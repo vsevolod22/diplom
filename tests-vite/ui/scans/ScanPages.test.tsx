@@ -1,0 +1,62 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { afterEach, describe, expect, it } from 'vitest';
+import { ScanListPage } from '@/pages/scans/ScanListPage';
+import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
+import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
+
+afterEach(cleanup);
+
+function page(path: string, element: React.ReactNode) {
+  return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <MemoryRouter initialEntries={[path]}><Routes><Route path={path.replace(/\/(?:partial|empty|unsupported|running)-demo$/, '/:scanId')} element={element} /></Routes></MemoryRouter>
+  </QueryClientProvider>);
+}
+describe('scan UI fixture versus unavailable production', () => {
+  it('does not confuse unavailable GET list with empty list', () => {
+    page('/scans', <ScanListPage />);
+    expect(screen.getByText(/Список недоступен: GET/)).toBeTruthy();
+    expect(screen.queryByText(/Сканов нет \(/)).toBeNull();
+  });
+  it('labels every fixture and never claims 0 CVE or 100% for partial scan', async () => {
+    page('/demo/scans/partial-demo', <ScanDetailPage demo />);
+    expect(await screen.findByText(/База уязвимостей недоступна/)).toBeTruthy();
+    expect(screen.getByText(/Выполнено \(не гарантия безопасности\)/)).toBeTruthy();
+    expect(screen.getByText(/ДЕМО · вымышленные данные/)).toBeTruthy();
+    expect(screen.getByText(/Прогресс: неизвестен/)).toBeTruthy();
+    expect(screen.getByText(/ожидаем подтверждения digest\/platform/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Отмена недоступна' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByText(/0 CVE/)).toBeNull();
+    expect(screen.queryByText(/100%/)).toBeNull();
+    expect(document.body.textContent).not.toContain('secretValue');
+  });
+  it('distinguishes filtered-zero from fully checked empty and unsupported coverage', async () => {
+    const view = page('/demo/scans/partial-demo', <ScanDetailPage demo />);
+    await screen.findByText(/SECRET_DETECTED/);
+    fireEvent.change(screen.getByLabelText('Категория'), { target: { value: 'vulnerability' } });
+    expect(await screen.findByText(/Нет совпадений фильтра/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Сбросить фильтр' }));
+    expect(await screen.findByText(/SECRET_DETECTED/)).toBeTruthy();
+    view.unmount();
+    page('/demo/scans/unsupported-demo', <ScanDetailPage demo />);
+    expect(await screen.findByText(/Нет подтверждённых находок: область не проверена полностью/)).toBeTruthy();
+  });
+  it('limits confirmed zero to the checked area and keeps the rest unsupported', async () => {
+    page('/demo/scans/empty-demo', <ScanDetailPage demo />);
+    expect(await screen.findByText(/0 находок в выполненной проверенной области/)).toBeTruthy();
+    expect(screen.getByText(/Не запускалась/)).toBeTruthy();
+    expect(screen.queryByText(/0 CVE/)).toBeNull();
+  });
+  it('shows demo records only in the explicitly marked demo list', async () => {
+    page('/demo/scans', <ScanListPage demo />);
+    expect(await screen.findByText(/library\/alpine:latest \(демо\)/)).toBeTruthy();
+    expect(screen.getByText(/ДЕМО · вымышленные данные/)).toBeTruthy();
+  });
+  it('does not enable launch for fixture or unconfigured browser auth', () => {
+    page('/demo/scans/new', <ScanCreatePage demo />);
+    expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText(/CVE и SBOM/)).toBeTruthy();
+    expect(screen.getByText(/Container \/ host/)).toBeTruthy();
+  });
+});
