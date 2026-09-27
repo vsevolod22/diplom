@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { check, integer, sqliteTable, text, unique } from 'drizzle-orm/sqlite-core';
 
-// Mirrors user_version=2. Runtime migrations in ledger.ts own DDL; never auto-push this schema.
+// Scans/outbox baseline, unchanged through user_version=6. Runtime migrations in ledger.ts
+// own the additional results/findings/events/audit tables; never auto-push this schema.
 export const scans = sqliteTable('scans', {
   id: text('id').primaryKey(),
   subject: text('subject').notNull(),

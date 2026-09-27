@@ -1,0 +1,79 @@
+name: dip-secure-egress
+services:
+  egress:
+    build:
+      context: ../..
+      dockerfile: server/deploy/gateway/Dockerfile
+    networks: [scan_internal, registry_uplink]
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+  volume-init:
+    profiles: [api]
+    image: busybox:1.37.0
+    command: ["chown", "65532:65532", "/data"]
+    volumes: ["scan_ledger:/data"]
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+  api:
+    profiles: [api]
+    build:
+      context: ../..
+      dockerfile: server/deploy/api.Dockerfile
+    environment:
+      SCAN_BIND_ADDRESS: 0.0.0.0
+      SCAN_LEDGER_PATH: /data/ledger.sqlite
+      SCAN_WORKER_READY_PATH: /data/worker.ready
+      SCAN_JWT_SECRET: ${SCAN_JWT_SECRET:-}
+      SCAN_JWT_ISSUER: ${SCAN_JWT_ISSUER:-}
+      SCAN_JWT_AUDIENCE: ${SCAN_JWT_AUDIENCE:-}
+    volumes:
+      - scan_ledger:/data
+    networks: [scan_internal]
+    depends_on:
+      egress: { condition: service_started }
+      volume-init: { condition: service_completed_successfully }
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1
+    # No published port until an authenticated, non-forwarding ingress is reviewed.
+  worker:
+    profiles: [api]
+    build:
+      context: ../..
+      dockerfile: server/deploy/worker.Dockerfile
+    environment:
+      SCAN_LEDGER_PATH: /data/ledger.sqlite
+      SCAN_WORKER_READY_PATH: /data/worker.ready
+      TRIVY_CACHE_DIR: /tmp/trivy
+    volumes: ["scan_ledger:/data"]
+    networks: [scan_internal]
+    depends_on:
+      egress: { condition: service_started }
+      volume-init: { condition: service_completed_successfully }
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1
+    # The endpoint remains 503 even with valid JWT: no production worker yet.
+networks:
+  scan_internal:
+    internal: true
+  registry_uplink: {}
+volumes:
+  scan_ledger: {}

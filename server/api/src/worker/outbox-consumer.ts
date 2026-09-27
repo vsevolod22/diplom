@@ -12,10 +12,11 @@ export async function consumeOne(ledger: ScanLedger, options: { timeoutMs: numbe
   let result: ScanResult;
   try { result = await runner(job, options); }
   catch { result = { ok: false, failure: scannerFailure(null) }; }
-  // A finding count alone is not a durable scan result. Until result persistence and
-  // coverage are implemented, a successful subprocess must not advertise completion.
-  // Never persist arbitrary runner output or diagnostics.
-  void result;
-  ledger.finish(job.scanId, job.attempts, 'failed');
+  // Only bounded allowlisted fields cross the scanner/ledger boundary.
+  if (result.ok && job.checks === '["secret"]' && job.scope === 'image') {
+    ledger.finishWithResult(job.scanId, job.attempts, result.findings, result.scannerVersion);
+  } else {
+    ledger.finish(job.scanId, job.attempts, 'failed', result.ok ? 'SCAN_FAILED' : result.failure.errorCode);
+  }
   return true;
 }

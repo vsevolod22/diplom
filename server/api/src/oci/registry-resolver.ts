@@ -14,13 +14,14 @@ export async function resolveManifest(ref: ImageReference, platform: string, fet
   registry: string; repository: string; digest: `sha256:${string}`; platform: string;
 }> {
   if (!/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/.test(platform)) throw new ResolutionRejected('Unsupported platform');
-  async function load(path: string, expected?: string): Promise<{ body: Buffer; actual: `sha256:${string}`; mediaType: string }> {
+  async function load(path: string, expected?: string, blob = false): Promise<{ body: Buffer; actual: `sha256:${string}`; mediaType: string }> {
     const response = await fetchManifest(ref.registry, path);
     // A 3xx or 401 is not permission to follow a new host or send credentials.
     if (response.status !== 200 || response.body.length > 4_000_000) throw new ResolutionRejected('OCI object unavailable');
     const actual = digest(response.body);
     const header = response.headers['docker-content-digest'];
-    if (typeof header !== 'string' || header !== actual || (expected && expected !== actual))
+    if ((!blob && typeof header !== 'string') || (header !== undefined && header !== actual) ||
+            (expected && expected !== actual))
       throw new ResolutionRejected('Digest mismatch');
     const mediaType = String(response.headers['content-type'] || '').split(';')[0];
     return { body: response.body, actual, mediaType };
@@ -50,8 +51,11 @@ export async function resolveManifest(ref: ImageReference, platform: string, fet
       !Number.isSafeInteger(config.size) || config.size! < 0 || config.size! > 4_000_000 ||
       !['application/vnd.oci.image.config.v1+json', 'application/vnd.docker.container.image.v1+json'].includes(config.mediaType || ''))
     throw new ResolutionRejected('Invalid config descriptor');
-  const blob = await load(`/v2/${ref.repository}/blobs/${encodeURIComponent(config.digest!)}`, config.digest);
-  if (blob.body.length !== config.size || blob.mediaType !== config.mediaType)
+  const blob = await load(`/v2/${ref.repository}/blobs/${encodeURIComponent(config.digest!)}`, config.digest, true);
+  // Registries may serve config bytes as application/octet-stream (including CDN
+    // redirects); the verified descriptor hash and exact size still bind the bytes.
+    if (blob.body.length !== config.size ||
+        (blob.mediaType !== config.mediaType && blob.mediaType !== 'application/octet-stream'))
     throw new ResolutionRejected('Config descriptor mismatch');
   let details: { os?: string; architecture?: string; variant?: string };
   try { details = JSON.parse(blob.body.toString('utf8')); } catch { throw new ResolutionRejected('Invalid config'); }

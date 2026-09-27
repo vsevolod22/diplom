@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import type { Job } from '../ledger/ledger.js';
 import { scannerFailure, type ScannerFailure } from './scanner-errors.js';
+import { parseSecretFindings, type SecretFinding } from './secret-findings.js';
 
-export type ScanResult = { ok: true; findingCount: number } | { ok: false; failure: ScannerFailure };
+export type ScanResult = { ok: true; findings: SecretFinding[]; scannerVersion: '0.69.3' } | { ok: false; failure: ScannerFailure };
 
 // Intended for a separately network-isolated worker container. This process cannot
 // establish the container's network boundary: deployment must enforce it independently.
@@ -10,10 +11,11 @@ export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: 
   if (!/^sha256:[a-f0-9]{64}$/.test(job.digest) ||
       !/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/.test(job.platform) ||
       !/^[a-z0-9.-]+$/.test(job.registry) || !/^[a-z0-9/._-]+$/.test(job.repository) ||
-      !options.dbDir || options.timeoutMs < 1000 || options.timeoutMs > 600_000) {
+      job.checks !== '["secret"]' || job.scope !== 'image' ||
+            !options.dbDir || options.timeoutMs < 1000 || options.timeoutMs > 600_000) {
     return { ok: false, failure: scannerFailure(null) };
   }
-  const args = ['image', '--image-src', 'remote', '--skip-db-update', '--skip-java-db-update',
+  const args = ['image', '--image-src', 'remote', '--scanners', 'secret', '--skip-db-update', '--skip-java-db-update',
     '--offline-scan', '--cache-dir', options.dbDir,
     '--platform', job.platform, '--format', 'json', `${job.registry}/${job.repository}@${job.digest}`];
   return new Promise(resolve => {
@@ -38,13 +40,8 @@ export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: 
       clearTimeout(timer);
       if (timedOut || code !== 0) return done({ ok: false, failure: scannerFailure(code, timedOut) });
       try {
-        const parsed: unknown = JSON.parse(output);
-        if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { Results?: unknown }).Results)) throw new Error();
-        // Do not return arbitrary strings or signed URLs from scanner output.
-        const results = (parsed as { Results: Array<{ Vulnerabilities?: unknown[]; Secrets?: unknown[] }> }).Results;
-        const findingCount = results.reduce((sum, item) => sum + (Array.isArray(item.Vulnerabilities) ? item.Vulnerabilities.length : 0) +
-          (Array.isArray(item.Secrets) ? item.Secrets.length : 0), 0);
-        done({ ok: true, findingCount });
+        const findings = parseSecretFindings(JSON.parse(output) as unknown);
+        done({ ok: true, findings, scannerVersion: '0.69.3' });
       } catch { done({ ok: false, failure: scannerFailure(null) }); }
     });
   });

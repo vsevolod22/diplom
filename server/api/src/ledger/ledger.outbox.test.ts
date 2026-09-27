@@ -24,15 +24,15 @@ test('lease expiry, retry, stale ack, terminal replay and subject isolation surv
     ledger = new ScanLedger(filename);
     const recovered = ledger.claim(1100, 100);
     assert.equal(recovered?.attempts, 2);
-    assert.equal(ledger.finish(first.scanId, 1, 'completed'), false);
+    assert.equal(ledger.finish(first.scanId, 1, 'failed'), false);
     assert.equal(ledger.retry(first.scanId, 2, 2000), true);
     assert.equal(ledger.claim(1999), undefined);
     const final = ledger.claim(2000);
     assert.equal(final?.attempts, 3);
-    assert.equal(ledger.finish(first.scanId, 3, 'completed'), true);
+    assert.equal(ledger.finish(first.scanId, 3, 'failed'), true);
     assert.equal(ledger.finish(first.scanId, 3, 'failed'), false);
     assert.equal(ledger.claim(999999), undefined);
-    assert.equal(ledger.state(first.scanId, 'alice'), 'completed');
+    assert.equal(ledger.state(first.scanId, 'alice'), 'failed');
     assert.equal(ledger.state(first.scanId, 'bob'), undefined);
     assert.deepEqual(ledger.enqueue(target), { ...first, created: false });
     assert.throws(() => ledger.enqueue({ ...target, fingerprint: 'c'.repeat(64) }), IdempotencyConflict);
@@ -58,7 +58,7 @@ test('migrates old schema atomically without losing queued scan', () => {
     assert.equal(ledger.claim(100)?.scanId, 'old-id');
     ledger.close();
     const migrated = new Database(filename);
-    assert.equal(migrated.pragma('user_version', { simple: true }), 2);
+    assert.equal(migrated.pragma('user_version', { simple: true }), 6);
     migrated.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -22,9 +22,14 @@ test('real HTTP POST never returns 202 without resolver and worker', async () =>
     const url = `http://127.0.0.1:${address.port}/api/v1/scans`;
     assert.equal((await fetch(url, { method: 'POST' })).status, 401);
         assert.equal((await fetch(url, { method: 'POST', headers: { authorization: 'Bearer invalid' } })).status, 401);
-    const response = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}` } });
+    const response = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ imageReference: 'registry-1.docker.io/library/alpine:3.20', checks: ['secret'],
+        scope: 'image', idempotencyKey: 'same-key-test' }) });
     assert.equal(response.status, 503);
     assert.deepEqual(await response.json(), { errorCode: 'SCANNER_UNAVAILABLE' });
+    assert.equal((await fetch(`${url}/00000000-0000-0000-0000-000000000000`,
+      { headers: { authorization: `Bearer ${token}` } })).status, 404);
+    assert.equal((await fetch(`${url}/00000000-0000-0000-0000-000000000000/events`)).status, 401);
   } finally {
     await app.close();
     keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index]; });

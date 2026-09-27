@@ -18,7 +18,7 @@ function fixture(file: string, version: 1 | 2): void {
     db.exec(`CREATE TABLE scans (
       id TEXT PRIMARY KEY, subject TEXT NOT NULL, idempotency_key TEXT NOT NULL,
       registry TEXT NOT NULL, repository TEXT NOT NULL, digest TEXT NOT NULL, platform TEXT NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('queued','running','completed','failed','cancelled')),
+      state TEXT NOT NULL CHECK (state IN ('queued','running','failed','failed','cancelled')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(subject,idempotency_key)
     );
     CREATE TABLE outbox (scan_id TEXT PRIMARY KEY REFERENCES scans(id), delivered_at TEXT);`);
@@ -46,7 +46,7 @@ test('fresh v0 initializes once and enforces foreign keys on every ledger connec
     assert.equal(second.state(created.scanId, target.subject), 'queued');
     const db = new Database(file);
     try {
-      assert.equal(db.pragma('user_version', { simple: true }), 2);
+      assert.equal(db.pragma('user_version', { simple: true }), 6);
       assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
       assert.deepEqual(db.pragma('foreign_key_check'), []);
       // An external connection must opt in separately; the ledger opts in at construction.
@@ -71,7 +71,7 @@ test('v1 and v2 fixtures retain rows, defaults, uniqueness, FK and version after
       reopened.close();
       const db = new Database(file);
       try {
-        assert.equal(db.pragma('user_version', { simple: true }), 2);
+        assert.equal(db.pragma('user_version', { simple: true }), 6);
         assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
         assert.deepEqual(db.pragma('foreign_key_check'), []);
         assert.equal((db.prepare('SELECT count(*) AS n FROM scans').get() as { n: number }).n, 1);
@@ -87,6 +87,31 @@ test('v1 and v2 fixtures retain rows, defaults, uniqueness, FK and version after
   }
 });
 
+test('v3 result upgrades to bounded findings, event and audit tables without losing prior rows', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ledger-v3-'));
+  try {
+    const file = join(dir, 'ledger.sqlite');
+    fixture(file, 2);
+    const old = new Database(file);
+    old.exec(`CREATE TABLE scan_results (
+      scan_id TEXT PRIMARY KEY REFERENCES scans(id), check_name TEXT NOT NULL,
+      finding_count INTEGER NOT NULL, coverage TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ); INSERT INTO scan_results(scan_id,check_name,finding_count,coverage) VALUES ('existing','secret',2,'image');
+    PRAGMA user_version = 3;`);
+    old.close();
+    const ledger = new ScanLedger(file);
+    assert.deepEqual(ledger.result('existing','alice'), { findingCount: 2, check: 'secret',
+      coverage: 'image', outcome: 'unsupported', errorCode: null, scannerVersion: null });
+    assert.equal(ledger.events('existing','alice',null)?.[0]?.state, 'queued');
+    ledger.close();
+    const db = new Database(file);
+    assert.equal(db.pragma('user_version', { simple: true }), 6);
+    assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
+    db.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('failed upgrade rolls back DDL and version; future and ambiguous v0 fail closed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ledger-failure-'));
   try {
@@ -100,7 +125,7 @@ test('failed upgrade rolls back DDL and version; future and ambiguous v0 fail cl
     assert.equal(after.pragma('user_version', { simple: true }), 1);
     assert.equal((after.prepare('SELECT count(*) AS n FROM scans').get() as { n: number }).n, 1);
     assert.equal((after.prepare("SELECT count(*) AS n FROM pragma_table_info('scans') WHERE name = 'checks'").get() as { n: number }).n, 0);
-    after.pragma('user_version = 3');
+    after.pragma('user_version = 7');
     after.close();
     assert.throws(() => new ScanLedger(file), /Unsupported ledger version/);
     const unversioned = join(dir, 'ambiguous.sqlite');
@@ -154,7 +179,8 @@ test('two connections serialize keys and claims; expired owner cannot retry or a
     try {
       const created = a.enqueue(target);
       assert.deepEqual(b.enqueue(target), { scanId: created.scanId, created: false });
-      assert.throws(() => b.enqueue({ ...target, digest: `sha256:${'c'.repeat(64)}` }), IdempotencyConflict);
+      assert.deepEqual(b.enqueue({ ...target, digest: `sha256:${'c'.repeat(64)}` }), { scanId: created.scanId, created: false });
+            assert.throws(() => b.enqueue({ ...target, fingerprint: 'c'.repeat(64) }), IdempotencyConflict);
       assert.equal(b.pending().length, 1);
       const first = a.claim(1000, 100);
       assert.equal(first?.attempts, 1);
@@ -168,9 +194,9 @@ test('two connections serialize keys and claims; expired owner cannot retry or a
       assert.equal(a.claim(1999), undefined);
       assert.equal(a.claim(2000)?.attempts, 3);
       assert.equal(b.finish(created.scanId, 2, 'failed'), false);
-      assert.equal(a.finish(created.scanId, 3, 'completed'), true);
+      assert.equal(a.finish(created.scanId, 3, 'failed'), true);
       assert.equal(b.finish(created.scanId, 3, 'failed'), false);
-      assert.equal(b.state(created.scanId, 'alice'), 'completed');
+      assert.equal(b.state(created.scanId, 'alice'), 'failed');
     } finally { a.close(); b.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -9,7 +9,9 @@ async function main(): Promise<void> {
     throw new Error('Dedicated JWT issuer, audience and signing secret are required');
   }
   const app = await NestFactory.create(AppModule);
-  await app.listen(Number(process.env.PORT || 3001), '127.0.0.1');
+  const bind = process.env.SCAN_BIND_ADDRESS ?? '127.0.0.1';
+  if (bind !== '127.0.0.1' && bind !== '0.0.0.0') throw new Error('Invalid bind address');
+  await app.listen(Number(process.env.PORT || 3001), bind);
 }
 
 void main();

@@ -6,7 +6,7 @@ import test from 'node:test';
 import { ScanLedger } from '../ledger/ledger.js';
 import { consumeOne } from './outbox-consumer.js';
 
-test('consumer claims persisted digest only, fences ack and does not advertise unpersisted findings', async () => {
+test('consumer claims persisted digest only; unsupported coverage fails closed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'consumer-'));
   try {
     const ledger = new ScanLedger(join(dir, 'ledger.sqlite'));
@@ -19,7 +19,7 @@ test('consumer claims persisted digest only, fences ack and does not advertise u
       assert.equal(job.digest, digest);
       assert.equal(job.platform, 'linux/amd64');
       assert.equal(job.registry, 'registry.example.com');
-      return { ok: true, findingCount: 0 };
+      return { ok: true, findings: [], scannerVersion: '0.69.3' };
     }, 1000), true);
     assert.equal(ledger.state(scanId, 'alice'), 'failed');
     assert.equal(await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/db' }, async () => {
