@@ -1,0 +1,16 @@
+node_modules/
+__pycache__/
+*.py[cod]
+dist/
+dist-admin/
+coverage/
+.vitest/
+playwright-report/
+test-results/
+*.tsbuildinfo
+*.local
+.env
+.env.*
+!.env.example
+.DS_Store
+.zed/settings.json

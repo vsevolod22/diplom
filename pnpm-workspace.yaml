@@ -1,0 +1,11 @@
+packages:
+  - .
+  - server/api
+
+allowBuilds:
+
+  '@swc/core': true
+  es5-ext: true
+  esbuild: true
+  msw: true
+  unrs-resolver: true

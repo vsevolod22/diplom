@@ -1,0 +1,7 @@
+FROM python:3.12-alpine
+RUN apk add --no-cache openssl && openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+    -keyout /key.pem -out /cert.pem -subj '/CN=registry.lab.test' \
+    -addext 'subjectAltName=DNS:registry.lab.test' >/dev/null 2>&1 && chmod 644 /key.pem
+COPY registry.py /registry.py
+USER 65534
+CMD ["python", "/registry.py"]

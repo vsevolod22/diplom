@@ -1,0 +1,19 @@
+# Flownix project context
+spec_mode: "strict"
+require_proposal_approval: false
+spec_first: false
+execution_order: "sequential"
+completion_flow: "direct"
+org:
+  id: "5cd5525e-0b7a-4e0b-aa15-f120053875f9"
+  name: "dad"
+project:
+  id: "520a0059-d0f2-4f86-8d93-fc15035a5715"
+  name: "Диплом"
+  key: "DIP"
+  spec: |
+    ## Цель
+    Создать новый дипломный веб-проект на основе архитектурного каркаса autobrief, без переноса предметной логики и окружения исходного продукта.
+
+    ## Техническая основа
+    React 19, TypeScript, Vite, pnpm; слои app/pages/features/shared, отдельная точка входа admin-app, Tailwind CSS, Vitest. Предметная область и функциональные требования будут определены отдельно.

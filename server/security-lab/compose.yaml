@@ -1,0 +1,50 @@
+name: dip-security-lab
+services:
+  egress:
+    build: .
+    environment:
+      ALLOWED_HOSTS: "registry-1.docker.io,auth.docker.io,production.cloudflare.docker.com,registry.lab.test"
+      LAB_FIXTURE: "1"
+    networks:
+      - scanner
+      - internet
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  registry:
+    build:
+      context: .
+      dockerfile: Dockerfile.registry
+    networks:
+      internet:
+        ipv4_address: 172.30.91.10
+        aliases: [registry.lab.test]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  scanner:
+    image: aquasec/trivy:0.69.3
+    profiles: [scan]
+    environment:
+      HTTP_PROXY: http://egress:8080
+      HTTPS_PROXY: http://egress:8080
+      NO_PROXY: ""
+      TRIVY_CACHE_DIR: /tmp/trivy
+    networks: [scanner]
+    depends_on: [egress]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1
+networks:
+  scanner:
+    internal: true
+  internet:
+    ipam:
+      config:
+        - subnet: 172.30.91.0/24
