@@ -25,7 +25,10 @@ export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: 
     const done = (result: ScanResult) => { if (!settled) { settled = true; resolve(result); } };
     const child = spawn('trivy', args, {
       env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp', HTTPS_PROXY: 'http://egress:8080',
-        HTTP_PROXY: 'http://egress:8080', NO_PROXY: '' },
+        HTTP_PROXY: 'http://egress:8080', NO_PROXY: '',
+                // Go TLS verifies the peer against the OS trust store (or an explicitly
+                // mounted trusted CA in the disposable proof deployment); never --insecure.
+                SSL_CERT_FILE: process.env.SSL_CERT_FILE || '/etc/ssl/certs/ca-certificates.crt' },
       stdio: ['ignore', 'pipe', 'ignore'], // stderr can include signed URLs
       shell: false,
     });

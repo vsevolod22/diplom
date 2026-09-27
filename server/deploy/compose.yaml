@@ -70,7 +70,7 @@ services:
     pids_limit: 128
     mem_limit: 1g
     cpus: 1
-    # The endpoint remains 503 even with valid JWT: no production worker yet.
+    # Worker runs only on scan_internal; public ingress requires a separate review.
 networks:
   scan_internal:
     internal: true

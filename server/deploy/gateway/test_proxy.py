@@ -48,6 +48,20 @@ class GatewayPolicyTests(unittest.TestCase):
             proxy.dial("registry-1.docker.io", lookup, lambda *_args: Socket())
         self.assertEqual(calls, [("1.1.1.1", 443)])
 
+    def test_fixture_pairs_are_exact_and_production_remains_public_only(self):
+        fixture = (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('172.30.92.10', 443))
+        policy = proxy.Policy(fixture_pairs=frozenset({('registry-1.docker.io', '172.30.92.10')}),
+                              lookup=lambda *_args, **_kwargs: [fixture])
+        self.assertEqual(proxy.addresses_for('registry-1.docker.io', policy.lookup, policy), [fixture])
+        for host, active_policy in (('auth.docker.io', policy), ('registry-1.docker.io', proxy.PRODUCTION_POLICY)):
+            with self.subTest(host=host), self.assertRaises(OSError):
+                proxy.addresses_for(host, lambda *_args, **_kwargs: [fixture], active_policy)
+        mixed = [fixture, (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::1', 443, 0, 0))]
+        with self.assertRaises(OSError):
+            proxy.addresses_for('registry-1.docker.io', lambda *_args, **_kwargs: mixed, policy)
+        with self.assertRaises(ValueError):
+            proxy.authority('169.254.169.254:443', policy)
+
     def test_go_client_connect_headers_are_accepted_without_forward_auth(self):
         upstream, peer = socket.socketpair()
         with patch.object(proxy, "dial", return_value=upstream) as dial, proxy.Server(("127.0.0.1", 0), proxy.Handler) as server:

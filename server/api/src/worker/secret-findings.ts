@@ -6,9 +6,19 @@ export const MAX_FINDINGS = 1000;
 // Scanner strings are untrusted, and can contain the matched secret itself. Keep only
 // bounded rule identifiers and numeric positions; never persist source text or paths.
 export function parseSecretFindings(value: unknown): SecretFinding[] {
-  if (!value || typeof value !== 'object' || !Array.isArray((value as { Results?: unknown }).Results)) throw new Error('Invalid scanner output');
+  if (!value || typeof value !== 'object') throw new Error('Invalid scanner output');
+  const report = value as { Results?: unknown; SchemaVersion?: unknown; ArtifactType?: unknown;
+    Metadata?: { Layers?: unknown; DiffIDs?: unknown; ImageConfig?: unknown } };
+  // Trivy omits Results for a clean image. Only accept that shape after a successful
+  // subprocess and with evidence that an image with layers was actually inspected.
+  const cleanImage = report.Results === undefined && report.SchemaVersion === 2 &&
+    report.ArtifactType === 'container_image' && Array.isArray(report.Metadata?.Layers) &&
+    report.Metadata.Layers.length > 0 && Array.isArray(report.Metadata.DiffIDs) &&
+    report.Metadata.DiffIDs.length > 0 && report.Metadata.ImageConfig !== null &&
+    typeof report.Metadata.ImageConfig === 'object';
+  if (!Array.isArray(report.Results) && !cleanImage) throw new Error('Invalid scanner output');
   const findings: SecretFinding[] = [];
-  const results = (value as { Results: unknown[] }).Results;
+  const results = (report.Results ?? []) as unknown[];
   if (results.length > MAX_FINDINGS) throw new Error('Too many scanner results');
   for (let r = 0; r < results.length; r++) {
     const result = results[r];

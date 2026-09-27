@@ -1,0 +1,58 @@
+# ONLY for the disposable test run: docker compose -f ../compose.yaml -f compose.yaml -p <random> --profile api
+# Never deploy this override. The shipped compose/gateway image has no fixture policy or gate replacement.
+services:
+  cert-init:
+    build:
+      context: ../..
+      dockerfile: server/deploy/proof/cert.Dockerfile
+    network_mode: none
+    volumes: [proof_certs:/certs, proof_trust:/trust]
+  registry:
+    build:
+      context: ../..
+      dockerfile: server/deploy/proof/registry.Dockerfile
+    depends_on: { cert-init: { condition: service_completed_successfully } }
+    volumes: [proof_certs:/certs:ro]
+    networks:
+      registry_uplink: { ipv4_address: 172.30.92.10 }
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  sink:
+    build:
+      context: ../..
+      dockerfile: server/deploy/proof/registry.Dockerfile
+    command: ["python", "/sink.py"]
+    networks:
+      registry_uplink: { ipv4_address: 172.30.92.11 }
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  egress:
+    build:
+      context: ../..
+      dockerfile: server/deploy/proof/gateway.Dockerfile
+    depends_on: { registry: { condition: service_started }, sink: { condition: service_started } }
+    tmpfs: [/tmp]
+  api:
+    build:
+      context: ../..
+      dockerfile: server/deploy/proof/api.Dockerfile
+    environment:
+      NODE_EXTRA_CA_CERTS: /trust/cert.pem
+    volumes: [proof_trust:/trust:ro]
+  worker:
+    environment:
+      SSL_CERT_FILE: /trust/cert.pem
+    volumes: [proof_trust:/trust:ro]
+networks:
+  registry_uplink:
+    ipam:
+      config: [{ subnet: 172.30.92.0/24 }]
+volumes:
+  proof_certs: {}
+  proof_trust: {}

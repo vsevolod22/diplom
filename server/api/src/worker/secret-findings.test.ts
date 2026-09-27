@@ -14,5 +14,14 @@ test('untrusted scanner evidence is reduced to bounded identifiers and numeric l
   assert.throws(() => parseSecretFindings({ Results: [{ Vulnerabilities: [{ Title: canary }] }] }));
   assert.throws(() => parseSecretFindings({ Results: [{ Secrets: Array.from({ length: 1001 }, () => ({ RuleID: 'a' })) }] }));
   assert.deepEqual(parseSecretFindings({ Results: [] }), []);
-    assert.throws(() => parseSecretFindings({}));
+  assert.throws(() => parseSecretFindings({}));
+});
+
+test('clean Trivy image has no Results only when layer metadata proves image inspection', () => {
+  const report = { SchemaVersion: 2, ArtifactType: 'container_image', Metadata: {
+    Layers: [{}], DiffIDs: ['sha256:abc'], ImageConfig: {},
+  } };
+  assert.deepEqual(parseSecretFindings(report), []);
+  assert.throws(() => parseSecretFindings({ ...report, Metadata: { Layers: [], DiffIDs: [], ImageConfig: {} } }));
+  assert.throws(() => parseSecretFindings({ ...report, Results: null }));
 });

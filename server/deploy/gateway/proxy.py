@@ -10,6 +10,8 @@ import selectors
 import socket
 import socketserver
 import threading
+from dataclasses import dataclass
+from typing import Callable
 
 HOSTS = frozenset(("registry-1.docker.io", "auth.docker.io", "production.cloudfront.docker.com"))
 MAX_CONNECTIONS = 64
@@ -17,11 +19,24 @@ MAX_BYTES = 64 * 1024 * 1024
 SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
 
-def authority(value):
+@dataclass(frozen=True)
+class Policy:
+    hosts: frozenset[str] = HOSTS
+    # Only the separately built proof gateway supplies an exact host/IP fixture map.
+    # Production creates Policy() below and has no runtime configuration for this field.
+    fixture_pairs: frozenset[tuple[str, str]] = frozenset()
+    lookup: Callable = socket.getaddrinfo
+    on_dial: Callable[[str, str], None] | None = None
+
+
+PRODUCTION_POLICY = Policy()
+
+
+def authority(value, policy=PRODUCTION_POLICY):
     if not isinstance(value, str) or value.count(":") != 1:
         raise ValueError("invalid CONNECT authority")
     host, port = value.split(":")
-    if (host not in HOSTS or port != "443" or len(host) > 253 or
+    if (host not in policy.hosts or port != "443" or len(host) > 253 or
             any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") or
                 any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in label)
                 for label in host.split("."))):
@@ -29,26 +44,29 @@ def authority(value):
     return host
 
 
-def addresses_for(host, lookup=socket.getaddrinfo):
+def addresses_for(host, lookup=socket.getaddrinfo, policy=PRODUCTION_POLICY):
     answers = lookup(host, 443, type=socket.SOCK_STREAM)
     # A mixed public/private answer is unsafe even if the first record is public.
     if not answers or len(answers) > 64:
         raise OSError("DNS refused")
     for family, kind, protocol, _, sockaddr in answers:
         if (family not in (socket.AF_INET, socket.AF_INET6) or kind != socket.SOCK_STREAM or
-                not ipaddress.ip_address(sockaddr[0]).is_global):
+                not (ipaddress.ip_address(sockaddr[0]).is_global or
+                                     (host, sockaddr[0]) in policy.fixture_pairs)):
             raise OSError("DNS refused")
     return answers
 
 
-def dial(host, lookup=socket.getaddrinfo, connector=socket.socket):
-    answers = addresses_for(host, lookup)
+def dial(host, lookup=socket.getaddrinfo, connector=socket.socket, policy=PRODUCTION_POLICY):
+    answers = addresses_for(host, policy.lookup if policy is not PRODUCTION_POLICY else lookup, policy)
     for family, kind, protocol, _, sockaddr in answers:
         connection = connector(family, kind, protocol)
         try:
             connection.settimeout(5)
             # sockaddr is the numeric, already validated answer; no second DNS lookup.
             connection.connect(sockaddr)
+            if policy.on_dial:
+                policy.on_dial(host, sockaddr[0])
             return connection
         except OSError:
             connection.close()
@@ -78,8 +96,9 @@ class Handler(socketserver.BaseRequestHandler):
                                             for line in lines[1:]) or len(lines) > 4 or
                                         sum(line.lower().startswith(b"host:") for line in lines[1:]) != 1):
                 raise ValueError("CONNECT only")
-            host = authority(request[1])
-            upstream = dial(host)
+            policy = getattr(self.server, 'policy', PRODUCTION_POLICY)
+            host = authority(request[1], policy)
+            upstream = dial(host) if policy is PRODUCTION_POLICY else dial(host, policy=policy)
             self.request.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             self.request.settimeout(35)
             upstream.settimeout(35)
