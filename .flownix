@@ -2,7 +2,7 @@
 spec_mode: "strict"
 require_proposal_approval: false
 spec_first: false
-execution_order: "sequential"
+execution_order: "parallel"
 completion_flow: "direct"
 org:
   id: "5cd5525e-0b7a-4e0b-aa15-f120053875f9"

@@ -1,17 +1,23 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ScanListPage } from '@/pages/scans/ScanListPage';
 import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
+import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
+import { fixtureScanTransport } from '@/shared/api/scans/fixtureScanTransport';
+import type { ScanStatus } from '@/shared/api/scans/scanTransport';
 
 afterEach(cleanup);
 
 function page(path: string, element: React.ReactNode) {
-  return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(<QueryClientProvider client={client}>
     <MemoryRouter initialEntries={[path]}><Routes><Route path={path.replace(/\/(?:partial|empty|unsupported|running)-demo$/, '/:scanId')} element={element} /></Routes></MemoryRouter>
   </QueryClientProvider>);
+  return { ...view, client };
 }
 describe('scan UI fixture versus unavailable production', () => {
   it('does not confuse unavailable GET list with empty list', () => {
@@ -52,6 +58,68 @@ describe('scan UI fixture versus unavailable production', () => {
     page('/demo/scans', <ScanListPage demo />);
     expect(await screen.findByText(/library\/alpine:latest \(демо\)/)).toBeTruthy();
     expect(screen.getByText(/ДЕМО · вымышленные данные/)).toBeTruthy();
+  });
+  it('holds focus in the mobile filter Sheet, preserves selection and restores the trigger on Escape', async () => {
+    const user = userEvent.setup();
+    page('/demo/scans/partial-demo', <ScanDetailPage demo />);
+    await screen.findByText(/SECRET_DETECTED/);
+    const trigger = screen.getByRole('button', { name: 'Фильтры' });
+    trigger.focus();
+    await user.keyboard('{Enter}');
+    const dialog = screen.getByRole('dialog', { name: 'Фильтры находок' });
+    const select = within(dialog).getByLabelText('Категория');
+    await waitFor(() => expect(document.activeElement).toBe(select));
+    await user.selectOptions(select, 'vulnerability');
+    expect(await screen.findByText(/Нет совпадений фильтра/)).toBeTruthy();
+    await user.keyboard('{Tab}');
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Сбросить фильтр' }));
+    await user.keyboard('{Shift>}{Tab}{/Shift}');
+    expect(document.activeElement).toBe(select);
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await user.click(trigger);
+    expect((within(screen.getByRole('dialog')).getByLabelText('Категория') as HTMLSelectElement).value).toBe('vulnerability');
+  });
+  it('announces only stage and terminal transitions during fixture snapshot bursts without moving focus or scroll', async () => {
+    const user = userEvent.setup();
+    const view = page('/demo/scans/running-demo', <ScanDetailPage demo />);
+    await screen.findByText(/Этап: secret/);
+    const key = ['scan', 'fixture', 'running-demo'];
+    const region = document.querySelector('[aria-live="polite"][aria-atomic="true"]') as HTMLElement;
+    expect(region.textContent).toBe('');
+    const trigger = screen.getByRole('button', { name: 'Фильтры' });
+    await user.click(trigger);
+    const select = within(screen.getByRole('dialog')).getByLabelText('Категория');
+    const pageScroll = window.scrollY;
+    for (let i = 0; i < 100; i++) {
+      act(() => view.client.setQueryData<ScanStatus>(key, (old) => ({ ...old!, percent: i })));
+      expect(region.textContent).toBe('');
+    }
+    expect(document.activeElement).toBe(select);
+    expect(window.scrollY).toBe(pageScroll);
+    act(() => view.client.setQueryData<ScanStatus>(key, (old) => ({ ...old!, stage: 'report' })));
+    await waitFor(() => expect(region.textContent).toBe('Этап скана: report'));
+    act(() => view.client.setQueryData<ScanStatus>(key, (old) => ({ ...old!, percent: 99 })));
+    expect(region.textContent).toBe('Этап скана: report');
+    act(() => view.client.setQueryData<ScanStatus>(key, (old) => ({ ...old!, state: 'partial' })));
+    await waitFor(() => expect(region.textContent).toBe('Итог скана: Частичный результат'));
+    act(() => view.client.setQueryData<ScanStatus>(key, (old) => ({ ...old!, percent: null })));
+    expect(region.textContent).toBe('Итог скана: Частичный результат');
+    expect(document.activeElement).toBe(select);
+    expect(window.scrollY).toBe(pageScroll);
+    expect(fixtureScanTransport.capabilities.events).toBe(false);
+  });
+  it('does not announce initial snapshot or reuse a prior scan announcement after scanId changes', () => {
+    const initial: ScanStatus = { scanId: 'fixture-a', state: 'running', stage: 'secret', percent: 1 };
+    const view = render(<ScanStatusAnnouncement scan={initial} />);
+    const region = screen.getByText('', { selector: '[aria-live="polite"]' });
+    expect(region.textContent).toBe('');
+    view.rerender(<ScanStatusAnnouncement scan={{ ...initial, stage: 'report' }} />);
+    expect(region.textContent).toBe('Этап скана: report');
+    view.rerender(<ScanStatusAnnouncement scan={{ scanId: 'fixture-b', state: 'partial', percent: null }} />);
+    expect(region.textContent).toBe('');
+    view.rerender(<ScanStatusAnnouncement scan={{ scanId: 'fixture-b', state: 'partial', percent: 10 }} />);
+    expect(region.textContent).toBe('');
   });
   it('does not enable launch for fixture or unconfigured browser auth', () => {
     page('/demo/scans/new', <ScanCreatePage demo />);
