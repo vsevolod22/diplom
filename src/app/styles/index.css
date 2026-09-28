@@ -4,6 +4,133 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  font-family: Inter, system-ui, sans-serif;
-  color-scheme: light dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color-scheme: light;
+  background: #f4f6fa;
+  color: #182238;
+  font-synthesis: none;
+  --scan-ink: #182238;
+  --scan-muted: #475569;
+  --scan-brand: #3730a3;
+  --scan-surface: #ffffff;
+  --scan-border: #dbe2ec;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+}
+
+:where(a, button, input, select):focus-visible {
+  outline: 3px solid #4338ca;
+  outline-offset: 3px;
+}
+.scan-card {
+  min-width: 0;
+  border: 1px solid var(--scan-border);
+  border-radius: 1.25rem;
+  background: var(--scan-surface);
+  box-shadow:
+    0 12px 36px -30px #1e293b80,
+    0 2px 8px -6px #1e293b30;
+}
+.scan-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: normal;
+}
+.scan-badge--neutral {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+.scan-badge--info {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #3730a3;
+}
+.scan-badge--warning {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #78350f;
+}
+.scan-badge--danger {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+.scan-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 0.75rem;
+  padding: 0.6rem 1rem;
+  font-weight: 650;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.scan-button--primary {
+  background: var(--scan-brand);
+  color: white;
+}
+.scan-button--primary:not(:disabled):hover {
+  background: #312e81;
+}
+.scan-button--secondary {
+  border-color: #cbd5e1;
+  background: white;
+  color: #1e293b;
+}
+.scan-button--secondary:not(:disabled):hover {
+  background: #f1f5f9;
+}
+.scan-button--ghost {
+  background: transparent;
+  color: var(--scan-brand);
+}
+.scan-button:disabled {
+  cursor: not-allowed;
+  background: #e2e8f0;
+  color: #475569;
+}
+.scan-alert {
+  border: 1px solid;
+  border-radius: 1rem;
+  padding: 1rem 1.25rem;
+}
+.scan-alert--warning {
+  border-color: #fbbf24;
+  background: #fffbeb;
+  color: #713f12;
+}
+.scan-alert--neutral {
+  border-color: #cbd5e1;
+  background: #fff;
+  color: #1e293b;
+}
+.scan-alert--danger {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #7f1d1d;
+}
+@media (min-width: 640px) {
+  .scan-filter-trigger {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scan-button,
+  main nav a {
+    transition: none;
+  }
 }

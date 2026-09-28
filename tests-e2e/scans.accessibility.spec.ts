@@ -19,6 +19,8 @@ for (const width of [320, 375, 1280]) {
     await page.setViewportSize({ width, height: 740 });
     await page.goto('/demo/scans/partial-demo');
     await expect(page.getByText('ДЕМО · вымышленные данные', { exact: false })).toBeVisible();
+    await expect(page.getByText('Состояние из локальной фикстуры', { exact: false })).toBeVisible();
+    await expect(page.locator('main nav [aria-current="page"]')).toHaveCount(0);
     await expect(page.getByText('Статус: Частичный результат')).toBeVisible();
     await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
     await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
@@ -54,6 +56,17 @@ for (const width of [320, 375, 1280]) {
     }
   });
 }
+
+test('navigation marks only the actual list or create page as current', async ({ page }) => {
+  await page.goto('/demo/scans');
+  await expect(page.getByRole('link', { name: 'Демо', exact: true })).toHaveAttribute('aria-current', 'page');
+  await page.goto('/demo/scans/new');
+  await expect(page.getByRole('link', { name: /Новый скан/ })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: 'Демо', exact: true })).not.toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+});
 
 for (const colorScheme of ['light', 'dark'] as const) {
   test(`fixture: text contrast and keyboard focus in ${colorScheme} system scheme`, async ({ page }) => {
