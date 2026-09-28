@@ -14,9 +14,9 @@ export function ScanFilterSheet({ filter, onFilterChange }: Props) {
         Фильтры
       </Dialog.Trigger>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-950/65 sm:hidden" />
+        <Dialog.Overlay className="scan-filter-overlay fixed inset-0 z-40 bg-slate-950/65 sm:hidden" />
         <Dialog.Content
-          className="fixed inset-y-0 right-0 z-50 flex w-[min(100vw,24rem)] min-w-0 flex-col gap-5 overflow-y-auto border-l border-slate-300 bg-white p-5 text-slate-900 shadow-2xl outline-none sm:hidden"
+          className="scan-filter-panel fixed inset-y-0 right-0 z-50 flex w-[min(100vw,24rem)] min-w-0 flex-col gap-5 overflow-y-auto border-l border-slate-300 bg-white p-5 text-slate-900 shadow-2xl outline-none sm:hidden"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             select.current?.focus();

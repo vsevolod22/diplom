@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Fingerprint, Layers3, ScanLine } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams } from 'react-router-dom';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
@@ -61,14 +62,15 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   return (
     <ScanShell demo={demo}>
       <section className="min-w-0 space-y-6" aria-labelledby="scan-detail">
-        <div className="min-w-0 space-y-2">
-          <p className="text-xs font-bold uppercase tracking-widest text-indigo-800">Обзор / деталь</p>
-          <h2 id="scan-detail" className="min-w-0 text-2xl font-semibold tracking-tight sm:text-3xl">
-            Деталь скана{' '}
-            <span className="block text-base font-normal text-slate-600 [overflow-wrap:anywhere]">
-              {scanId}
-            </span>
+        <div className="scan-detail__intro min-w-0 space-y-3">
+          <p className="scan-detail__eyebrow">/ 01 — РАЗБЕРИ ОБРАЗ ПО СЛОЯМ</p>
+          <h2 id="scan-detail" className="min-w-0 text-4xl font-black tracking-tighter sm:text-6xl">
+            ДЕТАЛЬ <span className="scan-detail__highlight">СКАНА.</span>
           </h2>
+          <p className="scan-detail__reference [overflow-wrap:anywhere]">ID / {scanId}</p>
+          <p className="scan-detail__subtitle">
+            {demo ? 'Демонстрационная карточка · вымышленные данные' : 'Авторизованный просмотр недоступен'}
+          </p>
         </div>
         {!enabled ? (
           <Alert tone="neutral" className="border-slate-300 bg-white text-slate-800">
@@ -83,13 +85,15 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
         ) : null}
         {scan.data ? (
           <div className="grid min-w-0 items-start gap-4 lg:grid-cols-2">
-            <Card className="min-w-0 space-y-5 p-5 sm:p-6">
+            <Card className="scan-detail__card scan-detail__card--state min-w-0 space-y-5 p-5 sm:p-6">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="text-xs font-bold uppercase tracking-widest text-indigo-800">
                     01 / {demo ? 'демонстрационный снимок' : 'снимок GET'}
                   </p>
-                  <h3 className="mt-1 text-lg font-semibold">Цель и состояние</h3>
+                  <h3 className="mt-1 flex items-center gap-2 text-xl font-black tracking-tight">
+                    <Fingerprint size={21} aria-hidden="true" /> Цель и состояние
+                  </h3>
                 </div>
                 <Badge tone={stateTone[scan.data.state]}>{stateLabels[scan.data.state]}</Badge>
               </div>
@@ -130,12 +134,14 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 </p>
               </div>
             </Card>
-            <Card className="min-w-0 space-y-4 p-5 sm:p-6">
+            <Card className="scan-detail__card scan-detail__card--coverage min-w-0 space-y-4 p-5 sm:p-6">
               <div>
                 <p className="text-xs font-bold uppercase tracking-widest text-indigo-800">
                   02 / {demo ? 'демонстрационное покрытие' : 'область проверок'}
                 </p>
-                <h3 className="mt-1 text-lg font-semibold">Покрытие проверок</h3>
+                <h3 className="mt-1 flex items-center gap-2 text-xl font-black tracking-tight">
+                  <Layers3 size={21} aria-hidden="true" /> Покрытие проверок
+                </h3>
                 <p className="mt-1 text-sm text-slate-600">
                   Исход каждой проверки отдельно от статуса скана.
                 </p>
@@ -171,11 +177,13 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
           </div>
         ) : null}
         {scan.data ? (
-          <Card className="min-w-0 space-y-5 p-5 sm:p-6">
+          <Card className="scan-detail__card scan-detail__card--findings min-w-0 space-y-5 p-5 sm:p-6">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-bold uppercase tracking-widest text-indigo-800">03 / результаты</p>
-                <h3 className="mt-1 text-lg font-semibold">Находки</h3>
+                <h3 className="mt-1 flex items-center gap-2 text-xl font-black tracking-tight">
+                  <ScanLine size={21} aria-hidden="true" /> Находки
+                </h3>
                 <p className="mt-1 text-sm text-slate-600">
                   Фильтр действует только на загруженную страницу, не на весь отчёт.
                 </p>

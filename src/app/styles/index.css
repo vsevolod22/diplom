@@ -306,6 +306,162 @@ body {
   display: grid;
   gap: 32px;
 }
+.scan-detail__intro {
+  position: relative;
+  overflow: hidden;
+  padding: clamp(24px, 5vw, 48px);
+  border-radius: 22px;
+  background: radial-gradient(circle at 90% 0%, #7e58dc77, transparent 44%), #211a2c;
+  color: #fff;
+}
+.scan-detail__intro::after {
+  content: '✳';
+  position: absolute;
+  right: 5%;
+  bottom: -55px;
+  font-size: clamp(160px, 24vw, 300px);
+  line-height: 1;
+  color: #a58aff36;
+  pointer-events: none;
+}
+.scan-detail__intro > * {
+  position: relative;
+  z-index: 1;
+}
+.scan-detail__eyebrow {
+  color: #d5fb57;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+.scan-detail__highlight {
+  color: #d5fb57;
+}
+.scan-detail__reference {
+  width: fit-content;
+  max-width: 100%;
+  padding: 7px 12px;
+  border: 1px solid #d5fb5777;
+  border-radius: 7px;
+  color: #e6fca7;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+.scan-detail__subtitle {
+  color: #e4deec;
+  font-size: 14px;
+}
+.scan-detail__card {
+  position: relative;
+  overflow: hidden;
+  border-color: #ddd6eb;
+  transition:
+    transform 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.scan-detail__card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6px;
+  background: #a58aff;
+}
+.scan-detail__card--state::before {
+  background: #d5fb57;
+}
+.scan-detail__card--findings::before {
+  background: linear-gradient(90deg, #d5fb57, #a58aff);
+}
+@media (hover: hover) {
+  .scan-detail__card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 26px 45px -32px #241b3d88;
+  }
+}
+.scan-demo-reveal {
+  transition:
+    transform 0.28s ease,
+    box-shadow 0.28s ease;
+}
+@media (hover: hover) {
+  .scan-demo-reveal:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 26px 45px -32px #241b3d88;
+  }
+}
+.scan-demo-reveal:focus-within {
+  box-shadow:
+    0 0 0 2px #5535a0,
+    0 26px 45px -32px #241b3d88;
+}
+@keyframes scan-sheet-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes scan-sheet-out {
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes scan-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes scan-overlay-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes scan-card-entrance {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .scan-filter-panel[data-state='open'] {
+    animation: scan-sheet-in 0.28s ease-out;
+  }
+  .scan-filter-panel[data-state='closed'] {
+    animation: scan-sheet-out 0.2s ease-in;
+  }
+  .scan-filter-overlay[data-state='open'] {
+    animation: scan-overlay-in 0.28s ease-out;
+  }
+  .scan-filter-overlay[data-state='closed'] {
+    animation: scan-overlay-out 0.2s ease-in;
+  }
+  .scan-detail__card,
+  .scan-detail__intro,
+  .scan-experience-hero,
+  .scan-demo-reveal {
+    animation: scan-card-entrance 0.55s backwards;
+  }
+  .scan-demo-reveal:nth-child(2) {
+    animation-delay: 0.08s;
+  }
+  .scan-demo-reveal:nth-child(3) {
+    animation-delay: 0.16s;
+  }
+  .scan-detail__card--coverage {
+    animation-delay: 0.08s;
+  }
+  .scan-detail__card--findings {
+    animation-delay: 0.16s;
+  }
+}
 @media (max-width: 700px) {
   .scan-shell__art {
     display: none;
@@ -332,6 +488,8 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .scan-button,
+  .scan-detail__card,
+  .scan-demo-reveal,
   main nav a {
     transition: none;
     transform: none !important;
