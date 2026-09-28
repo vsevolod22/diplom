@@ -10,12 +10,46 @@ import {
   ShieldAlert,
   Sparkles,
 } from 'lucide-react';
+import * as Tabs from '@radix-ui/react-tabs';
 import { useRef } from 'react';
 import { motion, useInView, useReducedMotion } from 'motion/react';
 import { Link } from 'react-router-dom';
 import './HomePage.css';
 
 const reveal = { opacity: 0, y: 28 };
+
+const exploreTabs = [
+  {
+    value: 'image',
+    label: 'Образ',
+    number: '01',
+    title: 'Начни с устройства.',
+    description:
+      'Представь образ как набор слоёв: каждый добавляет файлы и меняет то, что попадёт в контейнер.',
+    illustration: ['BASE', 'RUNTIME', 'APP'],
+    caption: 'Схема слоёв · вымышленный пример',
+  },
+  {
+    value: 'secrets',
+    label: 'Secrets',
+    number: '02',
+    title: 'Секретам не место в образе.',
+    description:
+      'Концепция проверки на случайно оставленные секреты. Внутренний Secrets-only сценарий разрабатывается и ожидает приёмки; из браузера он недоступен.',
+    illustration: ['CONFIG', 'TOKEN?', 'REVIEW'],
+    caption: 'Схема проверки · не результат анализа',
+  },
+  {
+    value: 'coverage',
+    label: 'Покрытие',
+    number: '03',
+    title: 'Знай границы видимости.',
+    description:
+      'Даже полный список пакетов не равен доказательству безопасности. Отмечай, что исследовано, а что осталось вне проверки.',
+    illustration: ['LAYERS', 'PACKAGES', 'GAPS'],
+    caption: 'Карта видимости · не SBOM и не скан',
+  },
+] as const;
 
 export function HomePage() {
   const reducedMotion = useReducedMotion();
@@ -285,6 +319,55 @@ export function HomePage() {
         </div>
       </section>
 
+      <section className="home__explore home__container" aria-labelledby="explore-title">
+        <div className="home__explore-intro">
+          <p className="home__section-kicker">/ 02 — ИССЛЕДУЙ ГЛУБЖЕ</p>
+          <h2 id="explore-title">ПОД ПОВЕРХНОСТЬЮ.</h2>
+          <p>Три ракурса на один образ. Это интерактивная концепция, а не данные работающего API.</p>
+        </div>
+        <Tabs.Root className="home__explore-tabs" defaultValue="image" activationMode="automatic">
+          <Tabs.List className="home__explore-list" aria-label="Ракурсы исследования образа">
+            {exploreTabs.map((tab) => (
+              <Tabs.Trigger className="home__explore-trigger" key={tab.value} value={tab.value}>
+                <span aria-hidden="true">{tab.number} / </span>
+                {tab.label}
+              </Tabs.Trigger>
+            ))}
+          </Tabs.List>
+          {exploreTabs.map((tab) => (
+            <Tabs.Content className="home__explore-panel" key={tab.value} value={tab.value}>
+              <div className="home__explore-copy">
+                <p className="home__explore-overline">КОНЦЕПТ / {tab.number}</p>
+                <h3>{tab.title}</h3>
+                <p>{tab.description}</p>
+                <span className="home__explore-note">Демо · вымышленные примеры · не live-скан</span>
+              </div>
+              <div className={`home__explore-art home__explore-art--${tab.value}`}>
+                <div className="home__explore-art-top" aria-hidden="true">
+                  <span>OCI / VISION</span>
+                  <span>✳ {tab.number}</span>
+                </div>
+                <motion.div
+                  className="home__explore-diagram"
+                  aria-hidden="true"
+                  initial={reducedMotion ? false : { opacity: 0, y: 18, rotate: -3 }}
+                  animate={{ opacity: 1, y: 0, rotate: 0 }}
+                  transition={{ duration: 0.45, ease: 'easeOut' }}
+                >
+                  {tab.illustration.map((item, index) => (
+                    <span className="home__explore-tile" key={item}>
+                      <small>0{index + 1}</small>
+                      {item}
+                    </span>
+                  ))}
+                </motion.div>
+                <p className="home__explore-caption">{tab.caption}</p>
+              </div>
+            </Tabs.Content>
+          ))}
+        </Tabs.Root>
+      </section>
+
       <section
         ref={outroRef}
         className="home__outro"
@@ -295,7 +378,7 @@ export function HomePage() {
           <div className="home__outro-sun" aria-hidden="true">
             ✳
           </div>
-          <p className="home__section-kicker">/ 02 — НАЧНИ ИССЛЕДОВАНИЕ</p>
+          <p className="home__section-kicker">/ 03 — НАЧНИ ИССЛЕДОВАНИЕ</p>
           <h2 id="outro-title">
             СМОТРИ
             <br />

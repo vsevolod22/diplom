@@ -12,6 +12,46 @@ function contrast(foreground: number[], background: number[]) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+test('landing: Radix tabs switch by keyboard without inventing live scan data', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto('/');
+  const tabs = page.getByRole('tablist', { name: 'Ракурсы исследования образа' });
+  const image = tabs.getByRole('tab', { name: /Образ/ });
+  await image.focus();
+  await expect(image).toHaveAttribute('aria-selected', 'true');
+  const focusColors = await image.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const context = document.createElement('canvas').getContext('2d');
+    if (!context) throw new Error('Cannot sample focus colors');
+    const rgb = (color: string) => {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      return Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3);
+    };
+    return [rgb(style.outlineColor), rgb(style.backgroundColor)];
+  });
+  expect(contrast(focusColors[0], focusColors[1])).toBeGreaterThanOrEqual(3);
+  await page.keyboard.press('ArrowRight');
+  const secrets = tabs.getByRole('tab', { name: /Secrets/ });
+  await expect(secrets).toBeFocused();
+  await expect(secrets).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel')).toContainText(
+    'Внутренний Secrets-only сценарий разрабатывается и ожидает приёмки',
+  );
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.getByRole('tab', { name: /Покрытие/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel')).toContainText('не SBOM и не скан');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  const panelFits = await page.locator('.home__explore-tabs').evaluate((tabsElement) => {
+    const container = tabsElement.getBoundingClientRect();
+    const panelText = tabsElement.querySelector('[data-state="active"] .home__explore-copy');
+    if (!panelText) throw new Error('Active panel copy missing');
+    const text = panelText.getBoundingClientRect();
+    return text.left >= container.left && text.right <= container.right;
+  });
+  expect(panelFits).toBe(true);
+});
+
 for (const width of [320, 375, 1280]) {
   test(`landing at ${width}px: clear demo boundary and no horizontal overflow`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
