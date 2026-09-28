@@ -123,6 +123,208 @@ body {
   background: #fef2f2;
   color: #7f1d1d;
 }
+.scan-shell {
+  background: #f4f6fa;
+}
+.scan-shell__hero {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: #0b0c11;
+  color: #f7f7f4;
+}
+.scan-shell__grid {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.45;
+  background-image:
+    linear-gradient(#ffffff12 1px, transparent 1px), linear-gradient(90deg, #ffffff12 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: linear-gradient(to right, transparent, black);
+}
+.scan-shell__glow {
+  position: absolute;
+  z-index: -1;
+  width: 600px;
+  height: 500px;
+  right: -130px;
+  top: -120px;
+  background: radial-gradient(ellipse, #8e62fa70 0%, #8e62fa25 45%, transparent 70%);
+  pointer-events: none;
+}
+.scan-shell__inner,
+.scan-shell__content {
+  width: min(100% - 40px, 1152px);
+  margin-inline: auto;
+}
+.scan-shell__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 78px;
+  border-bottom: 1px solid #ffffff26;
+}
+.scan-shell__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #f7f7f4;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  text-decoration: none;
+}
+.scan-shell__brand > span:not(.scan-shell__mark) {
+  color: #d5fb57;
+}
+.scan-shell__mark {
+  display: grid;
+  place-items: center;
+  width: 33px;
+  height: 33px;
+  border-radius: 9px;
+  background: #d5fb57;
+  color: #0b0c11;
+}
+.scan-shell__back {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 7px;
+  color: #e7e3f2;
+  font-size: 13px;
+}
+.scan-shell__body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 30px;
+  min-height: 310px;
+  padding: 44px 0;
+}
+.scan-shell__copy {
+  position: relative;
+  z-index: 1;
+  max-width: 800px;
+}
+.scan-shell__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  color: #d5fb57;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+}
+.scan-shell__title {
+  margin: 14px 0;
+  font-family: Impact, 'Arial Narrow', ui-sans-serif, sans-serif;
+  font-size: clamp(52px, 9vw, 112px);
+  line-height: 0.94;
+  letter-spacing: -0.035em;
+}
+.scan-shell__title [aria-hidden='true'] > span {
+  color: #d5fb57;
+}
+.scan-shell__hero a:focus-visible {
+  outline-color: #d5fb57;
+  outline-offset: 4px;
+}
+.scan-shell__lead {
+  max-width: 620px;
+  margin: 0 0 18px;
+  color: #dedce7;
+  line-height: 1.6;
+}
+.scan-shell__art {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 200px;
+  height: 200px;
+  border: 1px dashed #d5fb5770;
+  border-radius: 50%;
+  color: #d5fb57;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  transform: rotate(-12deg);
+}
+.scan-shell__art-ring {
+  display: grid;
+  place-items: center;
+  width: 150px;
+  height: 150px;
+  border: 1px solid #a58aff;
+  border-radius: 50%;
+  box-shadow: 0 0 75px #a58aff66;
+}
+.scan-shell__art > span {
+  position: absolute;
+  bottom: -16px;
+}
+.scan-shell__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 22px;
+}
+.scan-shell__nav a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 15px;
+  border: 1px solid #ffffff50;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  transition:
+    background-color 0.2s ease,
+    transform 0.2s ease;
+}
+.scan-shell__nav a:hover {
+  background: #ffffff25;
+  transform: translateY(-2px);
+}
+.scan-shell__nav a[aria-current='page'] {
+  border-color: #d5fb57;
+  background: #d5fb57;
+  color: #16180c;
+}
+.scan-shell__stage {
+  min-height: 55vh;
+  padding: 32px 0 100px;
+  background: #f4f6fa;
+}
+.scan-shell__content {
+  display: grid;
+  gap: 32px;
+}
+@media (max-width: 700px) {
+  .scan-shell__art {
+    display: none;
+  }
+  .scan-shell__body {
+    min-height: 280px;
+  }
+  .scan-shell__eyebrow {
+    font-size: 9px;
+  }
+  .scan-shell__nav a {
+    font-size: 12px;
+    padding-inline: 11px;
+  }
+  .scan-shell__content,
+  .scan-shell__inner {
+    width: min(100% - 32px, 1152px);
+  }
+}
 @media (min-width: 640px) {
   .scan-filter-trigger {
     display: none;
@@ -132,5 +334,6 @@ body {
   .scan-button,
   main nav a {
     transition: none;
+    transform: none !important;
   }
 }

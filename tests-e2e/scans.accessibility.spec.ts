@@ -13,6 +13,29 @@ function contrast(foreground: number[], background: number[]) {
 }
 
 for (const width of [320, 375, 1280]) {
+  test(`landing at ${width}px: clear demo boundary and no horizontal overflow`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await expect(page.getByText('Демо — вымышленные данные.', { exact: false })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Смотреть демо' })).toHaveAttribute('href', '/demo/scans');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    const titleLines = await page.locator('.home__title-line').evaluateAll((lines) =>
+      lines.map((line) => {
+        const { left, top, right, bottom } = line.getBoundingClientRect();
+        return { left, top, right, bottom };
+      }),
+    );
+    expect(titleLines).toHaveLength(3);
+    for (const line of titleLines) {
+      expect(line.left).toBeGreaterThanOrEqual(0);
+      expect(line.right).toBeLessThanOrEqual(width);
+    }
+    for (let i = 1; i < titleLines.length; i++)
+      expect(titleLines[i].top).toBeGreaterThanOrEqual(titleLines[i - 1].bottom);
+    await page.screenshot({ path: `test-results/landing-${width}.png`, fullPage: true });
+  });
   test(`fixture scan at ${width}px: keyboard, text status, no horizontal overflow or canvas dependency`, async ({
     page,
   }) => {
@@ -25,6 +48,7 @@ for (const width of [320, 375, 1280]) {
     await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
     await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Отмена недоступна' })).toBeDisabled();
+    if (width === 375) await page.screenshot({ path: 'test-results/scan-detail-375.png', fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     const columns = await page
       .locator('section[aria-labelledby="scan-detail"] > .grid')
@@ -89,8 +113,8 @@ for (const colorScheme of ['light', 'dark'] as const) {
         return getComputedStyle(element)[property];
       };
       return [
-        [rgb(css('main h1', 'color')), rgb(css('main', 'backgroundColor'))],
-        [rgb(css('main nav a', 'color')), rgb(css('main', 'backgroundColor'))],
+        [rgb(css('main h1', 'color')), rgb(css('.scan-shell__hero', 'backgroundColor'))],
+        [rgb(css('main nav a', 'color')), rgb(css('.scan-shell__hero', 'backgroundColor'))],
         [rgb(css('main [role="note"]', 'color')), rgb(css('main [role="note"]', 'backgroundColor'))],
       ];
     });
