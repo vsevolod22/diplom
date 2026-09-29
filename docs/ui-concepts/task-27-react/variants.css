@@ -1,0 +1,209 @@
+/* Layout directions rather than palette swaps: editorial rows / exhibition tiles / stepped timeline. */
+.a2 .record-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  border: 0;
+  align-items: stretch;
+}
+.a2 .record-list > div {
+  min-width: 0;
+}
+.a2 .record {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  border: 2px solid var(--ink);
+  padding: 27px;
+  gap: 24px;
+}
+.a2 .record.featured {
+  border-left: 2px solid var(--ink);
+  border-top: 12px solid var(--accent);
+}
+.a2 .record .pill,
+.a2 .record .text-link {
+  margin-top: auto;
+}
+.a2 .record h3 {
+  font-size: clamp(1.1rem, 2.2vw, 2rem);
+}
+.a2 .split {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+}
+.a2 .detail-grid {
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+}
+.a2 .ai-panel {
+  border-radius: 0 70px 0 0;
+}
+.a3 .record-list {
+  border-left: 2px solid var(--accent);
+  margin-left: 14px;
+}
+.a3 .record {
+  margin: 0 0 20px 24px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  position: relative;
+  background: var(--surface);
+}
+.a3 .record::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border-radius: 50%;
+  position: absolute;
+  left: -32px;
+  top: 50%;
+  box-shadow: 0 0 20px var(--accent);
+}
+.a3 .record.featured {
+  border-left: 1px solid var(--accent);
+  transform: translateX(12px);
+}
+.a3 .record.featured:hover {
+  transform: translateX(17px);
+}
+.a3 .coverage,
+.a3 .findings,
+.a3 .ai-panel,
+.a3 .form-panel {
+  border-radius: 24px;
+}
+.a3 .detail-grid {
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+}
+.a3 .intro h1 {
+  max-width: 10ch;
+}
+/* Distinct report/form choreography: exhibition columns vs. pulse conversation stage. */
+.a2 {
+  --accent: #9c3018;
+}
+.a2 .primary,
+.a2 .screen-nav button[aria-current='page'],
+.a2 .notice {
+  color: #fff;
+}
+.a2 .detail-title {
+  border-bottom: 4px solid var(--ink);
+  padding-bottom: 30px;
+}
+.a2 .coverage {
+  border-left: 8px solid var(--accent);
+}
+.a2 .findings {
+  margin-top: 80px;
+  transform: rotate(-1deg);
+  box-shadow: 10px 10px 0 var(--line);
+}
+.a2 .form-panel {
+  margin-top: 90px;
+  transform: rotate(1deg);
+  box-shadow: 12px 12px 0 var(--line);
+}
+.a2 .ai-panel {
+  margin-top: 90px;
+}
+.a3 .split {
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+}
+.a3 .form-panel {
+  border-top: 0;
+  border-right: 6px solid var(--accent);
+  box-shadow: 0 0 50px #64f5bf22;
+}
+.a3 .detail-title {
+  padding: 40px 0;
+  background: radial-gradient(ellipse at 75% 20%, #1d5d5d, transparent 55%);
+}
+.a3 .ai-panel {
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+  border-color: var(--accent);
+  box-shadow: 0 0 45px #64f5bf22;
+}
+@keyframes orbit {
+  0%,
+  100% {
+    transform: rotate(-14deg) scale(1);
+  }
+  50% {
+    transform: rotate(5deg) scale(1.07);
+  }
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-13px);
+  }
+}
+@keyframes glow {
+  0%,
+  100% {
+    box-shadow: 0 0 10px #64f5bf22;
+  }
+  50% {
+    box-shadow: 0 0 42px #64f5bf77;
+  }
+}
+.a1 .intro-mark {
+  animation: orbit 7s ease-in-out infinite;
+}
+.a2 .intro-mark {
+  animation: float 4s ease-in-out infinite;
+}
+.a3 .intro-mark,
+.a3 .ai-panel {
+  animation: glow 4s ease-in-out infinite;
+}
+@media (max-width: 800px) {
+  .a2 .record-list {
+    grid-template-columns: 1fr;
+  }
+  .a2 .split,
+  .a2 .detail-grid,
+  .a3 .detail-grid {
+    grid-template-columns: 1fr;
+  }
+  .a2 .form-panel,
+  .a2 .findings {
+    margin-top: 0;
+    transform: none;
+    box-shadow: none;
+  }
+  .a2 .ai-panel {
+    margin-top: 20px;
+  }
+  .a3 .split,
+  .a3 .ai-panel {
+    grid-template-columns: 1fr;
+  }
+  .a3 .record {
+    margin-left: 16px;
+  }
+  .a3 .record::before {
+    left: -24px;
+  }
+  .a3 .record.featured,
+  .a3 .record.featured:hover {
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .intro-mark,
+  .a3 .ai-panel {
+    animation: none !important;
+  }
+  .a3 .record,
+  .a3 .record:hover,
+  .a3 .record.featured,
+  .a3 .record.featured:hover {
+    transform: none;
+  }
+}
