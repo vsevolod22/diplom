@@ -14,9 +14,18 @@ afterEach(cleanup);
 
 function page(path: string, element: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const view = render(<QueryClientProvider client={client}>
-    <MemoryRouter initialEntries={[path]}><Routes><Route path={path.replace(/\/(?:partial|empty|unsupported|running)-demo$/, '/:scanId')} element={element} /></Routes></MemoryRouter>
-  </QueryClientProvider>);
+  const view = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route
+            path={path.replace(/\/(?:partial|empty|unsupported|running)-demo$/, '/:scanId')}
+            element={element}
+          />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
   return { ...view, client };
 }
 describe('scan UI fixture versus unavailable production', () => {
@@ -46,7 +55,9 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(await screen.findByText(/SECRET_DETECTED/)).toBeTruthy();
     view.unmount();
     page('/demo/scans/unsupported-demo', <ScanDetailPage demo />);
-    expect(await screen.findByText(/Нет подтверждённых находок: область не проверена полностью/)).toBeTruthy();
+    expect(
+      await screen.findByText(/Нет подтверждённых находок: область не проверена полностью/),
+    ).toBeTruthy();
   });
   it('limits confirmed zero to the checked area and keeps the rest unsupported', async () => {
     page('/demo/scans/empty-demo', <ScanDetailPage demo />);
@@ -78,7 +89,9 @@ describe('scan UI fixture versus unavailable production', () => {
     await user.keyboard('{Escape}');
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     await user.click(trigger);
-    expect((within(screen.getByRole('dialog')).getByLabelText('Категория') as HTMLSelectElement).value).toBe('vulnerability');
+    expect((within(screen.getByRole('dialog')).getByLabelText('Категория') as HTMLSelectElement).value).toBe(
+      'vulnerability',
+    );
   });
   it('announces only stage and terminal transitions during fixture snapshot bursts without moving focus or scroll', async () => {
     const user = userEvent.setup();
@@ -120,6 +133,26 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(region.textContent).toBe('');
     view.rerender(<ScanStatusAnnouncement scan={{ scanId: 'fixture-b', state: 'partial', percent: 10 }} />);
     expect(region.textContent).toBe('');
+  });
+  it('keeps the A1 list-to-create path visible and distinguishes the separate report fixture', async () => {
+    const user = userEvent.setup();
+    page('/demo/scans', <ScanListPage demo />);
+    expect(await screen.findByText(/library\/alpine:latest \(демо\)/)).toBeTruthy();
+    expect(
+      screen
+        .getAllByRole('link', { name: /Новый скан/ })
+        .at(-1)
+        ?.getAttribute('href'),
+    ).toBe('/demo/scans/new');
+    cleanup();
+    page('/demo/scans/new', <ScanCreatePage demo />);
+    await user.type(screen.getByLabelText(/Образ в registry/), 'library/alpine:3.21');
+    await user.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    expect(screen.getByText(/Цель подтверждена, но сервер недоступен/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('link', { name: /отдельный образец отчёта/ }).getAttribute('href')).toBe(
+      '/demo/scans/partial-demo',
+    );
   });
   it('does not enable launch for fixture or unconfigured browser auth', () => {
     page('/demo/scans/new', <ScanCreatePage demo />);

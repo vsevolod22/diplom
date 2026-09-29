@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import { ArrowUpRight, Layers3, ScanLine, ShieldAlert } from 'lucide-react';
+import { ArrowRight, ArrowUpRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { ScanShell } from '@/features/scans/ScanShell';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
-import { Alert, Badge, Card } from '@/shared/ui/scan-primitives';
+import { Alert, Badge } from '@/shared/ui/scan-primitives';
 
 const stateTone: Record<ScanStatus['state'], 'neutral' | 'info' | 'warning' | 'danger'> = {
   queued: 'neutral',
@@ -28,137 +28,88 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
   return (
     <ScanShell demo={demo}>
       <section aria-labelledby="scan-list" className="min-w-0 space-y-8 pb-8">
-        <div className="scan-experience-hero relative min-w-0 overflow-hidden rounded-[1.75rem] bg-[#17142a] px-5 py-7 text-white sm:px-9 sm:py-10 lg:px-12">
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute -right-14 -top-16 size-56 rounded-full border-[34px] border-[#c9ff54]/20 sm:size-72"
-          />
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute bottom-0 right-0 h-24 w-1/2 bg-[linear-gradient(120deg,transparent,rgba(145,98,255,0.22))]"
-          />
-          <div className="relative flex min-w-0 flex-wrap items-start justify-between gap-6">
-            <div className="min-w-0 flex-1">
-              <p className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.22em] text-[#c9ff54]">
-                <ScanLine size={16} aria-hidden="true" /> Обзор / сканы
-              </p>
-              <h2
-                id="scan-list"
-                className="mt-5 max-w-[12ch] text-[clamp(2.7rem,7vw,5.5rem)] font-black leading-[0.92] tracking-[-0.065em]"
-              >
-                Список <span className="text-[#c9ff54]">сканов</span>
-              </h2>
-              <p className="mt-6 max-w-xl text-sm leading-relaxed text-[#e1dff1] sm:text-base">
-                Цель, состояние и ход проверки — без догадок о том, что осталось за пределами видимости.
-              </p>
-            </div>
-            <div className="flex flex-col items-start gap-3 sm:items-end">
-              <span
-                aria-hidden="true"
-                className="text-6xl font-black leading-none tracking-[-0.09em] text-[#c9ff54]/60 sm:text-8xl"
-              >
-                01
-              </span>
-              {demo ? <Badge tone="warning">Только фикстуры</Badge> : null}
-            </div>
-          </div>
+        <div className="scan-a1__chapter">
+          <span>ГЛАВА 01 / КАТАЛОГ</span>
+          <span>{demo ? 'ЗАПИСИ ИЗ ФИКСТУР' : 'НЕТ БРАУЗЕРНОГО ДОСТУПА'}</span>
         </div>
-
-        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-[#cbc7dc] pb-4">
-          <div>
-            <p className="text-[11px] font-black uppercase tracking-[0.2em] text-[#5535a0]">01 / Каталог</p>
-            <p className="mt-1 text-sm text-slate-700">
-              {demo ? 'Локальные демонстрационные записи' : 'Реальный режим недоступен'}
+        <div className="scan-a1__intro">
+          <div className="min-w-0">
+            <h2 id="scan-list" className="scan-a1__heading">
+              Каждая проверка —<br />
+              <em>история с границами.</em>
+            </h2>
+            <p className="mt-5 max-w-2xl">
+              Цель, состояние и область проверки — без догадок о том, что осталось за пределами отчёта.
             </p>
           </div>
-          <Layers3 size={27} className="text-[#5535a0]" aria-hidden="true" />
+          {demo ? (
+            <Link className="scan-a1__action" to="/demo/scans/new">
+              + Новый скан <ArrowRight size={20} aria-hidden="true" />
+            </Link>
+          ) : null}
         </div>
-
         {!transport.capabilities.list ? (
-          <Alert role="status" tone="neutral" className="border-slate-300 bg-white text-slate-800">
-            <div className="flex min-w-0 items-start gap-4">
-              <span
-                aria-hidden="true"
-                className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-[#eee8ff] text-[#5535a0]"
-              >
-                <ShieldAlert size={22} />
-              </span>
-              <div className="min-w-0">
-                <p className="mb-2 text-[11px] font-black uppercase tracking-[0.18em] text-[#5535a0]">
-                  Нет доступа / не пустой список
-                </p>
-                <strong className="block [overflow-wrap:anywhere]">
-                  Список недоступен: GET /api/v1/scans и защищённый браузерный доступ ещё не реализованы.
-                </strong>
-                <span className="mt-2 block text-sm">Отсутствие списка не означает «сканов нет».</span>
-              </div>
-            </div>
+          <Alert role="status" tone="neutral">
+            <strong>
+              Список недоступен: GET /api/v1/scans и защищённый браузерный доступ ещё не реализованы.
+            </strong>
+            <span className="mt-2 block">Отсутствие списка не означает «сканов нет».</span>
+            <Link to="/demo/scans" className="mt-3 inline-block font-bold underline">
+              Посмотреть вымышленные записи
+            </Link>
           </Alert>
         ) : null}
         {list.isPending && transport.capabilities.list ? (
-          <p role="status" className="border-l-4 border-[#5535a0] bg-white p-5 text-slate-700">
+          <p role="status" className="scan-a1__muted">
             Загружаем список…
           </p>
         ) : null}
         {list.isError ? (
-          <Alert role="alert" tone="danger" className="border-red-300 bg-red-50 text-red-900">
+          <Alert role="alert" tone="danger">
             Не удалось загрузить список. Неизвестно, есть ли сканы.
           </Alert>
         ) : null}
-        {list.isSuccess && list.data.length === 0 ? (
-          <Card className="p-6 text-slate-700">Сканов нет (успешный ответ списка).</Card>
+        {list.isSuccess && !list.data.length ? (
+          <p className="scan-a1__muted">Сканов нет (успешный ответ списка).</p>
         ) : null}
         {list.isSuccess ? (
-          <ul className="grid min-w-0 gap-5 md:grid-cols-2">
+          <ol className="scan-a1__records min-w-0 list-none p-0">
             {list.data.map((scan, index) => (
-              <li key={scan.scanId} className="group min-w-0">
-                <Card className="scan-demo-reveal flex h-full min-w-0 flex-col overflow-hidden">
-                  <div className="flex min-w-0 items-start justify-between gap-3 border-b border-[#e3dff0] bg-[#f0ebff] px-5 py-4 sm:px-7">
-                    <span
-                      className="text-4xl font-black leading-none tracking-[-0.09em] text-[#5535a0]"
-                      aria-hidden="true"
-                    >
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                    <Badge tone={stateTone[scan.state]}>{stateLabels[scan.state]}</Badge>
-                  </div>
-                  <div className="flex min-w-0 flex-1 flex-col gap-6 p-5 sm:p-7">
-                    <div className="min-w-0">
-                      <p className="mb-3 text-[11px] font-black uppercase tracking-[0.2em] text-[#5535a0]">
-                        Цель сканирования
-                      </p>
-                      <h3 className="min-w-0 text-xl font-extrabold leading-tight tracking-tight sm:text-2xl">
-                        <Link
-                          className="inline-flex min-h-11 min-w-0 items-center gap-2 rounded-sm text-[#21153d] underline decoration-[#a68be8] decoration-2 underline-offset-4 transition-colors hover:text-[#5535a0] hover:decoration-[#5535a0] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#5535a0]"
-                          to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
-                        >
-                          <span className="min-w-0 [overflow-wrap:anywhere]">{scan.targetLabel}</span>
-                          <ArrowUpRight
-                            size={20}
-                            className="shrink-0 text-[#5535a0] motion-safe:transition-transform motion-safe:group-hover:translate-x-0.5 motion-safe:group-hover:-translate-y-0.5"
-                            aria-hidden="true"
-                          />
-                        </Link>
-                      </h3>
-                    </div>
-                    <div className="mt-auto grid min-w-0 gap-3 border-t border-[#e3dff0] pt-5 text-sm text-slate-700 sm:grid-cols-2">
-                      <div className="min-w-0 [overflow-wrap:anywhere]">
-                        <p>Статус: {stateLabels[scan.state]}</p>
-                        <p>Этап: {scan.stage || 'не предоставлен'}</p>
-                      </div>
-                      <p>Прогресс: {scan.percent == null ? 'неизвестен' : `${scan.percent}%`}</p>
-                    </div>
-                    {demo ? (
-                      <p className="border-l-[3px] border-[#5535a0] pl-3 text-xs font-semibold leading-relaxed text-[#392368]">
-                        Вымышленные данные · не результат реальной проверки
-                      </p>
-                    ) : null}
-                  </div>
-                </Card>
+              <li
+                key={scan.scanId}
+                className={`scan-a1__record min-w-0 ${scan.state === 'partial' ? 'scan-a1__record--featured' : ''}`}
+              >
+                <span className="scan-a1__index">
+                  {String(index + 1).padStart(2, '0')} / {stateLabels[scan.state]}
+                </span>
+                <div className="min-w-0">
+                  <h3>{scan.targetLabel}</h3>
+                  <p className="mt-2 text-sm">
+                    Этап: {scan.stage || 'не предоставлен'} · Прогресс:{' '}
+                    {scan.percent == null ? 'неизвестен' : `${scan.percent}%`}
+                  </p>
+                  {demo ? (
+                    <p className="mt-1 text-xs">Вымышленные данные · не результат реальной проверки</p>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap items-center gap-4">
+                  <Badge tone={stateTone[scan.state]}>{stateLabels[scan.state]}</Badge>
+                  <Link
+                    className="scan-a1__link"
+                    to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
+                  >
+                    Открыть деталь <ArrowUpRight size={17} aria-hidden="true" />
+                  </Link>
+                </div>
               </li>
             ))}
-          </ul>
+          </ol>
         ) : null}
+        <p className="scan-a1__muted text-sm">
+          {demo
+            ? 'Сканы в списке — локальные фикстуры. Анимации не отображают реальный ход проверки.'
+            : 'Запуск, список и отмена реальных проверок недоступны без защищённого ingress.'}
+        </p>
       </section>
     </ScanShell>
   );

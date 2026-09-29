@@ -1,10 +1,14 @@
 import type { ReactNode } from 'react';
-import { ArrowLeft, ArrowUpRight, ScanLine, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, ScanLine } from 'lucide-react';
+import { motion, useReducedMotion, useScroll } from 'motion/react';
+import './scan-a1.css';
 import { Link, useLocation } from 'react-router-dom';
 import { Alert, Badge } from '@/shared/ui/scan-primitives';
 
 export function ScanShell({ demo, children }: { demo: boolean; children: ReactNode }) {
   const { pathname } = useLocation();
+  const reducedMotion = useReducedMotion();
+  const { scrollYProgress } = useScroll();
   const newScanPath = demo ? '/demo/scans/new' : '/scans/new';
   const screenTitle =
     pathname === newScanPath
@@ -13,7 +17,12 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
         ? 'Список сканов'
         : 'Деталь скана';
   return (
-    <main className="scan-shell min-w-0 text-slate-950">
+    <main className="scan-shell scan-a1 min-w-0 text-slate-950">
+      <motion.div
+        className="scan-a1__progress"
+        aria-hidden="true"
+        style={reducedMotion ? undefined : { scaleX: scrollYProgress }}
+      />
       <div className="scan-shell__hero">
         <div className="scan-shell__grid" aria-hidden="true" />
         <div className="scan-shell__glow" aria-hidden="true" />
@@ -30,31 +39,11 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
             </Link>
           </header>
           <div className="scan-shell__body">
-            <div className="scan-shell__copy">
-              <p className="scan-shell__eyebrow">
-                <Sparkles size={17} aria-hidden="true" /> IMAGE / EXPLORER <span aria-hidden="true">—</span>{' '}
-                ДИПЛОМНЫЙ ПРОЕКТ
-              </p>
-              <h1 className="scan-shell__title">
-                <span aria-hidden="true">
-                  СМОТРИ <span>ГЛУБЖЕ.</span>
-                </span>
-                <span className="sr-only">{screenTitle}</span>
-              </h1>
-              <p className="scan-shell__lead">
-                Сканирование образов: цель, статус и подтверждённое покрытие. Без догадок о том, что не было
-                проверено.
-              </p>
-              <Badge tone={demo ? 'warning' : 'neutral'}>
-                {demo ? 'Режим · демо' : 'Режим · реальный доступ недоступен'}
-              </Badge>
-            </div>
-            <div className="scan-shell__art" aria-hidden="true">
-              <div className="scan-shell__art-ring">
-                <ScanLine size={90} strokeWidth={1} />
-              </div>
-              <span>LOOK / CLOSER</span>
-            </div>
+            <p className="scan-shell__eyebrow">IMAGE / EXPLORER</p>
+            <h1 className="sr-only">{screenTitle}</h1>
+            <Badge tone={demo ? 'warning' : 'neutral'}>
+              {demo ? 'Режим · демо' : 'Режим · реальный доступ недоступен'}
+            </Badge>
           </div>
           <nav aria-label="Разделы сканирования" className="scan-shell__nav">
             <Link to="/scans" aria-current={pathname === '/scans' ? 'page' : undefined}>
