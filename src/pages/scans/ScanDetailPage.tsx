@@ -3,6 +3,7 @@ import * as Accordion from '@radix-ui/react-accordion';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, ChevronDown, Sparkles } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
+import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanFilterSheet } from '@/features/scans/ScanFilterSheet';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
 import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
@@ -104,6 +105,12 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
         ) : null}
         {scan.data ? (
           <>
+            <MagicCard className="scan-a1__reading-card">
+              <p className="scan-a1__reading-copy">
+                Порядок чтения / цель → состояние → покрытие → находки. Подсветка помогает ориентироваться, но
+                не показывает ход проверки.
+              </p>
+            </MagicCard>
             <div className="scan-a1__chapter scan-a1__chapter--section">01 / СОСТОЯНИЕ И ЦЕЛЬ</div>
             <div className="scan-a1__state">
               <div className="scan-a1__state-main">

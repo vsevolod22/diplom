@@ -119,20 +119,40 @@
   border-top: 1px solid #625e74;
 }
 .scan-a1 .scan-a1__record {
+  border-bottom: 1px solid #625e74;
+  color: #faf8ff;
+}
+.scan-a1 .scan-a1__record-content {
   display: grid;
   grid-template-columns: minmax(95px, 14%) minmax(0, 1fr) auto;
   gap: 20px;
   align-items: center;
   padding: 27px 14px;
-  border-bottom: 1px solid #625e74;
-  color: #faf8ff;
-  transition:
-    background 0.2s ease,
-    transform 0.2s ease;
 }
-.scan-a1 .scan-a1__record:hover {
-  background: #211f34;
-  transform: translateX(4px);
+.scan-a1 .scan-a1__magic {
+  --color-background: #211f34;
+  --color-border: #625e74;
+  color: #faf8ff;
+}
+.scan-a1 .scan-a1__magic:focus-within {
+  border-color: #d1ff5e;
+}
+.scan-a1 .scan-a1__reading-card {
+  margin-bottom: 26px;
+}
+.scan-a1 .scan-a1__reading-copy {
+  padding: 16px 20px;
+  color: #ded9e9;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.scan-a1 .scan-a1__spotlight {
+  opacity: 0;
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .scan-a1 .scan-a1__magic:hover .scan-a1__spotlight {
+    opacity: 0.25;
+  }
 }
 .scan-a1 .scan-a1__record--featured {
   border-left: 5px solid #d1ff5e;
@@ -219,11 +239,11 @@
   outline-offset: 4px;
 }
 @media (max-width: 800px) {
-  .scan-a1 .scan-a1__record,
+  .scan-a1 .scan-a1__record-content,
   .scan-a1 .scan-a1__form-grid {
     grid-template-columns: 1fr;
   }
-  .scan-a1 .scan-a1__record {
+  .scan-a1 .scan-a1__record-content {
     gap: 9px;
   }
 }
@@ -231,7 +251,9 @@
   .scan-a1__progress {
     display: none;
   }
-  .scan-a1 .scan-a1__record,
+  .scan-a1 .scan-a1__spotlight {
+    display: none;
+  }
   .scan-a1 .scan-a1__action {
     transition: none;
     transform: none !important;

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ArrowRight, ArrowUpRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanShell } from '@/features/scans/ScanShell';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
@@ -79,28 +80,32 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
                 key={scan.scanId}
                 className={`scan-a1__record min-w-0 ${scan.state === 'partial' ? 'scan-a1__record--featured' : ''}`}
               >
-                <span className="scan-a1__index">
-                  {String(index + 1).padStart(2, '0')} / {stateLabels[scan.state]}
-                </span>
-                <div className="min-w-0">
-                  <h3>{scan.targetLabel}</h3>
-                  <p className="mt-2 text-sm">
-                    Этап: {scan.stage || 'не предоставлен'} · Прогресс:{' '}
-                    {scan.percent == null ? 'неизвестен' : `${scan.percent}%`}
-                  </p>
-                  {demo ? (
-                    <p className="mt-1 text-xs">Вымышленные данные · не результат реальной проверки</p>
-                  ) : null}
-                </div>
-                <div className="flex flex-wrap items-center gap-4">
-                  <Badge tone={stateTone[scan.state]}>{stateLabels[scan.state]}</Badge>
-                  <Link
-                    className="scan-a1__link"
-                    to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
-                  >
-                    Открыть деталь <ArrowUpRight size={17} aria-hidden="true" />
-                  </Link>
-                </div>
+                <MagicCard>
+                  <div className="scan-a1__record-content">
+                    <span className="scan-a1__index">
+                      {String(index + 1).padStart(2, '0')} / {stateLabels[scan.state]}
+                    </span>
+                    <div className="min-w-0">
+                      <h3>{scan.targetLabel}</h3>
+                      <p className="mt-2 text-sm">
+                        Этап: {scan.stage || 'не предоставлен'} · Прогресс:{' '}
+                        {scan.percent == null ? 'неизвестен' : `${scan.percent}%`}
+                      </p>
+                      {demo ? (
+                        <p className="mt-1 text-xs">Вымышленные данные · не результат реальной проверки</p>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-4">
+                      <Badge tone={stateTone[scan.state]}>{stateLabels[scan.state]}</Badge>
+                      <Link
+                        className="scan-a1__link"
+                        to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
+                      >
+                        Открыть деталь <ArrowUpRight size={17} aria-hidden="true" />
+                      </Link>
+                    </div>
+                  </div>
+                </MagicCard>
               </li>
             ))}
           </ol>

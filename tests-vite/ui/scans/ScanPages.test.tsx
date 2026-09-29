@@ -70,6 +70,32 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(await screen.findByText(/library\/alpine:latest \(демо\)/)).toBeTruthy();
     expect(screen.getByText(/ДЕМО · вымышленные данные/)).toBeTruthy();
   });
+  it('keeps ordered records, keys, links and scan facts outside decorative animation', async () => {
+    page('/demo/scans', <ScanListPage demo />);
+    const list = await screen.findByRole('list');
+    const records = within(list).getAllByRole('listitem');
+    expect(records.length).toBeGreaterThan(1);
+    for (const record of records) {
+      expect(record.querySelector('.scan-a1__magic')).not.toBeNull();
+      expect(
+        within(record)
+          .getByRole('link', { name: /Открыть деталь/ })
+          .getAttribute('href'),
+      ).toMatch(/^\/demo\/scans\//);
+      expect(record.textContent).toMatch(/Прогресс: (неизвестен|\d+%)/);
+      expect(record.textContent).toContain('Вымышленные данные');
+    }
+    expect(list.querySelectorAll(':scope > li')).toHaveLength(records.length);
+    expect(list.querySelector('[style*="opacity: 0"]')).toBeNull();
+  });
+  it('uses a separate non-factual MagicCard on the detail and keeps coverage outside it', async () => {
+    page('/demo/scans/partial-demo', <ScanDetailPage demo />);
+    expect(await screen.findByText(/Порядок чтения/)).toBeTruthy();
+    const card = document.querySelector('.scan-a1__reading-card');
+    expect(card?.textContent).toContain('не показывает ход проверки');
+    expect(card?.textContent).not.toContain('База уязвимостей');
+    expect((await screen.findByText(/База уязвимостей недоступна/)).closest('.scan-a1__magic')).toBeNull();
+  });
   it('holds focus in the mobile filter Sheet, preserves selection and restores the trigger on Escape', async () => {
     const user = userEvent.setup();
     page('/demo/scans/partial-demo', <ScanDetailPage demo />);
