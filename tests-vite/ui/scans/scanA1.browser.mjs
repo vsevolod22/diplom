@@ -2,6 +2,10 @@ import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
 
 const server = await createServer({ server: { host: '127.0.0.1', port: 0 } });
+async function assertNoOverflow(page, screen) {
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  if (overflow) throw Error(`${screen}: horizontal overflow at ${page.viewportSize().width}px`);
+}
 let browser;
 try {
   await server.listen();
@@ -15,14 +19,17 @@ try {
       page.on('pageerror', (error) => errors.push(error.message));
       await page.goto(`http://127.0.0.1:${port}/demo/scans`);
       await page.getByText('library/alpine:latest (демо)', { exact: true }).waitFor();
+      await assertNoOverflow(page, 'demo/list');
       await page
         .getByRole('link', { name: /Новый скан/ })
         .last()
         .click();
       if (!(await page.getByRole('button', { name: 'Запуск недоступен' }).isDisabled()))
         throw Error('Launch enabled');
+      await assertNoOverflow(page, 'demo/create');
       await page.getByRole('link', { name: /отдельный образец отчёта/ }).click();
       await page.getByText('База уязвимостей недоступна').waitFor();
+      await assertNoOverflow(page, 'demo/detail');
       if (!(await page.getByRole('button', { name: 'Чат недоступен' }).isDisabled()))
         throw Error('Chat enabled');
       if (width < 640) {
@@ -38,9 +45,8 @@ try {
       await page.getByText('library/alpine:latest (демо)', { exact: true }).waitFor();
       await page.goto(`http://127.0.0.1:${port}/scans`);
       await page.getByText(/Список недоступен: GET/).waitFor();
-      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
-      if (overflow || errors.length)
-        throw Error(`${width}/${reducedMotion}: overflow=${overflow}; ${errors.join('; ')}`);
+      await assertNoOverflow(page, 'live/list');
+      if (errors.length) throw Error(`${width}/${reducedMotion}: ${errors.join('; ')}`);
       checks++;
       await page.close();
     }
