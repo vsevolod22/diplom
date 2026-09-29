@@ -280,6 +280,79 @@
   outline: 3px solid var(--a1-accent);
   outline-offset: 3px;
 }
+.scan-a1-detail .scan-a1__lead {
+  position: relative;
+  min-height: 0;
+  align-items: flex-start;
+  isolation: isolate;
+}
+.scan-a1-detail .scan-a1__lead-copy,
+.scan-a1-detail .scan-a1__summary {
+  position: relative;
+  z-index: 1;
+}
+.scan-a1-detail .scan-a1__lead-copy {
+  max-width: 780px;
+}
+.scan-a1-detail .scan-a1__lead h2 {
+  font-size: clamp(3.2rem, 7vw, 7.5rem);
+}
+
+.scan-a1-detail .scan-a1__summary {
+  background: #141324;
+}
+.scan-a1-detail .scan-a1__report-nav {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 14px 0 48px;
+  background: var(--a1-line);
+  border: 1px solid var(--a1-line);
+}
+.scan-a1-detail .scan-a1__report-nav a {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 96px;
+  padding: 16px;
+  background: #211f34;
+  color: var(--a1-accent);
+  font-weight: 800;
+  text-decoration: none;
+  transition: background 0.2s ease;
+}
+.scan-a1-detail .scan-a1__report-nav a span {
+  color: #faf8ff;
+  font-weight: 600;
+}
+.scan-a1-detail .scan-a1__report-nav a:hover,
+.scan-a1-detail .scan-a1__report-nav a:focus-visible {
+  background: #463c61;
+}
+.scan-a1-detail :is(#scan-a1-state, #scan-a1-coverage, #scan-a1-findings, #scan-a1-ai) {
+  scroll-margin-top: 90px;
+}
+.scan-a1-detail .scan-a1__detail-divider {
+  position: relative;
+  height: 170px;
+  margin: 0 0 32px;
+}
+.scan-a1-detail .scan-a1__detail-divider .scan-a1__scene-art {
+  inset: 8% 4%;
+  padding: 12px 20px;
+}
+.scan-a1-detail .scan-a1__detail-divider .scan-a1__scene-word {
+  font-size: clamp(1.1rem, 3vw, 2rem);
+}
+.scan-a1-detail .scan-a1__detail-divider .scan-a1__scene-tracks,
+.scan-a1-detail .scan-a1__detail-divider .scan-a1__scene-footnote {
+  display: none;
+}
+@media (max-width: 800px) {
+  .scan-a1-detail .scan-a1__report-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 @media (max-width: 800px) {
   .scan-a1__lead {
     flex-direction: column;
@@ -313,6 +386,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .scan-a1-detail .scan-a1__report-nav a {
+    transition: none;
+  }
   .scan-a1-detail *,
   .scan-a1-detail *::before,
   .scan-a1-detail *::after {

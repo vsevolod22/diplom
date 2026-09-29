@@ -5,6 +5,7 @@ import { useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ScanShell } from '@/features/scans/ScanShell';
+import { ScanScene } from '@/features/scans/ScanScene';
 
 const formSchema = z.object({
   imageReference: z.string().trim().min(1, 'Укажите цель').max(256, 'Слишком длинная ссылка'),
@@ -30,8 +31,9 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
             <ArrowLeft size={16} aria-hidden="true" /> К списку
           </Link>
         </div>
-        <div className="scan-a1__form-grid">
+        <div className="scan-a1__create-hero">
           <div className="min-w-0">
+            <span className="scan-a1__folio">СИГНАЛ / 02 — ГРАНИЦА ДОВЕРИЯ</span>
             <h2 id="new-scan" className="scan-a1__heading">
               Задайте <em>границы.</em>
             </h2>
@@ -39,13 +41,11 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               Укажите образ и подтвердите разрешённую область. Запуск из браузера пока не настроен —
               заполнение формы не отправляет запрос.
             </p>
-            <div className="mt-10 border-l-4 border-[#d1ff5e] pl-5 text-sm leading-relaxed text-[#ded9e9]">
-              <strong className="block text-lg text-white">Область доверия</strong>
-              Secrets · image — внутренний сценарий разрабатывается и ожидает приёмки. CVE, SBOM и container /
-              host не входят в доступный scope. POST 202 — квитанция, не подтверждение закреплённого
-              digest/platform.
-            </div>
           </div>
+          <ScanScene variant="create" />
+        </div>
+
+        <div className="scan-a1__form-grid scan-a1__form-grid--story">
           <div className="scan-a1__form" role="group" aria-label="Параметры скана">
             <div>
               <label htmlFor="image-reference">Образ в registry (только разрешённый Alpine)</label>
@@ -111,6 +111,29 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 Посмотреть отдельный образец отчёта · другая фикстура
               </Link>
             ) : null}
+          </div>
+          <aside className="scan-a1__trust-note">
+            <span className="scan-a1__folio">ГРАНИЦА / 01—03</span>
+            <strong>Область доверия</strong>
+            <p>
+              Secrets · image — внутренний сценарий разрабатывается и ожидает приёмки. CVE, SBOM и container /
+              host не входят в доступный scope.
+            </p>
+            <p>POST 202 — квитанция, не подтверждение закреплённого digest/platform.</p>
+          </aside>
+        </div>
+        <div className="scan-a1__trust-path" aria-label="Этапы настройки">
+          <div>
+            <span>01 / ЦЕЛЬ</span>
+            <p>Укажите образ registry.</p>
+          </div>
+          <div>
+            <span>02 / ОБЛАСТЬ</span>
+            <p>Проверьте доступные категории.</p>
+          </div>
+          <div>
+            <span>03 / РАЗРЕШЕНИЕ</span>
+            <p>Подтвердите цель. Запуск всё ещё недоступен.</p>
           </div>
         </div>
       </section>

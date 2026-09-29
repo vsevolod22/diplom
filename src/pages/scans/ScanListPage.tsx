@@ -3,6 +3,7 @@ import { ArrowRight, ArrowUpRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanShell } from '@/features/scans/ScanShell';
+import { ScanScene } from '@/features/scans/ScanScene';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
@@ -33,8 +34,9 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
           <span>ГЛАВА 01 / КАТАЛОГ</span>
           <span>{demo ? 'ЗАПИСИ ИЗ ФИКСТУР' : 'НЕТ БРАУЗЕРНОГО ДОСТУПА'}</span>
         </div>
-        <div className="scan-a1__intro">
-          <div className="min-w-0">
+        <div className="scan-a1__intro scan-a1__intro--editorial">
+          <div className="scan-a1__intro-copy min-w-0">
+            <span className="scan-a1__folio">СИГНАЛ / 01 — АРХИВ ПРОВЕРОК</span>
             <h2 id="scan-list" className="scan-a1__heading">
               Каждая проверка —<br />
               <em>история с границами.</em>
@@ -43,11 +45,21 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
               Цель, состояние и область проверки — без догадок о том, что осталось за пределами отчёта.
             </p>
           </div>
-          {demo ? (
-            <Link className="scan-a1__action" to="/demo/scans/new">
-              + Новый скан <ArrowRight size={20} aria-hidden="true" />
-            </Link>
-          ) : null}
+          <div className="scan-a1__intro-art">
+            <ScanScene variant="list" />
+            <div className="scan-a1__intro-cta">
+              <span>01 / {demo ? 'ФИКСТУРЫ, НЕ LIVE' : 'LIVE НЕДОСТУПЕН'}</span>
+              {demo ? (
+                <Link className="scan-a1__action" to="/demo/scans/new">
+                  + Новый скан <ArrowRight size={20} aria-hidden="true" />
+                </Link>
+              ) : null}
+            </div>
+          </div>
+        </div>
+        <div className="scan-a1__section-title">
+          <span>РЕЕСТР / {demo ? 'ДЕМО' : 'НЕТ ДОСТУПА'}</span>
+          <span>ЦЕЛЬ → СОСТОЯНИЕ → ОТЧЁТ</span>
         </div>
         {!transport.capabilities.list ? (
           <Alert role="status" tone="neutral">
@@ -85,7 +97,7 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
                     <span className="scan-a1__index">
                       {String(index + 1).padStart(2, '0')} / {stateLabels[scan.state]}
                     </span>
-                    <div className="min-w-0">
+                    <div className="scan-a1__record-facts min-w-0">
                       <h3>{scan.targetLabel}</h3>
                       <p className="mt-2 text-sm">
                         Этап: {scan.stage || 'не предоставлен'} · Прогресс:{' '}

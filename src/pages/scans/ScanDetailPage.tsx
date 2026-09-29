@@ -6,6 +6,7 @@ import { Link, useParams } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanFilterSheet } from '@/features/scans/ScanFilterSheet';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
+import { ScanScene } from '@/features/scans/ScanScene';
 import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
@@ -85,6 +86,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
               {demo ? 'Демонстрационная карточка · вымышленные данные' : 'Авторизованный просмотр недоступен'}
             </p>
           </div>
+
           {scan.data ? (
             <div className="scan-a1__summary">
               <Badge tone={stateTone[scan.data.state]}>{stateLabels[scan.data.state]}</Badge>
@@ -111,7 +113,23 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 не показывает ход проверки.
               </p>
             </MagicCard>
-            <div className="scan-a1__chapter scan-a1__chapter--section">01 / СОСТОЯНИЕ И ЦЕЛЬ</div>
+            <nav className="scan-a1__report-nav" aria-label="Разделы отчёта">
+              <a href="#scan-a1-state">
+                01 <span>Состояние и цель</span>
+              </a>
+              <a href="#scan-a1-coverage">
+                02 <span>Покрытие</span>
+              </a>
+              <a href="#scan-a1-findings">
+                03 <span>Находки</span>
+              </a>
+              <a href="#scan-a1-ai">
+                04 <span>Помощник</span>
+              </a>
+            </nav>
+            <div className="scan-a1__chapter scan-a1__chapter--section" id="scan-a1-state">
+              01 / СОСТОЯНИЕ И ЦЕЛЬ
+            </div>
             <div className="scan-a1__state">
               <div className="scan-a1__state-main">
                 <h3>Цель и состояние</h3>
@@ -152,6 +170,9 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 </Button>
                 <p>Нет авторизованного cancel API. Неполные результаты не удаляются.</p>
               </div>
+            </div>
+            <div className="scan-a1__detail-divider" aria-hidden="true">
+              <ScanScene variant="detail" />
             </div>
             <div className="scan-a1__grid">
               <section className="scan-a1__panel" aria-labelledby="scan-a1-coverage">

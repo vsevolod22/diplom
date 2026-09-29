@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ScanListPage } from '@/pages/scans/ScanListPage';
 import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
@@ -10,6 +10,22 @@ import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement'
 import { fixtureScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
 
+// Motion's viewport hook needs an observer in jsdom; the browser suite covers real intersections.
+class TestIntersectionObserver implements IntersectionObserver {
+  readonly root = null;
+  readonly rootMargin = '0px';
+  readonly thresholds = [0];
+  constructor(callback: IntersectionObserverCallback) {
+    void callback;
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+}
+vi.stubGlobal('IntersectionObserver', TestIntersectionObserver);
 afterEach(cleanup);
 
 function page(path: string, element: React.ReactNode) {

@@ -60,7 +60,8 @@ for (const width of [320, 375, 1280]) {
     await expect(page.getByRole('heading', { name: /Каждая проверка/, level: 2 })).toBeVisible();
     await expect(page.getByText('Вымышленные данные · не результат реальной проверки').first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-    if (width === 375) await page.screenshot({ path: 'test-results/scan-list-375.png', fullPage: true });
+    if (width === 375 || width === 1280)
+      await page.screenshot({ path: `test-results/scan-list-${width}.png`, fullPage: true });
     await page.goto('/demo/scans/new');
     await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
     await expect(page.getByText('Область доверия')).toBeVisible();
@@ -70,7 +71,8 @@ for (const width of [320, 375, 1280]) {
       page.getByText('внутренний сценарий разрабатывается и ожидает приёмки', { exact: false }).first(),
     ).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-    if (width === 375) await page.screenshot({ path: 'test-results/scan-create-375.png', fullPage: true });
+    if (width === 375 || width === 1280)
+      await page.screenshot({ path: `test-results/scan-create-${width}.png`, fullPage: true });
   });
   test(`landing at ${width}px: clear demo boundary and no horizontal overflow`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
@@ -104,11 +106,14 @@ for (const width of [320, 375, 1280]) {
     await expect(page.getByText('ДЕМО · вымышленные данные', { exact: false })).toBeVisible();
     await expect(page.getByText('Состояние из локальной фикстуры', { exact: false })).toBeVisible();
     await expect(page.locator('main nav [aria-current="page"]')).toHaveCount(0);
-    await expect(page.getByText('Частичный результат', { exact: true }).first()).toBeVisible();
+    await expect(
+      page.locator('.scan-a1__facts').getByText('Частичный результат', { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
     await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Отмена недоступна' })).toBeDisabled();
-    if (width === 375) await page.screenshot({ path: 'test-results/scan-detail-375.png', fullPage: true });
+    if (width === 375 || width === 1280)
+      await page.screenshot({ path: `test-results/scan-detail-${width}.png`, fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     const columns = await page
       .locator('.scan-a1__grid')
@@ -147,7 +152,15 @@ test('ordinary motion: MagicCard spotlight and mobile filter preserve keyboard f
   await page.goto('/demo/scans');
   const firstCard = page.locator('.scan-a1__record .scan-a1__magic').first();
   await expect(firstCard).toBeVisible();
-  await firstCard.hover();
+  await firstCard.scrollIntoViewIfNeeded();
+  const box = await firstCard.boundingBox();
+  if (!box) throw new Error('Missing MagicCard bounds');
+  await page.mouse.move(box.x + 20, box.y + 20);
+  const firstGradient = await firstCard.evaluate((element) => getComputedStyle(element).backgroundImage);
+  await page.mouse.move(box.x + box.width - 20, box.y + box.height - 20);
+  await expect
+    .poll(() => firstCard.evaluate((element) => getComputedStyle(element).backgroundImage))
+    .not.toBe(firstGradient);
   await expect
     .poll(() =>
       firstCard
@@ -195,7 +208,9 @@ for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' });
     await page.setViewportSize({ width: 375, height: 740 });
     await page.goto('/demo/scans/partial-demo');
-    await expect(page.getByText('Частичный результат', { exact: true }).first()).toBeVisible();
+    await expect(
+      page.locator('.scan-a1__facts').getByText('Частичный результат', { exact: true }),
+    ).toBeVisible();
     const pairs = await page.evaluate(() => {
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
@@ -291,6 +306,87 @@ for (const width of [320, 375, 1280]) {
       await expect(page.getByText(/Список недоступен: GET/)).toBeVisible();
       await expect(page.locator('.scan-a1__records > li')).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    });
+  }
+}
+
+test('long unbroken stage fits the actual card text cell at 320px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto('/demo/scans/new');
+  await page.evaluate(async () => {
+    const { demoScans } = await import('/src/shared/api/scans/fixtureScanTransport.ts');
+    demoScans[0].stage = 'unbroken-' + 's'.repeat(280);
+  });
+  await page.getByRole('link', { name: /К списку/ }).click();
+  const facts = page.locator('.scan-a1__record-facts').first();
+  await expect(facts).toContainText('unbroken-');
+  const bounds = await facts.evaluate((element) => {
+    const card = element.closest('.scan-a1__magic')!.getBoundingClientRect();
+    const cell = element.getBoundingClientRect();
+    const line = element.querySelector('p')!;
+    const range = document.createRange();
+    range.selectNodeContents(line);
+    return {
+      card: { left: card.left, right: card.right },
+      cell: { left: cell.left, right: cell.right },
+      fragments: [...range.getClientRects()].map((rect) => ({ left: rect.left, right: rect.right })),
+    };
+  });
+  expect(bounds.fragments.length).toBeGreaterThan(2);
+  for (const fragment of bounds.fragments) {
+    expect(fragment.left).toBeGreaterThanOrEqual(bounds.cell.left - 1);
+    expect(fragment.right).toBeLessThanOrEqual(bounds.cell.right + 1);
+    expect(fragment.right).toBeLessThanOrEqual(bounds.card.right - 1);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+});
+
+for (const width of [320, 375, 1280]) {
+  for (const motion of ['reduce', 'no-preference'] as const) {
+    test(`upstream artwork is decorative and responsive across three screens ${width}px ${motion}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 740 });
+      await page.emulateMedia({ reducedMotion: motion });
+      for (const path of ['/demo/scans', '/demo/scans/new', '/demo/scans/partial-demo']) {
+        await page.goto(path);
+        const scene = page.locator('.scan-a1__scene:visible').first();
+        await expect(scene).toHaveAttribute('aria-hidden', 'true');
+        await scene.scrollIntoViewIfNeeded();
+        await expect(scene.locator('[data-scan-glow]')).toHaveAttribute(
+          'data-scan-glow',
+          motion === 'reduce' ? 'static' : path.includes('/new') ? 'pulse' : 'rotate',
+        );
+        await expect(scene.locator('[data-scan-scene-art]')).toBeAttached();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      }
+      await page.goto('/demo/scans/new');
+      const glow = page.locator('.scan-a1__create-hero [data-scan-glow]');
+      await page.locator('.scan-a1__create-hero > .scan-a1__scene').scrollIntoViewIfNeeded();
+      const before = await glow.evaluate((element) => getComputedStyle(element).backgroundImage);
+      if (motion === 'no-preference') {
+        await expect
+          .poll(() => glow.evaluate((element) => getComputedStyle(element).backgroundImage), {
+            timeout: 5000,
+          })
+          .not.toBe(before);
+      } else {
+        await page.waitForTimeout(350);
+        expect(await glow.evaluate((element) => getComputedStyle(element).backgroundImage)).toBe(before);
+      }
+      await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
+      await page.goto('/demo/scans/partial-demo');
+      const divider = page.locator('.scan-a1__detail-divider');
+      await expect(divider.locator('[data-scan-glow]')).toHaveAttribute('data-scan-glow', 'static');
+      await divider.scrollIntoViewIfNeeded();
+      if (motion === 'no-preference')
+        await expect(divider.locator('[data-scan-glow]')).toHaveAttribute('data-scan-glow', 'rotate');
+      await page
+        .getByRole('navigation', { name: 'Разделы отчёта' })
+        .getByRole('link', { name: /Покрытие/ })
+        .click();
+      await expect(page.getByRole('heading', { name: 'Покрытие проверок' })).toBeVisible();
+      await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
     });
   }
 }
