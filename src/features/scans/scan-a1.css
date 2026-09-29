@@ -35,11 +35,100 @@
   margin: 0;
   color: #d1ff5e;
 }
-.scan-a1 .scan-shell__nav {
-  gap: 8px;
+.scan-a1 .scan-nav-card {
+  display: grid;
+  gap: 10px;
+  padding: 0 0 30px;
 }
-.scan-a1 .scan-shell__nav a {
+.scan-a1 .scan-nav-card__label {
+  color: #d1ff5e;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+}
+.scan-a1 .scan-nav-card__items {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid #625e74;
+  background: #625e74;
+}
+.scan-a1 .scan-nav-card__items li {
+  min-width: 0;
+  background: #211f34;
+}
+.scan-a1 .scan-nav-card__items a {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  border: 0;
   border-radius: 0;
+  background: transparent;
+  text-decoration: none;
+}
+.scan-a1 .scan-nav-card__items a:hover {
+  transform: none;
+  background: #332e4d;
+}
+.scan-a1 .scan-nav-card__items a:focus-visible {
+  outline: 3px solid #d1ff5e;
+  outline-offset: -4px;
+  position: relative;
+  z-index: 1;
+}
+.scan-a1 .scan-nav-card__items a[aria-current='page']:focus-visible {
+  outline-color: #141324;
+}
+.scan-a1 .scan-nav-card__items a[aria-current='page'] {
+  background: #d1ff5e;
+  color: #141324;
+}
+.scan-a1 .scan-nav-card__item {
+  display: flex;
+  align-items: center;
+  gap: clamp(9px, 2vw, 25px);
+  min-height: 92px;
+  padding: 16px clamp(12px, 2vw, 28px);
+}
+.scan-a1 .scan-nav-card__number {
+  align-self: start;
+  color: #d1ff5e;
+  font-weight: 800;
+}
+.scan-a1 [aria-current='page'] .scan-nav-card__number {
+  color: #141324;
+}
+.scan-a1 .scan-nav-card__copy {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+.scan-a1 .scan-nav-card__copy strong {
+  font-size: clamp(0.8rem, 1.5vw, 1.05rem);
+}
+.scan-a1 .scan-nav-card__copy small {
+  color: #ded9e9;
+  font-size: 0.72rem;
+}
+.scan-a1 [aria-current='page'] .scan-nav-card__copy small {
+  color: #29243c;
+}
+.scan-a1 .scan-nav-card__icon {
+  margin-left: auto;
+}
+@media (max-width: 700px) {
+  .scan-a1 .scan-nav-card__items {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .scan-a1 .scan-nav-card__item {
+    min-height: 60px;
+    padding: 10px 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scan-a1 .scan-nav-card__items a {
+    transition: none;
+  }
 }
 .scan-a1 .scan-shell__stage {
   background: #141324;

@@ -88,7 +88,9 @@ describe('scan UI fixture versus unavailable production', () => {
   });
   it('keeps ordered records, keys, links and scan facts outside decorative animation', async () => {
     page('/demo/scans', <ScanListPage demo />);
-    const list = await screen.findByRole('list');
+    await screen.findByText(/library\/alpine:latest \(демо\)/);
+    const list = document.querySelector<HTMLElement>('.scan-a1__records');
+    if (!list) throw new Error('Missing scan records');
     const records = within(list).getAllByRole('listitem');
     expect(records.length).toBeGreaterThan(1);
     for (const record of records) {

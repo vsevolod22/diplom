@@ -192,6 +192,56 @@ test('ordinary motion: MagicCard spotlight and mobile filter preserve keyboard f
   await expect(trigger).toBeFocused();
 });
 
+test('21st.dev navigation card keeps real destinations, keyboard focus and reduced motion', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/demo/scans/partial-demo');
+  const nav = page.getByRole('navigation', { name: 'Разделы сканирования' });
+  await expect(nav.locator('.scan-nav-card__items > li')).toHaveCount(3);
+  await expect(nav.locator('[aria-current="page"]')).toHaveCount(0);
+  await expect(nav.getByRole('link', { name: 'О реальном режиме' })).toHaveAttribute('href', '/scans');
+  await expect(nav.getByRole('link', { name: 'Новый скан' })).toHaveAttribute('href', '/demo/scans/new');
+  const demo = nav.getByRole('link', { name: 'Демо' });
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press('Tab');
+    if (await demo.evaluate((element) => document.activeElement === element)) break;
+  }
+  await expect(demo).toBeFocused();
+  await expect(demo).toHaveCSS('outline-style', 'solid');
+  const item = demo.locator('.scan-nav-card__item');
+  const before = await item.evaluate((element) => getComputedStyle(element).transform);
+  await demo.hover();
+  await page.waitForTimeout(350);
+  expect(await item.evaluate((element) => getComputedStyle(element).transform)).toBe(before);
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/demo\/scans$/);
+  await expect(nav.getByRole('link', { name: 'Демо' })).toHaveAttribute('aria-current', 'page');
+  const liveLink = nav.getByRole('link', { name: 'О реальном режиме' });
+  const description = await liveLink.getAttribute('aria-describedby');
+  expect(description).toBeTruthy();
+  await expect(page.locator(`[id="${description}"]`)).toHaveText('Доступ пока закрыт');
+  await liveLink.click();
+  await expect(page).toHaveURL(/\/scans$/);
+  await expect(page.getByText(/Список недоступен: GET/)).toBeVisible();
+  await expect(nav.getByRole('link', { name: 'Новый скан' })).toHaveAttribute('href', '/scans/new');
+  await nav.getByRole('link', { name: 'Новый скан' }).click();
+  await expect(page).toHaveURL(/\/scans\/new$/);
+  await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
+  await nav.getByRole('link', { name: 'Демо' }).click();
+  await nav.getByRole('link', { name: 'Новый скан' }).click();
+  await expect(page).toHaveURL(/\/demo\/scans\/new$/);
+  await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.reload();
+  const moving = nav.getByRole('link', { name: 'Демо' }).locator('.scan-nav-card__item');
+  await moving.hover();
+  await expect.poll(() => moving.evaluate((element) => getComputedStyle(element).transform)).not.toBe('none');
+});
+
 test('navigation marks only the actual list or create page as current', async ({ page }) => {
   await page.goto('/demo/scans');
   await expect(page.getByRole('link', { name: 'Демо', exact: true })).toHaveAttribute('aria-current', 'page');

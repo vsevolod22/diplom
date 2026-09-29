@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { ArrowLeft, ArrowUpRight, ScanLine } from 'lucide-react';
+import { NavListCard } from './NavListCard';
 import { motion, useReducedMotion, useScroll } from 'motion/react';
 import './scan-a1.css';
 import { Link, useLocation } from 'react-router-dom';
@@ -45,17 +46,31 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
               {demo ? 'Режим · демо' : 'Режим · реальный доступ недоступен'}
             </Badge>
           </div>
-          <nav aria-label="Разделы сканирования" className="scan-shell__nav">
-            <Link to="/scans" aria-current={pathname === '/scans' ? 'page' : undefined}>
-              О реальном режиме <ArrowUpRight size={16} aria-hidden="true" />
-            </Link>
-            <Link to="/demo/scans" aria-current={pathname === '/demo/scans' ? 'page' : undefined}>
-              Демо <ArrowUpRight size={16} aria-hidden="true" />
-            </Link>
-            <Link to={newScanPath} aria-current={pathname === newScanPath ? 'page' : undefined}>
-              Новый скан <ArrowUpRight size={16} aria-hidden="true" />
-            </Link>
-          </nav>
+          <NavListCard
+            items={[
+              {
+                label: 'О реальном режиме',
+                description: 'Доступ пока закрыт',
+                to: '/scans',
+                icon: <ArrowUpRight size={18} />,
+                current: pathname === '/scans',
+              },
+              {
+                label: 'Демо',
+                description: 'Вымышленные записи',
+                to: '/demo/scans',
+                icon: <ArrowUpRight size={18} />,
+                current: pathname === '/demo/scans',
+              },
+              {
+                label: 'Новый скан',
+                description: 'Форма без запуска',
+                to: newScanPath,
+                icon: <ArrowUpRight size={18} />,
+                current: pathname === newScanPath,
+              },
+            ]}
+          />
         </div>
       </div>
       <div className="scan-shell__stage">
