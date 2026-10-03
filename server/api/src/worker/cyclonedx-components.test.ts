@@ -35,6 +35,18 @@ test('rejects forged image, incomplete output and unbounded package lists', () =
   assert.throws(() => parseImageSbom({ ...report(), components: [report().components[0]] }, image, 'linux/amd64'));
 });
 
+test('rejects package identity mismatches and untrusted names', () => {
+  const base = report();
+  const replace = (changes: Record<string, string>) => ({ ...base, components: [base.components[0],
+    { ...base.components[1], ...changes }] });
+  assert.throws(() => parseImageSbom(replace({ name: 'different' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ version: '999' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ name: 'CANARY_SECRET' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/other/alpine-baselayout@3.6.8-r1' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1?arch=x' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@%ZZ' }), image, 'linux/amd64'));
+});
+
 test('rejects unrecognized ecosystems, unsafe names and conflicting OS identity', () => {
   const base = report();
   assert.throws(() => parseImageSbom({ ...base, components: [...base.components, { type: 'library', name: 'name', version: '1', purl: 'pkg:generic/name@1' }] }, image, 'linux/amd64'));
