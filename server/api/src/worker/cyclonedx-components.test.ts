@@ -44,6 +44,9 @@ test('rejects package identity mismatches and untrusted names', () => {
   assert.throws(() => parseImageSbom(replace({ name: 'CANARY_SECRET' }), image, 'linux/amd64'));
   assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/other/alpine-baselayout@3.6.8-r1' }), image, 'linux/amd64'));
   assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1?arch=x' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1?arch=x86_64&distro=3.22.0' }), image, 'linux/amd64'));
+  assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1?arch=x86_64&distro=3.21.3&secret=raw' }), image, 'linux/amd64'));
+  assert.equal(parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1?arch=x86_64&distro=3.21.3' }), image, 'linux/amd64').components[0].name, 'alpine-baselayout');
   assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@%ZZ' }), image, 'linux/amd64'));
 });
 

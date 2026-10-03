@@ -8,10 +8,9 @@ const identifier = (value: unknown, max: number): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= max &&
   /^[A-Za-z0-9@][A-Za-z0-9@._+/-]*$/.test(value);
 
-function packageIdentity(purl: string, name: string, version: string): 'apk' | 'npm' {
+function packageIdentity(purl: string, name: string, version: string): { ecosystem: 'apk' | 'npm'; distro?: string } {
   // Compare the identity encoded in the purl rather than trusting unrelated display fields.
-  // Reject qualifiers/fragments until their semantics are explicitly supported.
-  const match = /^pkg:(apk|npm)\/([^?#]+)@([^/?#]+)$/.exec(purl);
+  const match = /^pkg:(apk|npm)\/([^?#]+)@([^/?#]+)(?:\?([^#]+))?$/.exec(purl);
   if (!match) throw new Error('Invalid SBOM package identity');
   let path: string;
   let purlVersion: string;
@@ -23,7 +22,14 @@ function packageIdentity(purl: string, name: string, version: string): 'apk' | '
       (match[1] === 'apk' ? path !== `alpine/${name}` : path !== name) ||
       !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._+-]*$/.test(name))
     throw new Error('Mismatched SBOM package identity');
-  return match[1] as 'apk' | 'npm';
+  const qualifiers = match[4];
+  if (!qualifiers) return { ecosystem: match[1] as 'apk' | 'npm' };
+  // Actual Alpine Trivy output includes these two qualifiers. Bind them to the
+  // selected architecture and the OS component, rejecting arbitrary metadata.
+  const q = /^(?:arch=x86_64&distro=|distro=)([0-9]+(?:\.[0-9]+){2})(?:&arch=x86_64)?$/.exec(qualifiers);
+  if (match[1] !== 'apk' || !q || !qualifiers.includes('arch=x86_64') ||
+      qualifiers.split('&').length !== 2) throw new Error('Invalid SBOM package qualifiers');
+  return { ecosystem: 'apk', distro: q[1] };
 }
 
 export function parseImageSbom(value: unknown, image: string, platform: string): ImageSbom {
@@ -37,6 +43,7 @@ export function parseImageSbom(value: unknown, image: string, platform: string):
   let os: ImageSbom['os'] | undefined;
   const components: SbomComponent[] = [];
   const seen = new Set<string>();
+  const distros: string[] = [];
   for (const item of value.components as unknown[]) {
     if (!object(item)) throw new Error('Invalid SBOM component');
     if (item.type === 'operating-system') {
@@ -46,11 +53,13 @@ export function parseImageSbom(value: unknown, image: string, platform: string):
     }
     if (item.type !== 'library' || !identifier(item.name, 128) || !identifier(item.version, 80) ||
         typeof item.purl !== 'string' || item.purl.length > 512) throw new Error('Invalid SBOM package');
-    const ecosystem = packageIdentity(item.purl, item.name, item.version);
-    const component: SbomComponent = { ecosystem, name: item.name, version: item.version };
+    const identity = packageIdentity(item.purl, item.name, item.version);
+    if (identity.distro) distros.push(identity.distro);
+    const component: SbomComponent = { ecosystem: identity.ecosystem, name: item.name, version: item.version };
     const key = JSON.stringify(component);
     if (!seen.has(key)) { seen.add(key); components.push(component); }
   }
-  if (!os || components.length === 0) throw new Error('No verified SBOM packages');
+  if (!os || components.length === 0 || distros.some(distro => distro !== os.version))
+    throw new Error('No verified SBOM packages');
   return { image, platform: 'linux/amd64', os, components };
 }
