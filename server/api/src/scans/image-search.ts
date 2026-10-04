@@ -4,7 +4,7 @@ import { BadRequestException, HttpException, ServiceUnavailableException } from 
 import { dockerHubSearch, hubSearchUrl, type HubSearchResponse } from '../oci/gateway-transport.js';
 
 export type ImageSuggestion = { label: string; reference: string; scannable: boolean; kind: 'tag' | 'repository'; tagConfirmed: boolean; eligibility: 'alpine-only' | 'unsupported'; reason: string; checks: { secret: boolean; sbom: boolean; vuln: 'conditional' | 'unsupported' } };
-export const searchPolicy = Object.freeze({ pageSize: 12, maxPages: 5, maxCandidates: 60, maxPageBytes: 128_000, maxBytes: 640_000, idleMs: 300_000, maxFetchMs: 5000, maxTotalMs: 25_000 });
+export const searchPolicy = Object.freeze({ pageSize: 12, maxPages: 5, maxCandidates: 60, maxPageBytes: 128_000, maxBytes: 640_000, idleMs: 300_000, maxFetchMs: 5000, maxTotalMs: 25_000, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' as const });
 export type ImageSearchPage = { items: ImageSuggestion[]; nextCursor: string | null; state: 'more-available' | 'terminal' | 'quota-exhausted'; loaded: number; pages: number; policy: typeof searchPolicy };
 const repoName = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;
 const tagName = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/;
@@ -19,7 +19,7 @@ export function parseImageSearch(value: unknown): { query: string; alpineTag: st
 }
 
 export function normalizeImageSuggestions(response: HubSearchResponse, tagSearch: boolean): ImageSuggestion[] {
-  if (!response || !Array.isArray(response.results) || response.results.length > 12) throw new Error('Invalid search response');
+  if (!response || !Array.isArray(response.results) || response.results.length > searchPolicy.pageSize) throw new Error('Invalid search response');
   const found = new Map<string, ImageSuggestion>();
   for (const item of response.results) {
     if (!item || typeof item !== 'object') continue;
@@ -51,10 +51,10 @@ export class ImageSearchSessions {
     for (const [key, rate] of this.rates) if (rate.until <= now) this.rates.delete(key);
     let rate = this.rates.get(subject);
     if (!rate) {
-      if (this.rates.size >= 1024) reject('IMAGE_SEARCH_CAPACITY', 429);
-      rate = { until: now + 60_000, count: 0 }; this.rates.set(subject, rate);
+      if (this.rates.size >= searchPolicy.maxRateEntries) reject('IMAGE_SEARCH_CAPACITY', 429);
+      rate = { until: now + searchPolicy.rateWindowMs, count: 0 }; this.rates.set(subject, rate);
     }
-    if (++rate.count > 30) reject('IMAGE_SEARCH_RATE_LIMITED', 429);
+    if (++rate.count > searchPolicy.maxRequestsPerSubject) reject('IMAGE_SEARCH_RATE_LIMITED', 429);
     let session: Session | undefined;
     if (cursor !== undefined) {
       session = [...this.sessions.values()].find(value => value.cursor === cursor || value.cached?.cursor === cursor);
@@ -62,26 +62,26 @@ export class ImageSearchSessions {
       if (session.busy) reject('IMAGE_SEARCH_BUSY', 429);
       if (session.cached?.cursor === cursor) { session.until = now + searchPolicy.idleMs; return session.cached.response; }
     } else {
-      if (this.sessions.size >= 1024) reject('IMAGE_SEARCH_CAPACITY', 429);
+      if (this.sessions.size >= searchPolicy.maxSessions) reject('IMAGE_SEARCH_CAPACITY', 429);
       session = { subject, query, generation: generation as string, tag: alpineTag, until: now + searchPolicy.idleMs, page: 0, bytes: 0, elapsed: 0, seen: new Set(), cursor: null, busy: false };
       this.sessions.set(randomBytes(24).toString('hex'), session);
     }
     const current = session!;
-    if (this.active >= 8 || [...this.sessions.values()].filter(value => value.subject === subject && value.busy).length >= 2) {
-          if (cursor === undefined) current.until = 0;
-          reject('IMAGE_SEARCH_BUSY', 429);
-        }
+    if (this.active >= searchPolicy.maxActivePerProcess || [...this.sessions.values()].filter(value => value.subject === subject && value.busy).length >= searchPolicy.maxActivePerSubject) {
+      if (cursor === undefined) current.until = 0;
+      reject('IMAGE_SEARCH_BUSY', 429);
+    }
     current.busy = true; this.active++;
     const started = performance.now();
     try {
-      if (current.page >= 5 || current.elapsed >= 25_000) reject('IMAGE_SEARCH_EXHAUSTED', 429);
+      if (current.page >= searchPolicy.maxPages || current.elapsed >= searchPolicy.maxTotalMs) reject('IMAGE_SEARCH_EXHAUSTED', 429);
       const page = current.page + 1;
       const kind = alpineTag ? 'tags' : 'repositories';
       const term = alpineTag ?? query;
       const response = await this.fetchHub(kind, term, page);
       const bytes = response.bytes ?? Buffer.byteLength(JSON.stringify(response));
       current.bytes += bytes;
-      if (!Number.isInteger(bytes) || bytes < 0 || bytes > 128_000 || current.bytes > 640_000 || performance.now() - started > 5000 || current.elapsed + performance.now() - started > 25_000) throw new Error('Search budget');
+      if (!Number.isInteger(bytes) || bytes < 0 || bytes > searchPolicy.maxPageBytes || current.bytes > searchPolicy.maxBytes || performance.now() - started > searchPolicy.maxFetchMs || current.elapsed + performance.now() - started > searchPolicy.maxTotalMs) throw new Error('Search budget');
       if (!Number.isInteger(response.count) || response.count! < 0 || !(response.next === null || typeof response.next === 'string')) throw new Error('Invalid page');
       if (response.next !== null) {
         const next = new URL(response.next!);
@@ -91,7 +91,7 @@ export class ImageSearchSessions {
       const items = normalizeImageSuggestions(response, alpineTag !== null).filter(item => !current.seen.has(item.reference));
       for (const item of items) current.seen.add(item.reference);
       current.page = page;
-      const state = response.next === null ? 'terminal' : page >= 5 || current.seen.size >= 60 ? 'quota-exhausted' : 'more-available';
+      const state = response.next === null ? 'terminal' : page >= searchPolicy.maxPages || current.seen.size >= searchPolicy.maxCandidates ? 'quota-exhausted' : 'more-available';
       const nextCursor = state === 'more-available' ? randomBytes(24).toString('hex') : null;
       const result: ImageSearchPage = { items, nextCursor, state, loaded: current.seen.size, pages: page, policy: searchPolicy };
       current.cached = cursor ? { cursor: cursor as string, response: result } : undefined;

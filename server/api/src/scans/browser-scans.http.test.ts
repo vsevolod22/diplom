@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module.js';
+import { BrowserScansController } from './browser-scans.controller.js';
+import { ImageSearchSessions, searchPolicy } from './image-search.js';
 
 const origin = 'http://127.0.0.1:8080';
 const sample = { imageReference: 'registry-1.docker.io/library/alpine:3.20', checks: ['secret'], scope: 'image', idempotencyKey: 'browser-test' };
@@ -35,7 +37,11 @@ test('browser scans fail closed for anonymous, unlisted users, foreign origins a
     process.env.SCAN_BROWSER_ALLOWED_USER_IDS = alice.id;
     const path = `${base}/browser/scans`;
     const post = (cookie: string, requestOrigin = origin) => fetch(path, { method: 'POST', headers: { cookie, origin: requestOrigin, 'content-type': 'application/json' }, body: JSON.stringify(sample) });
+        Object.defineProperty(app.get(BrowserScansController), 'imageSearch', { value: new ImageSearchSessions(async () => ({ results: [], count: 0, next: null })) });
         const discovery = `${path}/images?q=nginx&generation=gen`;
+        const page = await fetch(discovery, { headers: { cookie: alice.cookie } });
+        assert.equal(page.status, 200);
+        assert.deepEqual((await page.json() as { policy: unknown }).policy, searchPolicy);
         assert.equal((await fetch(discovery)).status, 401);
         assert.equal((await fetch(discovery, { headers: { cookie: bob.cookie } })).status, 403);
         assert.equal((await fetch(`${discovery}&cursor=${'a'.repeat(48)}`, { headers: { cookie: alice.cookie } })).status, 410);

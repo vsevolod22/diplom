@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { dockerHubManifestFetch, dockerHubSearch, gatewayGet } from './gateway-transport.js';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { connect as netConnect } from 'node:net';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ResolutionRejected, type ManifestResponse } from './registry-resolver.js';
 
 test('Hub requests build fixed destinations with discovery-only absolute deadline and size limit', async () => {
@@ -39,6 +45,68 @@ test('absolute deadline also covers a CONNECT established but stalled TLS handsh
   try {
     await assert.rejects(gatewayGet({ host: '127.0.0.1', port: (server.address() as { port: number }).port }, new URL('https://hub.docker.com/'), {}, 128_000, 40), /absolute deadline/);
   } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('verified local TLS: stalled headers, drip deadline, streaming overflow and certificate rejection close resources', { timeout: 30_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'hub-discovery-tls-'));
+  const certPath = join(directory, 'cert.pem'); const keyPath = join(directory, 'key.pem');
+  const sockets = new Set<import('node:stream').Duplex>();
+  const timers = new Set<ReturnType<typeof setInterval>>();
+  let mode: 'headers' | 'drip' | 'oversize' = 'headers';
+  let requests = 0; let drippedChunks = 0;
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=Hub discovery test', '-addext', 'subjectAltName=DNS:hub.docker.com'], { timeout: 10_000, stdio: 'ignore' });
+  const track = (socket: import('node:stream').Duplex) => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)); };
+  const tls = createHttpsServer({ cert: readFileSync(certPath), key: readFileSync(keyPath) }, (_request, response) => {
+    requests++;
+    if (mode === 'headers') return;
+    response.writeHead(200, { 'content-type': 'application/json' }); response.flushHeaders();
+    if (mode === 'oversize') { response.write(Buffer.alloc(128_001)); return; }
+    const timer = setInterval(() => { drippedChunks++; response.write(' '); }, 10); timers.add(timer);
+    response.once('close', () => { clearInterval(timer); timers.delete(timer); });
+  });
+  tls.on('connection', track);
+  const proxy = createServer(); proxy.on('connection', track);
+  proxy.on('connect', (_request, downstream, head) => {
+    const upstream = netConnect((tls.address() as { port: number }).port, '127.0.0.1'); track(upstream);
+    downstream.once('close', () => upstream.destroy()); upstream.once('close', () => downstream.destroy());
+    upstream.once('connect', () => {
+      downstream.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) upstream.write(head);
+      downstream.pipe(upstream); upstream.pipe(downstream);
+    });
+  });
+  try {
+    await new Promise<void>(resolve => tls.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+    const run = async (host: string, trusted: boolean, expected: string) => {
+      const env = { ...process.env };
+      delete env.NODE_EXTRA_CA_CERTS; delete env.NODE_TLS_REJECT_UNAUTHORIZED; delete env.NODE_OPTIONS;
+      if (trusted) env.NODE_EXTRA_CA_CERTS = certPath;
+      const script = `import assert from 'node:assert/strict';
+        import { gatewayGet } from ${JSON.stringify(new URL('./gateway-transport.ts', import.meta.url).href)};
+        await assert.rejects(gatewayGet({host:'127.0.0.1',port:${(proxy.address() as { port: number }).port}}, new URL(${JSON.stringify(`https://${host}/`)}), {},128000,200), new RegExp(${JSON.stringify(expected)}));`;
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+        let output = ''; child.stdout.on('data', chunk => { output += String(chunk); }); child.stderr.on('data', chunk => { output += String(chunk); });
+        const deadline = setTimeout(() => { child.kill('SIGKILL'); reject(Error('TLS test child timeout')); }, 5000);
+        child.once('error', error => { clearTimeout(deadline); reject(error); });
+        child.once('close', code => { clearTimeout(deadline); if (code === 0) resolve(); else reject(Error(output)); });
+      });
+      for (let attempt = 0; sockets.size && attempt < 100; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(sockets.size, 0, 'deadline/size/TLS failure closed both sides of the tunnel');
+      assert.equal(timers.size, 0, 'drip timer released');
+    };
+    await run('hub.docker.com', true, 'absolute deadline'); assert.equal(requests, 1, 'trusted handshake reached stalled HTTP headers');
+    mode = 'drip'; await run('hub.docker.com', true, 'absolute deadline'); assert.equal(requests, 2); assert.ok(drippedChunks > 1, 'ongoing body data cannot extend the absolute deadline');
+    mode = 'oversize'; await run('hub.docker.com', true, 'size limit'); assert.equal(requests, 3);
+    await run('hub.docker.com', false, 'TLS'); assert.equal(requests, 3, 'untrusted certificate cannot send HTTP');
+    await run('wrong.example', true, 'TLS'); assert.equal(requests, 3, 'wrong hostname cannot send HTTP');
+  } finally {
+    for (const timer of timers) clearInterval(timer);
+    for (const socket of sockets) socket.destroy();
+    await Promise.all([new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => tls.close(() => resolve()))]);
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 const gateway = { host: 'egress', port: 8080 };

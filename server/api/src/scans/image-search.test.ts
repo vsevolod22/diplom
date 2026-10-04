@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ImageSearchSessions, normalizeImageSuggestions, parseImageSearch, searchImages } from './image-search.js';
+import { ImageSearchSessions, searchPolicy, normalizeImageSuggestions, parseImageSearch, searchImages } from './image-search.js';
 import { hubSearchUrl } from '../oci/gateway-transport.js';
 
 test('opaque cursors bind subject, normalized query and generation; retry is cached', async () => {
@@ -25,10 +25,55 @@ test('opaque cursors bind subject, normalized query and generation; retry is cac
 });
 
 test('five pages retain 60 unique candidates, reject sixth page and distinguish incomplete', async () => {
-  const sessions = new ImageSearchSessions(async (kind, query, page = 1) => ({ results: Array.from({ length: 12 }, (_, i) => ({ repo_name: `user/image${page}-${i}` })), count: 100, next: hubSearchUrl(kind, query, page + 1).href }));
+  let calls = 0;
+  const sessions = new ImageSearchSessions(async (kind, query, page = 1) => { calls++; return { results: Array.from({ length: 12 }, (_, i) => ({ repo_name: `user/image${page}-${i}` })), count: 100, next: hubSearchUrl(kind, query, page + 1).href }; });
   let result = await sessions.search('alice', 'nginx', 'gen');
-  for (let page = 2; page <= 5; page++) result = await sessions.search('alice', 'nginx', 'gen', result.nextCursor);
+  const superseded = result.nextCursor;
+  let fifthCursor: string | null = null;
+  for (let page = 2; page <= 5; page++) { fifthCursor = result.nextCursor; result = await sessions.search('alice', 'nginx', 'gen', fifthCursor); }
   assert.equal(result.loaded, 60); assert.equal(result.pages, 5); assert.equal(result.nextCursor, null); assert.equal(result.state, 'quota-exhausted');
+  assert.deepEqual(await sessions.search('alice', 'nginx', 'gen', fifthCursor), result);
+  for (const cursor of [superseded, '0'.repeat(48)]) await assert.rejects(sessions.search('alice', 'nginx', 'gen', cursor));
+  assert.equal(calls, 5);
+  assert.deepEqual(result.policy, searchPolicy);
+  assert.equal(result.policy.scope, 'process-local');
+  assert.equal(result.policy.maxActivePerProcess, 8); assert.equal(result.policy.maxActivePerSubject, 2);
+  assert.equal(result.policy.maxRequestsPerSubject, 30); assert.equal(result.policy.rateWindowMs, 60_000);
+  assert.equal(result.policy.maxSessions, 1024); assert.equal(result.policy.maxRateEntries, 1024);
+});
+
+test('failed continuation retires cursor; restart and new process cannot replay it upstream', async () => {
+  let calls = 0;
+  const fetcher = async (kind: 'tags' | 'repositories', query: string, page = 1) => {
+    calls++; if (page === 2) throw Error('failed upstream');
+    return { results: [], count: 24, next: hubSearchUrl(kind, query, 2).href };
+  };
+  const sessions = new ImageSearchSessions(fetcher);
+  const first = await sessions.search('alice', 'nginx', 'gen');
+  await assert.rejects(sessions.search('alice', 'nginx', 'gen', first.nextCursor), error => (error as { getStatus: () => number }).getStatus() === 503);
+  await assert.rejects(sessions.search('alice', 'nginx', 'gen', first.nextCursor), error => (error as { getStatus: () => number }).getStatus() === 410);
+  await assert.rejects(new ImageSearchSessions(fetcher).search('alice', 'nginx', 'gen', first.nextCursor));
+  assert.equal(calls, 2);
+  const restarted = await sessions.search('alice', 'nginx', 'fresh');
+  assert.equal(restarted.pages, 1); assert.equal(calls, 3);
+});
+
+test('bounded session/rate maps reject capacity without clearing live budgets and safely reclaim expiry', async () => {
+  let now = 1000; let calls = 0;
+  const sessions = new ImageSearchSessions(async () => { calls++; return { results: [], count: 0, next: null }; }, () => now);
+  for (let i = 0; i < 1024; i++) await sessions.search(`user${i}`, 'nginx', 'gen');
+  await assert.rejects(sessions.search('extra', 'nginx', 'gen'));
+  assert.equal(calls, 1024);
+  // The rate window expires before sessions do; the session cap still rejects without egress.
+  now += 60_001;
+  await assert.rejects(sessions.search('extra', 'nginx', 'gen'));
+  assert.equal(calls, 1024);
+  // Capacity failures spend rather than reset this subject's request allowance.
+  for (let i = 0; i < 29; i++) await assert.rejects(sessions.search('extra', 'nginx', `g${i}`));
+  await assert.rejects(sessions.search('extra', 'nginx', 'rate'), error => (error as { getResponse: () => { errorCode: string } }).getResponse().errorCode === 'IMAGE_SEARCH_RATE_LIMITED');
+  now += 300_001;
+  const reclaimed = await sessions.search('extra', 'nginx', 'fresh');
+  assert.equal(reclaimed.state, 'terminal'); assert.equal(calls, 1025);
 });
 
 test('empty and duplicate pages do not falsely become terminal', async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeft, LockKeyhole } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
@@ -22,7 +22,7 @@ type ImageSuggestion = { label: string; reference: string; scannable: boolean; r
 const searchPageSchema = z.object({
   items: z.array(z.object({ label: z.string().min(1).max(256), reference: z.string().regex(/^registry-1\.docker\.io\/[a-z0-9._/-]+:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/), scannable: z.boolean(), eligibility: z.enum(['alpine-only', 'unsupported']), reason: z.string().min(1).max(256), kind: z.enum(['tag', 'repository']), tagConfirmed: z.boolean(), checks: z.object({ secret: z.boolean(), sbom: z.boolean(), vuln: z.enum(['conditional', 'unsupported']) }) })).max(12),
   nextCursor: z.string().regex(/^[a-f0-9]{48}$/).nullable(), state: z.enum(['more-available', 'terminal', 'quota-exhausted']), loaded: z.number().int().min(0).max(60), pages: z.number().int().min(1).max(5),
-  policy: z.object({ pageSize: z.literal(12), maxPages: z.literal(5), maxCandidates: z.literal(60) }),
+  policy: z.object({ pageSize: z.literal(12), maxPages: z.literal(5), maxCandidates: z.literal(60), maxActivePerProcess: z.literal(8), maxActivePerSubject: z.literal(2), maxRequestsPerSubject: z.literal(30), rateWindowMs: z.literal(60_000), maxSessions: z.literal(1024), maxRateEntries: z.literal(1024), scope: z.literal('process-local') }),
 }).superRefine((page, context) => {
   if ((page.state === 'more-available') !== (page.nextCursor !== null) || page.loaded < page.items.length || page.items.some(item => item.scannable !== (item.eligibility === 'alpine-only') || (item.scannable && (!item.reference.startsWith('registry-1.docker.io/library/alpine:') || !item.checks.secret || !item.checks.sbom || item.checks.vuln !== 'conditional')) || item.tagConfirmed !== (item.kind === 'tag'))) context.addIssue({ code: 'custom', message: 'Invalid discovery eligibility' });
 });
@@ -46,12 +46,18 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const checks = useWatch({ control, name: 'checks' }) ?? [];
   const [search, setSearch] = useState('');
   const [suggestions, setSuggestions] = useState<ImageSuggestion[]>([]);
-  const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error' | 'expired'>('idle');
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [pageState, setPageState] = useState<'more-available' | 'terminal' | 'quota-exhausted' | null>(null);
   const [pageRequest, setPageRequest] = useState(0);
   const searchGeneration = useRef(0);
   const loadedSuggestions = useRef<ImageSuggestion[]>([]);
+  const restarting = useRef(false);
+  const [retainedResults, setRetainedResults] = useState(false);
+  const discoveryStatus = useRef<HTMLParagraphElement>(null);
+  const restartButton = useRef<HTMLButtonElement>(null);
+  const activatedControl = useRef<HTMLButtonElement | null>(null);
+  const focusHandoff = useRef<{ element: HTMLButtonElement; generation: number; subject: string; epoch: number } | null>(null);
   const discovery = useRef<{ generation: string; cursor: string | null; identity: string; query: string; pages: number }>({ generation: '', cursor: null, identity: '', query: '', pages: 0 });
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -69,9 +75,13 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       setValue('imageReference', '');
     }
     const append = pageRequest > 0 && discovery.current.cursor !== null && discovery.current.identity === identity && discovery.current.query === query;
+    const restart = restarting.current && discovery.current.identity === identity && discovery.current.query === query;
+    restarting.current = false;
     if (!append) {
-      discovery.current = { generation: crypto.randomUUID(), cursor: null, identity, query, pages: 0 };
-      setSuggestions([]); setNextCursor(null); setPageState(null);
+      discovery.current = { generation: restart ? discovery.current.generation : crypto.randomUUID(), cursor: null, identity, query, pages: 0 };
+      loadedSuggestions.current = [];
+      if (!restart) { setSuggestions([]); setRetainedResults(false); }
+      setNextCursor(null); setPageState(null);
     }
     if (demo || !live || query.length < 2 || query.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(query) || query.includes('..') || query.includes('//') || query.includes('://')) {
       setSuggestions([]);
@@ -85,12 +95,29 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       return searchGeneration.current === generation && !controller.signal.aborted && session.generation === live.scope[1] && session.subject === live.scope[2];
     };
     const cursor = append ? discovery.current.cursor : null;
+    const serverGeneration = discovery.current.generation;
+    const initiatingControl = activatedControl.current;
+    activatedControl.current = null;
+    const handoff = () => {
+      if (current() && initiatingControl) focusHandoff.current = { element: initiatingControl, generation, subject: live.scope[2], epoch: live.scope[1] };
+    };
+    if (restart) handoff();
     const timer = window.setTimeout(async () => {
+      if (!current()) return;
       try {
-        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}&generation=${encodeURIComponent(discovery.current.generation)}${cursor ? `&cursor=${cursor}` : ''}`, {
+        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}&generation=${encodeURIComponent(serverGeneration)}${cursor ? `&cursor=${cursor}` : ''}`, {
           credentials: 'same-origin', signal: controller.signal, headers: { accept: 'application/json' },
         });
-        if (!response.ok) throw new Error('Search unavailable');
+        if (!response.ok) {
+          let code: unknown;
+          try { code = z.object({ errorCode: z.string().max(64) }).parse(await response.json()).errorCode; } catch { /* Never display upstream error details. */ }
+          if (!current()) return;
+          discovery.current.cursor = null;
+          setNextCursor(null); setPageState(null); setRetainedResults(true);
+          setSearchState(response.status === 410 && code === 'IMAGE_SEARCH_EXPIRED' ? 'expired' : 'error');
+          handoff();
+          return;
+        }
         const data: unknown = await response.json();
         const page = searchPageSchema.parse(data);
         if (!current()) return;
@@ -101,13 +128,39 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         discovery.current.pages = page.pages;
         setNextCursor(page.nextCursor); setPageState(page.state);
         discovery.current.cursor = page.nextCursor;
+        setRetainedResults(false);
         setSearchState('ready');
+        if (!page.nextCursor || restart) handoff();
       } catch {
-        if (current()) { setSearchState('error'); }
+        if (current()) {
+          discovery.current.cursor = null;
+          setNextCursor(null); setPageState(null); setRetainedResults(true); setSearchState('error');
+          handoff();
+        }
       }
     }, append ? 0 : 350);
     return () => { controller.abort(); window.clearTimeout(timer); };
   }, [search, demo, live, pageRequest, setValue]);
+  useLayoutEffect(() => {
+    const pending = focusHandoff.current;
+    if (!pending) return;
+    focusHandoff.current = null;
+    const session = scanSession();
+    if (pending.generation !== searchGeneration.current || session.subject !== pending.subject || session.generation !== pending.epoch) return;
+    const active = document.activeElement;
+    if ((active === pending.element || (active === document.body && !pending.element.isConnected)) && !pending.element.isConnected) {
+      (restartButton.current ?? discoveryStatus.current)?.focus();
+    }
+  }, [searchState, nextCursor]);
+  function restartSearch(element: HTMLButtonElement) {
+    ++searchGeneration.current;
+    activatedControl.current = document.activeElement === element ? element : null;
+    discovery.current = { ...discovery.current, generation: crypto.randomUUID(), cursor: null, pages: 0 };
+    loadedSuggestions.current = [];
+    restarting.current = true;
+    setRetainedResults(true); setNextCursor(null); setPageState(null);
+    setPageRequest(value => value + 1);
+  }
   const matches = alpineTargets.filter(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase()));
   const visible: ImageSuggestion[] = [
     ...matches.map(target => ({ ...target, scannable: true })),
@@ -204,13 +257,19 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     <span>{target.reference}{target.reason ? ` · ${target.reason}` : ''}{target.tagConfirmed === false ? ' · latest — предлагаемая цель, наличие тега и платформы не подтверждено' : ''}{alpineTargets.some(saved => saved.reference === target.reference) ? ' · сохранённая цель' : ' · найдено в Docker Hub'}</span>
                   </button>
                 ))}
-                {searchState === 'loading' && search.trim().length >= 2 ? <p role="status">Ищем в Docker Hub…</p> : null}
-                {searchState === 'error' && search.trim().length >= 2 ? <p role="status">Поиск Docker Hub сейчас недоступен; загруженные результаты неполные. Сохранённые цели остаются доступны.</p> : null}
-                {!suggestions.length && searchState === 'ready' && pageState === 'terminal' ? <p role="status">Ничего не найдено в Docker Hub.</p> : null}
-                                {pageState === 'quota-exhausted' ? <p role="status">Достигнут лимит поиска; результаты неполные (не более 5 страниц / 60 образов).</p> : null}
-                                {nextCursor ? <button type="button" disabled={searchState === 'loading'} onClick={() => setPageRequest(value => value + 1)}>Показать ещё</button> : null}
-                                {searchState === 'error' ? <button type="button" onClick={() => { discovery.current.cursor = null; setPageRequest(value => value + 1); }}>Начать новый поиск</button> : null}
-                                {imageReference ? <p className="scan-a1__muted">Выбранная цель (сохраняется отдельно от поиска): {imageReference}</p> : null}
+                <p ref={discoveryStatus} role="status" tabIndex={-1} aria-label="Состояние поиска Docker Hub">
+                  {searchState === 'expired' ? 'Поиск истёк. Начните новый поиск; загруженные результаты неполные, выбранная цель сохранена.' :
+                    searchState === 'error' ? 'Поиск Docker Hub сейчас недоступен; загруженные результаты неполные. Сохранённые цели остаются доступны.' :
+                    searchState === 'loading' ? `Ищем в Docker Hub…${retainedResults ? ' Предыдущие результаты сохранены как неполные.' : ''}` :
+                    pageState === 'quota-exhausted' ? 'Достигнут лимит поиска; результаты неполные (не более 5 страниц / 60 образов).' :
+                    searchState === 'ready' && pageState === 'terminal' ? suggestions.length ? 'Поиск завершён.' : 'Ничего не найдено в Docker Hub.' : ''}
+                </p>
+                {nextCursor ? <button type="button" disabled={searchState === 'loading'} onClick={event => {
+                  activatedControl.current = document.activeElement === event.currentTarget ? event.currentTarget : null;
+                  setPageRequest(value => value + 1);
+                }}>Показать ещё</button> : null}
+                {searchState === 'error' || searchState === 'expired' ? <button ref={restartButton} type="button" onClick={event => restartSearch(event.currentTarget)}>Начать новый поиск</button> : null}
+                {imageReference ? <p className="scan-a1__muted">Выбранная цель (сохраняется отдельно от поиска): {imageReference}</p> : null}
               </div>
               {imageReference === alpineTargets[3].reference ? <p className="scan-a1__muted">Архивный образ: при проверке закреплённого digest 04.10.2026 локальная DB нашла 4 CVE. Результат нового запуска зависит от актуальной DB и доступности scanner; этот образ не используйте для рабочих нагрузок.</p> : null}
               {errors.imageReference ? <p id="image-reference-error" role="alert">{errors.imageReference.message}</p> : null}

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { LiveScanSession } from '@/features/scans/LiveScanSession';
 import { ScanListPage } from '@/pages/scans/ScanListPage';
 import { DemoAuthPage } from '@/pages/auth/DemoAuthPage';
@@ -21,7 +22,7 @@ const row = { scanId: id, state: 'completed', digest, platform: 'linux/amd64', t
 const json = (data: unknown) => ({ ok: true, status: 200, json: async () => data });
 const imagePage = (items: Array<{ label: string; reference: string; scannable: boolean }>, nextCursor: string | null = null, pages = 1) => ({
   items: items.map(item => ({ ...item, eligibility: item.scannable ? 'alpine-only' : 'unsupported', reason: item.scannable ? 'Alpine only' : 'найден в Docker Hub, сканирование пока недоступно', kind: item.scannable ? 'tag' : 'repository', tagConfirmed: item.scannable, checks: { secret: item.scannable, sbom: item.scannable, vuln: item.scannable ? 'conditional' : 'unsupported' } })),
-  nextCursor, state: nextCursor ? 'more-available' : 'terminal', loaded: items.length, pages, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60 },
+  nextCursor, state: nextCursor ? 'more-available' : 'terminal', loaded: items.length, pages, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' },
 });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -39,6 +40,112 @@ function mount(path: string) {
 }
 
 describe('cookie-session live scans', () => {
+  for (const status of [410, 503]) it(`distinguishes ${status}, retires cursor, restarts without losing scan intent or loaded results`, async () => {
+    const user = userEvent.setup();
+    const item = { label: 'Alpine · retained', reference: 'registry-1.docker.io/library/alpine:retained', scannable: true };
+    let finishRestart!: (value: ReturnType<typeof json>) => void;
+    const restart = new Promise<ReturnType<typeof json>>(resolve => { finishRestart = resolve; });
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      requests.push(path);
+      if (requests.length === 1) return json(imagePage([item], 'a'.repeat(48)));
+      if (requests.length === 2) return { ok: false, status, json: async () => ({ errorCode: status === 410 ? 'IMAGE_SEARCH_EXPIRED' : 'IMAGE_SEARCH_UNAVAILABLE' }) };
+      return restart;
+    }));
+    mount('/scans/new');
+    fireEvent.change(await screen.findByRole('searchbox'), { target: { value: 'alpine retained' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Alpine · retained/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    const more = screen.getByRole('button', { name: 'Показать ещё' }); more.focus();
+    await user.keyboard('{Enter}');
+    const retry = await screen.findByRole('button', { name: 'Начать новый поиск' });
+    expect(screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }).textContent).toContain(status === 410 ? 'Поиск истёк' : 'Поиск Docker Hub сейчас недоступен');
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
+    expect(document.activeElement).toBe(retry);
+    expect(screen.getByRole('button', { name: /Alpine · retained/ }).getAttribute('aria-pressed')).toBe('true');
+    expect((screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement).checked).toBe(true);
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(requests).toHaveLength(3));
+    expect(document.activeElement).toBe(screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }));
+    const firstUrl = new URL(requests[0], 'http://localhost'); const restartUrl = new URL(requests[2], 'http://localhost');
+    expect(restartUrl.searchParams.has('cursor')).toBe(false);
+    expect(restartUrl.searchParams.get('generation')).not.toBe(firstUrl.searchParams.get('generation'));
+    expect(screen.getByRole('button', { name: /Alpine · retained/ })).toBeTruthy();
+    expect(screen.getByText(/Предыдущие результаты сохранены как неполные/)).toBeTruthy();
+    await act(async () => finishRestart(json(imagePage([]))));
+    expect(screen.queryByRole('button', { name: /Alpine · retained/ })).toBeNull();
+    expect(screen.getByText(/Выбранная цель.*alpine:retained/)).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }));
+  });
+
+  for (const quota of [false, true]) for (const movedFocus of [false, true]) it(`terminal pagination: quota=${quota}, movedFocus=${movedFocus}`,  async () => {
+    const user = userEvent.setup();
+    const item = { label: 'Alpine · focus', reference: 'registry-1.docker.io/library/alpine:focus', scannable: true };
+    let finish!: (value: ReturnType<typeof json>) => void;
+    let pageCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      pageCalls++;
+      if (pageCalls === 1) return json(imagePage([item], 'a'.repeat(48)));
+      if (quota && pageCalls < 5) return json({ ...imagePage([], String(pageCalls).repeat(48), pageCalls), loaded: 1 });
+      return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+    }));
+    mount('/scans/new');
+    const search = await screen.findByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'alpine focus' } });
+    await screen.findByRole('button', { name: /Alpine · focus/ });
+    if (quota) for (let page = 2; page <= 4; page++) {
+      const more = screen.getByRole('button', { name: 'Показать ещё' }); more.focus(); await user.keyboard('{Enter}');
+      await waitFor(() => expect(pageCalls).toBe(page));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Показать ещё' }).hasAttribute('disabled')).toBe(false));
+      expect(document.activeElement).toBe(more);
+    }
+    const more = screen.getByRole('button', { name: 'Показать ещё' }); more.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(pageCalls).toBe(quota ? 5 : 2));
+    if (movedFocus) search.focus();
+    await act(async () => finish(json({ ...imagePage([], null, quota ? 5 : 2), loaded: 1, state: quota ? 'quota-exhausted' : 'terminal' })));
+    expect(document.activeElement).toBe(movedFocus ? search : screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }));
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
+  });
+
+  for (const lateFailure of [false, true]) it(`ignores ${lateFailure ? 'failure' : 'success'} from a restarted generation after another query`, async () => {
+    let resolveRestart!: (value: ReturnType<typeof json>) => void;
+    let rejectRestart!: (error: Error) => void;
+    const pending = new Promise<ReturnType<typeof json>>((resolve, reject) => { resolveRestart = resolve; rejectRestart = reject; });
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('q=new')) return json(imagePage([{ label: 'new-discovery', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }], 'b'.repeat(48)));
+      if (++calls === 1) return { ok: false, status: 410, json: async () => ({ errorCode: 'IMAGE_SEARCH_EXPIRED' }) };
+      return pending;
+    }));
+    mount('/scans/new'); const search = await screen.findByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'old' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Начать новый поиск' }));
+    await waitFor(() => expect(calls).toBe(2));
+    fireEvent.change(search, { target: { value: 'new' } });
+    expect(await screen.findByRole('button', { name: /new-discovery/ })).toBeTruthy(); search.focus();
+    await act(async () => { if (lateFailure) rejectRestart(Error('late restart')); else resolveRestart(json(imagePage([]))); });
+    expect(screen.getByRole('button', { name: /new-discovery/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Показать ещё' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Начать новый поиск' })).toBeNull();
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('retries initial failure with a fresh generation', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      requests.push(path);
+      return requests.length === 1 ? { ok: false, status: 503, json: async () => ({ errorCode: 'IMAGE_SEARCH_UNAVAILABLE' }) } : json(imagePage([]));
+    }));
+    mount('/scans/new'); fireEvent.change(await screen.findByRole('searchbox'), { target: { value: 'nginx' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Начать новый поиск' }));
+    expect(await screen.findByText('Ничего не найдено в Docker Hub.')).toBeTruthy();
+    expect(new URL(requests[0], 'http://localhost').searchParams.get('generation')).not.toBe(new URL(requests[1], 'http://localhost').searchParams.get('generation'));
+  });
   for (const lateFailure of [false, true]) it(`ignores stale ${lateFailure ? 'failure' : 'success'} when abort is ignored`, async () => {
     let resolveOld!: (value: ReturnType<typeof json>) => void;
     let rejectOld!: (reason: Error) => void;
