@@ -1,32 +1,36 @@
 # Optional local CVE DB overlay. Apply only together with compose.stand.yaml;
-# update the signed, pinned release and these three pins before NextUpdate.
+# pins and host release directory are supplied by the private stand.env;
+# never edit or replace an already published release in place.
 services:
   api:
     environment:
       SCAN_VULN_ENABLED: "true"
       SCAN_VULN_RELEASE_DIR: /opt/release
-      SCAN_VULN_MANIFEST_DIGEST: sha256:68d30a47a4fc43375a468479433fb1b1383c91084e2a036074679f85675eeeb9
-      SCAN_VULN_ARTIFACT_SHA256: e629df3a0a4b358c202ef2cfe1f432cb0ae6c20d9cc0e5a0ef7ae3928ad722b5
+      SCAN_VULN_MANIFEST_DIGEST: ${SCAN_VULN_MANIFEST_DIGEST:?Set reviewed OCI manifest digest}
+      SCAN_VULN_ARTIFACT_SHA256: ${SCAN_VULN_ARTIFACT_SHA256:?Set signed bundle SHA256}
     volumes:
       - type: bind
-        source: ../../.local-auth/trivy-db-releases/68d30a47
+        source: ${SCAN_VULN_RELEASE_HOST_DIR:?Set published absolute release directory}
         target: /opt/release
         read_only: true
+        bind: { create_host_path: false }
   worker:
     environment:
       SCAN_VULN_ENABLED: "true"
       SCAN_VULN_RELEASE_DIR: /opt/release
-      SCAN_VULN_MANIFEST_DIGEST: sha256:68d30a47a4fc43375a468479433fb1b1383c91084e2a036074679f85675eeeb9
-      SCAN_VULN_ARTIFACT_SHA256: e629df3a0a4b358c202ef2cfe1f432cb0ae6c20d9cc0e5a0ef7ae3928ad722b5
+      SCAN_VULN_MANIFEST_DIGEST: ${SCAN_VULN_MANIFEST_DIGEST:?Set reviewed OCI manifest digest}
+      SCAN_VULN_ARTIFACT_SHA256: ${SCAN_VULN_ARTIFACT_SHA256:?Set signed bundle SHA256}
     volumes:
       - type: bind
-        source: ../../.local-auth/trivy-db-releases/68d30a47
+        source: ${SCAN_VULN_RELEASE_HOST_DIR:?Set published absolute release directory}
         target: /opt/release
         read_only: true
+        bind: { create_host_path: false }
       - type: bind
-        source: ../../.local-auth/trivy-db-releases/68d30a47/db
+        source: ${SCAN_VULN_RELEASE_HOST_DIR:?Set published absolute release directory}/db
         target: /tmp/trivy/db
         read_only: true
+        bind: { create_host_path: false }
     tmpfs: !override
       - /tmp:rw,noexec,nosuid,size=16m
       - /tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=512m
