@@ -133,12 +133,27 @@ test('candidate CDN redirects strip token and foreign scopes never fetch token',
   const seen: Array<{ host: string; auth: string | undefined }> = [];
   const fetch = nginxCandidateFetch(async (_gateway, url, headers) => {
     seen.push({ host: url.hostname, auth: headers.authorization });
+    if (url.hostname === 'auth.docker.io') {
+      assert.equal(url.searchParams.get('scope'), 'repository:library/nginx:pull');
+      return { status: 200, headers: {}, body: Buffer.from('{"token":"fixture-token"}') };
+    }
     if (url.hostname === 'production.cloudfront.docker.com') return { status: 200, headers: {}, body: Buffer.alloc(0) };
+    if (!headers.authorization) return { status: 401, headers: { 'www-authenticate':
+      'Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/nginx:pull"' }, body: Buffer.alloc(0) };
     return { status: 302, headers: { location: 'https://production.cloudfront.docker.com/blob' }, body: Buffer.alloc(0) };
   });
-  await fetch('registry-1.docker.io', `/v2/library/nginx/blobs/sha256:${'a'.repeat(64)}`);
-  assert.deepEqual(seen.map(item => item.host), ['registry-1.docker.io', 'production.cloudfront.docker.com']);
-  assert.equal(seen[1].auth, undefined);
+  const path = `/v2/library/nginx/blobs/sha256:${'a'.repeat(64)}`;
+  await fetch('registry-1.docker.io', path);
+  assert.deepEqual(seen, [
+    { host: 'registry-1.docker.io', auth: undefined },
+    { host: 'auth.docker.io', auth: undefined },
+    { host: 'registry-1.docker.io', auth: 'Bearer fixture-token' },
+    { host: 'production.cloudfront.docker.com', auth: undefined },
+  ]);
+  for (let i = 0; i < 4; i++) await fetch('registry-1.docker.io', path);
+  assert.equal(seen.length, 12, 'auth, registry retries and CDN redirects share the request budget');
+  await assert.rejects(fetch('registry-1.docker.io', path), ResolutionRejected);
+  assert.equal(seen.length, 12);
   let calls = 0;
   const foreign = nginxCandidateFetch(async () => {
     calls++; return { status: 401, headers: { 'www-authenticate':
