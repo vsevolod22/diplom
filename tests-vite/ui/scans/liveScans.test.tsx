@@ -39,7 +39,73 @@ function mount(path: string) {
   return client;
 }
 
+function emulateDisabledBlur(element: HTMLElement) {
+  // jsdom also ignores blur() on disabled controls; temporarily enable only to emulate native blur.
+  const disabled = element.hasAttribute('disabled');
+  element.removeAttribute('disabled');
+  element.blur();
+  if (disabled) element.setAttribute('disabled', '');
+}
+
 describe('cookie-session live scans', () => {
+  for (const action of ['restore', 'search', 'target', 'checks', 'moved-then-body', 'tab', 'unowned', 'pointer'] as const) it(`surviving pagination after native disabled blur: ${action}`, async () => {
+    const user = userEvent.setup();
+    const item = { label: 'Alpine · focused', reference: 'registry-1.docker.io/library/alpine:focused', scannable: true };
+    let finish!: (value: ReturnType<typeof json>) => void;
+    let requests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (++requests === 1) return json(imagePage([item], 'a'.repeat(48)));
+      return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+    }));
+    mount('/scans/new'); const search = await screen.findByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'alpine focused' } });
+    const target = await screen.findByRole('button', { name: /Alpine · focused/ });
+    fireEvent.click(target);
+    const confirmation = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }); fireEvent.click(confirmation);
+    const more = screen.getByRole('button', { name: 'Показать ещё' });
+    if (action === 'unowned') { search.focus(); fireEvent.click(more); }
+    else if (action === 'pointer') await user.click(more);
+    else { more.focus(); await user.keyboard('{Enter}'); }
+    await waitFor(() => expect(more.hasAttribute('disabled')).toBe(true));
+    await waitFor(() => expect(requests).toBe(2));
+    // jsdom does not reproduce Chromium's native disabled-button blur.
+    act(() => emulateDisabledBlur(document.activeElement as HTMLElement));
+    expect(document.activeElement).toBe(document.body);
+    if (action === 'search') search.focus();
+    if (action === 'target') target.focus();
+    if (action === 'checks') confirmation.focus();
+    if (action === 'moved-then-body') { search.focus(); search.blur(); }
+    if (action === 'tab') { await user.keyboard('{Tab}'); (document.activeElement as HTMLElement).blur(); }
+    const expected = action === 'restore' ? more : document.activeElement;
+    await act(async () => finish(json({ ...imagePage([], 'b'.repeat(48), 2), loaded: 1 })));
+    expect(more.hasAttribute('disabled')).toBe(false);
+    expect(document.activeElement).toBe(expected);
+    expect(target.getAttribute('aria-pressed')).toBe('true');
+    expect((confirmation as HTMLInputElement).checked).toBe(true);
+  });
+
+  for (const outcome of ['success', 'failure'] as const) for (const change of ['query', 'sign-out', 'subject', 'session', 'unmount'] as const) it(`does not restore stale pagination focus after ${change}: ${outcome}`, async () => {
+    const user = userEvent.setup();
+    let finish!: (value: ReturnType<typeof json>) => void;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('&cursor=')) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+      return json(imagePage([], 'a'.repeat(48)));
+    }));
+    const client = mount('/scans/new'); const search = await screen.findByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'alpine old' } });
+    const more = await screen.findByRole('button', { name: 'Показать ещё' }); more.focus(); await user.keyboard('{Enter}');
+    await waitFor(() => expect(more.hasAttribute('disabled')).toBe(true));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    act(() => emulateDisabledBlur(more));
+    const focus = vi.spyOn(more, 'focus');
+    if (change === 'query') { search.focus(); fireEvent.change(search, { target: { value: '' } }); }
+    else if (change === 'unmount') cleanup();
+    else transitionScanSession(change === 'sign-out' ? null : change === 'session' ? 'alice' : 'bob', client, change === 'session');
+    await act(async () => finish(outcome === 'success' ? json(imagePage([], 'b'.repeat(48), 2)) : { ok: false, status: 503, json: async () => ({ errorCode: 'IMAGE_SEARCH_UNAVAILABLE' }) }));
+    expect(focus).not.toHaveBeenCalled(); focus.mockRestore();
+  });
   for (const status of [410, 503]) it(`distinguishes ${status}, retires cursor, restarts without losing scan intent or loaded results`, async () => {
     const user = userEvent.setup();
     const item = { label: 'Alpine · retained', reference: 'registry-1.docker.io/library/alpine:retained', scannable: true };

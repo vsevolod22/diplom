@@ -31,6 +31,7 @@ const formSchema = z.object({
   checks: z.array(z.enum(scanChecks)).min(1, 'Выберите хотя бы одну проверку'),
 });
 type FormValues = z.infer<typeof formSchema>;
+type FocusActivation = { element: HTMLButtonElement; keyboard: boolean; moved: boolean; stop: () => void };
 export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const {
     register,
@@ -56,8 +57,8 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const [retainedResults, setRetainedResults] = useState(false);
   const discoveryStatus = useRef<HTMLParagraphElement>(null);
   const restartButton = useRef<HTMLButtonElement>(null);
-  const activatedControl = useRef<HTMLButtonElement | null>(null);
-  const focusHandoff = useRef<{ element: HTMLButtonElement; generation: number; subject: string; epoch: number } | null>(null);
+  const activatedControl = useRef<FocusActivation | null>(null);
+  const focusHandoff = useRef<{ activation: FocusActivation; generation: number; subject: string; epoch: number } | null>(null);
   const discovery = useRef<{ generation: string; cursor: string | null; identity: string; query: string; pages: number }>({ generation: '', cursor: null, identity: '', query: '', pages: 0 });
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -69,6 +70,8 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   useEffect(() => {
     const query = search.trim().toLowerCase().replace(/ +/g, ' ');
     const generation = ++searchGeneration.current;
+    const activation = activatedControl.current;
+    activatedControl.current = null;
     const identity = live?.scope.join(':') ?? '';
     if (discovery.current.identity !== identity) {
       setConfirmed(false); attempt.current = null; selectedTarget.current = null;
@@ -86,6 +89,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     if (demo || !live || query.length < 2 || query.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(query) || query.includes('..') || query.includes('//') || query.includes('://')) {
       setSuggestions([]);
       setSearchState('idle');
+      activation?.stop();
       return;
     }
     setSearchState('loading');
@@ -96,10 +100,8 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     };
     const cursor = append ? discovery.current.cursor : null;
     const serverGeneration = discovery.current.generation;
-    const initiatingControl = activatedControl.current;
-    activatedControl.current = null;
     const handoff = () => {
-      if (current() && initiatingControl) focusHandoff.current = { element: initiatingControl, generation, subject: live.scope[2], epoch: live.scope[1] };
+      if (current() && activation) focusHandoff.current = { activation, generation, subject: live.scope[2], epoch: live.scope[1] };
     };
     if (restart) handoff();
     const timer = window.setTimeout(async () => {
@@ -130,7 +132,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         discovery.current.cursor = page.nextCursor;
         setRetainedResults(false);
         setSearchState('ready');
-        if (!page.nextCursor || restart) handoff();
+        handoff();
       } catch {
         if (current()) {
           discovery.current.cursor = null;
@@ -139,22 +141,51 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         }
       }
     }, append ? 0 : 350);
-    return () => { controller.abort(); window.clearTimeout(timer); };
+    return () => { controller.abort(); window.clearTimeout(timer); activation?.stop(); };
   }, [search, demo, live, pageRequest, setValue]);
   useLayoutEffect(() => {
     const pending = focusHandoff.current;
     if (!pending) return;
     focusHandoff.current = null;
+    const { activation } = pending;
+    // A surviving control is still disabled during the loading commit.
+    if (activation.element.isConnected && activation.element.disabled && searchState === 'loading') {
+      focusHandoff.current = pending;
+      return;
+    }
+    activation.stop();
     const session = scanSession();
-    if (pending.generation !== searchGeneration.current || session.subject !== pending.subject || session.generation !== pending.epoch) return;
+    if (pending.generation !== searchGeneration.current || session.subject !== pending.subject || session.generation !== pending.epoch || activation.moved) return;
     const active = document.activeElement;
-    if ((active === pending.element || (active === document.body && !pending.element.isConnected)) && !pending.element.isConnected) {
-      (restartButton.current ?? discoveryStatus.current)?.focus();
+    if (active !== activation.element && active !== document.body) return;
+    if (!activation.element.isConnected) {
+      (restartButton.current ?? discoveryStatus.current)?.focus({ preventScroll: true });
+    } else if (activation.keyboard && !activation.element.disabled && active === document.body) {
+      activation.element.focus({ preventScroll: true });
     }
   }, [searchState, nextCursor]);
+  function captureActivation(element: HTMLButtonElement, keyboard: boolean) {
+    activatedControl.current?.stop();
+    activatedControl.current = null;
+    if (document.activeElement !== element) return;
+    const activation: FocusActivation = { element, keyboard, moved: false, stop: () => {
+      document.removeEventListener('focusin', onFocus);
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onPointer);
+    } };
+    const onFocus = (event: FocusEvent) => {
+      if (event.target !== element && event.target !== document.body) activation.moved = true;
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Tab') activation.moved = true; };
+    const onPointer = () => { activation.moved = true; };
+    document.addEventListener('focusin', onFocus);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onPointer);
+    activatedControl.current = activation;
+  }
   function restartSearch(element: HTMLButtonElement) {
     ++searchGeneration.current;
-    activatedControl.current = document.activeElement === element ? element : null;
+    captureActivation(element, false);
     discovery.current = { ...discovery.current, generation: crypto.randomUUID(), cursor: null, pages: 0 };
     loadedSuggestions.current = [];
     restarting.current = true;
@@ -265,7 +296,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     searchState === 'ready' && pageState === 'terminal' ? suggestions.length ? 'Поиск завершён.' : 'Ничего не найдено в Docker Hub.' : ''}
                 </p>
                 {nextCursor ? <button type="button" disabled={searchState === 'loading'} onClick={event => {
-                  activatedControl.current = document.activeElement === event.currentTarget ? event.currentTarget : null;
+                  captureActivation(event.currentTarget, event.detail === 0);
                   setPageRequest(value => value + 1);
                 }}>Показать ещё</button> : null}
                 {searchState === 'error' || searchState === 'expired' ? <button ref={restartButton} type="button" onClick={event => restartSearch(event.currentTarget)}>Начать новый поиск</button> : null}
