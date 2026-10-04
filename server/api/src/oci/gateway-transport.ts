@@ -3,6 +3,19 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import { ResolutionRejected, type ManifestFetch, type ManifestResponse } from './registry-resolver.js';
 
+export type HubSearchResponse = { results: Array<{ repo_name?: unknown; name?: unknown }> };
+
+export async function dockerHubSearch(kind: 'tags' | 'repositories', query: string): Promise<HubSearchResponse> {
+  const url = kind === 'tags'
+    ? `https://hub.docker.com/v2/repositories/library/alpine/tags/?page_size=12&name=${encodeURIComponent(query)}`
+    : `https://hub.docker.com/v2/search/repositories/?page_size=12&query=${encodeURIComponent(query)}`;
+  const result = await gatewayGet({ host: 'egress', port: 8080 }, new URL(url), { accept: 'application/json' }, 128_000);
+  if (result.status !== 200 || !String(result.headers['content-type'] ?? '').startsWith('application/json'))
+    throw new ResolutionRejected('Image search unavailable');
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.body)) as HubSearchResponse; }
+  catch { throw new ResolutionRejected('Invalid image search response'); }
+}
+
 export const DOCKER_HUB_HOSTS = Object.freeze({
   registry: 'registry-1.docker.io', token: 'auth.docker.io', blobs: ['production.cloudfront.docker.com'],
 });

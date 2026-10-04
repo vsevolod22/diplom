@@ -13,7 +13,8 @@ import threading
 from dataclasses import dataclass
 from typing import Callable
 
-HOSTS = frozenset(("registry-1.docker.io", "auth.docker.io", "production.cloudfront.docker.com"))
+# hub.docker.com is only for bounded public discovery in the API; image/DB pulls stay on existing hosts.
+HOSTS = frozenset(("registry-1.docker.io", "auth.docker.io", "production.cloudfront.docker.com", "hub.docker.com"))
 MAX_CONNECTIONS = 64
 MAX_BYTES = 64 * 1024 * 1024
 SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)

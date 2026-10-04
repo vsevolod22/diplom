@@ -334,7 +334,8 @@
   text-align: left;
   cursor: pointer;
 }
-.scan-a1 .scan-a1__target:hover { border-color: #d1ff5e; }
+.scan-a1 .scan-a1__target:hover:not(:disabled) { border-color: #d1ff5e; }
+.scan-a1 .scan-a1__target:disabled { opacity: 0.65; cursor: not-allowed; }
 .scan-a1 .scan-a1__target[aria-pressed='true'] {
   border-color: #d1ff5e;
   box-shadow: inset 4px 0 #d1ff5e;

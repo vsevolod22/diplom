@@ -105,6 +105,26 @@ describe('cookie-session live scans', () => {
     expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/results?limit=50`)).toBe(true);
   });
 
+  it('shows remote Docker Hub results but does not allow unsupported repositories to launch', async () => {
+    const fetchMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/images?q=nginx')) return json([{ label: 'nginx', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }]);
+      if (path.includes('/images?q=Alpine%203.16')) return json([{ label: 'Alpine · 3.16.9', reference: 'registry-1.docker.io/library/alpine:3.16.9', scannable: true }]);
+      return json({ scanId: id, state: 'queued', result: null });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    mount('/scans/new');
+    const search = await screen.findByRole('searchbox', { name: 'Поиск по доступным образам' });
+    fireEvent.change(search, { target: { value: 'nginx' } });
+    const nginx = await screen.findByRole('button', { name: /nginx.*сканирование пока недоступно/ });
+    expect(nginx.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(search, { target: { value: 'Alpine 3.16' } });
+    const alpine = await screen.findByRole('button', { name: /Alpine · 3.16.9/ });
+    expect(alpine.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(alpine);
+    expect(screen.getByText('registry-1.docker.io/library/alpine:3.16.9')).toBeTruthy();
+  });
+
   it('selects the verified old Alpine digest without substituting a mutable tag', async () => {
     const fetchMock = vi.fn(async (path: string, options?: RequestInit) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
@@ -136,7 +156,7 @@ describe('cookie-session live scans', () => {
     expect(button.hasAttribute('disabled')).toBe(true);
     const search = screen.getByRole('searchbox', { name: 'Поиск по доступным образам' });
     fireEvent.change(search, { target: { value: 'ubuntu' } });
-    expect(screen.getByText(/Ничего не найдено/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Alpine · 3.21/ })).toBeNull();
     expect(button.hasAttribute('disabled')).toBe(true);
     fireEvent.change(search, { target: { value: '3.21' } });
     fireEvent.click(screen.getByRole('button', { name: /Alpine · 3.21/ }));

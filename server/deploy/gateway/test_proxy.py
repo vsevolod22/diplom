@@ -17,6 +17,9 @@ class GatewayPolicyTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 proxy.authority(value)
         self.assertEqual(proxy.authority("registry-1.docker.io:443"), "registry-1.docker.io")
+        self.assertEqual(proxy.authority("hub.docker.com:443"), "hub.docker.com")
+        with self.assertRaises(ValueError):
+            proxy.authority("hub.docker.com.evil.test:443")
 
     def test_mixed_dns_and_rebinding_deny_before_dial(self):
         public = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))

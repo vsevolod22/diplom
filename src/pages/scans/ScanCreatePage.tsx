@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, LockKeyhole } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
@@ -17,8 +17,9 @@ const alpineTargets = [
   { label: 'Alpine · 3.20', reference: 'registry-1.docker.io/library/alpine:3.20' },
   { label: 'Alpine · 3.16 (архивный · CVE-пример)', reference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6' },
 ] as const;
+type ImageSuggestion = { label: string; reference: string; scannable: boolean };
 const formSchema = z.object({
-  imageReference: z.string().refine(value => alpineTargets.some(target => target.reference === value), 'Выберите образ из доступного каталога'),
+  imageReference: z.string().regex(/^registry-1\.docker\.io\/library\/alpine(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/, 'Выберите доступный образ Alpine'),
   checks: z.array(z.enum(scanChecks)).min(1, 'Выберите хотя бы одну проверку'),
 });
 type FormValues = z.infer<typeof formSchema>;
@@ -36,12 +37,45 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const imageReference = useWatch({ control, name: 'imageReference' });
   const checks = useWatch({ control, name: 'checks' }) ?? [];
   const [search, setSearch] = useState('');
+  const [suggestions, setSuggestions] = useState<ImageSuggestion[]>([]);
+  const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const attempt = useRef<{ target: string; checks: string; key: string } | null>(null);
   const live = useLiveScanSession();
   const navigate = useNavigate();
+  useEffect(() => {
+    const query = search.trim();
+    if (demo || !live || query.length < 2 || query.length > 64) {
+      setSuggestions([]);
+      setSearchState('idle');
+      return;
+    }
+    setSearchState('loading');
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}`, {
+          credentials: 'same-origin', signal: controller.signal, headers: { accept: 'application/json' },
+        });
+        if (!response.ok) throw new Error('Search unavailable');
+        const data: unknown = await response.json();
+        if (!Array.isArray(data)) throw new Error('Invalid search response');
+        setSuggestions(data.filter((item): item is ImageSuggestion =>
+          typeof item?.label === 'string' && typeof item?.reference === 'string' && typeof item?.scannable === 'boolean').slice(0, 12));
+        setSearchState('ready');
+      } catch {
+        if (!controller.signal.aborted) { setSuggestions([]); setSearchState('error'); }
+      }
+    }, 350);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [search, demo, live]);
+  const matches = alpineTargets.filter(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const visible: ImageSuggestion[] = [
+    ...matches.map(target => ({ ...target, scannable: true })),
+    ...(searchState === 'ready' ? suggestions.filter(target => !matches.some(item => item.reference === target.reference)) : []),
+  ];
   async function create(values: FormValues) {
     if (demo || !live || !confirmed || busy) return;
     setBusy(true);
@@ -87,7 +121,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               Задайте <em>границы.</em>
             </h2>
             <p className="scan-a1__muted mt-6 max-w-xl text-lg">
-              Найдите и выберите образ Alpine из доступных целей. Запуск требует действующей сессии и разрешения сервера.
+              Ищите образы Docker Hub по названию или тегу. Сейчас сканируются только образы Alpine; остальные результаты отмечены как недоступные для запуска. Запуск требует действующей сессии и разрешения сервера.
             </p>
           </div>
           <ScanScene variant="create" />
@@ -103,16 +137,17 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 type="search"
                 value={search}
                 onChange={event => setSearch(event.target.value)}
-                placeholder="Alpine, 3.21, latest"
+                placeholder="Alpine 3.16, nginx, postgres…"
                 autoComplete="off"
               />
               <div className="scan-a1__targets" role="group" aria-label="Выбор образа" aria-describedby={errors.imageReference ? 'image-reference-error' : undefined}>
-                {alpineTargets.filter(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase())).map(target => (
+                {visible.map(target => (
                   <button
                     key={target.reference}
                     type="button"
                     className="scan-a1__target"
                     aria-pressed={imageReference === target.reference}
+                    disabled={!target.scannable}
                     onClick={() => {
                       setValue('imageReference', target.reference, { shouldValidate: true });
                       setConfirmed(false);
@@ -120,12 +155,12 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     }}
                   >
                     <strong>{target.label}</strong>
-                    <span>{target.reference}</span>
+                    <span>{target.reference}{target.scannable ? '' : ' · найден в Docker Hub, сканирование пока недоступно'}</span>
                   </button>
                 ))}
-                {!alpineTargets.some(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase())) ? (
-                  <p>Ничего не найдено. Сейчас поддерживается только Alpine из Docker Hub.</p>
-                ) : null}
+                {searchState === 'loading' && search.trim().length >= 2 ? <p role="status">Ищем в Docker Hub…</p> : null}
+                {searchState === 'error' && search.trim().length >= 2 ? <p role="status">Поиск Docker Hub сейчас недоступен. Сохранённые цели остаются доступны.</p> : null}
+                {!visible.length && searchState === 'ready' ? <p role="status">Ничего не найдено.</p> : null}
               </div>
               {imageReference === alpineTargets[3].reference ? <p className="scan-a1__muted">Архивный образ: при проверке закреплённого digest 04.10.2026 локальная DB нашла 4 CVE. Результат нового запуска зависит от актуальной DB и доступности scanner; этот образ не используйте для рабочих нагрузок.</p> : null}
               {errors.imageReference ? <p id="image-reference-error" role="alert">{errors.imageReference.message}</p> : null}
