@@ -19,6 +19,10 @@ const id = '00000000-0000-4000-8000-000000000001';
 const digest = `sha256:${'a'.repeat(64)}`;
 const row = { scanId: id, state: 'completed', digest, platform: 'linux/amd64', targetLabel: 'private/alpine' };
 const json = (data: unknown) => ({ ok: true, status: 200, json: async () => data });
+const imagePage = (items: Array<{ label: string; reference: string; scannable: boolean }>, nextCursor: string | null = null, pages = 1) => ({
+  items: items.map(item => ({ ...item, eligibility: item.scannable ? 'alpine-only' : 'unsupported', reason: item.scannable ? 'Alpine only' : 'найден в Docker Hub, сканирование пока недоступно', kind: item.scannable ? 'tag' : 'repository', tagConfirmed: item.scannable, checks: { secret: item.scannable, sbom: item.scannable, vuln: item.scannable ? 'conditional' : 'unsupported' } })),
+  nextCursor, state: nextCursor ? 'more-available' : 'terminal', loaded: items.length, pages, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60 },
+});
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -35,6 +39,93 @@ function mount(path: string) {
 }
 
 describe('cookie-session live scans', () => {
+  for (const lateFailure of [false, true]) it(`ignores stale ${lateFailure ? 'failure' : 'success'} when abort is ignored`, async () => {
+    let resolveOld!: (value: ReturnType<typeof json>) => void;
+    let rejectOld!: (reason: Error) => void;
+    const pending = new Promise<ReturnType<typeof json>>((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('q=old')) return pending;
+      return json(imagePage([{ label: 'new-result', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }], 'b'.repeat(48)));
+    }));
+    mount('/scans/new');
+    const search = await screen.findByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'old' } });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([path]) => String(path).includes('q=old'))).toBe(true));
+    fireEvent.change(search, { target: { value: 'new' } });
+    expect(await screen.findByRole('button', { name: /new-result/ })).toBeTruthy();
+    await act(async () => { if (lateFailure) rejectOld(Error('late')); else resolveOld(json(imagePage([{ label: 'old-result', reference: 'registry-1.docker.io/library/alpine:old', scannable: true }]))); });
+    expect(screen.queryByRole('button', { name: /old-result/ })).toBeNull();
+    expect(screen.queryByText(/Поиск Docker Hub сейчас недоступен/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Показать ещё' }).hasAttribute('disabled')).toBe(false);
+    fireEvent.change(search, { target: { value: '' } });
+    expect(screen.queryByRole('button', { name: /new-result/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
+  });
+
+  for (const change of ['clear', 'invalid', 'unmount', 'sign-out', 'subject'] as const) it(`ignores a pending response after ${change}`, async () => {
+      let resolveOld!: (value: ReturnType<typeof json>) => void;
+      const pending = new Promise<ReturnType<typeof json>>(resolve => { resolveOld = resolve; });
+      vi.stubGlobal('fetch', vi.fn(async (path: string) => path === '/api/v1/auth/me' ? json({ id: 'alice', email: 'alice@example.com' }) : pending));
+      const client = mount('/scans/new');
+      const search = await screen.findByRole('searchbox');
+      fireEvent.change(search, { target: { value: 'pending' } });
+      await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([path]) => String(path).includes('q=pending'))).toBe(true));
+      if (change === 'clear' || change === 'invalid') fireEvent.change(search, { target: { value: change === 'clear' ? '' : 'https://evil.example' } });
+      else if (change === 'unmount') cleanup();
+      else transitionScanSession(change === 'sign-out' ? null : 'bob', client);
+      await act(async () => resolveOld(json(imagePage([{ label: 'stale-result', reference: 'registry-1.docker.io/library/alpine:stale', scannable: true }], 'a'.repeat(48)))));
+      expect(screen.queryByRole('button', { name: /stale-result/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
+    });
+
+    it('merges explicit pages and an empty terminal page without losing selection or focus', async () => {
+      const first = { label: 'Alpine · custom-one', reference: 'registry-1.docker.io/library/alpine:custom-one', scannable: true };
+      const second = { label: 'Alpine · custom-two', reference: 'registry-1.docker.io/library/alpine:custom-two', scannable: true };
+      let calls = 0;
+      vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+        if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+        calls++;
+        if (calls === 1) return json(imagePage([first], 'a'.repeat(48)));
+        if (calls === 2) return json({ ...imagePage([first, second], 'b'.repeat(48), 2), loaded: 2 });
+        return json({ ...imagePage([], null, 3), loaded: 2 });
+      }));
+      mount('/scans/new');
+      fireEvent.change(await screen.findByRole('searchbox'), { target: { value: 'alpine custom' } });
+      const selected = await screen.findByRole('button', { name: /Alpine · custom-one/ });
+      fireEvent.click(selected); selected.focus();
+      fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
+      expect(await screen.findByRole('button', { name: /Alpine · custom-two/ })).toBeTruthy();
+      expect(screen.getAllByRole('button', { name: /Alpine · custom-one/ })).toHaveLength(1);
+      expect(document.activeElement).toBe(selected);
+      fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull());
+      expect(selected.getAttribute('aria-pressed')).toBe('true');
+      expect(screen.queryByText(/Ничего не найдено/)).toBeNull();
+      expect(calls).toBe(3);
+    });
+
+    it('pages explicitly, keeps selection and prior results on failure, rejects unknown eligibility', async () => {
+    const first = { label: 'Alpine · unique-tag', reference: 'registry-1.docker.io/library/alpine:unique-tag', scannable: true };
+    const fetchMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('&cursor=')) return { ok: false, status: 503, json: async () => ({}) };
+      return json(imagePage([first], 'a'.repeat(48)));
+    });
+    vi.stubGlobal('fetch', fetchMock); mount('/scans/new');
+    const search = await screen.findByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'alpine unique' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Alpine · unique-tag/ }));
+    expect(fetchMock.mock.calls.filter(([path]) => path.includes('/images')).length).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
+    expect(await screen.findByText(/Поиск Docker Hub сейчас недоступен/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Alpine · unique-tag/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText(/Выбранная цель.*unique-tag/)).toBeTruthy();
+    fireEvent.change(search, { target: { value: 'unknown' } });
+    fetchMock.mockImplementation(async (path: string) => path === '/api/v1/auth/me' ? json({ id: 'alice', email: 'alice@example.com' }) : json({ ...imagePage([first]), items: [{ ...first, eligibility: 'unknown' }] }));
+    await waitFor(() => expect(screen.getByText(/Поиск Docker Hub сейчас недоступен/)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /Alpine · unique-tag/ })).toBeNull();
+  });
   it('uses SSE only as a hint for a fresh GET and closes after terminal snapshot', async () => {
     const streams: Array<{ path: string; close: ReturnType<typeof vi.fn>; emit: (type: string, data?: unknown) => void }> = [];
     vi.stubGlobal('EventSource', class {
@@ -108,8 +199,8 @@ describe('cookie-session live scans', () => {
   it('shows remote Docker Hub results but does not allow unsupported repositories to launch', async () => {
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/images?q=nginx')) return json([{ label: 'nginx', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }]);
-      if (path.includes('/images?q=Alpine%203.16')) return json([{ label: 'Alpine · 3.16.9', reference: 'registry-1.docker.io/library/alpine:3.16.9', scannable: true }]);
+      if (path.includes('/images?q=nginx')) return json(imagePage([{ label: 'nginx', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }]));
+      if (path.includes('/images?q=alpine%203.16')) return json(imagePage([{ label: 'Alpine · 3.16.9', reference: 'registry-1.docker.io/library/alpine:3.16.9', scannable: true }]));
       return json({ scanId: id, state: 'queued', result: null });
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -122,7 +213,7 @@ describe('cookie-session live scans', () => {
     const alpine = await screen.findByRole('button', { name: /Alpine · 3.16.9/ });
     expect(alpine.hasAttribute('disabled')).toBe(false);
     fireEvent.click(alpine);
-    expect(screen.getByText('registry-1.docker.io/library/alpine:3.16.9')).toBeTruthy();
+    expect(screen.getByText(/Выбранная цель.*registry-1.docker.io\/library\/alpine:3.16.9/)).toBeTruthy();
   });
 
   it('selects the verified old Alpine digest without substituting a mutable tag', async () => {

@@ -4,7 +4,7 @@ import { AuthStore } from '../auth/auth.store.js';
 import { originForRequest, tokenFrom } from '../auth/auth.controller.js';
 import { ScansService } from './scans.service.js';
 import type { Identity } from '../security/identity.js';
-import { searchImages } from './image-search.js';
+import { ImageSearchSessions } from './image-search.js';
 
 type BrowserRequest = { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string } };
 
@@ -12,7 +12,7 @@ type BrowserRequest = { headers: Record<string, string | string[] | undefined>; 
 // bridge; the internal JWT-only scan controller keeps its independent authentication.
 @Controller('api/v1/browser/scans')
 export class BrowserScansController {
-  private readonly searchCalls = new Map<string, { until: number; count: number }>();
+  private readonly imageSearch = new ImageSearchSessions();
   constructor(@Inject(AuthStore) private readonly store: AuthStore, @Inject(ScansService) private readonly scans: ScansService) {}
 
   private identity(req: BrowserRequest, mutation = false): Identity {
@@ -45,18 +45,9 @@ export class BrowserScansController {
 
   @Get('images')
   @Header('Cache-Control', 'no-store')
-  searchImages(@Req() req: BrowserRequest, @Query('q') query?: string) {
+  searchImages(@Req() req: BrowserRequest, @Query('q') query?: string, @Query('generation') generation?: string, @Query('cursor') cursor?: string) {
     const { subject } = this.identity(req);
-    const now = Date.now();
-    if (this.searchCalls.size > 1024) {
-      for (const [key, value] of this.searchCalls) if (value.until <= now) this.searchCalls.delete(key);
-      if (this.searchCalls.size > 1024) this.searchCalls.clear();
-    }
-    const previous = this.searchCalls.get(subject);
-    const count = previous && previous.until > now ? previous.count + 1 : 1;
-    this.searchCalls.set(subject, { until: previous && previous.until > now ? previous.until : now + 10_000, count });
-    if (count > 10) throw new HttpException({ errorCode: 'IMAGE_SEARCH_RATE_LIMITED' }, HttpStatus.TOO_MANY_REQUESTS);
-    return searchImages(query);
+    return this.imageSearch.search(subject, query, generation, cursor);
   }
 
   @Post()

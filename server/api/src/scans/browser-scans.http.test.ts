@@ -35,6 +35,14 @@ test('browser scans fail closed for anonymous, unlisted users, foreign origins a
     process.env.SCAN_BROWSER_ALLOWED_USER_IDS = alice.id;
     const path = `${base}/browser/scans`;
     const post = (cookie: string, requestOrigin = origin) => fetch(path, { method: 'POST', headers: { cookie, origin: requestOrigin, 'content-type': 'application/json' }, body: JSON.stringify(sample) });
+        const discovery = `${path}/images?q=nginx&generation=gen`;
+        assert.equal((await fetch(discovery)).status, 401);
+        assert.equal((await fetch(discovery, { headers: { cookie: bob.cookie } })).status, 403);
+        assert.equal((await fetch(`${discovery}&cursor=${'a'.repeat(48)}`, { headers: { cookie: alice.cookie } })).status, 410);
+        assert.equal((await fetch(`${path}/images?q=nginx`, { headers: { cookie: alice.cookie } })).status, 400);
+        assert.equal((await fetch(`${path}/images?q=https%3A%2F%2Fevil.example&generation=gen`, { headers: { cookie: alice.cookie } })).status, 400);
+        const forged = await fetch(path, { method: 'POST', headers: { cookie: alice.cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...sample, imageReference: 'registry-1.docker.io/library/nginx:latest' }) });
+        assert.equal(forged.status, 400);
     assert.equal((await fetch(path)).status, 401);
     assert.equal((await fetch(path, { headers: { cookie: bob.cookie } })).status, 403);
     assert.equal((await post(bob.cookie)).status, 403);

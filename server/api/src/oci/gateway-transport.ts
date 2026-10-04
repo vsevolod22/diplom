@@ -3,16 +3,28 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import { ResolutionRejected, type ManifestFetch, type ManifestResponse } from './registry-resolver.js';
 
-export type HubSearchResponse = { results: Array<{ repo_name?: unknown; name?: unknown }> };
+export type HubSearchResponse = { results: Array<{ repo_name?: unknown; name?: unknown }>; next?: string | null; count?: number; bytes?: number };
 
-export async function dockerHubSearch(kind: 'tags' | 'repositories', query: string): Promise<HubSearchResponse> {
-  const url = kind === 'tags'
-    ? `https://hub.docker.com/v2/repositories/library/alpine/tags/?page_size=12&name=${encodeURIComponent(query)}`
-    : `https://hub.docker.com/v2/search/repositories/?page_size=12&query=${encodeURIComponent(query)}`;
-  const result = await gatewayGet({ host: 'egress', port: 8080 }, new URL(url), { accept: 'application/json' }, 128_000);
+export function hubSearchUrl(kind: 'tags' | 'repositories', query: string, page: number): URL {
+  if (!Number.isInteger(page) || page < 1 || page > 6) throw new ResolutionRejected('Invalid search page');
+  const url = new URL(kind === 'tags' ? 'https://hub.docker.com/v2/repositories/library/alpine/tags/' : 'https://hub.docker.com/v2/search/repositories/');
+  url.searchParams.set('page_size', '12');
+  url.searchParams.set(kind === 'tags' ? 'name' : 'query', query);
+  url.searchParams.set('page', String(page));
+  return url;
+}
+
+export async function dockerHubSearch(kind: 'tags' | 'repositories', query: string, page = 1,
+  request = gatewayGet): Promise<HubSearchResponse> {
+  const result = await request({ host: 'egress', port: 8080 }, hubSearchUrl(kind, query, page), { accept: 'application/json' }, 128_000, 5000);
+  if (result.body.length > 128_000) throw new ResolutionRejected('Image search size limit');
   if (result.status !== 200 || !String(result.headers['content-type'] ?? '').startsWith('application/json'))
     throw new ResolutionRejected('Image search unavailable');
-  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.body)) as HubSearchResponse; }
+  try {
+    const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.body)) as HubSearchResponse;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response');
+    return { ...data, bytes: result.body.length };
+  }
   catch { throw new ResolutionRejected('Invalid image search response'); }
 }
 
@@ -35,23 +47,34 @@ function safeUrl(raw: string, allowed: ReadonlySet<string>): URL {
 
 // Never directly resolve or fetch a remote URL in this process. TLS validates the host
 // through Node's trust store; the gateway independently validates every connected IP.
-async function gatewayGet(gateway: Gateway, url: URL, headers: Record<string, string>, maxBytes = MAX_OBJECT): Promise<ManifestResponse> {
+export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<string, string>, maxBytes = MAX_OBJECT, deadlineMs?: number): Promise<ManifestResponse> {
   if (!gateway.host || !Number.isInteger(gateway.port) || gateway.port < 1 || gateway.port > 65535)
     throw new ResolutionRejected('Invalid gateway');
   return new Promise((resolve, reject) => {
     let settled = false;
-    const fail = (stage: string) => { if (!settled) { settled = true; reject(new ResolutionRejected(`Registry ${stage} failed`)); } }; 
+    const resources: Array<{ destroy: () => void }> = [];
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => { clearTimeout(deadline); for (const resource of resources) resource.destroy(); };
+    const fail = (stage: string) => { if (!settled) { settled = true; cleanup(); reject(new ResolutionRejected(`Registry ${stage} failed`)); } };
+    if (deadlineMs !== undefined) deadline = setTimeout(() => fail('absolute deadline'), deadlineMs);
     const connect = httpRequest({ hostname: gateway.host, port: gateway.port, method: 'CONNECT', path: `${url.hostname}:443`, headers: { host: `${url.hostname}:443` }, timeout: 5000 });
+    resources.push(connect);
     connect.on('connect', (response, socket, head) => {
+      resources.push(socket);
+      if (settled) { socket.destroy(); return; }
       if (response.statusCode !== 200 || head.length) { socket.destroy(); fail(`CONNECT status ${response.statusCode ?? 0}`); return; }
       const secure = tlsConnect({ socket, servername: url.hostname, rejectUnauthorized: true });
+      resources.push(secure);
       secure.setTimeout(10_000, () => { secure.destroy(); fail('TLS timeout'); });
       secure.on('error', () => fail('TLS')); 
       secure.once('secureConnect', () => {
+        if (settled) return;
         const agent = new HttpsAgent({ keepAlive: false });
+        resources.push(agent);
         agent.createConnection = () => secure;
         const request = httpsRequest({ hostname: url.hostname, method: 'GET', path: url.pathname + url.search,
           headers, agent, timeout: 10000 }, result => {
+          resources.push(result);
           const chunks: Buffer[] = [];
           let size = 0;
           result.on('data', (chunk: Buffer) => {
@@ -59,11 +82,12 @@ async function gatewayGet(gateway: Gateway, url: URL, headers: Record<string, st
             if (size > maxBytes) { result.destroy(); fail('size limit'); } else chunks.push(chunk);
           });
           result.on('end', () => {
-            if (!settled) { settled = true; resolve({ status: result.statusCode || 0, headers: result.headers, body: Buffer.concat(chunks) }); }
+            if (!settled) { settled = true; clearTimeout(deadline); resolve({ status: result.statusCode || 0, headers: result.headers, body: Buffer.concat(chunks) }); agent.destroy(); }
           });
           result.on('error', () => fail('response')); 
         });
-        request.on('error', () => fail('request')); 
+        resources.push(request);
+        request.on('error', () => fail('request'));
         request.on('timeout', () => { request.destroy(); fail('request timeout'); });
         request.end();
       });

@@ -10,6 +10,7 @@ import { ScanShell } from '@/features/scans/ScanShell';
 import { ScanScene } from '@/features/scans/ScanScene';
 import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import { scanChecks } from '@/shared/api/scans/scanTransport';
+import { scanSession } from '@/shared/api/auth/scanSession';
 
 const alpineTargets = [
   { label: 'Alpine · latest', reference: 'registry-1.docker.io/library/alpine:latest' },
@@ -17,7 +18,14 @@ const alpineTargets = [
   { label: 'Alpine · 3.20', reference: 'registry-1.docker.io/library/alpine:3.20' },
   { label: 'Alpine · 3.16 (архивный · CVE-пример)', reference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6' },
 ] as const;
-type ImageSuggestion = { label: string; reference: string; scannable: boolean };
+type ImageSuggestion = { label: string; reference: string; scannable: boolean; reason?: string; tagConfirmed?: boolean };
+const searchPageSchema = z.object({
+  items: z.array(z.object({ label: z.string().min(1).max(256), reference: z.string().regex(/^registry-1\.docker\.io\/[a-z0-9._/-]+:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/), scannable: z.boolean(), eligibility: z.enum(['alpine-only', 'unsupported']), reason: z.string().min(1).max(256), kind: z.enum(['tag', 'repository']), tagConfirmed: z.boolean(), checks: z.object({ secret: z.boolean(), sbom: z.boolean(), vuln: z.enum(['conditional', 'unsupported']) }) })).max(12),
+  nextCursor: z.string().regex(/^[a-f0-9]{48}$/).nullable(), state: z.enum(['more-available', 'terminal', 'quota-exhausted']), loaded: z.number().int().min(0).max(60), pages: z.number().int().min(1).max(5),
+  policy: z.object({ pageSize: z.literal(12), maxPages: z.literal(5), maxCandidates: z.literal(60) }),
+}).superRefine((page, context) => {
+  if ((page.state === 'more-available') !== (page.nextCursor !== null) || page.loaded < page.items.length || page.items.some(item => item.scannable !== (item.eligibility === 'alpine-only') || (item.scannable && (!item.reference.startsWith('registry-1.docker.io/library/alpine:') || !item.checks.secret || !item.checks.sbom || item.checks.vuln !== 'conditional')) || item.tagConfirmed !== (item.kind === 'tag'))) context.addIssue({ code: 'custom', message: 'Invalid discovery eligibility' });
+});
 const formSchema = z.object({
   imageReference: z.string().regex(/^registry-1\.docker\.io\/library\/alpine(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/, 'Выберите доступный образ Alpine'),
   checks: z.array(z.enum(scanChecks)).min(1, 'Выберите хотя бы одну проверку'),
@@ -39,45 +47,76 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const [search, setSearch] = useState('');
   const [suggestions, setSuggestions] = useState<ImageSuggestion[]>([]);
   const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [pageState, setPageState] = useState<'more-available' | 'terminal' | 'quota-exhausted' | null>(null);
+  const [pageRequest, setPageRequest] = useState(0);
+  const searchGeneration = useRef(0);
+  const loadedSuggestions = useRef<ImageSuggestion[]>([]);
+  const discovery = useRef<{ generation: string; cursor: string | null; identity: string; query: string; pages: number }>({ generation: '', cursor: null, identity: '', query: '', pages: 0 });
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const selectedTarget = useRef<ImageSuggestion | null>(null);
   const attempt = useRef<{ target: string; checks: string; key: string } | null>(null);
   const live = useLiveScanSession();
   const navigate = useNavigate();
   useEffect(() => {
-    const query = search.trim();
-    if (demo || !live || query.length < 2 || query.length > 64) {
+    const query = search.trim().toLowerCase().replace(/ +/g, ' ');
+    const generation = ++searchGeneration.current;
+    const identity = live?.scope.join(':') ?? '';
+    if (discovery.current.identity !== identity) {
+      setConfirmed(false); attempt.current = null; selectedTarget.current = null;
+      setValue('imageReference', '');
+    }
+    const append = pageRequest > 0 && discovery.current.cursor !== null && discovery.current.identity === identity && discovery.current.query === query;
+    if (!append) {
+      discovery.current = { generation: crypto.randomUUID(), cursor: null, identity, query, pages: 0 };
+      setSuggestions([]); setNextCursor(null); setPageState(null);
+    }
+    if (demo || !live || query.length < 2 || query.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(query) || query.includes('..') || query.includes('//') || query.includes('://')) {
       setSuggestions([]);
       setSearchState('idle');
       return;
     }
     setSearchState('loading');
     const controller = new AbortController();
+    const current = () => {
+      const session = scanSession();
+      return searchGeneration.current === generation && !controller.signal.aborted && session.generation === live.scope[1] && session.subject === live.scope[2];
+    };
+    const cursor = append ? discovery.current.cursor : null;
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}`, {
+        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}&generation=${encodeURIComponent(discovery.current.generation)}${cursor ? `&cursor=${cursor}` : ''}`, {
           credentials: 'same-origin', signal: controller.signal, headers: { accept: 'application/json' },
         });
         if (!response.ok) throw new Error('Search unavailable');
         const data: unknown = await response.json();
-        if (!Array.isArray(data)) throw new Error('Invalid search response');
-        setSuggestions(data.filter((item): item is ImageSuggestion =>
-          typeof item?.label === 'string' && typeof item?.reference === 'string' && typeof item?.scannable === 'boolean').slice(0, 12));
+        const page = searchPageSchema.parse(data);
+        if (!current()) return;
+        const merged = [...new Map([...(append ? loadedSuggestions.current : []), ...page.items].map(item => [item.reference, item])).values()];
+        if (page.pages !== (append ? discovery.current.pages + 1 : 1) || page.loaded !== merged.length || (page.state === 'more-available' && page.pages >= 5)) throw new Error('Invalid page sequence');
+        setSuggestions(merged);
+        loadedSuggestions.current = merged;
+        discovery.current.pages = page.pages;
+        setNextCursor(page.nextCursor); setPageState(page.state);
+        discovery.current.cursor = page.nextCursor;
         setSearchState('ready');
       } catch {
-        if (!controller.signal.aborted) { setSuggestions([]); setSearchState('error'); }
+        if (current()) { setSearchState('error'); }
       }
-    }, 350);
+    }, append ? 0 : 350);
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [search, demo, live]);
+  }, [search, demo, live, pageRequest, setValue]);
   const matches = alpineTargets.filter(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase()));
   const visible: ImageSuggestion[] = [
     ...matches.map(target => ({ ...target, scannable: true })),
-    ...(searchState === 'ready' ? suggestions.filter(target => !matches.some(item => item.reference === target.reference)) : []),
+    ...suggestions.filter(target => !matches.some(item => item.reference === target.reference)),
   ];
   async function create(values: FormValues) {
     if (demo || !live || !confirmed || busy) return;
+    const eligible = alpineTargets.some(target => target.reference === values.imageReference) || (selectedTarget.current?.reference === values.imageReference && selectedTarget.current.scannable === true);
+    if (!eligible) { setConfirmed(false); setError('Выберите цель с подтверждённым допуском Alpine.'); return; }
     setBusy(true);
     setError('');
     try {
@@ -136,7 +175,12 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 id="image-search"
                 type="search"
                 value={search}
-                onChange={event => setSearch(event.target.value)}
+                onChange={event => {
+                  ++searchGeneration.current;
+                  discovery.current.cursor = null;
+                  setSuggestions([]); setNextCursor(null); setPageState(null); setPageRequest(0);
+                  setSearch(event.target.value);
+                }}
                 placeholder="Alpine 3.16, nginx, postgres…"
                 autoComplete="off"
               />
@@ -149,18 +193,24 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     aria-pressed={imageReference === target.reference}
                     disabled={!target.scannable}
                     onClick={() => {
+                      selectedTarget.current = target;
                       setValue('imageReference', target.reference, { shouldValidate: true });
                       setConfirmed(false);
+                      if (imageReference !== target.reference) attempt.current = null;
                       setError('');
                     }}
                   >
                     <strong>{target.label}</strong>
-                    <span>{target.reference}{target.scannable ? '' : ' · найден в Docker Hub, сканирование пока недоступно'}</span>
+                    <span>{target.reference}{target.reason ? ` · ${target.reason}` : ''}{target.tagConfirmed === false ? ' · latest — предлагаемая цель, наличие тега и платформы не подтверждено' : ''}{alpineTargets.some(saved => saved.reference === target.reference) ? ' · сохранённая цель' : ' · найдено в Docker Hub'}</span>
                   </button>
                 ))}
                 {searchState === 'loading' && search.trim().length >= 2 ? <p role="status">Ищем в Docker Hub…</p> : null}
-                {searchState === 'error' && search.trim().length >= 2 ? <p role="status">Поиск Docker Hub сейчас недоступен. Сохранённые цели остаются доступны.</p> : null}
-                {!visible.length && searchState === 'ready' ? <p role="status">Ничего не найдено.</p> : null}
+                {searchState === 'error' && search.trim().length >= 2 ? <p role="status">Поиск Docker Hub сейчас недоступен; загруженные результаты неполные. Сохранённые цели остаются доступны.</p> : null}
+                {!suggestions.length && searchState === 'ready' && pageState === 'terminal' ? <p role="status">Ничего не найдено в Docker Hub.</p> : null}
+                                {pageState === 'quota-exhausted' ? <p role="status">Достигнут лимит поиска; результаты неполные (не более 5 страниц / 60 образов).</p> : null}
+                                {nextCursor ? <button type="button" disabled={searchState === 'loading'} onClick={() => setPageRequest(value => value + 1)}>Показать ещё</button> : null}
+                                {searchState === 'error' ? <button type="button" onClick={() => { discovery.current.cursor = null; setPageRequest(value => value + 1); }}>Начать новый поиск</button> : null}
+                                {imageReference ? <p className="scan-a1__muted">Выбранная цель (сохраняется отдельно от поиска): {imageReference}</p> : null}
               </div>
               {imageReference === alpineTargets[3].reference ? <p className="scan-a1__muted">Архивный образ: при проверке закреплённого digest 04.10.2026 локальная DB нашла 4 CVE. Результат нового запуска зависит от актуальной DB и доступности scanner; этот образ не используйте для рабочих нагрузок.</p> : null}
               {errors.imageReference ? <p id="image-reference-error" role="alert">{errors.imageReference.message}</p> : null}
@@ -168,15 +218,15 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
             <fieldset>
               <legend>Проверки · одновременно, область registry IMAGE</legend>
               <label>
-                <input type="checkbox" value="secret" {...register('checks', { onChange: () => { setConfirmed(false); setError(''); } })} />
+                <input type="checkbox" value="secret" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
                 Secrets · проверка образа
               </label>
               <label>
-                <input type="checkbox" value="sbom" {...register('checks', { onChange: () => { setConfirmed(false); setError(''); } })} />
+                <input type="checkbox" value="sbom" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
                 SBOM · перечень пакетов, не проверка уязвимостей
               </label>
               <label>
-                <input type="checkbox" value="vuln" {...register('checks', { onChange: () => { setConfirmed(false); setError(''); } })} />
+                <input type="checkbox" value="vuln" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
                 CVE · доступно только при настроенной сервером базе уязвимостей
               </label>
               <label>

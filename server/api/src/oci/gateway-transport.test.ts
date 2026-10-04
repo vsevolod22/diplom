@@ -1,7 +1,45 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { dockerHubManifestFetch } from './gateway-transport.js';
+import { dockerHubManifestFetch, dockerHubSearch, gatewayGet } from './gateway-transport.js';
+import { createServer } from 'node:http';
 import { ResolutionRejected, type ManifestResponse } from './registry-resolver.js';
+
+test('Hub requests build fixed destinations with discovery-only absolute deadline and size limit', async () => {
+  await dockerHubSearch('repositories', 'nginx', 2, async (gateway, url, headers, bytes, deadline) => {
+    assert.deepEqual(gateway, { host: 'egress', port: 8080 });
+    assert.equal(url.hostname, 'hub.docker.com'); assert.equal(url.searchParams.get('page'), '2');
+    assert.deepEqual(headers, { accept: 'application/json' }); assert.equal(bytes, 128_000); assert.equal(deadline, 5000);
+    return response(200, { 'content-type': 'application/json' }, '{"results":[],"count":0,"next":null}');
+  });
+  for (const result of [response(302, { location: 'https://evil.example' }), response(429), response(503), response(200, { 'content-type': 'text/html' }, '{}'), response(200, { 'content-type': 'application/json' }, 'broken'), response(200, { 'content-type': 'application/json' }, 'x'.repeat(128_001))]) {
+    await assert.rejects(dockerHubSearch('tags', '3.16', 1, async () => result));
+  }
+});
+
+test('absolute discovery deadline covers a stalled CONNECT and closes its socket', async () => {
+  const sockets = new Set<import('node:stream').Duplex>();
+  const server = createServer();
+  server.on('connect', (_request, socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const started = performance.now();
+    await assert.rejects(gatewayGet({ host: '127.0.0.1', port: (server.address() as { port: number }).port }, new URL('https://hub.docker.com/'), {}, 128_000, 40), /absolute deadline/);
+    assert.ok(performance.now() - started < 1000);
+  } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('absolute deadline also covers a CONNECT established but stalled TLS handshake', async () => {
+  const sockets = new Set<import('node:stream').Duplex>();
+  const server = createServer();
+  server.on('connect', (_request, socket) => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket));
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await assert.rejects(gatewayGet({ host: '127.0.0.1', port: (server.address() as { port: number }).port }, new URL('https://hub.docker.com/'), {}, 128_000, 40), /absolute deadline/);
+  } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
 
 const gateway = { host: 'egress', port: 8080 };
 const path = '/v2/library/alpine/manifests/3.20';
@@ -56,7 +94,6 @@ test('hostile auth realms, scopes and redirect URLs fail closed', async () => {
   }
   for (const location of ['http://production.cloudfront.docker.com/path', 'https://169.254.169.254/path',
     'https://production.cloudfront.docker.com.evil.org/path', 'https://user@production.cloudfront.docker.com/path']) {
-    await assert.rejects(dockerHubManifestFetch(gateway, 'library/alpine', async () => response(302, { location }))
-      ('registry-1.docker.io', '/v2/library/alpine/blobs/sha256:abc'), ResolutionRejected);
+    await assert.rejects(dockerHubManifestFetch(gateway, 'library/alpine', async () => response(302, { location }))('registry-1.docker.io', '/v2/library/alpine/blobs/sha256:abc'), ResolutionRejected);
   }
 });
