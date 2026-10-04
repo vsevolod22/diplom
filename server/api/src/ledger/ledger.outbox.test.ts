@@ -58,7 +58,7 @@ test('migrates old schema atomically without losing queued scan', () => {
     assert.equal(ledger.claim(100)?.scanId, 'old-id');
     ledger.close();
     const migrated = new Database(filename);
-    assert.equal(migrated.pragma('user_version', { simple: true }), 9);
+    assert.equal(migrated.pragma('user_version', { simple: true }), 10);
     migrated.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -3,6 +3,9 @@ import { scanPinned, type ScanResult } from './scan-worker.js';
 import { scanSbomPinned, type SbomScanResult } from './sbom-worker.js';
 import { scanVulnPinned, type VulnScanOptions, type VulnScanResult } from './vuln-worker.js';
 import { scannerFailure } from './scanner-errors.js';
+import { assertArchiveDbFreshness } from './archive-result-contract.js';
+import { scanNginxArchive } from './archive-scan-worker.js';
+import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 
 type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal;
   vuln?: Omit<VulnScanOptions, 'timeoutMs' | 'signal'> };
@@ -29,7 +32,7 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   // The claim API cannot inspect checks until after claiming; reserve the maximum
   // sequential budget for every claim so even a three-check job stays fenced.
   if (options.signal?.aborted) return false;
-  const job = ledger.claim(now, 3 * options.timeoutMs + 27_000);
+  const job = ledger.claim(now, 3 * options.timeoutMs + 27_000, 627_000);
   if (!job) return false;
   const canonical = checks(job.checks);
   // Preserve legacy single-runner injection for unsupported check sets, but
@@ -61,6 +64,33 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   const outcomes: CombinedOutcome[] = [];
   const image = `${job.registry}/${job.repository}@${job.digest}`;
   try {
+    if (job.repository === 'library/nginx') {
+      const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => Object.entries(candidate).every(([key, value]) => key === 'configDigest' || job[key as keyof Job] === value));
+      if (!canonical || !target) {
+        ledger.finish(job.scanId, job.attempts, 'failed'); return true;
+      }
+      // Only internally seeded exact-candidate qualification jobs can reach this
+      // branch; public API admission remains closed until independent qualification.
+      try {
+        const report = await scanNginxArchive(canonical, { signal: controller.signal, target,
+          vuln: options.vuln ? { ...options.vuln, timeoutMs: 120_000, signal: controller.signal } : undefined });
+        poll();
+        if (!controller.signal.aborted) {
+          try { assertArchiveDbFreshness(report); }
+          catch { report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' }; }
+          try { ledger.finishArchive(job.scanId, job.attempts, report); }
+          catch (error) {
+            // A NextUpdate crossing inside BEGIN IMMEDIATE must not erase independent checks.
+            try { assertArchiveDbFreshness(report); } catch {
+              report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
+              ledger.finishArchive(job.scanId, job.attempts, report); return true;
+            }
+            throw error;
+          }
+        }
+      } catch { if (!controller.signal.aborted) ledger.finish(job.scanId, job.attempts, 'failed'); }
+      return true;
+    }
     for (const check of requested) {
       poll();
       if (controller.signal.aborted) return true;

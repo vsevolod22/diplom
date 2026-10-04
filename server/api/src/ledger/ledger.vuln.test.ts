@@ -67,7 +67,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'completed']);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 9);
+  assert.equal(db.pragma('user_version', { simple: true }), 10);
   assert.equal(count(db, 'scan_vuln_results'), 1);
   assert.equal(count(db, 'scan_vuln_findings'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');

@@ -142,6 +142,25 @@ export class ScansService {
     const ledger = this.ledgerStore.ledger;
     const snapshot = ledger?.snapshot(scanId, identity.subject);
     if (!snapshot) throw new NotFoundException();
+    const archive = ledger?.archiveResult(scanId, identity.subject);
+    if (archive) {
+      const checks = ledger!.requestedChecks(scanId, identity.subject);
+      const perCheck = Object.fromEntries(checks.map(check => {
+        const result = archive[check as 'secret' | 'sbom' | 'vuln'];
+        return [check, result ? { outcome: result.outcome,
+          ...(result.outcome !== 'checked' ? { reason: result.reason } : {}),
+          ...(check === 'secret' && archive.secret?.outcome === 'checked' ? { findingCount: archive.secret.findings.length } : {}),
+          ...(check === 'sbom' && archive.sbom?.outcome === 'checked' ? { componentCount: archive.sbom.sbom.components.length } : {}),
+          ...(check === 'vuln' && archive.vuln?.outcome === 'checked' ? { findingCount: archive.vuln.findings.length } : {}),
+          ...(check === 'vuln' && archive.vuln && archive.vuln.outcome !== 'failed' ?
+            { os: archive.vuln.os, node: archive.vuln.node, db: archive.vuln.db } : {}),
+          scannerVersion: archive.scannerVersion, checksVersion: archive.receipt.checksVersion, checkedAt: archive.checkedAt } : null];
+      }));
+      return { scanId, ...snapshot, checks, perCheck, result: checks.length === 1 ? perCheck[checks[0]] : null,
+        imageProfile: { version: archive.receipt.profileVersion, configDigest: archive.receipt.configDigest,
+          resourcePolicyVersion: archive.receipt.resourcePolicyVersion, qualified: false },
+        coverage: 'image', checkedIsNotSafe: true };
+    }
     const sbom = ledger?.sbom(scanId, identity.subject);
     const sbomCoverage = sbom?.outcome === 'checked'
       ? { check: 'sbom', coverage: sbom.coverage, outcome: sbom.outcome, componentCount: sbom.componentCount,
@@ -170,7 +189,17 @@ export class ScansService {
     if (cursor !== undefined && !/^(0|[1-9]\d{0,5})$/.test(cursor) ||
         limit !== undefined && !/^(?:[1-9]|[1-9]\d|100)$/.test(limit)) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
     const ledger = this.ledgerStore.ledger;
-    const result = ledger?.findings(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
+    const archive = ledger?.archiveResult(scanId, identity.subject);
+        if (archive?.secret) {
+          const result = archive.secret;
+          if (result.outcome !== 'checked') return { findings: [], nextCursor: null, coverage: { outcome: result.outcome, reason: result.reason } };
+          const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
+          if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
+          return { findings: result.findings.slice(start, end), nextCursor: end < result.findings.length ? end : null,
+            coverage: { check: 'secret', outcome: 'checked', coverage: 'image', findingCount: result.findings.length,
+              scannerVersion: archive.scannerVersion, checkedAt: archive.checkedAt } };
+        }
+        const result = ledger?.findings(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!result) throw new NotFoundException();
     return { ...result, coverage: ledger?.result(scanId, identity.subject) ?? null };
   }
@@ -182,7 +211,17 @@ export class ScansService {
       throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
     const ledger = this.ledgerStore.ledger;
     if (!ledger) throw unavailable();
-    const report = ledger.sbom(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
+    const archive = ledger.archiveResult(scanId, identity.subject);
+        if (archive?.sbom) {
+          const result = archive.sbom;
+          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason, coverage: 'image', components: [], nextCursor: null };
+          const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.sbom.components.length);
+          if (start > result.sbom.components.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
+          return { outcome: 'checked', coverage: 'image', image: result.sbom.image, platform: result.sbom.platform,
+            os: result.sbom.os, components: result.sbom.components.slice(start, end), componentCount: result.sbom.components.length,
+            nextCursor: end < result.sbom.components.length ? end : null, scannerVersion: archive.scannerVersion, checkedAt: archive.checkedAt };
+        }
+        const report = ledger.sbom(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!report) throw new NotFoundException();
     if (report.outcome === 'checked' && Number(cursor ?? 0) > report.componentCount)
       throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
@@ -196,7 +235,19 @@ export class ScansService {
       throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
     const ledger = this.ledgerStore.ledger;
     if (!ledger) throw unavailable();
-    const report = ledger.vuln(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
+    const archive = ledger.archiveResult(scanId, identity.subject);
+        if (archive?.vuln) {
+          const result = archive.vuln;
+          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason, coverage: 'image', findings: [], nextCursor: null,
+            ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db } : {}) };
+          const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
+          if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
+          return { outcome: 'checked', coverage: 'image', image: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
+            platform: archive.receipt.platform, findings: result.findings.slice(start, end), findingCount: result.findings.length,
+            nextCursor: end < result.findings.length ? end : null, db: result.db, os: result.os, node: result.node,
+            scannerVersion: archive.scannerVersion, checkedAt: archive.checkedAt };
+        }
+        const report = ledger.vuln(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!report) throw new NotFoundException();
     if (report.outcome === 'checked' && Number(cursor ?? 0) > report.findingCount)
       throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });

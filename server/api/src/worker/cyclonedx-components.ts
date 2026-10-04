@@ -1,3 +1,5 @@
+import { validateArchiveSbom, type ArchiveBinding } from '../oci/archive-identity.js';
+
 // Allowlist for a future SBOM stage: no raw Trivy JSON, URLs, paths or properties cross into results.
 export type SbomComponent = { ecosystem: 'apk' | 'npm'; name: string; version: string };
 export type ImageSbom = { image: string; platform: 'linux/amd64'; os: { name: string; version: string }; components: SbomComponent[] };
@@ -35,11 +37,16 @@ function packageIdentity(purl: string, name: string, version: string): { ecosyst
   return { ecosystem: 'apk', distro: q[1] };
 }
 
-export function parseImageSbom(value: unknown, image: string, platform: string): ImageSbom {
-  if (!/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(image) || platform !== 'linux/amd64' ||
+export function parseImageSbom(value: unknown, image: string, platform: string, binding?: ArchiveBinding): ImageSbom {
+  if (binding) {
+    validateArchiveSbom(value, binding);
+    if (image !== `${binding.receipt.registry}/${binding.receipt.repository}@${binding.receipt.digest}` || platform !== binding.receipt.platform)
+      throw new Error('Unbound archive SBOM');
+  }
+  if ((!binding && !/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(image)) || platform !== 'linux/amd64' ||
       !object(value) || value.bomFormat !== 'CycloneDX' || value.specVersion !== '1.6' ||
       !object(value.metadata) || !object(value.metadata.component) ||
-      value.metadata.component.type !== 'container' || value.metadata.component.name !== image ||
+      value.metadata.component.type !== 'container' || value.metadata.component.name !== (binding?.archivePath ?? image) ||
       !Array.isArray(value.components) || value.components.length === 0 || value.components.length > 1000) {
     throw new Error('Invalid or unbound SBOM');
   }

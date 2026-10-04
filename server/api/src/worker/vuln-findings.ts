@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateArchiveJson, type ArchiveBinding } from '../oci/archive-identity.js';
 
 // Data-only normalizer. The caller must separately enforce a successful Trivy 0.69.3
 // subprocess, bounded JSON input bytes, and an isolated, pinned scan invocation.
@@ -23,7 +24,7 @@ const severities = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
 const sources = new Set([
   'alpine', 'nvd', 'ghsa', 'npm', 'nodejs-security-wg', 'osv', 'cve',
   'redhat', 'ubuntu', 'photon', 'amazon', 'oracle-oval', 'julia', 'alma',
-  'azure', 'rocky', 'cbl-mariner', 'bitnami', 'ruby-advisory-db',
+  'azure', 'rocky', 'cbl-mariner', 'bitnami', 'ruby-advisory-db', 'bottlerocket',
 ]);
 
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -41,11 +42,16 @@ function validPackagePath(value: unknown): value is string {
       segment !== '.' && segment !== '..' && /^[A-Za-z0-9@._+-]+$/.test(segment));
 }
 
-export function parseVulnFindings(value: unknown, image: string, platform: string): VulnFinding[] {
-  if (!imagePattern.test(image) || platform !== 'linux/amd64' || !object(value) ||
-      value.SchemaVersion !== 2 || value.ArtifactType !== 'container_image' || value.ArtifactName !== image ||
-      !object(value.Metadata) || !Array.isArray(value.Metadata.RepoDigests) ||
-      value.Metadata.RepoDigests.length !== 1 || value.Metadata.RepoDigests[0] !== image ||
+export function parseVulnFindings(value: unknown, image: string, platform: string, binding?: ArchiveBinding): VulnFinding[] {
+  if (binding) {
+    validateArchiveJson(value, binding);
+    if (image !== `${binding.receipt.registry}/${binding.receipt.repository}@${binding.receipt.digest}` || platform !== binding.receipt.platform)
+      throw new Error('Unbound archive vulnerabilities');
+  }
+  if ((!binding && !imagePattern.test(image)) || platform !== 'linux/amd64' || !object(value) ||
+      value.SchemaVersion !== 2 || value.ArtifactType !== 'container_image' || value.ArtifactName !== (binding?.archivePath ?? image) ||
+      !object(value.Metadata) || (!binding && (!Array.isArray(value.Metadata.RepoDigests) ||
+      value.Metadata.RepoDigests.length !== 1 || value.Metadata.RepoDigests[0] !== image)) ||
       !object(value.Metadata.ImageConfig) || value.Metadata.ImageConfig.os !== 'linux' ||
       value.Metadata.ImageConfig.architecture !== 'amd64' ||
       !object(value.Metadata.OS) || value.Metadata.OS.Family !== 'alpine' ||
@@ -116,7 +122,7 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
       const provenanceRef = ecosystem === 'npm'
         ? `target-${createHash('sha256').update(JSON.stringify([result.Target, raw.PkgPath])).digest('hex')}`
         : targetRef;
-      const key = JSON.stringify([ecosystem, provenanceRef, raw.VulnerabilityID, raw.PkgName, raw.InstalledVersion]);
+      const key = JSON.stringify([...(binding ? [image, platform, 'vuln'] : []), ecosystem, provenanceRef, raw.VulnerabilityID, raw.PkgName, raw.InstalledVersion]);
       const existing = byLocation.get(key);
       if (existing) {
         if (existing.severity !== raw.Severity || existing.fixedVersion !== fixedVersion)

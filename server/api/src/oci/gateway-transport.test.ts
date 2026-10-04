@@ -52,7 +52,7 @@ test('verified local TLS: stalled headers, drip deadline, streaming overflow and
   const certPath = join(directory, 'cert.pem'); const keyPath = join(directory, 'key.pem');
   const sockets = new Set<import('node:stream').Duplex>();
   const timers = new Set<ReturnType<typeof setInterval>>();
-  let mode: 'headers' | 'drip' | 'oversize' = 'headers';
+  let mode: 'headers' | 'drip' | 'oversize' | 'finite' = 'headers';
   let requests = 0; let drippedChunks = 0;
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=Hub discovery test', '-addext', 'subjectAltName=DNS:hub.docker.com'], { timeout: 10_000, stdio: 'ignore' });
   const track = (socket: import('node:stream').Duplex) => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)); };
@@ -61,6 +61,7 @@ test('verified local TLS: stalled headers, drip deadline, streaming overflow and
     if (mode === 'headers') return;
     response.writeHead(200, { 'content-type': 'application/json' }); response.flushHeaders();
     if (mode === 'oversize') { response.write(Buffer.alloc(128_001)); return; }
+        if (mode === 'finite') { response.end(Buffer.alloc(4096)); return; }
     const timer = setInterval(() => { drippedChunks++; response.write(' '); }, 10); timers.add(timer);
     response.once('close', () => { clearInterval(timer); timers.delete(timer); });
   });
@@ -78,13 +79,22 @@ test('verified local TLS: stalled headers, drip deadline, streaming overflow and
   try {
     await new Promise<void>(resolve => tls.listen(0, '127.0.0.1', resolve));
     await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
-    const run = async (host: string, trusted: boolean, expected: string) => {
+    const run = async (host: string, trusted: boolean, expected: string, streaming = false) => {
       const env = { ...process.env };
       delete env.NODE_EXTRA_CA_CERTS; delete env.NODE_TLS_REJECT_UNAUTHORIZED; delete env.NODE_OPTIONS;
       if (trusted) env.NODE_EXTRA_CA_CERTS = certPath;
       const script = `import assert from 'node:assert/strict';
         import { gatewayGet } from ${JSON.stringify(new URL('./gateway-transport.ts', import.meta.url).href)};
-        await assert.rejects(gatewayGet({host:'127.0.0.1',port:${(proxy.address() as { port: number }).port}}, new URL(${JSON.stringify(`https://${host}/`)}), {},128000,200), new RegExp(${JSON.stringify(expected)}));`;
+        const gateway={host:'127.0.0.1',port:${(proxy.address() as { port: number }).port}};
+                const url=new URL(${JSON.stringify(`https://${host}/`)});
+                if (${streaming}) {
+                  let busy=false,bytes=0;
+                  const sink=async(chunk,status)=>{ assert.equal(busy,false);busy=true;assert.equal(status,200);
+                    await new Promise(resolve=>setTimeout(resolve,10)); bytes+=chunk.length;busy=false;
+                    if (${JSON.stringify(expected)}==='response') throw Error('SECRET_CANARY'); };
+                  if (${JSON.stringify(expected)}) await assert.rejects(gatewayGet(gateway,url,{},128000,1000,sink), /Registry response failed/);
+                  else {const result=await gatewayGet(gateway,url,{},128000,1000,sink);assert.equal(bytes,4096);assert.equal(result.body.length,0);}
+                } else await assert.rejects(gatewayGet(gateway,url,{},128000,200),new RegExp(${JSON.stringify(expected)}));`;
       await new Promise<void>((resolve, reject) => {
         const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
         let output = ''; child.stdout.on('data', chunk => { output += String(chunk); }); child.stderr.on('data', chunk => { output += String(chunk); });
@@ -101,6 +111,8 @@ test('verified local TLS: stalled headers, drip deadline, streaming overflow and
     mode = 'oversize'; await run('hub.docker.com', true, 'size limit'); assert.equal(requests, 3);
     await run('hub.docker.com', false, 'TLS'); assert.equal(requests, 3, 'untrusted certificate cannot send HTTP');
     await run('wrong.example', true, 'TLS'); assert.equal(requests, 3, 'wrong hostname cannot send HTTP');
+        mode = 'finite'; await run('hub.docker.com', true, '', true);
+        await run('hub.docker.com', true, 'response', true);
   } finally {
     for (const timer of timers) clearInterval(timer);
     for (const socket of sockets) socket.destroy();

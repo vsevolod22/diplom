@@ -25,7 +25,7 @@ export type BundlePreflightOptions = {
   now?: Date;
 };
 
-type Descriptor = {
+export type VerifiedDbIdentity = {
   envelopeVersion: number;
   signer: string;
   source: string;
@@ -45,6 +45,14 @@ function timestamp(value: unknown): number {
   const time = Date.parse(millis);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== millis) throw failure();
   return time;
+}
+
+// Shared at-use/write-boundary policy; identity alone is not cryptographic verification.
+export function assertDbFreshness(descriptor: Pick<VerifiedDbIdentity, 'updatedAt' | 'downloadedAt' | 'nextUpdate'>, now = Date.now()): void {
+  const updated = timestamp(descriptor.updatedAt), downloaded = timestamp(descriptor.downloadedAt), next = timestamp(descriptor.nextUpdate);
+  if (!Number.isFinite(now) || updated > now + MAX_CLOCK_SKEW_MS || downloaded > now + MAX_CLOCK_SKEW_MS ||
+      downloaded < updated || now - updated > MAX_UPDATE_AGE_MS || now - downloaded > MAX_DOWNLOAD_AGE_MS ||
+      next <= updated || next - updated > MAX_UPDATE_INTERVAL_MS || now >= next) throw failure();
 }
 
 async function rejectSymlinkAncestors(directory: string): Promise<void> {
@@ -87,7 +95,7 @@ async function readBounded(path: string, limit: number, hashOnly = false): Promi
 
 /** Fixed files: descriptor.json (canonical UTF-8 JSON), descriptor.sig (raw 64-byte Ed25519 signature), bundle.bin. */
 export async function preflightVulnDbBundle(options: BundlePreflightOptions): Promise<{
-  kind: 'envelope-preflight-only'; artifactSha256: string; schemaVersion: number;
+  kind: 'envelope-preflight-only'; artifactSha256: string; schemaVersion: number; identity: Readonly<VerifiedDbIdentity>;
 }> {
   try {
     const { directory, expectedSigner, expectedSource, expectedSchemaVersion, expectedArtifactSha256, expectedManifestDigest } = options;
@@ -110,7 +118,7 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw failure();
     const value = parsed as Record<string, unknown>;
     // Exact serialization disallows extra/duplicate fields, noncanonical encodings and key reordering.
-    const descriptor: Descriptor = {
+    const descriptor: VerifiedDbIdentity = {
       envelopeVersion: value.envelopeVersion as number,
       signer: value.signer as string,
       source: value.source as string,
@@ -138,13 +146,7 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     const db = metadata as Record<string, unknown>;
     if (db.Version !== descriptor.schemaVersion || db.UpdatedAt !== descriptor.updatedAt ||
         db.DownloadedAt !== descriptor.downloadedAt || db.NextUpdate !== descriptor.nextUpdate) throw failure();
-    const updated = timestamp(descriptor.updatedAt);
-    const downloaded = timestamp(descriptor.downloadedAt);
-    const next = timestamp(descriptor.nextUpdate);
-    if (updated > now + MAX_CLOCK_SKEW_MS || downloaded > now + MAX_CLOCK_SKEW_MS ||
-        downloaded < updated || now - updated > MAX_UPDATE_AGE_MS ||
-        now - downloaded > MAX_DOWNLOAD_AGE_MS || next <= updated ||
-        next - updated > MAX_UPDATE_INTERVAL_MS || now >= next) throw failure();
+    assertDbFreshness(descriptor, now);
     const pinnedHash = Buffer.from(expectedArtifactSha256, 'hex');
     if (!timingSafeEqual(Buffer.from(descriptor.artifactSha256, 'hex'), pinnedHash)) throw failure();
     const artifactHash = await readBounded(join(directory, 'bundle.bin'), MAX_ARTIFACT_BYTES, true);
@@ -152,7 +154,9 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     // Bind the actual read-only cache bytes too; gzip integrity alone says nothing about extracted DB.
     const dbHash = await readBounded(join(directory, 'db', 'trivy.db'), MAX_DB_BYTES, true);
     if (!timingSafeEqual(dbHash, Buffer.from(descriptor.dbSha256, 'hex'))) throw failure();
-    return { kind: 'envelope-preflight-only', artifactSha256: expectedArtifactSha256, schemaVersion: expectedSchemaVersion };
+    // Hashing the real DB can cross NextUpdate; initial preflight time is not sufficient.
+    assertDbFreshness(descriptor, options.now?.getTime() ?? Date.now());
+    return { kind: 'envelope-preflight-only', artifactSha256: expectedArtifactSha256, schemaVersion: expectedSchemaVersion, identity: Object.freeze(descriptor) };
   } catch {
     // Never leak raw paths, descriptor contents, signature verification or filesystem errors.
     throw failure();

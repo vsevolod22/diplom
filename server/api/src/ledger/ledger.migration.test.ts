@@ -46,7 +46,7 @@ test('fresh v0 initializes once and enforces foreign keys on every ledger connec
     assert.equal(second.state(created.scanId, target.subject), 'queued');
     const db = new Database(file);
     try {
-      assert.equal(db.pragma('user_version', { simple: true }), 9);
+      assert.equal(db.pragma('user_version', { simple: true }), 10);
       assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
       assert.deepEqual(db.pragma('foreign_key_check'), []);
       // An external connection must opt in separately; the ledger opts in at construction.
@@ -71,7 +71,7 @@ test('v1 and v2 fixtures retain rows, defaults, uniqueness, FK and version after
       reopened.close();
       const db = new Database(file);
       try {
-        assert.equal(db.pragma('user_version', { simple: true }), 9);
+        assert.equal(db.pragma('user_version', { simple: true }), 10);
         assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
         assert.deepEqual(db.pragma('foreign_key_check'), []);
         assert.equal((db.prepare('SELECT count(*) AS n FROM scans').get() as { n: number }).n, 1);
@@ -106,7 +106,7 @@ test('v3 result upgrades to bounded findings, event and audit tables without los
     assert.equal(ledger.events('existing','alice',null)?.[0]?.state, 'queued');
     ledger.close();
     const db = new Database(file);
-    assert.equal(db.pragma('user_version', { simple: true }), 9);
+    assert.equal(db.pragma('user_version', { simple: true }), 10);
     assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -125,7 +125,7 @@ test('failed upgrade rolls back DDL and version; future and ambiguous v0 fail cl
     assert.equal(after.pragma('user_version', { simple: true }), 1);
     assert.equal((after.prepare('SELECT count(*) AS n FROM scans').get() as { n: number }).n, 1);
     assert.equal((after.prepare("SELECT count(*) AS n FROM pragma_table_info('scans') WHERE name = 'checks'").get() as { n: number }).n, 0);
-    after.pragma('user_version = 10');
+    after.pragma('user_version = 11');
     after.close();
     assert.throws(() => new ScanLedger(file), /Unsupported ledger version/);
     const unversioned = join(dir, 'ambiguous.sqlite');

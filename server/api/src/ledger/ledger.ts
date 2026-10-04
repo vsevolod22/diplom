@@ -6,6 +6,9 @@ import { scans } from './schema.js';
 import { MAX_FINDINGS, type SecretFinding } from '../worker/secret-findings.js';
 import type { ImageSbom, SbomComponent } from '../worker/cyclonedx-components.js';
 import { MAX_VULN_FINDINGS, type VulnFinding } from '../worker/vuln-findings.js';
+import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
+import { assertArchiveDbFreshness, validateArchiveReport } from '../worker/archive-result-contract.js';
+import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
 
 export type PinnedTarget = {
   subject: string;
@@ -27,7 +30,7 @@ const SUBJECT_MINUTE_LIMIT = 6;
 const MAX_SBOM_COMPONENTS = 1000;
 const vulnSources = new Set(['unknown', 'alpine', 'nvd', 'ghsa', 'npm', 'nodejs-security-wg', 'osv', 'cve',
   'redhat', 'ubuntu', 'photon', 'amazon', 'oracle-oval', 'julia', 'alma', 'azure', 'rocky',
-  'cbl-mariner', 'bitnami', 'ruby-advisory-db']);
+  'cbl-mariner', 'bitnami', 'ruby-advisory-db', 'bottlerocket']);
 const sbomIdentifier = (value: unknown, max: number): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= max &&
   /^[A-Za-z0-9@][A-Za-z0-9@._+/-]*$/.test(value);
@@ -54,7 +57,7 @@ const canonicalChecks = (value: string): CheckName[] | null => {
   } catch { return null; }
 };
 
-function validateCombined(outcomes: CombinedOutcome[]): void {
+function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string): void {
   if (!Array.isArray(outcomes) || outcomes.length < 1 || outcomes.length > 3 ||
       outcomes.some(item => !sbomObject(item, item?.outcome === 'failed' ? ['check','outcome','errorCode'] :
         item?.check === 'sbom' ? ['check','outcome','sbom','scannerVersion'] :
@@ -84,7 +87,7 @@ function validateCombined(outcomes: CombinedOutcome[]): void {
       const sbom = item.sbom;
       if (!sbomObject(sbom, ['image','platform','os','components']) ||
           typeof sbom.image !== 'string' ||
-          !/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(sbom.image) ||
+          !(archiveImage ? sbom.image === archiveImage : /^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(sbom.image)) ||
           sbom.platform !== 'linux/amd64' || !sbomObject(sbom.os, ['name','version']) ||
           sbom.os.name !== 'alpine' || !sbomIdentifier(sbom.os.version, 80) ||
           !Array.isArray(sbom.components) || sbom.components.length < 1 ||
@@ -102,7 +105,7 @@ function validateCombined(outcomes: CombinedOutcome[]): void {
       }
     } else {
       if (typeof item.image !== 'string' ||
-          !/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(item.image) ||
+          !(archiveImage ? item.image === archiveImage : /^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(item.image)) ||
           !Array.isArray(item.findings) || item.findings.length > MAX_VULN_FINDINGS)
         throw new TypeError('Invalid vulnerability result');
       const seen = new Set<string>();
@@ -124,7 +127,7 @@ function validateCombined(outcomes: CombinedOutcome[]): void {
             f.severitySources.length > vulnSources.size ||
             f.severitySources.some((source, i) => typeof source !== 'string' || !vulnSources.has(source) ||
               i > 0 && f.severitySources[i - 1] >= source)) throw new TypeError('Invalid vulnerability finding');
-        const key = JSON.stringify([f.ecosystem, f.provenanceRef, f.cveId, f.packageName, f.installedVersion]);
+        const key = JSON.stringify([...(archiveImage ? [archiveImage, 'linux/amd64', 'vuln'] : []), f.ecosystem, f.provenanceRef, f.cveId, f.packageName, f.installedVersion]);
         if (f.findingId !== `vuln-${createHash('sha256').update(key).digest('hex')}` || seen.has(key))
           throw new TypeError('Invalid or duplicate vulnerability finding');
         seen.add(key);
@@ -147,7 +150,7 @@ export class ScanLedger {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 5000');
       const version = Number(this.db.pragma('user_version', { simple: true }));
-      if (version > 9 || version < 0) throw new Error('Unsupported ledger version');
+      if (version > 10 || version < 0) throw new Error('Unsupported ledger version');
       // FK enforcement must be toggled outside a transaction for SQLite's table rebuild.
       // Check the rebuilt references before commit, then restore enforcement afterward.
       if (version < 9) this.db.pragma('foreign_keys = OFF');
@@ -299,6 +302,13 @@ export class ScanLedger {
           ALTER TABLE scan_results_v9 RENAME TO scan_results;
           PRAGMA user_version = 9;`);
         }
+        if (version < 10) {
+          this.db.exec(`CREATE TABLE IF NOT EXISTS scan_archive_results (
+            scan_id TEXT PRIMARY KEY REFERENCES scans(id),
+            attempt INTEGER NOT NULL CHECK (attempt > 0),
+            report TEXT NOT NULL CHECK (length(report) <= 2000000)
+          ); PRAGMA user_version = 10;`);
+        }
         if ((this.db.pragma('foreign_key_check') as unknown[]).length)
           throw new Error('Ledger migration foreign key mismatch');
       });
@@ -384,7 +394,9 @@ export class ScanLedger {
       .all() as Array<{ scanId: string; digest: string; platform: string }>;
   }
 
-  claim(now = Date.now(), leaseMs = 60_000): Job | undefined {
+  claim(now = Date.now(), leaseMs = 60_000, archiveLeaseMs?: number): Job | undefined {
+      if (archiveLeaseMs !== undefined && (!Number.isSafeInteger(archiveLeaseMs) || archiveLeaseMs < 1 || archiveLeaseMs > 627_000))
+        throw new TypeError('Invalid archive lease');
     return this.immediate(() => {
       const row = this.db.prepare(`SELECT s.id AS scanId, s.registry, s.repository, s.digest, s.platform, s.checks, s.scope, o.attempts
         FROM outbox o JOIN scans s ON s.id = o.scan_id
@@ -393,7 +405,7 @@ export class ScanLedger {
         ORDER BY s.created_at, s.id LIMIT 1`).get(now, now) as ClaimRow | undefined;
       if (!row) return undefined;
       this.db.prepare('UPDATE outbox SET lease_until = ?, attempts = attempts + 1 WHERE scan_id = ?')
-        .run(now + leaseMs, row.scanId);
+        .run(now + (row.repository === 'library/nginx' && archiveLeaseMs ? Math.max(leaseMs, archiveLeaseMs) : leaseMs), row.scanId);
       this.db.prepare("UPDATE scans SET state = 'running' WHERE id = ?").run(row.scanId);
       this.event(row.scanId, 'running');
       return { ...row, attempts: row.attempts + 1 };
@@ -516,6 +528,52 @@ export class ScanLedger {
       this.event(scanId, 'completed');
       return true;
     });
+  }
+
+  // Quarantined exact-candidate attempt output. No public admission or generic profile switch.
+  finishArchive(scanId: string, attempts: number, report: ArchiveScanReport): boolean {
+    const requested = ['secret', 'sbom', 'vuln'].filter(check => Object.hasOwn(report, check));
+    validateArchiveReport(report, requested);
+    const image = `${report.receipt.registry}/${report.receipt.repository}@${report.receipt.digest}`;
+    const checked: CombinedOutcome[] = [];
+    if (report.secret?.outcome === 'checked') checked.push({ check: 'secret', ...report.secret, scannerVersion: report.scannerVersion });
+    if (report.sbom?.outcome === 'checked') checked.push({ check: 'sbom', ...report.sbom, scannerVersion: report.scannerVersion });
+    if (report.vuln?.outcome === 'checked') {
+      if (!sbomObject(report.vuln, ['outcome', 'findings', 'db', 'os', 'node']) ||
+          !sbomObject(report.vuln.os, ['outcome']) || report.vuln.os.outcome !== 'checked' ||
+          !(sbomObject(report.vuln.node, ['outcome']) && report.vuln.node.outcome === 'checked' ||
+            sbomObject(report.vuln.node, ['outcome','reason']) && report.vuln.node.outcome === 'unsupported' &&
+            report.vuln.node.reason === 'NODE_INVENTORY_ABSENT')) throw new TypeError('Invalid archive coverage');
+      checked.push({ check: 'vuln', outcome: 'checked', image, findings: report.vuln.findings, scannerVersion: report.scannerVersion });
+    }
+    if (checked.length) validateCombined(checked, image);
+    const body = JSON.stringify(report);
+    if (Buffer.byteLength(body) > 2_000_000) throw new TypeError('Invalid archive result size');
+    return this.immediate(() => {
+      const row = this.db.prepare(`SELECT s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
+        FROM scans s JOIN outbox o ON o.scan_id=s.id WHERE s.id=? AND s.state='running'
+        AND o.attempts=? AND o.delivered_at IS NULL`).get(scanId, attempts) as Job | undefined;
+      if (!row) return false;
+      const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => candidate.digest === report.receipt.digest);
+      if (!target || Object.entries(target).some(([key, value]) => key !== 'configDigest' && row[key as keyof Job] !== value) ||
+          row.scope !== 'image' || row.checks !== JSON.stringify(requested)) throw new TypeError('Archive job mismatch');
+      // Freshness is a clock check only; no hashing/network work inside the transaction.
+      assertArchiveDbFreshness(report);
+      const changed = this.db.prepare(`UPDATE outbox SET delivered_at=CURRENT_TIMESTAMP,lease_until=NULL
+        WHERE scan_id=? AND attempts=? AND delivered_at IS NULL`).run(scanId, attempts);
+      if (changed.changes !== 1) throw new Error('Archive attempt mismatch');
+      this.db.prepare('INSERT INTO scan_archive_results(scan_id,attempt,report) VALUES (?,?,?)').run(scanId, attempts, body);
+      const terminal = checked.length === requested.length ? 'completed' : checked.length ? 'partial' : 'failed';
+      this.db.prepare(`UPDATE scans SET state=?,terminal_at=CURRENT_TIMESTAMP WHERE id=? AND state='running'`).run(terminal, scanId);
+      this.event(scanId, terminal);
+      return true;
+    });
+  }
+
+  archiveResult(scanId: string, subject: string): ArchiveScanReport | undefined {
+    const row = this.db.prepare(`SELECT r.report FROM scan_archive_results r JOIN scans s ON s.id=r.scan_id
+      WHERE s.id=? AND s.subject=?`).get(scanId, subject) as { report: string } | undefined;
+    return row ? JSON.parse(row.report) as ArchiveScanReport : undefined;
   }
 
   finishCombined(scanId: string, attempts: number, outcomes: CombinedOutcome[]): boolean {
@@ -814,7 +872,7 @@ export class ScanLedger {
     return this.immediate(() => {
       this.db.prepare('DELETE FROM admission_windows WHERE minute < ?').run(Math.floor(Date.now() / 60000) - 1440);
       this.db.prepare(`DELETE FROM scan_audit WHERE created_at < datetime('now', ?)`).run(`-${days} days`);
-      for (const table of ['scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
+      for (const table of ['scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
       this.db.prepare(`DELETE FROM scan_results WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)
         .run(`-${days} days`);
       this.db.prepare(`DELETE FROM outbox WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)

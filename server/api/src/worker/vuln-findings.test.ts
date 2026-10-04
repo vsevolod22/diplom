@@ -34,6 +34,12 @@ test('OS and node-pkg findings are bounded data, never raw scanner evidence', ()
   assert.deepEqual(parse(report()), findings);
 });
 
+test('actual DB Bottlerocket severity assessment is allowlisted but arbitrary source data remains rejected', () => {
+  const base = report();
+  const value = { ...base, Results: [{ ...base.Results[0], Vulnerabilities: [{ ...vuln(), VendorSeverity: { alpine: 3, bottlerocket: 4 } }] }] };
+  assert.deepEqual(parse(value)[0].severitySources, ['alpine', 'bottlerocket']);
+  assert.throws(() => parse({ ...value, Results: [{ ...value.Results[0], Vulnerabilities: [{ ...vuln(), VendorSeverity: { bottlerocket: 5 } }] }] }));
+});
 test('same location merges sources; distinct target provenance survives', () => {
   const base = report();
   const os = base.Results[0];

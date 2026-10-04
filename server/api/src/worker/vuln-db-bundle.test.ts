@@ -51,9 +51,9 @@ async function fixture(t: TestContext) {
 }
 
 test('valid signed envelope and pinned synthetic bytes: preflight only', async (t) => {
-  const { options } = await fixture(t);
+  const { options, descriptor } = await fixture(t);
   assert.deepEqual(await preflightVulnDbBundle(options), {
-    kind: 'envelope-preflight-only', artifactSha256: hash, schemaVersion: 2,
+    kind: 'envelope-preflight-only', artifactSha256: hash, schemaVersion: 2, identity: descriptor,
   });
 });
 

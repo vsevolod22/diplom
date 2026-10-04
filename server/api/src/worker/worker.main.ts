@@ -6,10 +6,12 @@ import { isAbsolute } from 'node:path';
 import type { VulnScanOptions } from './vuln-worker.js';
 import { ScanLedger } from '../ledger/ledger.js';
 import { consumeOne } from './outbox-consumer.js';
+import { recoverArchiveScratch } from '../oci/bounded-image-archive.js';
 
 const file = process.env.SCAN_LEDGER_PATH;
 const ready = process.env.SCAN_WORKER_READY_PATH;
 if (!file || !ready || !process.env.TRIVY_CACHE_DIR) throw new Error('Worker storage is required');
+await recoverArchiveScratch();
 const ledger = new ScanLedger(file);
 const version = spawnSync('trivy', ['--version'], { stdio: 'ignore', timeout: 5000,
   env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp' } });

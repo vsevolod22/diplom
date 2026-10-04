@@ -47,15 +47,19 @@ function safeUrl(raw: string, allowed: ReadonlySet<string>): URL {
 
 // Never directly resolve or fetch a remote URL in this process. TLS validates the host
 // through Node's trust store; the gateway independently validates every connected IP.
-export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<string, string>, maxBytes = MAX_OBJECT, deadlineMs?: number): Promise<ManifestResponse> {
+export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<string, string>, maxBytes = MAX_OBJECT, deadlineMs?: number,
+  sink?: (chunk: Buffer, status: number) => Promise<void>, signal?: AbortSignal): Promise<ManifestResponse> {
   if (!gateway.host || !Number.isInteger(gateway.port) || gateway.port < 1 || gateway.port > 65535)
     throw new ResolutionRejected('Invalid gateway');
   return new Promise((resolve, reject) => {
     let settled = false;
     const resources: Array<{ destroy: () => void }> = [];
     let deadline: ReturnType<typeof setTimeout> | undefined;
-    const cleanup = () => { clearTimeout(deadline); for (const resource of resources) resource.destroy(); };
+    const cleanup = () => { clearTimeout(deadline); signal?.removeEventListener('abort', abort); for (const resource of resources) resource.destroy(); };
     const fail = (stage: string) => { if (!settled) { settled = true; cleanup(); reject(new ResolutionRejected(`Registry ${stage} failed`)); } };
+    const abort = () => fail('cancelled');
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener('abort', abort, { once: true });
     if (deadlineMs !== undefined) deadline = setTimeout(() => fail('absolute deadline'), deadlineMs);
     const connect = httpRequest({ hostname: gateway.host, port: gateway.port, method: 'CONNECT', path: `${url.hostname}:443`, headers: { host: `${url.hostname}:443` }, timeout: 5000 });
     resources.push(connect);
@@ -77,13 +81,23 @@ export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<str
           resources.push(result);
           const chunks: Buffer[] = [];
           let size = 0;
-          result.on('data', (chunk: Buffer) => {
-            size += chunk.length;
-            if (size > maxBytes) { result.destroy(); fail('size limit'); } else chunks.push(chunk);
-          });
-          result.on('end', () => {
-            if (!settled) { settled = true; clearTimeout(deadline); resolve({ status: result.statusCode || 0, headers: result.headers, body: Buffer.concat(chunks) }); agent.destroy(); }
-          });
+          void (async () => {
+            try {
+              for await (const chunk of result) {
+                if (settled) return;
+                const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                size += bytes.length;
+                if (size > maxBytes) { fail('size limit'); return; }
+                if (sink) await sink(bytes, result.statusCode || 0);
+                else chunks.push(bytes);
+              }
+              if (!settled) {
+                settled = true; clearTimeout(deadline);
+                resolve({ status: result.statusCode || 0, headers: result.headers, body: Buffer.concat(chunks) });
+                cleanup();
+              }
+            } catch { fail('response'); }
+          })();
           result.on('error', () => fail('response')); 
         });
         resources.push(request);
