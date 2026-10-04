@@ -20,6 +20,7 @@ export type BundlePreflightOptions = {
   expectedSource: string;
   expectedSchemaVersion: number;
   expectedArtifactSha256: string;
+  expectedManifestDigest: string;
   now?: Date;
 };
 
@@ -29,15 +30,18 @@ type Descriptor = {
   source: string;
   schemaVersion: number;
   artifactSha256: string;
+  metadataSha256: string;
+  manifestDigest: string;
   updatedAt: string;
   downloadedAt: string;
   nextUpdate: string;
 };
 
 function timestamp(value: unknown): number {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) throw failure();
-  const time = Date.parse(value);
-  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw failure();
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/.test(value)) throw failure();
+  const millis = value.replace(/\.(\d{1,9})Z$/, (_, fraction: string) => `.${fraction.padEnd(3, '0').slice(0, 3)}Z`);
+  const time = Date.parse(millis);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== millis) throw failure();
   return time;
 }
 
@@ -84,11 +88,13 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
   kind: 'envelope-preflight-only'; artifactSha256: string; schemaVersion: number;
 }> {
   try {
-    const { directory, expectedSigner, expectedSource, expectedSchemaVersion, expectedArtifactSha256 } = options;
+    const { directory, expectedSigner, expectedSource, expectedSchemaVersion, expectedArtifactSha256, expectedManifestDigest } = options;
     if (typeof directory !== 'string' || typeof expectedSigner !== 'string' || !expectedSigner ||
         typeof expectedSource !== 'string' || !expectedSource ||
         !Number.isSafeInteger(expectedSchemaVersion) || expectedSchemaVersion < 1 ||
-        typeof expectedArtifactSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedArtifactSha256)) throw failure();
+        typeof expectedArtifactSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedArtifactSha256) ||
+                typeof expectedManifestDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(expectedManifestDigest) ||
+                !expectedSource.endsWith(`@${expectedManifestDigest}`)) throw failure();
     const now = (options.now ?? new Date()).getTime();
     if (!Number.isFinite(now)) throw failure();
     const key = createPublicKey(options.trustedPublicKeyPem);
@@ -107,6 +113,8 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
       source: value.source as string,
       schemaVersion: value.schemaVersion as number,
       artifactSha256: value.artifactSha256 as string,
+      metadataSha256: value.metadataSha256 as string,
+      manifestDigest: value.manifestDigest as string,
       updatedAt: value.updatedAt as string,
       downloadedAt: value.downloadedAt as string,
       nextUpdate: value.nextUpdate as string,
@@ -114,7 +122,17 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     if (JSON.stringify(descriptor) !== descriptorBytes.toString('utf8') ||
         descriptor.envelopeVersion !== 1 || descriptor.signer !== expectedSigner ||
         descriptor.source !== expectedSource || descriptor.schemaVersion !== expectedSchemaVersion ||
-        !/^[a-f0-9]{64}$/.test(descriptor.artifactSha256)) throw failure();
+        descriptor.manifestDigest !== expectedManifestDigest ||
+        !/^[a-f0-9]{64}$/.test(descriptor.artifactSha256) ||
+        !/^[a-f0-9]{64}$/.test(descriptor.metadataSha256)) throw failure();
+    const metadataBytes = await readBounded(join(directory, 'db', 'metadata.json'), 4096);
+    const metadataHash = createHash('sha256').update(metadataBytes).digest();
+    if (!timingSafeEqual(metadataHash, Buffer.from(descriptor.metadataSha256, 'hex'))) throw failure();
+    const metadata: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(metadataBytes));
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw failure();
+    const db = metadata as Record<string, unknown>;
+    if (db.Version !== descriptor.schemaVersion || db.UpdatedAt !== descriptor.updatedAt ||
+        db.DownloadedAt !== descriptor.downloadedAt || db.NextUpdate !== descriptor.nextUpdate) throw failure();
     const updated = timestamp(descriptor.updatedAt);
     const downloaded = timestamp(descriptor.downloadedAt);
     const next = timestamp(descriptor.nextUpdate);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtemp, realpath, rm, symlink, truncate, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, truncate, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -16,16 +16,26 @@ async function fixture(t: TestContext) {
   t.after(async () => { await rm(directory, { recursive: true, force: true }); });
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const trustedPublicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const manifestDigest = `sha256:${'a'.repeat(64)}`;
   const options: BundlePreflightOptions = {
     directory, trustedPublicKeyPem, expectedSigner: 'offline-operator',
-    expectedSource: 'pinned-local-source', expectedSchemaVersion: 2,
-    expectedArtifactSha256: hash, now: NOW,
+    expectedSource: `ghcr.io/aquasecurity/trivy-db@${manifestDigest}`, expectedSchemaVersion: 2,
+    expectedArtifactSha256: hash, expectedManifestDigest: manifestDigest, now: NOW,
   };
+  const metadata = {
+    Version: 2, NextUpdate: '2026-10-04T10:00:00.123456789Z',
+    UpdatedAt: '2026-10-03T10:00:00.123456789Z',
+    DownloadedAt: '2026-10-03T11:00:00.123456789Z',
+  };
+  const metadataBytes = Buffer.from(JSON.stringify(metadata));
+  await mkdir(join(directory, 'db'));
+  await writeFile(join(directory, 'db', 'metadata.json'), metadataBytes);
   const descriptor = {
     envelopeVersion: 1, signer: options.expectedSigner, source: options.expectedSource,
     schemaVersion: options.expectedSchemaVersion, artifactSha256: hash,
-    updatedAt: '2026-10-03T10:00:00.000Z', downloadedAt: '2026-10-03T11:00:00.000Z',
-    nextUpdate: '2026-10-04T10:00:00.000Z',
+    metadataSha256: createHash('sha256').update(metadataBytes).digest('hex'), manifestDigest,
+    updatedAt: metadata.UpdatedAt, downloadedAt: metadata.DownloadedAt,
+    nextUpdate: metadata.NextUpdate,
   };
   const writeDescriptor = async (data = descriptor) => {
     const bytes = Buffer.from(JSON.stringify(data));
@@ -34,7 +44,7 @@ async function fixture(t: TestContext) {
   };
   await writeDescriptor();
   await writeFile(join(directory, 'bundle.bin'), artifact);
-  return { directory, options, descriptor, writeDescriptor };
+  return { directory, options, descriptor, metadata, writeDescriptor };
 }
 
 test('valid signed envelope and pinned synthetic bytes: preflight only', async (t) => {
@@ -58,6 +68,18 @@ test('rejects tamper, invalid signature, wrong independent key and hash, without
   const { publicKey } = generateKeyPairSync('ed25519');
   await assert.rejects(preflightVulnDbBundle({ ...options, trustedPublicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString() }), fail);
   await assert.rejects(preflightVulnDbBundle({ ...options, expectedArtifactSha256: '0'.repeat(64) }), fail);
+  await assert.rejects(preflightVulnDbBundle({ ...options, expectedManifestDigest: `sha256:${'b'.repeat(64)}` }), fail);
+});
+
+test('rejects metadata tampering, forged DB timestamps and mismatched OCI digest', async (t) => {
+  const { directory, options, descriptor, metadata, writeDescriptor } = await fixture(t);
+  await writeFile(join(directory, 'db', 'metadata.json'), JSON.stringify({ ...metadata, Version: 3 }));
+  await assert.rejects(preflightVulnDbBundle(options), fail);
+  await writeFile(join(directory, 'db', 'metadata.json'), JSON.stringify(metadata));
+  await writeDescriptor({ ...descriptor, updatedAt: '2026-10-03T10:00:00.000Z' });
+  await assert.rejects(preflightVulnDbBundle(options), fail);
+  await writeDescriptor({ ...descriptor, manifestDigest: `sha256:${'b'.repeat(64)}` });
+  await assert.rejects(preflightVulnDbBundle(options), fail);
 });
 
 test('rejects missing files and symlinked files or directory', async (t) => {
