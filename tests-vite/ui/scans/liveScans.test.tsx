@@ -105,6 +105,24 @@ describe('cookie-session live scans', () => {
     expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/results?limit=50`)).toBe(true);
   });
 
+  it('selects the verified old Alpine digest without substituting a mutable tag', async () => {
+    const fetchMock = vi.fn(async (path: string, options?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path === '/api/v1/browser/scans' && options?.method === 'POST') return json({ scanId: id });
+      return json({ scanId: id, state: 'queued', result: null });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    mount('/scans/new');
+    fireEvent.change(await screen.findByRole('searchbox', { name: 'Поиск по доступным образам' }), { target: { value: '3.16' } });
+    fireEvent.click(screen.getByRole('button', { name: /Alpine · 3.16/ }));
+    expect(screen.getByText(/локальная DB нашла 4 CVE/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('checkbox', { name: /CVE · доступно/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([path, options]) => path === '/api/v1/browser/scans' && options?.method === 'POST')).toBe(true));
+    const request = fetchMock.mock.calls.find(([path, options]) => path === '/api/v1/browser/scans' && options?.method === 'POST');
+    expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({ imageReference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6', scope: 'image', checks: ['secret', 'vuln'] });
+  });
   it('submits confirmed scope once and navigates only after a validated receipt', async () => {
     const fetchMock = vi.fn(async (path: string, options?: RequestInit) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });

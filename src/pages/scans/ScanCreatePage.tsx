@@ -15,6 +15,7 @@ const alpineTargets = [
   { label: 'Alpine · latest', reference: 'registry-1.docker.io/library/alpine:latest' },
   { label: 'Alpine · 3.21', reference: 'registry-1.docker.io/library/alpine:3.21' },
   { label: 'Alpine · 3.20', reference: 'registry-1.docker.io/library/alpine:3.20' },
+  { label: 'Alpine · 3.16 (архивный · CVE-пример)', reference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6' },
 ] as const;
 const formSchema = z.object({
   imageReference: z.string().refine(value => alpineTargets.some(target => target.reference === value), 'Выберите образ из доступного каталога'),
@@ -126,6 +127,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                   <p>Ничего не найдено. Сейчас поддерживается только Alpine из Docker Hub.</p>
                 ) : null}
               </div>
+              {imageReference === alpineTargets[3].reference ? <p className="scan-a1__muted">Архивный образ: при проверке закреплённого digest 04.10.2026 локальная DB нашла 4 CVE. Результат нового запуска зависит от актуальной DB и доступности scanner; этот образ не используйте для рабочих нагрузок.</p> : null}
               {errors.imageReference ? <p id="image-reference-error" role="alert">{errors.imageReference.message}</p> : null}
             </div>
             <fieldset>
