@@ -107,6 +107,11 @@ test('rejects missing files and symlinked files or directory', async (t) => {
   await assert.rejects(preflightVulnDbBundle(options), fail);
   await unlink(join(directory, 'descriptor.sig'));
   await writeDescriptor();
+  await rm(join(directory, 'db'), { recursive: true });
+  const external = await mkdtemp(join(tmpdir(), 'vuln-db-external-'));
+  t.after(async () => { await rm(external, { recursive: true, force: true }); });
+  await symlink(external, join(directory, 'db'));
+  await assert.rejects(preflightVulnDbBundle(options), fail);
   const link = `${directory}-link`;
   await symlink(directory, link);
   t.after(async () => { await rm(link, { force: true }); });

@@ -102,6 +102,7 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     const key = createPublicKey(options.trustedPublicKeyPem);
     if (key.asymmetricKeyType !== 'ed25519') throw failure();
     await rejectSymlinkAncestors(directory);
+    await rejectSymlinkAncestors(join(directory, 'db'));
     const descriptorBytes = await readBounded(join(directory, 'descriptor.json'), MAX_DESCRIPTOR_BYTES);
     const signature = await readBounded(join(directory, 'descriptor.sig'), 64);
     if (signature.length !== 64 || !verify(null, descriptorBytes, key, signature)) throw failure();
