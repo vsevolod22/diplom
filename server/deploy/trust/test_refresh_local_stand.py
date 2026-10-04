@@ -24,6 +24,69 @@ class PublisherTests(unittest.TestCase):
         self.pin = 'sha256:' + 'c' * 64
         self.updated = module.replace_pins(self.original, Path(self.tmp.name) / 'new', self.pin, 'd' * 64)
 
+    def test_healthy_accepts_running_services_and_ignores_blank_lines(self):
+        records = [
+            {'Service': 'worker', 'State': 'running'},
+            {'Service': 'egress', 'State': 'running'},
+            {'Service': 'api', 'State': 'running', 'Health': 'healthy'},
+        ]
+        output = '\n \t\n' + '\n\n'.join(map(json.dumps, records)) + '\n \n'
+        with patch.object(module, 'run', return_value=output) as run:
+            self.assertTrue(module.healthy())
+        run.assert_called_once_with(*module.COMPOSE, 'ps', '--format', 'json', timeout=45)
+
+    def test_healthy_rejects_missing_or_unready_services(self):
+        api = {'Service': 'api', 'State': 'running', 'Health': 'healthy'}
+        worker = {'Service': 'worker', 'State': 'running'}
+        cases = [[], [api], [worker],
+                 [dict(api, Health='unhealthy'), worker],
+                 [dict(api, Health='starting'), worker],
+                 [dict(api, State='exited'), worker],
+                 [api, dict(worker, State='exited')],
+                 [api, dict(worker, State='restarting')]]
+        for records in cases:
+            with self.subTest(records=records), patch.object(
+                    module, 'run', return_value='\n'.join(map(json.dumps, records))):
+                self.assertFalse(module.healthy())
+
+    def test_healthy_invalid_records_fail_closed(self):
+        for output in ('not json', 'null', '[]', '{}'):
+            with self.subTest(output=output), patch.object(module, 'run', return_value=output):
+                with self.assertRaises((ValueError, TypeError, KeyError)):
+                    module.healthy()
+
+    def test_switch_with_real_health_verifies_candidate(self):
+        output = '\n'.join(map(json.dumps, [
+            {'Service': 'api', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'worker', 'State': 'running'},
+        ]))
+        with patch.object(module, 'ENV', self.env), patch.object(module, 'ROOT', self.env.parent), \
+             patch.object(module, 'run', return_value=output) as run, \
+             patch.object(module, 'container_preflight') as preflight, \
+             patch.object(module, 'scan_chain_ready') as ready:
+            module.switch(self.original, self.updated, self.pin, 'd' * 64)
+        self.assertEqual(self.env.read_text(), self.updated)
+        self.assertEqual(self.env.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(module.env_values(self.env.read_text())['SCAN_JWT_SECRET'], 'unchanged')
+        preflight.assert_called_once_with(self.pin, 'd' * 64)
+        ready.assert_called_once_with()
+        self.assertEqual(sum('up' in call.args for call in run.call_args_list), 1)
+
+    def test_switch_with_real_invalid_health_rolls_back(self):
+        with patch.object(module, 'ENV', self.env), patch.object(module, 'ROOT', self.env.parent), \
+             patch.object(module, 'run', return_value='not json') as run, \
+             patch.object(module, 'container_preflight') as preflight, \
+             patch.object(module, 'scan_chain_ready') as ready:
+            with self.assertRaises(ValueError):
+                module.switch(self.original, self.updated, self.pin, 'd' * 64)
+        self.assertEqual(self.env.read_text(), self.original)
+        self.assertEqual(self.env.stat().st_mode & 0o777, 0o600)
+        preflight.assert_not_called()
+        ready.assert_not_called()
+        recreate = (*module.COMPOSE, 'up', '-d', '--no-build', '--no-deps',
+                    '--force-recreate', 'worker', 'api')
+        self.assertEqual(sum(call.args == recreate for call in run.call_args_list), 2)
+
     def test_env_keeps_auth_secret_and_rejects_duplicate_or_invalid_pin(self):
         self.assertIn('SCAN_JWT_SECRET=unchanged\n', self.updated)
         self.assertEqual(module.env_values(self.updated)['SCAN_VULN_MANIFEST_DIGEST'], self.pin)

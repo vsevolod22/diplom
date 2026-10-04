@@ -98,7 +98,7 @@ def atomic_env(text):
 
 def healthy():
     lines = run(*COMPOSE, 'ps', '--format', 'json', timeout=45).splitlines()
-    services = {record['Service']: record for record in (json.loads(line) for line in lines) if line.strip()}
+    services = {record['Service']: record for record in (json.loads(line) for line in lines if line.strip())}
     return (services.get('api', {}).get('State') == 'running' and
             services['api'].get('Health') == 'healthy' and
             services.get('worker', {}).get('State') == 'running')
