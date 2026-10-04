@@ -12,8 +12,10 @@ type BrowserRequest = { headers: Record<string, string | string[] | undefined>; 
 // bridge; the internal JWT-only scan controller keeps its independent authentication.
 @Controller('api/v1/browser/scans')
 export class BrowserScansController {
-  private readonly imageSearch = new ImageSearchSessions();
-  constructor(@Inject(AuthStore) private readonly store: AuthStore, @Inject(ScansService) private readonly scans: ScansService) {}
+  private readonly imageSearch: ImageSearchSessions;
+  constructor(@Inject(AuthStore) private readonly store: AuthStore, @Inject(ScansService) private readonly scans: ScansService) {
+    this.imageSearch = new ImageSearchSessions(undefined, undefined, item => this.scans.imageSuggestion(item));
+  }
 
   private identity(req: BrowserRequest, mutation = false): Identity {
     // The demo override is deliberately impossible to use with a public/HTTPS origin.

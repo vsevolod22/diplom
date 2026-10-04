@@ -8,7 +8,20 @@ export const scanChecks = ['secret', 'sbom', 'vuln'] as const;
 export type ScanCheck = typeof scanChecks[number];
 const checkName = z.enum(scanChecks);
 const failureCode = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']);
-const status = z.object({ scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional() }).nullable()).optional() });
+const archiveReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT']);
+const subCoverage = z.discriminatedUnion('outcome', [z.object({ outcome: z.literal('checked') }),
+  z.object({ outcome: z.literal('unsupported'), reason: archiveReason })]);
+const dbTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/);
+const dbIdentity = z.object({ envelopeVersion: z.literal(1), signer: z.literal('local-db-operator-v1'),
+  source: z.string().regex(/^ghcr\.io\/aquasecurity\/trivy-db@sha256:[a-f0-9]{64}$/), schemaVersion: z.literal(2),
+  manifestDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/), artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  metadataSha256: z.string().regex(/^[a-f0-9]{64}$/), dbSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  updatedAt: dbTime, downloadedAt: dbTime, nextUpdate: dbTime }).refine(db => db.source === `ghcr.io/aquasecurity/trivy-db@${db.manifestDigest}`);
+const archiveEvidence = { os: subCoverage.optional(), node: subCoverage.optional(), db: dbIdentity.optional() };
+const reportImage = z.union([z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/),
+  z.literal('registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3'),
+    z.literal('registry-1.docker.io/library/nginx@sha256:b17b00f7ef0038aeb11362157f49006a130628ee711cefcced871405d046f114')]);
+const status = z.object({ scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional(), reason: archiveReason.optional(), ...archiveEvidence, checksVersion: z.string().max(80).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
 const results = z.object({ findings: z.array(finding), nextCursor: z.string().nullable(), coverage: z.array(coverage) });
 // Receipt URLs may refer to the internal API. Only the ID crosses into browser navigation.
 const receipt = z.object({ scanId: z.string().uuid() });
@@ -19,9 +32,11 @@ export type ScanCoverage = z.infer<typeof coverage>;
 export type ScanReceipt = z.infer<typeof receipt>;
 export type ScanSummary = ScanStatus & { targetLabel: string };
 export type ScanIntent = { imageReference: string; scope: 'image'; checks: ScanCheck[]; idempotencyKey: string };
+type ArchiveEvidence = { os?: z.infer<typeof subCoverage>; node?: z.infer<typeof subCoverage>; db?: z.infer<typeof dbIdentity> };
 export type ScanVuln =
-  | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; findingCount: number; scannerVersion: string; checkedAt: string; findings: { findingId: string; cveId: string; ecosystem: 'apk' | 'npm'; packageName: string; installedVersion: string; severity: 'UNKNOWN' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; fixedVersion: string | null }[]; nextCursor: string | null }
-  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; findings: []; nextCursor: null };
+  | ArchiveEvidence & { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; findingCount: number; scannerVersion: string; checkedAt: string; findings: { findingId: string; cveId: string; ecosystem: 'apk' | 'npm'; packageName: string; installedVersion: string; severity: 'UNKNOWN' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; fixedVersion: string | null }[]; nextCursor: string | null }
+  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; findings: []; nextCursor: null }
+  | ArchiveEvidence & { outcome: 'unsupported'; coverage: 'image'; reason: z.infer<typeof archiveReason>; findings: []; nextCursor: null };
 export type ScanSbom =
   | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; os: { name: 'alpine'; version: string }; componentCount: number; scannerVersion: string; checkedAt: string; components: { ecosystem: 'apk' | 'npm'; name: string; version: string }[]; nextCursor: string | null }
   | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; components: []; nextCursor: null };
@@ -53,12 +68,22 @@ const wireVulnResult = z.discriminatedUnion('outcome', [
   z.object({ check: z.literal('vuln'), coverage: z.literal('image'), outcome: z.literal('checked'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1) }),
   z.object({ check: z.literal('vuln'), coverage: z.literal('image'), outcome: z.literal('failed'), errorCode: failureCode }),
 ]);
-const wirePerCheck = z.union([wireCoverage, wireSbomResult, wireVulnResult]);
+const wireArchiveCheck = z.object({ check: checkName, coverage: z.literal('image'), outcome: wireOutcome,
+  reason: archiveReason.optional(), errorCode: failureCode.nullable(), scannerVersion: z.literal('0.69.3'),
+  checksVersion: z.string().min(1).max(80), checkedAt: z.string().datetime(),
+  findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional(), ...archiveEvidence });
+const wirePerCheck = z.unknown().transform((value, context) => {
+  const schema = value && typeof value === 'object' && 'checksVersion' in value
+    ? wireArchiveCheck : z.union([wireCoverage, wireSbomResult, wireVulnResult]);
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) { context.addIssue({ code: 'custom', message: 'Invalid check coverage' }); return z.NEVER; }
+  return parsed.data;
+});
 const wireChecks = z.array(checkName).min(1).max(3).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
-const wireStatus = z.object({ scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.string().regex(/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/).optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
+const wireStatus = z.object({ imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.string().regex(/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/).optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
 const sbomComponent = z.strictObject({ ecosystem: z.enum(['apk', 'npm']), name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
 const wireSbom = z.discriminatedUnion('outcome', [
-  z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/), platform: z.literal('linux/amd64'), os: z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) }), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
+  z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), os: z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) }), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
   z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']), components: z.tuple([]), nextCursor: z.null() }),
 ]);
 export function parseCurrentSbom(value: unknown): ScanSbom {
@@ -76,7 +101,8 @@ export function parseCurrentStatus(value: unknown): ScanStatus {
   if (checks && perCheck && (Object.keys(perCheck).some(key => !checks.includes(key as ScanCheck) || (perCheck[key as ScanCheck] != null && perCheck[key as ScanCheck]?.check !== key)) || checks.some(key => !(key in perCheck)))) throw new Error('Недопустимый статус проверок');
   return { scanId: current.scanId, state: current.state, percent: null,
     ...(checks ? { checks, perCheck, ...(checks.length === 1 ? { check: checks[0] } : {}) } : {}),
-    ...(current.digest && current.platform ? { digest: current.digest, platform: current.platform } : {}) };
+    ...(current.digest && current.platform ? { digest: current.digest, platform: current.platform } : {}),
+    ...(current.imageReference ? { imageReference: current.imageReference } : {}) };
 }
 export function parseCurrentList(value: unknown): { scans: ScanSummary[]; nextCursor: string | null } {
   const page = wireList.parse(value);
@@ -99,12 +125,13 @@ export function parseCurrentResults(value: unknown): ScanResults {
 }
 const wireVulnFinding = z.object({ findingId: z.string(), cveId: z.string(), ecosystem: z.enum(['apk', 'npm']), packageName: z.string(), installedVersion: z.string(), severity: z.enum(['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']), fixedVersion: z.string().nullable() });
 const wireVuln = z.discriminatedUnion('outcome', [
-  z.object({ outcome: z.literal('checked'), coverage: z.literal('image'), image: z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/), platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
+  z.object({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, ...archiveEvidence, platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
   z.object({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode, findings: z.tuple([]), nextCursor: z.null() }),
+  z.object({ outcome: z.literal('unsupported'), coverage: z.literal('image'), reason: archiveReason, ...archiveEvidence, findings: z.tuple([]), nextCursor: z.null() }),
 ]);
 export function parseCurrentVuln(value: unknown): ScanVuln {
   const page = wireVuln.parse(value);
-  if (page.outcome === 'failed') return page;
+  if (page.outcome !== 'checked') return page;
   if (page.findings.length > page.findingCount || (page.nextCursor !== null && (page.findings.length === 0 || page.nextCursor > page.findingCount))) throw new Error('Недопустимая страница CVE');
   return { ...page, findings: page.findings.map(({ findingId, cveId, ecosystem, packageName, installedVersion, severity, fixedVersion }) => ({ findingId, cveId, ecosystem, packageName, installedVersion, severity, fixedVersion })), nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };
 }

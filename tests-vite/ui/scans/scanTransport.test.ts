@@ -93,6 +93,28 @@ describe('scan transport boundary', () => {
     await expect(transport.vuln(id, '../other')).rejects.toThrow('Недопустимая страница');
     await expect(transport.create({ imageReference: 'alpine', scope: 'image', checks: ['vuln', 'secret'], idempotencyKey: id })).rejects.toThrow('Недопустимый набор');
   });
+  it('parses the exact archive report and retains independent OS/Node outcomes without raw evidence', () => {
+    const image = 'registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3';
+    const os = { outcome: 'checked' }, node = { outcome: 'unsupported', reason: 'NODE_INVENTORY_ABSENT' };
+    const report = { outcome: 'checked', coverage: 'image', image, platform: 'linux/amd64', findingCount: 1,
+      scannerVersion: '0.69.3', checkedAt: '2026-10-04T21:00:00.000Z', findings: [], nextCursor: null, os, node };
+    expect(parseCurrentVuln(report)).toMatchObject({ image, os, node });
+    expect(parseCurrentSbom({ outcome: 'checked', coverage: 'image', image, platform: 'linux/amd64',
+      os: { name: 'alpine', version: '3.23.3' }, componentCount: 72, scannerVersion: '0.69.3', checkedAt: report.checkedAt,
+      components: [{ ecosystem: 'apk', name: 'busybox', version: '1' }], nextCursor: 50 })).toMatchObject({ image });
+    for (const invalidImage of [image.replace('0dcc', '1dcc'), image.replace('nginx', 'node'), image.replace('@sha256:', ':')]) {
+      expect(() => parseCurrentVuln({ ...report, image: invalidImage })).toThrow();
+    }
+    expect(() => parseCurrentVuln({ ...report, node: { outcome: 'safe' } })).toThrow();
+    const perCheck = { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 1, scannerVersion: '0.69.3',
+      checksVersion: 'trivy-0.69.3-archive-v1', checkedAt: report.checkedAt, errorCode: null, os, node };
+    const status = { scanId: 'x', state: 'completed', imageReference: image, checks: ['vuln'], perCheck: { vuln: perCheck }, result: perCheck };
+    expect(parseCurrentStatus(status)).toMatchObject({ imageReference: image, perCheck: { vuln: { os, node } } });
+    expect(() => parseCurrentStatus({ ...status, perCheck: { vuln: { ...perCheck, checkedAt: 123 } } })).toThrow();
+    expect(() => parseCurrentStatus({ ...status, perCheck: { vuln: { ...perCheck, node: { outcome: 'safe' } } } })).toThrow();
+    expect(parseCurrentVuln({ outcome: 'unsupported', coverage: 'image', reason: 'OS_EOL', os: { outcome: 'unsupported', reason: 'OS_EOL' }, node,
+      findings: [], nextCursor: null })).toMatchObject({ outcome: 'unsupported', reason: 'OS_EOL', node });
+  });
   it('rejects cross-origin and unexpected scan URLs', () => {
     expect(sameOriginScanUrl('/api/v1/browser/scans/abc', 'abc')).toBe('/api/v1/browser/scans/abc');
     expect(() => sameOriginScanUrl('/api/v1/scans/abc', 'abc')).toThrow();

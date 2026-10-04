@@ -20,14 +20,14 @@ const alpineTargets = [
 ] as const;
 type ImageSuggestion = { label: string; reference: string; scannable: boolean; reason?: string; tagConfirmed?: boolean };
 const searchPageSchema = z.object({
-  items: z.array(z.object({ label: z.string().min(1).max(256), reference: z.string().regex(/^registry-1\.docker\.io\/[a-z0-9._/-]+:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/), scannable: z.boolean(), eligibility: z.enum(['alpine-only', 'unsupported']), reason: z.string().min(1).max(256), kind: z.enum(['tag', 'repository']), tagConfirmed: z.boolean(), checks: z.object({ secret: z.boolean(), sbom: z.boolean(), vuln: z.enum(['conditional', 'unsupported']) }) })).max(12),
+  items: z.array(z.object({ label: z.string().min(1).max(256), reference: z.string().regex(/^registry-1\.docker\.io\/[a-z0-9._/-]+(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/), scannable: z.boolean(), eligibility: z.enum(['alpine-only', 'isolated-exact-profile', 'unsupported']), reason: z.string().min(1).max(256), kind: z.enum(['tag', 'repository']), tagConfirmed: z.boolean(), checks: z.object({ secret: z.boolean(), sbom: z.boolean(), vuln: z.enum(['conditional', 'unsupported']) }) })).max(12),
   nextCursor: z.string().regex(/^[a-f0-9]{48}$/).nullable(), state: z.enum(['more-available', 'terminal', 'quota-exhausted']), loaded: z.number().int().min(0).max(60), pages: z.number().int().min(1).max(5),
   policy: z.object({ pageSize: z.literal(12), maxPages: z.literal(5), maxCandidates: z.literal(60), maxActivePerProcess: z.literal(8), maxActivePerSubject: z.literal(2), maxRequestsPerSubject: z.literal(30), rateWindowMs: z.literal(60_000), maxSessions: z.literal(1024), maxRateEntries: z.literal(1024), scope: z.literal('process-local') }),
 }).superRefine((page, context) => {
-  if ((page.state === 'more-available') !== (page.nextCursor !== null) || page.loaded < page.items.length || page.items.some(item => item.scannable !== (item.eligibility === 'alpine-only') || (item.scannable && (!item.reference.startsWith('registry-1.docker.io/library/alpine:') || !item.checks.secret || !item.checks.sbom || item.checks.vuln !== 'conditional')) || item.tagConfirmed !== (item.kind === 'tag'))) context.addIssue({ code: 'custom', message: 'Invalid discovery eligibility' });
+  if ((page.state === 'more-available') !== (page.nextCursor !== null) || page.loaded < page.items.length || page.items.some(item => item.scannable !== (item.eligibility !== 'unsupported') || (item.eligibility === 'alpine-only' && !item.reference.startsWith('registry-1.docker.io/library/alpine:')) || (item.eligibility === 'isolated-exact-profile' && !/^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(item.reference)) || (item.scannable && (!item.checks.secret || !item.checks.sbom || item.checks.vuln !== 'conditional')) || item.tagConfirmed !== (item.kind === 'tag'))) context.addIssue({ code: 'custom', message: 'Invalid discovery eligibility' });
 });
 const formSchema = z.object({
-  imageReference: z.string().regex(/^registry-1\.docker\.io\/library\/alpine(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/, 'Выберите доступный образ Alpine'),
+  imageReference: z.string().regex(/^registry-1\.docker\.io\/library\/(?:alpine(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})|nginx@sha256:[a-f0-9]{64})$/, 'Выберите образ с серверным допуском'),
   checks: z.array(z.enum(scanChecks)).min(1, 'Выберите хотя бы одну проверку'),
 });
 type FormValues = z.infer<typeof formSchema>;
@@ -200,7 +200,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   async function create(values: FormValues) {
     if (demo || !live || !confirmed || busy) return;
     const eligible = alpineTargets.some(target => target.reference === values.imageReference) || (selectedTarget.current?.reference === values.imageReference && selectedTarget.current.scannable === true);
-    if (!eligible) { setConfirmed(false); setError('Выберите цель с подтверждённым допуском Alpine.'); return; }
+    if (!eligible) { setConfirmed(false); setError('Выберите цель с подтверждённым серверным допуском.'); return; }
     setBusy(true);
     setError('');
     try {
@@ -244,7 +244,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               Задайте <em>границы.</em>
             </h2>
             <p className="scan-a1__muted mt-6 max-w-xl text-lg">
-              Ищите образы Docker Hub по названию или тегу. Сейчас сканируются только образы Alpine; остальные результаты отмечены как недоступные для запуска. Запуск требует действующей сессии и разрешения сервера.
+              Ищите образы Docker Hub по названию или тегу. Допуск определяет сервер: Alpine и явно разрешённые точные профили; остальные результаты недоступны для запуска. Запуск требует действующей сессии и разрешения сервера.
             </p>
           </div>
           <ScanScene variant="create" />

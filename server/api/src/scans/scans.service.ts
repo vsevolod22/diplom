@@ -11,6 +11,8 @@ import { parseScanRequest } from './scan-request.js';
 import { preflightVulnDbBundle } from '../worker/vuln-db-bundle.js';
 import { chainReady } from './scan-readiness.js';
 import type { Identity } from '../security/identity.js';
+import type { ImageReference } from './image-reference.js';
+import type { ImageSuggestion } from './image-search.js';
 
 const allowed = new Set(['registry-1.docker.io']);
 const unavailable = () => new ServiceUnavailableException({ errorCode: 'SCANNER_UNAVAILABLE' });
@@ -26,6 +28,17 @@ export class ScansService {
   ) {}
 
   protected readiness(): Promise<boolean> { return chainReady(); }
+
+  // Production is closed to archive candidates. Only a separately composed proof
+  // server overrides these hooks; there is deliberately no environment enable flag.
+  protected acceptsReference(reference: ImageReference): boolean {
+    return reference.registry === 'registry-1.docker.io' && reference.repository === 'library/alpine';
+  }
+  protected resolveTarget(reference: ImageReference) { return this.resolver.resolvePublicAlpine(reference); }
+  protected acceptsPinned(pinned: { registry: string; repository: string; platform: string; digest: string }): boolean {
+    return pinned.registry === 'registry-1.docker.io' && pinned.repository === 'library/alpine' && pinned.platform === 'linux/amd64';
+  }
+  imageSuggestion(suggestion: ImageSuggestion): ImageSuggestion { return suggestion; }
 
   protected async vulnDbReady(): Promise<boolean> {
     const directory = process.env.SCAN_VULN_RELEASE_DIR;
@@ -56,8 +69,8 @@ export class ScansService {
     let request;
     try { request = parseScanRequest(body, allowed); }
     catch { reject('INVALID_REQUEST'); throw new BadRequestException({ errorCode: 'INVALID_SCAN_REQUEST' }); }
-    // Only the public Alpine image on the resolver's pinned linux/amd64 platform.
-    if (request.reference.repository !== 'library/alpine') {
+    // Check policy before replay too: a seeded closed candidate cannot gain public admission.
+    if (!this.acceptsReference(request.reference)) {
       reject('UNSUPPORTED');
       throw new BadRequestException({ errorCode: 'UNSUPPORTED_SCAN' });
     }
@@ -80,9 +93,8 @@ export class ScansService {
       // Charge admission before hashing the operator's DB release (up to 2 GiB).
       if (request.checks.includes('vuln') && !(await this.vulnDbReady())) { reject('UNSUPPORTED'); throw unavailable(); }
       if (!(await this.readiness())) { reject('EGRESS'); throw unavailable(); }
-      const pinned = await this.resolver.resolvePublicAlpine(request.reference);
-      if (pinned.registry !== 'registry-1.docker.io' || pinned.repository !== 'library/alpine' ||
-          pinned.platform !== 'linux/amd64') { reject('UNSUPPORTED'); throw unavailable(); }
+      const pinned = await this.resolveTarget(request.reference);
+      if (!this.acceptsPinned(pinned)) { reject('UNSUPPORTED'); throw unavailable(); }
       // A worker/gateway outage during resolution must not enqueue a new task.
       if (!(await this.readiness())) { reject('EGRESS'); throw unavailable(); }
       const { scanId } = ledger.enqueue({ subject: identity.subject, idempotencyKey: request.idempotencyKey,
@@ -147,16 +159,18 @@ export class ScansService {
       const checks = ledger!.requestedChecks(scanId, identity.subject);
       const perCheck = Object.fromEntries(checks.map(check => {
         const result = archive[check as 'secret' | 'sbom' | 'vuln'];
-        return [check, result ? { outcome: result.outcome,
+        return [check, result ? { check, coverage: 'image', outcome: result.outcome,
+          errorCode: result.outcome === 'failed' ? (result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED') : null,
           ...(result.outcome !== 'checked' ? { reason: result.reason } : {}),
           ...(check === 'secret' && archive.secret?.outcome === 'checked' ? { findingCount: archive.secret.findings.length } : {}),
           ...(check === 'sbom' && archive.sbom?.outcome === 'checked' ? { componentCount: archive.sbom.sbom.components.length } : {}),
           ...(check === 'vuln' && archive.vuln?.outcome === 'checked' ? { findingCount: archive.vuln.findings.length } : {}),
           ...(check === 'vuln' && archive.vuln && archive.vuln.outcome !== 'failed' ?
             { os: archive.vuln.os, node: archive.vuln.node, db: archive.vuln.db } : {}),
-          scannerVersion: archive.scannerVersion, checksVersion: archive.receipt.checksVersion, checkedAt: archive.checkedAt } : null];
+          scannerVersion: archive.scannerVersion, checksVersion: archive.receipt.checksVersion, checkedAt: new Date(archive.checkedAt).toISOString() } : null];
       }));
-      return { scanId, ...snapshot, checks, perCheck, result: checks.length === 1 ? perCheck[checks[0]] : null,
+      return { scanId, ...snapshot, imageReference: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
+        checks, perCheck, result: checks.length === 1 ? perCheck[checks[0]] : null,
         imageProfile: { version: archive.receipt.profileVersion, configDigest: archive.receipt.configDigest,
           resourcePolicyVersion: archive.receipt.resourcePolicyVersion, qualified: false },
         coverage: 'image', checkedIsNotSafe: true };
@@ -192,12 +206,14 @@ export class ScansService {
     const archive = ledger?.archiveResult(scanId, identity.subject);
         if (archive?.secret) {
           const result = archive.secret;
-          if (result.outcome !== 'checked') return { findings: [], nextCursor: null, coverage: { outcome: result.outcome, reason: result.reason } };
+          if (result.outcome !== 'checked') return { findings: [], nextCursor: null, coverage: {
+            check: 'secret', coverage: 'image', outcome: result.outcome, reason: result.reason, findingCount: 0,
+            errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', scannerVersion: archive.scannerVersion } };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
           if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
           return { findings: result.findings.slice(start, end), nextCursor: end < result.findings.length ? end : null,
-            coverage: { check: 'secret', outcome: 'checked', coverage: 'image', findingCount: result.findings.length,
-              scannerVersion: archive.scannerVersion, checkedAt: archive.checkedAt } };
+            coverage: { check: 'secret', outcome: 'checked', coverage: 'image', findingCount: result.findings.length, errorCode: null,
+              scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString() } };
         }
         const result = ledger?.findings(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!result) throw new NotFoundException();
@@ -214,12 +230,13 @@ export class ScansService {
     const archive = ledger.archiveResult(scanId, identity.subject);
         if (archive?.sbom) {
           const result = archive.sbom;
-          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason, coverage: 'image', components: [], nextCursor: null };
+          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason,
+            errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', coverage: 'image', components: [], nextCursor: null };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.sbom.components.length);
           if (start > result.sbom.components.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
           return { outcome: 'checked', coverage: 'image', image: result.sbom.image, platform: result.sbom.platform,
             os: result.sbom.os, components: result.sbom.components.slice(start, end), componentCount: result.sbom.components.length,
-            nextCursor: end < result.sbom.components.length ? end : null, scannerVersion: archive.scannerVersion, checkedAt: archive.checkedAt };
+            nextCursor: end < result.sbom.components.length ? end : null, scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString() };
         }
         const report = ledger.sbom(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!report) throw new NotFoundException();
@@ -238,14 +255,16 @@ export class ScansService {
     const archive = ledger.archiveResult(scanId, identity.subject);
         if (archive?.vuln) {
           const result = archive.vuln;
-          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason, coverage: 'image', findings: [], nextCursor: null,
+          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason,
+            ...(result.outcome === 'failed' ? { errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED' } : {}),
+            coverage: 'image', findings: [], nextCursor: null,
             ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db } : {}) };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
           if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
           return { outcome: 'checked', coverage: 'image', image: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
             platform: archive.receipt.platform, findings: result.findings.slice(start, end), findingCount: result.findings.length,
             nextCursor: end < result.findings.length ? end : null, db: result.db, os: result.os, node: result.node,
-            scannerVersion: archive.scannerVersion, checkedAt: archive.checkedAt };
+            scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString() };
         }
         const report = ledger.vuln(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!report) throw new NotFoundException();

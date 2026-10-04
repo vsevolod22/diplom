@@ -141,7 +141,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const reportData = isSecret && scan.isSuccess && report.isSuccess ? report.data : undefined;
   const liveCoverage = demo ? undefined : scan.data?.checks?.map((check: ScanCheck): ScanCoverage => {
     const outcome = scan.data?.perCheck?.[check];
-    return { check: check === 'secret' ? 'Secrets' : check === 'sbom' ? 'SBOM' : 'CVE', status: outcome?.outcome ?? 'skipped', reason: outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined };
+    return { check: check === 'secret' ? 'Secrets' : check === 'sbom' ? 'SBOM' : 'CVE', status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined };
   });
   const findings =
     reportData?.findings.filter((finding) => filter === 'all' || finding.category === filter) ?? [];
@@ -432,15 +432,19 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
             {isSbom && !sbomOnly ? <section className="scan-a1__panel" aria-label="Пакеты SBOM">
               <h3>Пакеты SBOM</h3>
               {sbom.isSuccess ? sbom.data.outcome === 'failed' ? <p>SBOM не проверен: {sbom.data.errorCode}. Число пакетов неизвестно.</p> : <>
-                <p>Инвентарь image: {sbom.data.componentCount} пакетов. SBOM не оценивает CVE.</p>
+                <p>Инвентарь image: {sbom.data.componentCount} пакетов · ОС {sbom.data.os.name} {sbom.data.os.version}. SBOM не оценивает CVE.</p>
                 <ul className="scan-a1__findings">{sbom.data.components.map((component, index) => <li key={`${sbomCursor ?? '0'}-${index}`}><strong>{component.name}</strong><p>{component.ecosystem} · {component.version}</p></li>)}</ul>
                 {sbom.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setSbomCursor(sbom.data.nextCursor ?? undefined)}>Следующая страница SBOM</Button> : null}
               </> : <p>{sbom.isError ? 'SBOM недоступен; число пакетов неизвестно.' : 'Ожидаем результат SBOM.'}</p>}
             </section> : null}
             {isVuln ? <section className="scan-a1__panel" aria-label="Результаты CVE">
               <h3>CVE · registry IMAGE</h3>
-              {vuln.isSuccess ? vuln.data.outcome === 'failed' ? <p>CVE не проверены: {vuln.data.errorCode}. Число уязвимостей неизвестно.</p> : !scan.data.digest || scan.data.platform !== vuln.data.platform || vuln.data.image !== `registry-1.docker.io/library/alpine@${scan.data.digest}` ? <p>Идентичность образа в CVE-отчёте не совпадает со статусом; результат неизвестен.</p> : <>
+              {vuln.isSuccess ? vuln.data.outcome === 'failed' ? <p>CVE не проверены: {vuln.data.errorCode}. Число уязвимостей неизвестно.</p> : vuln.data.outcome === 'unsupported' ? <p>CVE не поддерживаются: {vuln.data.reason}. Это не нулевое число находок.</p> : !scan.data.digest || scan.data.platform !== vuln.data.platform || vuln.data.image !== (scan.data.imageReference ?? `registry-1.docker.io/library/alpine@${scan.data.digest}`) ? <p>Идентичность образа в CVE-отчёте не совпадает со статусом; результат неизвестен.</p> : <>
                 <p>Находок в проверенной области: {vuln.data.findingCount}. Это не гарантия безопасности; другие области не проверялись.</p>
+                                {vuln.data.os ? <p>OS CVE: {coverageLabels[vuln.data.os.outcome]}{vuln.data.os.outcome === 'unsupported' ? ` · ${vuln.data.os.reason}` : ''}</p> : null}
+                                {vuln.data.node ? <p>Node/npm CVE: {coverageLabels[vuln.data.node.outcome]}{vuln.data.node.outcome === 'unsupported' ? ` · ${vuln.data.node.reason}` : ''}</p> : null}
+                                {vuln.data.db ? <p className="scan-a1__muted">DB {vuln.data.db.manifestDigest} · {vuln.data.db.signer} (локальная аттестация, не подпись издателя) · обновлена {vuln.data.db.updatedAt} · срок {vuln.data.db.nextUpdate}</p> : null}
+                                <p className="scan-a1__muted">scanner {vuln.data.scannerVersion} · проверено {vuln.data.checkedAt}{scan.data.perCheck?.vuln?.checksVersion ? ` · checks ${scan.data.perCheck.vuln.checksVersion}` : ''}</p>
                 <ul className="scan-a1__findings">{vuln.data.findings.map(finding => <li key={finding.findingId}><strong>{finding.cveId} · {finding.severity}</strong><p>{finding.ecosystem} · {finding.packageName} {finding.installedVersion} · исправление: {finding.fixedVersion ?? 'не указано'}</p></li>)}</ul>
                 {vuln.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setVulnCursor(vuln.data.nextCursor ?? undefined)}>Следующая страница CVE</Button> : null}
               </> : <p>{vuln.isError ? vuln.error instanceof ScanHttpError && vuln.error.status === 503 ? 'CVE недоступны: проверьте настройку базы уязвимостей у администратора. Число находок неизвестно.' : 'CVE недоступны; число уязвимостей неизвестно.' : !scan.data.perCheck?.vuln && ['completed', 'partial', 'failed'].includes(scan.data.state) ? 'Нет подтверждённого результата CVE; число находок неизвестно.' : 'Ожидаем результат CVE. Нулевое число не подтверждено.'}</p>}

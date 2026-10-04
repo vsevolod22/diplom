@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { BadRequestException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { dockerHubSearch, hubSearchUrl, type HubSearchResponse } from '../oci/gateway-transport.js';
 
-export type ImageSuggestion = { label: string; reference: string; scannable: boolean; kind: 'tag' | 'repository'; tagConfirmed: boolean; eligibility: 'alpine-only' | 'unsupported'; reason: string; checks: { secret: boolean; sbom: boolean; vuln: 'conditional' | 'unsupported' } };
+export type ImageSuggestion = { label: string; reference: string; scannable: boolean; kind: 'tag' | 'repository'; tagConfirmed: boolean; eligibility: 'alpine-only' | 'isolated-exact-profile' | 'unsupported'; reason: string; checks: { secret: boolean; sbom: boolean; vuln: 'conditional' | 'unsupported' } };
 export const searchPolicy = Object.freeze({ pageSize: 12, maxPages: 5, maxCandidates: 60, maxPageBytes: 128_000, maxBytes: 640_000, idleMs: 300_000, maxFetchMs: 5000, maxTotalMs: 25_000, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' as const });
 export type ImageSearchPage = { items: ImageSuggestion[]; nextCursor: string | null; state: 'more-available' | 'terminal' | 'quota-exhausted'; loaded: number; pages: number; policy: typeof searchPolicy };
 const repoName = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;
@@ -42,7 +42,8 @@ export class ImageSearchSessions {
   private readonly sessions = new Map<string, Session>();
   private readonly rates = new Map<string, { until: number; count: number }>();
   private active = 0;
-  constructor(private readonly fetchHub: FetchHub = dockerHubSearch, private readonly now = Date.now) {}
+  constructor(private readonly fetchHub: FetchHub = dockerHubSearch, private readonly now = Date.now,
+    private readonly mapSuggestion: (item: ImageSuggestion) => ImageSuggestion = item => item) {}
   async search(subject: string, raw: unknown, generation: unknown, cursor?: unknown): Promise<ImageSearchPage> {
     const { query, alpineTag } = parseImageSearch(raw);
     if (typeof generation !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(generation) || (cursor !== undefined && (typeof cursor !== 'string' || !/^[a-f0-9]{48}$/.test(cursor)))) reject('INVALID_IMAGE_SEARCH', 400);
@@ -88,7 +89,7 @@ export class ImageSearchSessions {
         const expected = hubSearchUrl(kind, term, page + 1);
         if (next.origin !== expected.origin || next.pathname !== expected.pathname || next.username || next.password || next.hash || [...next.searchParams].length !== [...expected.searchParams].length || [...expected.searchParams].some(([key, value]) => next.searchParams.getAll(key).length !== 1 || next.searchParams.get(key) !== value)) throw new Error('Invalid continuation');
       }
-      const items = normalizeImageSuggestions(response, alpineTag !== null).filter(item => !current.seen.has(item.reference));
+      const items = normalizeImageSuggestions(response, alpineTag !== null).map(this.mapSuggestion).filter(item => !current.seen.has(item.reference));
       for (const item of items) current.seen.add(item.reference);
       current.page = page;
       const state = response.next === null ? 'terminal' : page >= searchPolicy.maxPages || current.seen.size >= searchPolicy.maxCandidates ? 'quota-exhausted' : 'more-available';
