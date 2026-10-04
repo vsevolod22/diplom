@@ -30,10 +30,13 @@ async function fixture(t: TestContext) {
   const metadataBytes = Buffer.from(JSON.stringify(metadata));
   await mkdir(join(directory, 'db'));
   await writeFile(join(directory, 'db', 'metadata.json'), metadataBytes);
+  const dbBytes = Buffer.from('SYNTHETIC DB BYTES; NOT A TRIVY DATABASE');
+  await writeFile(join(directory, 'db', 'trivy.db'), dbBytes);
   const descriptor = {
     envelopeVersion: 1, signer: options.expectedSigner, source: options.expectedSource,
     schemaVersion: options.expectedSchemaVersion, artifactSha256: hash,
-    metadataSha256: createHash('sha256').update(metadataBytes).digest('hex'), manifestDigest,
+    metadataSha256: createHash('sha256').update(metadataBytes).digest('hex'),
+    dbSha256: createHash('sha256').update(dbBytes).digest('hex'), manifestDigest,
     updatedAt: metadata.UpdatedAt, downloadedAt: metadata.DownloadedAt,
     nextUpdate: metadata.NextUpdate,
   };
@@ -76,6 +79,9 @@ test('rejects metadata tampering, forged DB timestamps and mismatched OCI digest
   await writeFile(join(directory, 'db', 'metadata.json'), JSON.stringify({ ...metadata, Version: 3 }));
   await assert.rejects(preflightVulnDbBundle(options), fail);
   await writeFile(join(directory, 'db', 'metadata.json'), JSON.stringify(metadata));
+  await writeFile(join(directory, 'db', 'trivy.db'), 'tampered');
+  await assert.rejects(preflightVulnDbBundle(options), fail);
+  await writeFile(join(directory, 'db', 'trivy.db'), 'SYNTHETIC DB BYTES; NOT A TRIVY DATABASE');
   await writeDescriptor({ ...descriptor, updatedAt: '2026-10-03T10:00:00.000Z' });
   await assert.rejects(preflightVulnDbBundle(options), fail);
   await writeDescriptor({ ...descriptor, manifestDigest: `sha256:${'b'.repeat(64)}` });

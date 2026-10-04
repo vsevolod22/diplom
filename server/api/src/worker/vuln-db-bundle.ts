@@ -7,6 +7,7 @@ import { isAbsolute, join, parse, sep } from 'node:path';
 // check CVEs, or authorize admission. Never hand the result to an admission decision.
 const MAX_DESCRIPTOR_BYTES = 4096;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
+const MAX_DB_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_DOWNLOAD_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_UPDATE_AGE_MS = 48 * 60 * 60 * 1000;
@@ -31,6 +32,7 @@ type Descriptor = {
   schemaVersion: number;
   artifactSha256: string;
   metadataSha256: string;
+  dbSha256: string;
   manifestDigest: string;
   updatedAt: string;
   downloadedAt: string;
@@ -114,6 +116,7 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
       schemaVersion: value.schemaVersion as number,
       artifactSha256: value.artifactSha256 as string,
       metadataSha256: value.metadataSha256 as string,
+      dbSha256: value.dbSha256 as string,
       manifestDigest: value.manifestDigest as string,
       updatedAt: value.updatedAt as string,
       downloadedAt: value.downloadedAt as string,
@@ -124,7 +127,8 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
         descriptor.source !== expectedSource || descriptor.schemaVersion !== expectedSchemaVersion ||
         descriptor.manifestDigest !== expectedManifestDigest ||
         !/^[a-f0-9]{64}$/.test(descriptor.artifactSha256) ||
-        !/^[a-f0-9]{64}$/.test(descriptor.metadataSha256)) throw failure();
+        !/^[a-f0-9]{64}$/.test(descriptor.metadataSha256) ||
+                !/^[a-f0-9]{64}$/.test(descriptor.dbSha256)) throw failure();
     const metadataBytes = await readBounded(join(directory, 'db', 'metadata.json'), 4096);
     const metadataHash = createHash('sha256').update(metadataBytes).digest();
     if (!timingSafeEqual(metadataHash, Buffer.from(descriptor.metadataSha256, 'hex'))) throw failure();
@@ -144,6 +148,9 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     if (!timingSafeEqual(Buffer.from(descriptor.artifactSha256, 'hex'), pinnedHash)) throw failure();
     const artifactHash = await readBounded(join(directory, 'bundle.bin'), MAX_ARTIFACT_BYTES, true);
     if (!timingSafeEqual(artifactHash, pinnedHash)) throw failure();
+    // Bind the actual read-only cache bytes too; gzip integrity alone says nothing about extracted DB.
+    const dbHash = await readBounded(join(directory, 'db', 'trivy.db'), MAX_DB_BYTES, true);
+    if (!timingSafeEqual(dbHash, Buffer.from(descriptor.dbSha256, 'hex'))) throw failure();
     return { kind: 'envelope-preflight-only', artifactSha256: expectedArtifactSha256, schemaVersion: expectedSchemaVersion };
   } catch {
     // Never leak raw paths, descriptor contents, signature verification or filesystem errors.
