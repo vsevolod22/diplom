@@ -7,7 +7,13 @@ export type ScanResult = { ok: true; findings: SecretFinding[]; scannerVersion: 
 
 // Intended for a separately network-isolated worker container. This process cannot
 // establish the container's network boundary: deployment must enforce it independently.
-export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: string }): Promise<ScanResult> {
+// The injected lifecycle is only for exercising stuck pipes without a real Trivy process.
+const workerLifecycle: { spawn: typeof spawn; stopWorker: () => void } = {
+  spawn, stopWorker: () => process.exit(1),
+};
+
+export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: string; signal?: AbortSignal },
+  lifecycle: typeof workerLifecycle = workerLifecycle): Promise<ScanResult> {
   if (!/^sha256:[a-f0-9]{64}$/.test(job.digest) ||
       !/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/.test(job.platform) ||
       !/^[a-z0-9.-]+$/.test(job.registry) || !/^[a-z0-9/._-]+$/.test(job.repository) ||
@@ -21,9 +27,13 @@ export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: 
   return new Promise(resolve => {
     let settled = false;
     let timedOut = false;
+    let cancelled = options.signal?.aborted ?? false;
+    let killed = false;
+    let spawnFailed = false;
     let output = '';
-    const done = (result: ScanResult) => { if (!settled) { settled = true; resolve(result); } };
-    const child = spawn('trivy', args, {
+    let outputBytes = 0;
+    let killFallback: ReturnType<typeof setTimeout> | undefined;
+    const child = lifecycle.spawn('trivy', args, {
       env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp', HTTPS_PROXY: 'http://egress:8080',
         HTTP_PROXY: 'http://egress:8080', NO_PROXY: '',
                 // Go TLS verifies the peer against the OS trust store (or an explicitly
@@ -32,20 +42,48 @@ export async function scanPinned(job: Job, options: { timeoutMs: number; dbDir: 
       stdio: ['ignore', 'pipe', 'ignore'], // stderr can include signed URLs
       shell: false,
     });
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, options.timeoutMs);
+    const done = (result: ScanResult) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(killFallback);
+        options.signal?.removeEventListener('abort', abort);
+        resolve(result);
+      }
+    };
+    const kill = () => {
+      if (killed) return;
+      killed = true;
+      child.kill('SIGKILL');
+      // 'exit' alone is insufficient: a descendant can keep stdout open.
+      // Never return to the consumer unless 'close' confirms the pipe is gone.
+      killFallback = setTimeout(() => lifecycle.stopWorker(), 2000);
+    };
+    const abort = () => {
+      cancelled = true;
+      kill();
+      // The consumer races abort against this promise and can claim the next job
+      // before 'close'. Terminate the container even if SIGKILL succeeds.
+      lifecycle.stopWorker();
+    };
+    const timer = setTimeout(() => { timedOut = true; kill(); }, options.timeoutMs);
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (output.length + chunk.length > 8_000_000) {
-        child.kill('SIGKILL');
-      } else output += chunk.toString('utf8');
+      if (killed) return;
+      outputBytes += chunk.length;
+      if (outputBytes > 8_000_000) kill();
+      else output += chunk.toString('utf8');
     });
-    child.on('error', () => { clearTimeout(timer); done({ ok: false, failure: scannerFailure(null) }); });
+    child.on('error', () => { spawnFailed = true; kill(); });
     child.on('close', code => {
-      clearTimeout(timer);
-      if (timedOut || code !== 0) return done({ ok: false, failure: scannerFailure(code, timedOut) });
+      if (cancelled || timedOut || killed || spawnFailed || code !== 0)
+        return done({ ok: false, failure: scannerFailure(spawnFailed ? null : code, timedOut) });
       try {
         const findings = parseSecretFindings(JSON.parse(output) as unknown);
         done({ ok: true, findings, scannerVersion: '0.69.3' });
       } catch { done({ ok: false, failure: scannerFailure(null) }); }
     });
+    if (cancelled) abort(); else options.signal?.addEventListener('abort', abort, { once: true });
+    // Cover a signal that fired between the initial check and listener registration.
+    if (options.signal?.aborted && !cancelled) abort();
   });
 }

@@ -3,9 +3,11 @@ import { ArrowRight, ArrowUpRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanShell } from '@/features/scans/ScanShell';
+import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { ScanScene } from '@/features/scans/ScanScene';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
+import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
 import { Alert, Badge } from '@/shared/ui/scan-primitives';
 
@@ -20,9 +22,10 @@ const stateTone: Record<ScanStatus['state'], 'neutral' | 'info' | 'warning' | 'd
 };
 
 export function ScanListPage({ demo = false }: { demo?: boolean }) {
-  const transport = demo ? fixtureScanTransport : unavailableScanTransport;
+  const live = useLiveScanSession();
+  const transport = demo ? fixtureScanTransport : live?.transport ?? unavailableScanTransport;
   const list = useQuery({
-    queryKey: ['scans', transport.kind, 'list'],
+    queryKey: demo ? ['scans', 'fixture', 'list'] : [...(live?.scope ?? ['live-scans', 'unavailable']), 'list'],
     queryFn: ({ signal }) => transport.list(signal),
     enabled: transport.capabilities.list,
     retry: false,
@@ -32,7 +35,7 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
       <section aria-labelledby="scan-list" className="min-w-0 space-y-8 pb-8">
         <div className="scan-a1__chapter">
           <span>ГЛАВА 01 / КАТАЛОГ</span>
-          <span>{demo ? 'ЗАПИСИ ИЗ ФИКСТУР' : 'НЕТ БРАУЗЕРНОГО ДОСТУПА'}</span>
+          <span>{demo ? 'ЗАПИСИ ИЗ ФИКСТУР' : 'АВТОРИЗОВАННЫЙ СПИСОК'}</span>
         </div>
         <div className="scan-a1__intro scan-a1__intro--editorial">
           <div className="scan-a1__intro-copy min-w-0">
@@ -48,9 +51,9 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
           <div className="scan-a1__intro-art">
             <ScanScene variant="list" />
             <div className="scan-a1__intro-cta">
-              <span>01 / {demo ? 'ФИКСТУРЫ, НЕ LIVE' : 'LIVE НЕДОСТУПЕН'}</span>
-              {demo ? (
-                <Link className="scan-a1__action" to="/demo/scans/new">
+              <span>01 / {demo ? 'ФИКСТУРЫ, НЕ LIVE' : 'СНИМОК API'}</span>
+              {transport.capabilities.create || demo ? (
+                <Link className="scan-a1__action" to={demo ? '/demo/scans/new' : '/scans/new'}>
                   + Новый скан <ArrowRight size={20} aria-hidden="true" />
                 </Link>
               ) : null}
@@ -58,13 +61,13 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
           </div>
         </div>
         <div className="scan-a1__section-title">
-          <span>РЕЕСТР / {demo ? 'ДЕМО' : 'НЕТ ДОСТУПА'}</span>
+          <span>РЕЕСТР / {demo ? 'ДЕМО' : 'LIVE'}</span>
           <span>ЦЕЛЬ → СОСТОЯНИЕ → ОТЧЁТ</span>
         </div>
         {!transport.capabilities.list ? (
           <Alert role="status" tone="neutral">
             <strong>
-              Список недоступен: GET /api/v1/scans и защищённый браузерный доступ ещё не реализованы.
+              Список недоступен без подтверждённой сессии.
             </strong>
             <span className="mt-2 block">Отсутствие списка не означает «сканов нет».</span>
             <Link to="/demo/scans" className="mt-3 inline-block font-bold underline">
@@ -79,7 +82,11 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
         ) : null}
         {list.isError ? (
           <Alert role="alert" tone="danger">
-            Не удалось загрузить список. Неизвестно, есть ли сканы.
+            {list.error instanceof ScanAccessError && list.error.status === 403 ? (
+              <>Аккаунту не выдано разрешение на реальные сканы. Вход работает, но список и запуск закрыты. Узнайте ID на <Link to="/account" className="font-bold underline">странице аккаунта</Link>, чтобы разрешить этот аккаунт на стенде.</>
+            ) : list.error instanceof ScanAccessError && list.error.status === 401 ? (
+              <>Сессия больше не действует. <Link to="/login" className="font-bold underline">Войдите заново</Link>.</>
+            ) : 'Не удалось загрузить список. Неизвестно, есть ли сканы.'}
           </Alert>
         ) : null}
         {list.isSuccess && !list.data.length ? (
@@ -125,7 +132,7 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
         <p className="scan-a1__muted text-sm">
           {demo
             ? 'Сканы в списке — локальные фикстуры. Анимации не отображают реальный ход проверки.'
-            : 'Запуск, список и отмена реальных проверок недоступны без защищённого ingress.'}
+            : 'Список и запуск доступны разрешённому аккаунту; деталь получает SSE-подсказки и подтверждает состояние через GET. Отмена доступна активным сканам.'}
         </p>
       </section>
     </ScanShell>

@@ -46,8 +46,9 @@ test('wrong checks roll back result, delivery and terminal state', () => {
     assert.equal(db.state(scanId, 'alice'), 'running');
     assert.equal(db.result(scanId, 'alice'), undefined);
     assert.equal(db.finish(scanId, job.attempts, 'failed', 'SCAN_TIMEOUT'), true);
-    assert.deepEqual(db.result(scanId, 'alice'), { findingCount: 0, check: 'secret', coverage: 'image',
-      outcome: 'failed', errorCode: 'SCAN_TIMEOUT', scannerVersion: null });
+    // An unsupported check must not be misreported as secret coverage.
+    assert.equal(db.result(scanId, 'alice'), undefined);
+    assert.equal(db.state(scanId, 'alice'), 'failed');
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

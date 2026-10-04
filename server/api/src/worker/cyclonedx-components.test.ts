@@ -9,7 +9,7 @@ const report = () => ({
   components: [
     { type: 'operating-system', name: 'alpine', version: '3.21.3' },
     { type: 'library', name: 'alpine-baselayout', version: '3.6.8-r1',
-      purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1',
+      purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1?arch=x86_64&distro=3.21.3',
       properties: [{ name: 'raw-secret', value: 'CANARY_SECRET' }] },
     { type: 'library', name: '@org/module', version: '1.2.3', purl: 'pkg:npm/%40org/module@1.2.3',
       description: 'CANARY_SECRET' },
@@ -39,6 +39,7 @@ test('rejects package identity mismatches and untrusted names', () => {
   const base = report();
   const replace = (changes: Record<string, string>) => ({ ...base, components: [base.components[0],
     { ...base.components[1], ...changes }] });
+  assert.throws(() => parseImageSbom(replace({ purl: 'pkg:apk/alpine/alpine-baselayout@3.6.8-r1' }), image, 'linux/amd64'));
   assert.throws(() => parseImageSbom(replace({ name: 'different' }), image, 'linux/amd64'));
   assert.throws(() => parseImageSbom(replace({ version: '999' }), image, 'linux/amd64'));
   assert.throws(() => parseImageSbom(replace({ name: 'CANARY_SECRET' }), image, 'linux/amd64'));

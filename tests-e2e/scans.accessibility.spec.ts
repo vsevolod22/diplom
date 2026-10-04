@@ -65,11 +65,9 @@ for (const width of [320, 375, 1280]) {
     await page.goto('/demo/scans/new');
     await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
     await expect(page.getByText('Область доверия')).toBeVisible();
-    await expect(page.getByText('Secrets · image', { exact: false }).first()).toBeVisible();
-    await expect(page.locator('fieldset input:checked')).toHaveCount(0);
-    await expect(
-      page.getByText('внутренний сценарий разрабатывается и ожидает приёмки', { exact: false }).first(),
-    ).toBeVisible();
+    await expect(page.getByText('Secrets · проверка образа', { exact: false }).first()).toBeVisible();
+    await expect(page.locator('fieldset input:checked')).toHaveCount(1);
+    await expect(page.getByText('host и running container не поддерживаются', { exact: false }).first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     if (width === 375 || width === 1280)
       await page.screenshot({ path: `test-results/scan-create-${width}.png`, fullPage: true });
@@ -144,6 +142,39 @@ for (const width of [320, 375, 1280]) {
       await expect(page.getByRole('button', { name: 'Фильтры' })).toBeHidden();
     }
   });
+}
+
+for (const width of [320, 375, 1280]) {
+  for (const reducedMotion of ['reduce', 'no-preference'] as const) {
+    test(`21st.dev tabs and accordion: ${width}px ${reducedMotion}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await page.emulateMedia({ reducedMotion });
+      await page.goto('/demo/scans/new');
+      const tabs = page.getByRole('tablist', { name: 'Памятка о подготовке скана' });
+      const target = tabs.getByRole('tab', { name: '01 / Цель' });
+      await target.focus();
+      await expect(target).toHaveCSS('outline-style', 'solid');
+      await page.keyboard.press('ArrowRight');
+      await expect(tabs.getByRole('tab', { name: '02 / Границы' })).toBeFocused();
+      await expect(page.getByRole('tabpanel')).toContainText('авторизованный GET status');
+      await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      if (reducedMotion === 'reduce')
+        await page.screenshot({ path: `test-results/21st-create-${width}.png`, fullPage: true });
+      await page.goto('/demo/scans/partial-demo');
+      await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
+      await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
+      const trigger = page.getByRole('button', { name: 'Что означает неполный отчёт?' });
+      await trigger.focus();
+      await expect(trigger).toHaveCSS('outline-style', 'solid');
+      await page.keyboard.press('Enter');
+      await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      await expect(page.getByText('Сбой проверки не означает', { exact: false })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      if (reducedMotion === 'reduce')
+        await page.screenshot({ path: `test-results/21st-detail-${width}.png`, fullPage: true });
+    });
+  }
 }
 
 test('ordinary motion: MagicCard spotlight and mobile filter preserve keyboard focus', async ({ page }) => {

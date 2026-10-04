@@ -1,7 +1,7 @@
 import type { ScanResults, ScanStatus, ScanSummary, ScanTransport } from './scanTransport';
 
 export const demoScans: ScanSummary[] = [
-  { scanId: 'partial-demo', state: 'partial', percent: null, targetLabel: 'library/alpine:latest (демо)', imageReference: 'library/alpine:latest' },
+  { scanId: 'partial-demo', state: 'partial', percent: null, targetLabel: 'library/alpine:latest (демо)', imageReference: 'library/alpine:latest', checks: ['secret', 'sbom', 'vuln'], perCheck: { secret: { check: 'secret', coverage: 'image', outcome: 'checked' }, sbom: { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_FAILED' }, vuln: { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_UNAVAILABLE' } } },
   { scanId: 'empty-demo', state: 'completed', percent: null, targetLabel: 'library/alpine:3.21 (демо)' },
   { scanId: 'unsupported-demo', state: 'partial', percent: null, targetLabel: 'library/alpine:edge (демо)' },
   { scanId: 'running-demo', state: 'running', stage: 'secret', percent: null, targetLabel: 'library/alpine:3 (демо)' },
@@ -30,6 +30,8 @@ export const fixtureScanTransport: ScanTransport = {
     if (!reports[id] || cursor) throw new Error('Результаты недоступны');
     return reports[id];
   },
+  async sbom() { return { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', components: [], nextCursor: null }; },
+  async vuln() { return { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_UNAVAILABLE', findings: [], nextCursor: null }; },
   async create() { throw new Error('Запуск доступен только после настройки защищённого браузерного доступа'); },
   async cancel() { throw new Error('Отмена недоступна: серверный маршрут не реализован'); },
 };
@@ -40,6 +42,8 @@ export const unavailableScanTransport: ScanTransport = {
   async list() { throw new Error('Список недоступен: нет защищённого браузерного доступа и GET списка'); },
   async get() { throw new Error('Деталь недоступна: нет защищённого браузерного доступа'); },
   async results() { throw new Error('Результаты недоступны: нет защищённого браузерного доступа'); },
+  async sbom() { throw new Error('SBOM недоступен: нет защищённого браузерного доступа'); },
+  async vuln() { throw new Error('CVE недоступно: нет защищённого браузерного доступа'); },
   async create() { throw new Error('Запуск недоступен: нет защищённого браузерного доступа'); },
   async cancel() { throw new Error('Отмена недоступна: нет серверного маршрута'); },
 };

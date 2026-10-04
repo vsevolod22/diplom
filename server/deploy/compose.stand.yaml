@@ -1,0 +1,121 @@
+name: dip-auth-stand
+services:
+  auth-volume-init:
+    image: busybox:1.37.0
+    command: ["chown", "65532:65532", "/data"]
+    volumes: [auth_accounts:/data]
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+
+  scan-volume-init:
+    image: busybox:1.37.0
+    command: ["chown", "65532:65532", "/data"]
+    volumes: [scan_ledger:/data]
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+
+  egress:
+    build:
+      context: ../..
+      dockerfile: server/deploy/gateway/Dockerfile
+    networks: [scan_internal, registry_uplink]
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1
+
+  worker:
+    restart: on-failure
+    build:
+      context: ../..
+      dockerfile: server/deploy/worker.Dockerfile
+    environment:
+      SCAN_LEDGER_PATH: /data/ledger.sqlite
+      SCAN_WORKER_READY_PATH: /data/worker.ready
+      TRIVY_CACHE_DIR: /tmp/trivy
+    volumes: [scan_ledger:/data]
+    networks: [scan_internal]
+    depends_on:
+      egress: { condition: service_started }
+      scan-volume-init: { condition: service_completed_successfully }
+    read_only: true
+    tmpfs: [/tmp:size=512m]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1
+
+  api:
+    build:
+      context: ../..
+      dockerfile: server/deploy/api.Dockerfile
+    environment:
+      SCAN_BIND_ADDRESS: 0.0.0.0
+      PORT: "3001"
+      SCAN_JWT_SECRET: ${SCAN_JWT_SECRET:?Set a private scan JWT secret of at least 32 bytes}
+      SCAN_JWT_ISSUER: dip-auth-stand
+      SCAN_JWT_AUDIENCE: dip-auth-stand
+      AUTH_DB_PATH: /auth/auth.sqlite
+      SCAN_LEDGER_PATH: /data/ledger.sqlite
+      SCAN_WORKER_READY_PATH: /data/worker.ready
+      SCAN_BROWSER_ALLOWED_USER_IDS: ${SCAN_BROWSER_ALLOWED_USER_IDS:-}
+      SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS: ${SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS:-false}
+      AUTH_ORIGIN: ${AUTH_ORIGIN:?Set the exact external HTTPS origin}
+      AUTH_ALLOW_INSECURE_LOCAL_HTTP: ${AUTH_ALLOW_INSECURE_LOCAL_HTTP:-false}
+    volumes:
+      - auth_accounts:/auth
+      - scan_ledger:/data
+    networks: [auth_internal, scan_internal]
+    depends_on:
+      auth-volume-init: { condition: service_completed_successfully }
+      scan-volume-init: { condition: service_completed_successfully }
+      egress: { condition: service_started }
+      worker: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/v1/auth/me').then(r=>process.exit(r.status===401?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+
+  web:
+    build:
+      context: ../..
+      dockerfile: server/deploy/stand.Dockerfile
+    ports: ["127.0.0.1:8080:8080"]
+    networks: [auth_internal, web_edge]
+    depends_on:
+      api: { condition: service_healthy }
+    read_only: true
+    tmpfs: [/tmp]
+    user: "101:101"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+
+networks:
+  auth_internal:
+    internal: true
+  scan_internal:
+    internal: true
+  registry_uplink: {}
+  web_edge: {}
+volumes:
+  auth_accounts: {}
+  scan_ledger: {}

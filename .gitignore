@@ -9,6 +9,7 @@ playwright-report/
 test-results/
 *.tsbuildinfo
 *.local
+.local-auth/
 .env
 .env.*
 !.env.example

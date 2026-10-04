@@ -23,7 +23,10 @@ function packageIdentity(purl: string, name: string, version: string): { ecosyst
       !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._+-]*$/.test(name))
     throw new Error('Mismatched SBOM package identity');
   const qualifiers = match[4];
-  if (!qualifiers) return { ecosystem: match[1] as 'apk' | 'npm' };
+  if (!qualifiers) {
+    if (match[1] === 'apk') throw new Error('Unbound SBOM package identity');
+    return { ecosystem: 'npm' };
+  }
   // Actual Alpine Trivy output includes these two qualifiers. Bind them to the
   // selected architecture and the OS component, rejecting arbitrary metadata.
   const q = /^(?:arch=x86_64&distro=|distro=)([0-9]+(?:\.[0-9]+){2})(?:&arch=x86_64)?$/.exec(qualifiers);

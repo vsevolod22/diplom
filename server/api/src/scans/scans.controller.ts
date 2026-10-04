@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Header, HttpCode, Inject, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import type { ServerResponse } from 'node:http';
 import { ScanAuthGuard, type AuthenticatedRequest } from '../security/scan-auth.guard.js';
 import { ScansService } from './scans.service.js';
 
@@ -13,6 +14,17 @@ export class ScansController {
     return this.scans.create(request.identity!, body);
   }
 
+  @Get()
+  list(@Req() request: AuthenticatedRequest, @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
+    return this.scans.list(request.identity!, cursor, limit);
+  }
+
+  @Post(':scanId/cancel')
+  @HttpCode(200)
+  cancel(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string, @Body() body: unknown) {
+    return this.scans.cancel(request.identity!, scanId, body);
+  }
+
   @Get(':scanId')
   status(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string) {
     return this.scans.status(request.identity!, scanId);
@@ -24,11 +36,20 @@ export class ScansController {
     return this.scans.results(request.identity!, scanId, cursor, limit);
   }
 
+  @Get(':scanId/sbom')
+  sbom(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string,
+    @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
+    return this.scans.sbom(request.identity!, scanId, cursor, limit);
+  }
+
+  @Get(':scanId/vuln')
+  vuln(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string,
+    @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
+    return this.scans.vuln(request.identity!, scanId, cursor, limit);
+  }
+
   @Get(':scanId/events')
-  @Header('Content-Type', 'text/event-stream')
-  @Header('Cache-Control', 'no-store')
-  events(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string): string {
-    const last = request.headers['last-event-id'];
-    return `retry: 2000\n${this.scans.events(request.identity!, scanId, typeof last === 'string' ? last : undefined)}`;
+  events(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string, @Res() response: ServerResponse): void {
+    this.scans.events(request.identity!, scanId, request.headers['last-event-id'], response);
   }
 }

@@ -10,6 +10,7 @@ COPY server/api/package.json server/api/package.json
 RUN pnpm install --frozen-lockfile --filter @diplom/scan-api...
 COPY server/api/src server/api/src
 COPY server/api/tsconfig.json server/api/tsconfig.json
+COPY server/deploy/trust/db-signing-key.pub.pem server/deploy/trust/db-signing-key.pub.pem
 COPY --from=scanner /usr/local/bin/trivy /usr/local/bin/trivy
 RUN pnpm --filter @diplom/scan-api typecheck && node -e "require('./server/api/node_modules/better-sqlite3')(':memory:').close()" && trivy --version
 WORKDIR /app/server/api

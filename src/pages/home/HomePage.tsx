@@ -81,6 +81,7 @@ export function HomePage() {
             <Link to="/scans">
               Сканы <ArrowUpRight size={16} aria-hidden="true" />
             </Link>
+            <Link to="/account">Аккаунт</Link>
           </nav>
         </header>
 
@@ -137,7 +138,7 @@ export function HomePage() {
               </div>
               <p className="home__hero-disclaimer">
                 <span aria-hidden="true">✳</span> Демо — вымышленные данные. Настоящий запуск скана из
-                браузера сейчас недоступен.
+                браузера сейчас недоступен. <Link to="/register">Регистрация необязательна.</Link>
               </p>
             </motion.div>
           </div>
@@ -386,7 +387,7 @@ export function HomePage() {
           </h2>
           <p className="home__outro-copy">
             Открой демонстрационный сценарий или перейди к разделу сканов. Демо использует только вымышленные
-            fixtures; реальный браузерный скан пока недоступен.
+            фикстуры; реальный запуск Alpine/secret доступен только разрешённому аккаунту в локальном стенде.
           </p>
           <div className="home__actions home__actions--outro">
             <Link className="home__button home__button--primary" to="/demo/scans">
@@ -399,8 +400,7 @@ export function HomePage() {
           <div className="home__footer">
             <span>OCI / VISION</span>
             <span>
-              <LockKeyhole size={14} aria-hidden="true" /> Дипломный проект · Не сервис реального сканирования
-              в браузере
+              <LockKeyhole size={14} aria-hidden="true" /> Дипломный проект · Демо отдельно от защищённого сканирования
             </span>
             <a href="#home-title">Наверх ↑</a>
           </div>

@@ -4,16 +4,27 @@ const state = z.enum(['queued', 'running', 'cancelling', 'completed', 'partial',
 const coverageState = z.enum(['checked', 'unsupported', 'not_authorized', 'failed', 'skipped']);
 const coverage = z.object({ check: z.string(), status: coverageState, reason: z.string().optional(), scannerVersion: z.string().optional(), dbVersion: z.string().optional() });
 const finding = z.object({ findingId: z.string(), category: z.string(), ruleId: z.string(), severity: z.string(), location: z.string().optional(), evidenceRef: z.string().optional() });
-const status = z.object({ scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional() });
+export const scanChecks = ['secret', 'sbom', 'vuln'] as const;
+export type ScanCheck = typeof scanChecks[number];
+const checkName = z.enum(scanChecks);
+const failureCode = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']);
+const status = z.object({ scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional() }).nullable()).optional() });
 const results = z.object({ findings: z.array(finding), nextCursor: z.string().nullable(), coverage: z.array(coverage) });
-const receipt = z.object({ scanId: z.string(), statusUrl: z.string(), eventsUrl: z.string() });
+// Receipt URLs may refer to the internal API. Only the ID crosses into browser navigation.
+const receipt = z.object({ scanId: z.string().uuid() });
 export type ScanStatus = z.infer<typeof status>;
 export type ScanResults = z.infer<typeof results>;
 export type ScanFinding = z.infer<typeof finding>;
 export type ScanCoverage = z.infer<typeof coverage>;
 export type ScanReceipt = z.infer<typeof receipt>;
 export type ScanSummary = ScanStatus & { targetLabel: string };
-export type ScanIntent = { imageReference: string; scope: 'image'; checks: ['secret']; idempotencyKey: string };
+export type ScanIntent = { imageReference: string; scope: 'image'; checks: ScanCheck[]; idempotencyKey: string };
+export type ScanVuln =
+  | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; findingCount: number; scannerVersion: string; checkedAt: string; findings: { findingId: string; cveId: string; ecosystem: 'apk' | 'npm'; packageName: string; installedVersion: string; severity: 'UNKNOWN' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; fixedVersion: string | null }[]; nextCursor: string | null }
+  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; findings: []; nextCursor: null };
+export type ScanSbom =
+  | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; os: { name: 'alpine'; version: string }; componentCount: number; scannerVersion: string; checkedAt: string; components: { ecosystem: 'apk' | 'npm'; name: string; version: string }[]; nextCursor: string | null }
+  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; components: []; nextCursor: null };
 export type ScanCapabilities = { list: boolean; create: boolean; cancel: boolean; events: boolean };
 export type ScanTransport = {
   kind: 'fixture' | 'live';
@@ -21,21 +32,57 @@ export type ScanTransport = {
   list(signal?: AbortSignal): Promise<ScanSummary[]>;
   get(scanId: string, signal?: AbortSignal): Promise<ScanStatus>;
   results(scanId: string, cursor?: string, signal?: AbortSignal): Promise<ScanResults>;
+  sbom(scanId: string, cursor?: string, signal?: AbortSignal): Promise<ScanSbom>;
+  vuln(scanId: string, cursor?: string, signal?: AbortSignal): Promise<ScanVuln>;
   create(intent: ScanIntent): Promise<ScanReceipt>;
   cancel(scanId: string): Promise<void>;
+  subscribeEvents?(scanId: string, onHint: () => void, onError: () => void, onOpen: () => void): () => void;
 };
 export const parseScanStatus = (value: unknown): ScanStatus => status.parse(value);
 export const parseScanResults = (value: unknown): ScanResults => results.parse(value);
 export const parseScanReceipt = (value: unknown): ScanReceipt => receipt.parse(value);
 
-// Current internal API wire shape; future fields must be explicitly reviewed before enabling browser transport.
+// Browser scan endpoints currently expose this limited wire shape; new fields require review before display.
 const wireOutcome = z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']);
 const wireCoverage = z.object({ findingCount: z.number().int().nonnegative(), check: z.literal('secret'), coverage: z.literal('image'), outcome: wireOutcome, errorCode: z.string().nullable(), scannerVersion: z.string().nullable() });
-const wireStatus = z.object({ scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'failed', 'cancelled']), result: wireCoverage.nullable() });
+const wireSbomResult = z.discriminatedUnion('outcome', [
+  z.object({ check: z.literal('sbom'), coverage: z.literal('image'), outcome: z.literal('checked'), componentCount: z.number().int().positive(), scannerVersion: z.string(), checkedAt: z.string() }),
+  z.object({ check: z.literal('sbom'), coverage: z.literal('image'), outcome: z.literal('failed'), errorCode: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']) }),
+]);
+const wireVulnResult = z.discriminatedUnion('outcome', [
+  z.object({ check: z.literal('vuln'), coverage: z.literal('image'), outcome: z.literal('checked'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1) }),
+  z.object({ check: z.literal('vuln'), coverage: z.literal('image'), outcome: z.literal('failed'), errorCode: failureCode }),
+]);
+const wirePerCheck = z.union([wireCoverage, wireSbomResult, wireVulnResult]);
+const wireChecks = z.array(checkName).min(1).max(3).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
+const wireStatus = z.object({ scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.string().regex(/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/).optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
+const sbomComponent = z.strictObject({ ecosystem: z.enum(['apk', 'npm']), name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
+const wireSbom = z.discriminatedUnion('outcome', [
+  z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/), platform: z.literal('linux/amd64'), os: z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) }), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
+  z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']), components: z.tuple([]), nextCursor: z.null() }),
+]);
+export function parseCurrentSbom(value: unknown): ScanSbom {
+  const page = wireSbom.parse(value);
+  if (page.outcome === 'failed') return page;
+  if (page.components.length > page.componentCount || (page.nextCursor !== null && (page.components.length === 0 || page.nextCursor > page.componentCount))) throw new Error('Недопустимая страница SBOM');
+  return { ...page, nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };
+}
+const wireList = z.object({ scans: z.array(z.object({ scanId: z.string().uuid(), state: wireStatus.shape.state, digest: wireStatus.shape.digest.unwrap(), platform: wireStatus.shape.platform.unwrap(), targetLabel: z.string() })), nextCursor: z.string().regex(/^[1-9]\d{0,14}:[1-9]\d{0,14}$/).nullable() });
 const wireResults = z.object({ findings: z.array(z.object({ findingId: z.string(), ruleId: z.string(), line: z.number().nullable(), evidenceRef: z.string() })), nextCursor: z.number().int().nonnegative().nullable(), coverage: wireCoverage.nullable() });
 export function parseCurrentStatus(value: unknown): ScanStatus {
   const current = wireStatus.parse(value);
-  return { scanId: current.scanId, state: current.state, percent: null };
+  const checks = current.checks ?? (current.check || current.result ? [current.check ?? current.result!.check] : undefined);
+  const perCheck = current.perCheck ?? (checks?.length === 1 ? { [checks[0]]: current.result ?? null } : undefined);
+  if (checks && perCheck && (Object.keys(perCheck).some(key => !checks.includes(key as ScanCheck) || (perCheck[key as ScanCheck] != null && perCheck[key as ScanCheck]?.check !== key)) || checks.some(key => !(key in perCheck)))) throw new Error('Недопустимый статус проверок');
+  return { scanId: current.scanId, state: current.state, percent: null,
+    ...(checks ? { checks, perCheck, ...(checks.length === 1 ? { check: checks[0] } : {}) } : {}),
+    ...(current.digest && current.platform ? { digest: current.digest, platform: current.platform } : {}) };
+}
+export function parseCurrentList(value: unknown): { scans: ScanSummary[]; nextCursor: string | null } {
+  const page = wireList.parse(value);
+  return { scans: page.scans.map(({ scanId, state, digest, platform, targetLabel }) => ({
+    scanId, state, digest, platform, targetLabel, percent: null,
+  })), nextCursor: page.nextCursor };
 }
 export function parseCurrentResults(value: unknown): ScanResults {
   const current = wireResults.parse(value);
@@ -50,8 +97,27 @@ export function parseCurrentResults(value: unknown): ScanResults {
     ],
   };
 }
-export function sameOriginScanUrl(raw: string, scanId: string, suffix = ''): string {
-  const expected = `/api/v1/scans/${encodeURIComponent(scanId)}${suffix}`;
+const wireVulnFinding = z.object({ findingId: z.string(), cveId: z.string(), ecosystem: z.enum(['apk', 'npm']), packageName: z.string(), installedVersion: z.string(), severity: z.enum(['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']), fixedVersion: z.string().nullable() });
+const wireVuln = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('checked'), coverage: z.literal('image'), image: z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/), platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
+  z.object({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode, findings: z.tuple([]), nextCursor: z.null() }),
+]);
+export function parseCurrentVuln(value: unknown): ScanVuln {
+  const page = wireVuln.parse(value);
+  if (page.outcome === 'failed') return page;
+  if (page.findings.length > page.findingCount || (page.nextCursor !== null && (page.findings.length === 0 || page.nextCursor > page.findingCount))) throw new Error('Недопустимая страница CVE');
+  return { ...page, findings: page.findings.map(({ findingId, cveId, ecosystem, packageName, installedVersion, severity, fixedVersion }) => ({ findingId, cveId, ecosystem, packageName, installedVersion, severity, fixedVersion })), nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };
+}
+export const BROWSER_SCANS_PATH = '/api/v1/browser/scans';
+
+const eventHint = z.object({ scanId: z.string().uuid(), state: state, percent: z.null() });
+export function parseScanEventHint(value: unknown, scanId: string): boolean {
+  const parsed = eventHint.safeParse(value);
+  return parsed.success && parsed.data.scanId === scanId;
+}
+
+export function sameOriginScanUrl(raw: string, scanId: string, suffix: '' | '/results' | '/sbom' | '/vuln' | '/events' = ''): string {
+  const expected = `${BROWSER_SCANS_PATH}/${encodeURIComponent(scanId)}${suffix}`;
   const url = new URL(raw, window.location.origin);
   if (raw !== expected || url.origin !== window.location.origin || url.pathname !== expected || url.search || url.hash) {
     throw new Error('Недопустимый адрес скана');

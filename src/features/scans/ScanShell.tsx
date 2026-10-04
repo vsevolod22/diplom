@@ -1,13 +1,36 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowUpRight, ScanLine } from 'lucide-react';
 import { NavListCard } from './NavListCard';
 import { motion, useReducedMotion, useScroll } from 'motion/react';
 import './scan-a1.css';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { logoutDemoUser } from '@/shared/api/auth/demoAuth';
+import { transitionScanSession } from '@/shared/api/auth/scanSession';
 import { Alert, Badge } from '@/shared/ui/scan-primitives';
 
 export function ScanShell({ demo, children }: { demo: boolean; children: ReactNode }) {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState(false);
+  async function logout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setLogoutError(false);
+    try {
+      await logoutDemoUser();
+      transitionScanSession(null, queryClient, true);
+      await queryClient.cancelQueries();
+      queryClient.clear();
+      navigate('/login');
+    } catch {
+      setLogoutError(true);
+    } finally {
+      setLoggingOut(false);
+    }
+  }
   const reducedMotion = useReducedMotion();
   const { scrollYProgress } = useScroll();
   const newScanPath = demo ? '/demo/scans/new' : '/scans/new';
@@ -35,22 +58,28 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
               </span>
               OCI <span aria-hidden="true">/</span> VISION
             </Link>
-            <Link to="/" className="scan-shell__back">
-              <ArrowLeft size={15} aria-hidden="true" /> На главную
-            </Link>
+            <div className="scan-shell__account-links">
+              <Link to="/account">Аккаунт</Link>
+              {!demo ? <button className="scan-shell__logout" type="button" disabled={loggingOut} onClick={() => { void logout(); }}>
+                {loggingOut ? 'Выходим…' : 'Выйти'}
+              </button> : null}
+              <Link to="/" className="scan-shell__back">
+                <ArrowLeft size={15} aria-hidden="true" /> На главную
+              </Link>
+            </div>
           </header>
           <div className="scan-shell__body">
             <p className="scan-shell__eyebrow">IMAGE / EXPLORER</p>
             <h1 className="sr-only">{screenTitle}</h1>
             <Badge tone={demo ? 'warning' : 'neutral'}>
-              {demo ? 'Режим · демо' : 'Режим · реальный доступ недоступен'}
+              {demo ? 'Режим · демо' : 'Режим · авторизованный API'}
             </Badge>
           </div>
           <NavListCard
             items={[
               {
-                label: 'О реальном режиме',
-                description: 'Доступ пока закрыт',
+                label: 'Реальные сканы',
+                description: 'По защищённой сессии',
                 to: '/scans',
                 icon: <ArrowUpRight size={18} />,
                 current: pathname === '/scans',
@@ -64,7 +93,7 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
               },
               {
                 label: 'Новый скан',
-                description: 'Форма без запуска',
+                description: demo ? 'Форма без запуска' : 'Запуск с разрешения сервера',
                 to: newScanPath,
                 icon: <ArrowUpRight size={18} />,
                 current: pathname === newScanPath,
@@ -84,13 +113,14 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
             </Alert>
           ) : (
             <Alert role="note" tone="neutral" className="border-slate-300 bg-slate-50 text-slate-800">
-              <strong className="block">Реальный режим недоступен</strong>
+              <strong className="block">Авторизованный режим</strong>
               <span className="mt-1 block text-sm leading-relaxed">
-                Нет безопасного browser ingress и авторизованной сессии. Сервер не предоставляет GET списка и
-                отмену. Демонстрация доступна отдельно.
+                Снимки доступны через защищённую cookie-сессию и разрешение сервера.
+                Статус обновляется по серверным событиям или опросу; доступные действия определяет сервер. Демонстрация доступна отдельно.
               </span>
             </Alert>
           )}
+          {logoutError ? <Alert role="alert" tone="danger">Не удалось завершить сессию на сервере. Повторите выход.</Alert> : null}
           {children}
         </div>
       </div>

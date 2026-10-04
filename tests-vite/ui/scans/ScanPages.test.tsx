@@ -8,6 +8,8 @@ import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
 import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
 import { fixtureScanTransport } from '@/shared/api/scans/fixtureScanTransport';
+import { createAuthorizedScanTransport } from '@/shared/api/scans/httpScanTransport';
+import { LiveScanContext } from '@/features/scans/liveScanContext';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
 
 // Motion's viewport hook needs an observer in jsdom; the browser suite covers real intersections.
@@ -26,7 +28,7 @@ class TestIntersectionObserver implements IntersectionObserver {
   }
 }
 vi.stubGlobal('IntersectionObserver', TestIntersectionObserver);
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.stubGlobal('IntersectionObserver', TestIntersectionObserver); });
 
 function page(path: string, element: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -47,7 +49,7 @@ function page(path: string, element: React.ReactNode) {
 describe('scan UI fixture versus unavailable production', () => {
   it('does not confuse unavailable GET list with empty list', () => {
     page('/scans', <ScanListPage />);
-    expect(screen.getByText(/Список недоступен: GET/)).toBeTruthy();
+    expect(screen.getByText(/Список недоступен без подтверждённой сессии/)).toBeTruthy();
     expect(screen.queryByText(/Сканов нет \(/)).toBeNull();
   });
   it('labels every fixture and never claims 0 CVE or 100% for partial scan', async () => {
@@ -190,18 +192,116 @@ describe('scan UI fixture versus unavailable production', () => {
     ).toBe('/demo/scans/new');
     cleanup();
     page('/demo/scans/new', <ScanCreatePage demo />);
-    await user.type(screen.getByLabelText(/Образ в registry/), 'library/alpine:3.21');
+    await user.type(screen.getByRole('searchbox', { name: 'Поиск по доступным образам' }), '3.21');
+    await user.click(screen.getByRole('button', { name: /Alpine · 3.21/ }));
     await user.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    expect(screen.getByText(/Цель подтверждена, но сервер недоступен/)).toBeTruthy();
+    expect(screen.getByText(/Демо не отправляет запросы/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('link', { name: /отдельный образец отчёта/ }).getAttribute('href')).toBe(
       '/demo/scans/partial-demo',
     );
   });
+  it('renders 21st.dev guide tabs on create without hiding scope or enabling launch', async () => {
+    const user = userEvent.setup();
+    page('/demo/scans/new', <ScanCreatePage demo />);
+    const tabs = screen.getByRole('tablist', { name: 'Памятка о подготовке скана' });
+    const target = within(tabs).getByRole('tab', { name: '01 / Цель' });
+    target.focus();
+    expect(target.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tabpanel').textContent).toContain('Tag сам по себе');
+    await user.keyboard('{ArrowRight}');
+    expect(within(tabs).getByRole('tab', { name: '02 / Границы' }).getAttribute('aria-selected')).toBe(
+      'true',
+    );
+    expect(screen.getByRole('tabpanel').textContent).toContain('авторизованный GET status');
+    expect(screen.getByRole('checkbox', { name: /CVE · доступно/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
+  });
+  it('renders 21st.dev report accordion after always-visible failed coverage', async () => {
+    const user = userEvent.setup();
+    page('/demo/scans/partial-demo', <ScanDetailPage demo />);
+    await screen.findByText(/База уязвимостей недоступна/);
+    expect(
+      screen.getByText(/База уязвимостей недоступна/).closest('[data-slot="accordion-content"]'),
+    ).toBeNull();
+    const trigger = screen.getByRole('button', { name: 'Что означает неполный отчёт?' });
+    trigger.focus();
+    await user.keyboard('{Enter}');
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(/Сбой проверки не означает/)).toBeTruthy();
+  });
+  it('confirms live cancellation, keeps the GET state until refetch and refreshes status and results', async () => {
+    const id = 'abc';
+    const user = userEvent.setup();
+    let resolveCancel!: (value: unknown) => void;
+    const pendingCancel = new Promise<unknown>((resolve) => { resolveCancel = resolve; });
+    let statusReads = 0;
+    let resultReads = 0;
+    const fetchMock = vi.fn((path: string) => {
+      if (path.endsWith('/cancel')) return pendingCancel;
+      if (path.endsWith('/results?limit=50')) {
+        resultReads++;
+        return Promise.resolve({ ok: true, json: async () => ({ findings: [], nextCursor: null, coverage: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'unsupported', errorCode: null, scannerVersion: null } }) });
+      }
+      statusReads++;
+      return Promise.resolve({ ok: true, json: async () => ({ scanId: id, state: statusReads > 1 ? 'cancelled' : 'running', result: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'unsupported', errorCode: null, scannerVersion: null } }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <LiveScanContext.Provider value={{ transport: createAuthorizedScanTransport({ subject: 'alice', currentSubject: () => 'alice' }), scope: ['live-scans', 1, 'alice'] }}>
+          <MemoryRouter initialEntries={[`/scans/${id}`]}><Routes><Route path="/scans/:scanId" element={<ScanDetailPage />} /></Routes></MemoryRouter>
+        </LiveScanContext.Provider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('Статус')).toBeTruthy();
+    await waitFor(() => expect(resultReads).toBe(1));
+    await user.click(screen.getByRole('button', { name: 'Отменить скан' }));
+    expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/cancel'))).toBe(false);
+    confirm.mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: 'Отменить скан' }));
+    expect(screen.getByRole('button', { name: 'Отменяем…' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('Статус').parentElement?.textContent).toContain('Выполняется');
+    await act(async () => { resolveCancel({ ok: true, json: async () => ({ scanId: id, state: 'cancelled' }) }); });
+    await waitFor(() => expect(statusReads).toBeGreaterThan(1));
+    await waitFor(() => expect(resultReads).toBeGreaterThan(1));
+    expect(screen.getByRole('button', { name: 'Отмена недоступна' }).hasAttribute('disabled')).toBe(true);
+    confirm.mockRestore();
+  });
+  it.each([409, 404])('shows a safe message on live cancel HTTP %i without optimistic state', async (status) => {
+    const user = userEvent.setup();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchMock = vi.fn((path: string) => Promise.resolve(path.endsWith('/cancel')
+      ? { ok: false, status, json: async () => ({ secret: 'private' }) }
+      : path.includes('/results')
+        ? { ok: true, json: async () => ({ findings: [], nextCursor: null, coverage: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'unsupported', errorCode: null, scannerVersion: null } }) }
+        : { ok: true, json: async () => ({ scanId: 'abc', state: 'running', result: null }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><LiveScanContext.Provider value={{ transport: createAuthorizedScanTransport({ subject: 'alice', currentSubject: () => 'alice' }), scope: ['live-scans', 1, 'alice'] }}><MemoryRouter initialEntries={['/scans/abc']}><Routes><Route path="/scans/:scanId" element={<ScanDetailPage />} /></Routes></MemoryRouter></LiveScanContext.Provider></QueryClientProvider>);
+    await user.click(await screen.findByRole('button', { name: 'Отменить скан' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/отмена невозможна/i);
+    expect(document.body.textContent).not.toContain('private');
+    expect(screen.getByRole('button', { name: 'Отменить скан' }).hasAttribute('disabled')).toBe(false);
+
+  });
+  it('never sends network requests from demo create even when SBOM is selected and confirmed', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    page('/demo/scans/new', <ScanCreatePage demo />);
+    fireEvent.click(screen.getByRole('button', { name: /Alpine · 3.21/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it('does not enable launch for fixture or unconfigured browser auth', () => {
     page('/demo/scans/new', <ScanCreatePage demo />);
     expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByText(/CVE и SBOM/)).toBeTruthy();
-    expect(screen.getByText(/Container \/ host/)).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: /CVE · доступно/ })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ })).toBeTruthy();
+    expect(screen.getByText(/Host \/ running container/)).toBeTruthy();
   });
 });

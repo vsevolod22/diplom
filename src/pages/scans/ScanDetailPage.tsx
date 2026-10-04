@@ -1,16 +1,24 @@
-import { useState } from 'react';
-import * as Accordion from '@radix-ui/react-accordion';
-import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, ChevronDown, Sparkles } from 'lucide-react';
+import { useEffect, useState } from 'react';
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, Sparkles } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
+import {
+  ReportAccordion,
+  ReportAccordionContent,
+  ReportAccordionItem,
+  ReportAccordionTrigger,
+} from '@/features/scans/ReportAccordion';
 import { ScanFilterSheet } from '@/features/scans/ScanFilterSheet';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
+import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { ScanScene } from '@/features/scans/ScanScene';
 import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
-import type { ScanCoverage, ScanStatus } from '@/shared/api/scans/scanTransport';
+import { ScanHttpError } from '@/shared/api/scans/httpScanTransport';
+import type { ScanCheck, ScanCoverage, ScanStatus } from '@/shared/api/scans/scanTransport';
 import { Alert, Badge, Button } from '@/shared/ui/scan-primitives';
 import './scan-detail-a1.css';
 
@@ -42,23 +50,101 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const { scanId = '' } = useParams();
   const [filter, setFilter] = useState('all');
   const [cursor, setCursor] = useState<string | undefined>();
-  const transport = demo ? fixtureScanTransport : unavailableScanTransport;
+  const [sbomCursor, setSbomCursor] = useState<string | undefined>();
+  const [vulnCursor, setVulnCursor] = useState<string | undefined>();
+  const live = useLiveScanSession();
+  const transport = demo ? fixtureScanTransport : live?.transport ?? unavailableScanTransport;
   const enabled = !!scanId && (demo || transport.capabilities.list);
+  const queryClient = useQueryClient();
+  const scope = live?.scope ?? ['live-scans', 'unavailable'];
+  const streamKey = `${scope.join(':')}:${scanId}`;
+  const [connectedStream, setConnectedStream] = useState<string | null>(null);
+  const cancellation = useMutation({
+    mutationFn: (id: string) => transport.cancel(id),
+    onSuccess: async (_, id) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [...scope, 'scan', id] }),
+        queryClient.invalidateQueries({ queryKey: [...scope, 'results', id] }),
+        queryClient.invalidateQueries({ queryKey: [...scope, 'sbom', id] }),
+        queryClient.invalidateQueries({ queryKey: [...scope, 'vuln', id] }),
+      ]);
+    },
+  });
   const scan = useQuery({
-    queryKey: ['scan', transport.kind, scanId],
+    queryKey: demo ? ['scan', 'fixture', scanId] : [...(live?.scope ?? ['live-scans', 'unavailable']), 'scan', scanId],
     queryFn: ({ signal }) => transport.get(scanId, signal),
     enabled,
     retry: false,
     refetchOnWindowFocus: !demo,
+    refetchInterval: demo ? false : (query) => {
+      const snapshot = query.state.data as ScanStatus | undefined;
+      return snapshot && ['queued', 'running', 'cancelling'].includes(snapshot.state) && connectedStream !== streamKey ? 2000 : false;
+    },
   });
-  const report = useQuery({
-    queryKey: ['scan-results', transport.kind, scanId, filter, cursor],
-    queryFn: ({ signal }) => transport.results(scanId, cursor, signal),
-    enabled: enabled && scan.isSuccess,
+  const requested = scan.data?.checks ?? (scan.data?.check ? [scan.data.check] : []);
+  const isSbom = requested.includes('sbom');
+  const isSecret = demo || requested.includes('secret');
+  const isVuln = requested.includes('vuln');
+  const sbomOnly = isSbom && !isSecret && !isVuln;
+  const sbom = useQuery({
+    queryKey: [...scope, 'sbom', scanId, scan.data?.state, sbomCursor],
+    queryFn: ({ signal }) => transport.sbom(scanId, sbomCursor, signal),
+    enabled: enabled && scan.isSuccess && isSbom && scan.data.perCheck?.sbom?.outcome != null && ['completed', 'partial', 'failed'].includes(scan.data.state),
     retry: false,
   });
+  const vuln = useQuery({
+    queryKey: [...scope, 'vuln', scanId, scan.data?.state, vulnCursor],
+    queryFn: ({ signal }) => transport.vuln(scanId, vulnCursor, signal),
+    enabled: enabled && scan.isSuccess && isVuln && scan.data.perCheck?.vuln?.outcome != null && ['completed', 'partial', 'failed'].includes(scan.data.state),
+    retry: false,
+  });
+  const report = useQuery({
+    queryKey: demo ? ['scan-results', 'fixture', scanId, filter, cursor] : [...(live?.scope ?? ['live-scans', 'unavailable']), 'results', scanId, scan.data?.state, filter, cursor],
+    queryFn: ({ signal }) => transport.results(scanId, cursor, signal),
+    enabled: enabled && scan.isSuccess && isSecret,
+    retry: false,
+  });
+  const active = scan.isSuccess && scan.data?.scanId === scanId && ['queued', 'running', 'cancelling'].includes(scan.data.state);
+  useEffect(() => {
+    if (demo || !active || !transport.capabilities.events || !transport.subscribeEvents) return;
+    let mounted = true;
+    let refreshing = false;
+    let pending = false;
+    const refresh = async () => {
+      pending = true;
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        while (pending && mounted) {
+          pending = false;
+          // Event state and percent are hints only. GET status and results are authoritative.
+          await queryClient.invalidateQueries({ queryKey: [...scope, 'scan', scanId] });
+          if (mounted) await Promise.all([
+                      queryClient.invalidateQueries({ queryKey: [...scope, 'results', scanId] }),
+                      queryClient.invalidateQueries({ queryKey: [...scope, 'sbom', scanId] }),
+                      queryClient.invalidateQueries({ queryKey: [...scope, 'vuln', scanId] }),
+                    ]);
+        }
+      } finally { refreshing = false; }
+    };
+    let close: () => void;
+    try {
+      close = transport.subscribeEvents(scanId, () => { void refresh(); },
+        () => { if (mounted) setConnectedStream(null); },
+        () => { if (mounted) { setConnectedStream(streamKey); void refresh(); } });
+    } catch {
+      // Invalid ID or unavailable EventSource: keep polling the GET snapshot.
+      return;
+    }
+    return () => { mounted = false; close(); };
+  }, [demo, active, transport, queryClient, scanId, streamKey, scope]);
+  const reportData = isSecret && scan.isSuccess && report.isSuccess ? report.data : undefined;
+  const liveCoverage = demo ? undefined : scan.data?.checks?.map((check: ScanCheck): ScanCoverage => {
+    const outcome = scan.data?.perCheck?.[check];
+    return { check: check === 'secret' ? 'Secrets' : check === 'sbom' ? 'SBOM' : 'CVE', status: outcome?.outcome ?? 'skipped', reason: outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined };
+  });
   const findings =
-    report.data?.findings.filter((finding) => filter === 'all' || finding.category === filter) ?? [];
+    reportData?.findings.filter((finding) => filter === 'all' || finding.category === filter) ?? [];
   const changeFilter = (value: string) => {
     setFilter(value);
     setCursor(undefined);
@@ -76,18 +162,18 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
         <div className="scan-a1__lead">
           <div className="scan-a1__lead-copy">
             <p className="scan-a1__eyebrow">
-              {demo ? 'ДЕМО / ВЫМЫШЛЕННЫЕ ДАННЫЕ' : 'РЕАЛЬНЫЙ РЕЖИМ / НЕДОСТУПЕН'}
+              {demo ? 'ДЕМО / ВЫМЫШЛЕННЫЕ ДАННЫЕ' : 'РЕАЛЬНЫЙ РЕЖИМ / СНИМОК API'}
             </p>
             <h2 id="scan-detail">
               Не всё, что видно, <em>проверено.</em>
             </h2>
             <p className="scan-a1__reference">ID / {scanId}</p>
             <p className="scan-a1__muted">
-              {demo ? 'Демонстрационная карточка · вымышленные данные' : 'Авторизованный просмотр недоступен'}
+              {demo ? 'Демонстрационная карточка · вымышленные данные' : 'Авторизованный снимок статуса'}
             </p>
           </div>
 
-          {scan.data ? (
+          {scan.isSuccess && scan.data ? (
             <div className="scan-a1__summary">
               <Badge tone={stateTone[scan.data.state]}>{stateLabels[scan.data.state]}</Badge>
               <span>Прогресс: {scan.data.percent == null ? 'неизвестен' : `${scan.data.percent}%`}</span>
@@ -105,7 +191,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
             Не удалось получить данные скана. Его существование и доступность не подтверждены.
           </Alert>
         ) : null}
-        {scan.data ? (
+        {scan.isSuccess && scan.data ? (
           <>
             <MagicCard className="scan-a1__reading-card">
               <p className="scan-a1__reading-copy">
@@ -121,7 +207,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 02 <span>Покрытие</span>
               </a>
               <a href="#scan-a1-findings">
-                03 <span>Находки</span>
+                03 <span>{sbomOnly ? 'Пакеты SBOM' : 'Находки и пакеты'}</span>
               </a>
               <a href="#scan-a1-ai">
                 04 <span>Помощник</span>
@@ -163,12 +249,32 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 <p>
                   {demo
                     ? 'Состояние из локальной фикстуры; это не GET status и не live-поток.'
-                    : 'Состояние только из GET snapshot; live SSE/replay не подтверждён.'}
+                    : 'SSE сообщает о переходах; состояние и находки подтверждаются отдельными GET. При потере потока работает polling.'}
                 </p>
-                <Button variant="secondary" type="button" disabled title="Серверный API отмены не реализован">
-                  Отмена недоступна
-                </Button>
-                <p>Нет авторизованного cancel API. Неполные результаты не удаляются.</p>
+                {!demo && transport.capabilities.cancel && ['queued', 'running'].includes(scan.data.state) ? (
+                  <Button
+                    variant="secondary"
+                    type="button"
+                    disabled={cancellation.isPending}
+                    onClick={() => {
+                      if (window.confirm('Отменить скан? Уже полученные результаты сохранятся.')) {
+                        cancellation.mutate(scanId);
+                      }
+                    }}
+                  >
+                    {cancellation.isPending ? 'Отменяем…' : 'Отменить скан'}
+                  </Button>
+                ) : (
+                  <Button variant="secondary" type="button" disabled>
+                    Отмена недоступна
+                  </Button>
+                )}
+                <p>{demo ? 'Демо не отправляет серверную отмену.' : 'Неполные результаты не удаляются. Статус подтверждается GET snapshot.'}</p>
+                {cancellation.isError ? (
+                  <Alert role="alert" tone="danger">
+                    Не удалось отменить скан: он недоступен или отмена невозможна в текущем состоянии. Обновите статус.
+                  </Alert>
+                ) : null}
               </div>
             </div>
             <div className="scan-a1__detail-divider" aria-hidden="true">
@@ -179,9 +285,9 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 <p className="scan-a1__eyebrow">02 / ПОКРЫТИЕ</p>
                 <h3 id="scan-a1-coverage">Покрытие проверок</h3>
                 <p className="scan-a1__muted">Исход каждой проверки отдельно от статуса скана.</p>
-                {report.data ? (
+                {(liveCoverage ?? reportData?.coverage) ? (
                   <ul className="scan-a1__coverage">
-                    {report.data.coverage.map((item) => (
+                    {(liveCoverage ?? reportData?.coverage ?? []).map((item) => (
                       <li key={item.check}>
                         <strong>{item.check}</strong>
                         <div>
@@ -199,25 +305,52 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                     ))}
                   </ul>
                 ) : (
-                  <p>Нет подтверждённого coverage; «0 проблем» недопустимо.</p>
+                  <p>Нет подтверждённого coverage; тип проверки и результат неизвестны. «0 проблем» недопустимо.</p>
                 )}
-                <Accordion.Root type="single" collapsible className="scan-a1__explanation">
-                  <Accordion.Item value="notes">
-                    <Accordion.Header>
-                      <Accordion.Trigger>
-                        Что означает неполный отчёт? <ChevronDown size={17} aria-hidden="true" />
-                      </Accordion.Trigger>
-                    </Accordion.Header>
-                    <Accordion.Content>
-                      Нельзя считать непроверенные категории безопасными. Причины сбоев видны выше без
-                      раскрытия пояснения.
-                    </Accordion.Content>
-                  </Accordion.Item>
-                </Accordion.Root>
+                {isSbom && sbom.isError ? <Alert role="alert" tone="danger">Не удалось загрузить SBOM: данные не подтверждены.</Alert> : null}
+                                {isVuln && vuln.isError ? <Alert role="alert" tone="danger">Не удалось загрузить CVE: данные недоступны, число уязвимостей неизвестно.</Alert> : null}
+                <div className="scan-a1__coverage-guide">
+                  <span className="scan-a1__eyebrow">КАК ЧИТАТЬ ПОКРЫТИЕ / СПРАВКА</span>
+                  <p>Статус, исходы и причины проверок показаны выше без раскрытия подсказок.</p>
+                  <ReportAccordion type="single" collapsible>
+                    <ReportAccordionItem value="partial">
+                      <ReportAccordionTrigger>Что означает неполный отчёт?</ReportAccordionTrigger>
+                      <ReportAccordionContent>
+                        Нельзя считать непроверенные категории безопасными. Сбой проверки не означает «0
+                        находок».
+                      </ReportAccordionContent>
+                    </ReportAccordionItem>
+                    <ReportAccordionItem value="target">
+                      <ReportAccordionTrigger>Когда цель считается подтверждённой?</ReportAccordionTrigger>
+                      <ReportAccordionContent>
+                        Только когда авторизованный GET status предоставляет закреплённые digest и platform;
+                        указанный tag не подтверждает содержимое образа.
+                      </ReportAccordionContent>
+                    </ReportAccordionItem>
+                  </ReportAccordion>
+                </div>
               </section>
               <section className="scan-a1__panel" aria-labelledby="scan-a1-findings">
                 <p className="scan-a1__eyebrow">03 / РЕЗУЛЬТАТЫ</p>
-                <h3 id="scan-a1-findings">Находки</h3>
+                <h3 id="scan-a1-findings">{sbomOnly ? 'Пакеты SBOM' : 'Находки'}</h3>
+                {sbomOnly ? (
+                  ['queued', 'running'].includes(scan.data.state) ? <p>SBOM ещё выполняется; перечень пакетов не подтверждён.</p> :
+                  scan.data.state === 'cancelled' ? <p>Скан отменён; SBOM не подтверждён.</p> :
+                  !scan.data.perCheck?.sbom ? <p>Результат SBOM не подтверждён; число пакетов неизвестно.</p> : sbom.isPending ? <p>Загружаем SBOM…</p> : sbom.isError ? (
+                    <Alert role="alert" tone="danger">Перечень пакетов недоступен; результат неизвестен.</Alert>
+                  ) : sbom.data.outcome === 'failed' ? (
+                    <p>SBOM не проверен. Пакеты и уязвимости не подтверждены.</p>
+                  ) : (
+                    <div>
+                      <p>Подтверждённый инвентарь: {sbom.data.componentCount} пакетов · ОС {sbom.data.os.name} {sbom.data.os.version} · {sbom.data.platform}</p>
+                      <p className="scan-a1__muted">Образ: {sbom.data.image}. SBOM не содержит оценку CVE и не подтверждает безопасность.</p>
+                      <ul className="scan-a1__findings">{sbom.data.components.map((component, index) => (
+                        <li key={`${sbomCursor ?? '0'}-${index}`}><strong>{component.name}</strong><p>{component.ecosystem} · версия {component.version}</p></li>
+                      ))}</ul>
+                      {sbom.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setSbomCursor(sbom.data.nextCursor ?? undefined)}>Следующая страница SBOM</Button> : null}
+                    </div>
+                  )
+                ) : isSecret ? (<>
                 <p className="scan-a1__muted">
                   Фильтр действует только на загруженную страницу, не на весь отчёт.
                 </p>
@@ -245,7 +378,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                     Не удалось загрузить результаты; число находок неизвестно.
                   </Alert>
                 ) : null}
-                {report.data && findings.length > 0 ? (
+                {reportData && findings.length > 0 ? (
                   <ul className="scan-a1__findings">
                     {findings.map((finding) => (
                       <li key={finding.findingId}>
@@ -258,7 +391,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                     ))}
                   </ul>
                 ) : null}
-                {report.data && findings.length === 0 && filter !== 'all' ? (
+                {reportData && findings.length === 0 && filter !== 'all' ? (
                   <Alert tone="neutral" className="scan-a1__empty">
                     Нет совпадений фильтра на загруженной странице. Это не означает отсутствие находок во всём
                     отчёте.{' '}
@@ -267,35 +400,51 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                     </button>
                   </Alert>
                 ) : null}
-                {report.data &&
+                {reportData &&
                 findings.length === 0 &&
                 filter === 'all' &&
-                (report.data.nextCursor || cursor) ? (
+                (reportData.nextCursor || cursor) ? (
                   <p>На текущей странице находок нет; общий результат не подтверждён.</p>
                 ) : null}
-                {report.data &&
+                {reportData &&
                 findings.length === 0 &&
                 filter === 'all' &&
-                !report.data.nextCursor &&
+                !reportData.nextCursor &&
                 !cursor ? (
                   <p>
-                    {report.data.coverage.some((item) => item.status === 'checked') &&
-                    !report.data.coverage.some((item) => item.status === 'failed')
+                    {(liveCoverage ?? reportData.coverage).some((item) => item.check === 'Secrets' && item.status === 'checked')
                       ? '0 находок в выполненной проверенной области; другие области не исключены.'
                       : 'Нет подтверждённых находок: область не проверена полностью. Это не «0 CVE».'}
                   </p>
                 ) : null}
-                {report.data?.nextCursor ? (
+                {reportData?.nextCursor ? (
                   <Button
                     variant="secondary"
                     type="button"
-                    onClick={() => setCursor(report.data.nextCursor ?? undefined)}
+                    onClick={() => setCursor(reportData.nextCursor ?? undefined)}
                   >
                     Следующая страница
                   </Button>
                 ) : null}
+                </>) : isVuln ? <p>Результаты CVE показаны ниже отдельно от Secrets.</p> : <p>Тип проверки пока не указан в ответе статуса. Результаты не запрашиваются до подтверждения типа сервером.</p>}
               </section>
             </div>
+            {isSbom && !sbomOnly ? <section className="scan-a1__panel" aria-label="Пакеты SBOM">
+              <h3>Пакеты SBOM</h3>
+              {sbom.isSuccess ? sbom.data.outcome === 'failed' ? <p>SBOM не проверен: {sbom.data.errorCode}. Число пакетов неизвестно.</p> : <>
+                <p>Инвентарь image: {sbom.data.componentCount} пакетов. SBOM не оценивает CVE.</p>
+                <ul className="scan-a1__findings">{sbom.data.components.map((component, index) => <li key={`${sbomCursor ?? '0'}-${index}`}><strong>{component.name}</strong><p>{component.ecosystem} · {component.version}</p></li>)}</ul>
+                {sbom.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setSbomCursor(sbom.data.nextCursor ?? undefined)}>Следующая страница SBOM</Button> : null}
+              </> : <p>{sbom.isError ? 'SBOM недоступен; число пакетов неизвестно.' : 'Ожидаем результат SBOM.'}</p>}
+            </section> : null}
+            {isVuln ? <section className="scan-a1__panel" aria-label="Результаты CVE">
+              <h3>CVE · registry IMAGE</h3>
+              {vuln.isSuccess ? vuln.data.outcome === 'failed' ? <p>CVE не проверены: {vuln.data.errorCode}. Число уязвимостей неизвестно.</p> : !scan.data.digest || scan.data.platform !== vuln.data.platform || vuln.data.image !== `registry-1.docker.io/library/alpine@${scan.data.digest}` ? <p>Идентичность образа в CVE-отчёте не совпадает со статусом; результат неизвестен.</p> : <>
+                <p>Находок в проверенной области: {vuln.data.findingCount}. Это не гарантия безопасности; другие области не проверялись.</p>
+                <ul className="scan-a1__findings">{vuln.data.findings.map(finding => <li key={finding.findingId}><strong>{finding.cveId} · {finding.severity}</strong><p>{finding.ecosystem} · {finding.packageName} {finding.installedVersion} · исправление: {finding.fixedVersion ?? 'не указано'}</p></li>)}</ul>
+                {vuln.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setVulnCursor(vuln.data.nextCursor ?? undefined)}>Следующая страница CVE</Button> : null}
+              </> : <p>{vuln.isError ? vuln.error instanceof ScanHttpError && vuln.error.status === 503 ? 'CVE недоступны: проверьте настройку базы уязвимостей у администратора. Число находок неизвестно.' : 'CVE недоступны; число уязвимостей неизвестно.' : !scan.data.perCheck?.vuln && ['completed', 'partial', 'failed'].includes(scan.data.state) ? 'Нет подтверждённого результата CVE; число находок неизвестно.' : 'Ожидаем результат CVE. Нулевое число не подтверждено.'}</p>}
+            </section> : null}
             <section className="scan-a1__ai" aria-labelledby="scan-a1-ai">
               <div>
                 <p className="scan-a1__eyebrow">04 / КОНТЕКСТНЫЙ ПОМОЩНИК · КОНЦЕПТ</p>

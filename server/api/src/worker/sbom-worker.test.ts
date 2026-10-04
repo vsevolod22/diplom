@@ -13,7 +13,7 @@ const image = `${job.registry}/${job.repository}@${job.digest}`;
 const report = () => JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.6',
   metadata: { component: { type: 'container', name: image } }, components: [
     { type: 'operating-system', name: 'alpine', version: '3.21.3' },
-    { type: 'library', name: 'apk-tools', version: '2.14.6-r0', purl: 'pkg:apk/alpine/apk-tools@2.14.6-r0',
+    { type: 'library', name: 'apk-tools', version: '2.14.6-r0', purl: 'pkg:apk/alpine/apk-tools@2.14.6-r0?arch=x86_64&distro=3.21.3',
       properties: [{ value: 'CANARY_SECRET' }] },
   ] });
 function scanner() {

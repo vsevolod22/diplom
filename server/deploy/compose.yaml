@@ -50,6 +50,7 @@ services:
     # No published port until an authenticated, non-forwarding ingress is reviewed.
   worker:
     profiles: [api]
+    restart: on-failure
     build:
       context: ../..
       dockerfile: server/deploy/worker.Dockerfile
@@ -63,7 +64,7 @@ services:
       egress: { condition: service_started }
       volume-init: { condition: service_completed_successfully }
     read_only: true
-    tmpfs: [/tmp]
+    tmpfs: [/tmp:size=512m]
     user: "65532:65532"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
