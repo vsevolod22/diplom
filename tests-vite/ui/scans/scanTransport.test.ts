@@ -74,6 +74,15 @@ describe('scan transport boundary', () => {
     await expect(transport.sbom(id, '../evil')).rejects.toThrow('Недопустимая страница');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+  it('allowlists archive SBOM failure reasons without weakening its strict boundary', () => {
+    const failed = { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_TIMEOUT', reason: 'SCAN_TIMEOUT', components: [], nextCursor: null };
+    expect(parseCurrentSbom(failed)).toEqual(failed);
+    expect(parseCurrentSbom({ ...failed, errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE' })).toMatchObject({ reason: 'DB_UNAVAILABLE' });
+    for (const invalid of [{ ...failed, reason: 'SECRET_CANARY' }, { ...failed, reason: 'OS_EOL' },
+      { ...failed, errorCode: 'SCAN_FAILED' }, { ...failed, raw: 'SECRET_CANARY' }]) {
+      expect(() => parseCurrentSbom(invalid)).toThrow();
+    }
+  });
   it('keeps simultaneous outcomes independent and strips vulnerability evidence', async () => {
     const id = '00000000-0000-4000-8000-000000000001';
     const checked = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };

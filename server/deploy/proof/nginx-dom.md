@@ -16,4 +16,11 @@ Candidate: child `sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa
 
 Chromium performs actual DOM login, search, selection, combined scan creation, terminal report and reload. It asserts the persisted image identity, per-check outcomes, positive normalized CVEs, 72 APK components, Alpine 3.23.3, scanner and DB release, OS checked and Node/npm unsupported. It also tests replay, changed-check conflict, wrong Origin, other pins/repositories, anonymous and foreign-owner result isolation, one persisted job and scratch cleanup. No scan is seeded and no HTTP response/DB/readiness/scanner is stubbed. Credentials and raw scanner/error output are not printed; failures report only a phase and bounded server coverage snapshot.
 
+The effective worker memory cap is the existing local overlay's **2 GiB**, not
+the base stand/judge's 1 GiB. The wrapper asserts that effective cap alongside
+CPU/PID/rootfs/network/mount constraints. It does not change caps or certify the
+1-GiB target; a separately reviewed memory/resource-contract decision is still
+needed before production opt-in. Missing/expired signed DB must fail the positive
+proof; do not refresh/re-sign/bypass freshness merely to manufacture a pass.
+
 A successful proof is **not** production qualification or whole DIP-TASK-2 acceptance. `imageProfile.qualified` remains false. Three independent security/correctness/spec reviews and explicit local operator opt-in are still required before a reviewed production profile/deployment. Remote npm positive, full provenance/conflict-preserving dedup/redaction coverage, the remaining stale/tampered/expiry matrix and actual NEW upstream rotation/rollback are separate outstanding criteria. A pass with the current DB is not rotation evidence; local attestation is not an Aqua publisher signature.

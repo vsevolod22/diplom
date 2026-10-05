@@ -7,7 +7,7 @@ Alpine remote admission/parsers continue unchanged.
 
 ## Current qualification blocker
 
-The actual pinned Trivy 0.69.3/current signed DB reports this candidate as Alpine
+The actual pinned Trivy 0.69.3/signed DB proof on 2026-10-04 reports the old `b17b00f7…046f114` candidate as Alpine
 3.20.6 with `EOSL: true`. The raw scan reports 83 vulnerabilities, but EOL is **not**
 qualified checked OS coverage. Standalone vulnerability qualification terminates
 `failed` with `unsupported / OS_EOL`; combined qualification is `partial` with
@@ -23,7 +23,12 @@ entries and 63,511,040 archive bytes. Actual Trivy identifies Alpine 3.23.3 and
 verified schema interpretation, not a synthetic field or EOL override. Real
 standalone and combined consumer/ledger/cookie HTTP positive assertions require
 nonzero normalized CVEs. No universal enable flag or production opt-in exists.
-Positive DOM creation/selection and independent reviews remain required.
+The separate unseeded combined DOM proof is implemented in
+`server/deploy/proof/test_nginx_dom_path.py` (recipe: `nginx-dom.md`). The
+2026-10-04 author run recorded 209 normalized OS CVEs, 72 APK and report reload;
+these dated counts are not timeless expectations or independent reviewer reruns.
+The standalone consumer jobs above are internally seeded real scans, not browser
+POST/launch proofs. Correctness review requested rework; approval is not complete.
 
 ## Boundaries
 
@@ -54,6 +59,11 @@ Positive DOM creation/selection and independent reviews remain required.
   scanner attempt tree (archive + private cache/temp), not all preparation phases.
   During scanning a bounded tree/available-space monitor aborts on over-budget
   writes; the existing 512 MiB tmpfs is the independent physical hard guard.
+  Only ENOENT from disappearing enumerated descendants is tolerated while Trivy
+  cleans temporary files/directories; root disappearance, symlinks, special types,
+  non-ENOENT errors, depth/entry/byte/free-space violations remain fail-closed.
+  A quiescent final audit runs after subprocesses close. Audit violations are
+  SCAN_FAILED, not a synthetic timeout; real cancellation/deadline stays SCAN_TIMEOUT.
   Cleanup removes only the own attempt tree, including fanal/cache, never RO DB.
   Single-worker boot recovery removes only generated abandoned attempt directories.
 - Prepare once per attempt; sequential fixed `trivy image --input` argv, no proxy
@@ -64,6 +74,17 @@ Positive DOM creation/selection and independent reviews remain required.
   and config rootfs; RepoDigests are absent. CycloneDX DiffID properties are
   unordered in actual Trivy, so exact multiplicity is checked, not fictitious
   ordering. No raw report identity is rewritten into remote RepoDigests.
+- Clean Secrets (omitted/empty/meaningless Results) require meaningful bounded
+  layer DiffIDs matching inspected image DiffIDs, not archive identity alone.
+  Missing/unknown/malformed OS evidence fails with SCAN_FAILED; only validated
+  Alpine EOSL=true is unsupported/OS_EOL. Omitted EOSL still means false in the
+  pinned binary schema when the required OS/inventory evidence is valid.
+- Effective local CVE overlay RAM is **2 GiB**, overriding the base stand's 1 GiB.
+  These proofs validate that existing local resource envelope, not the judge's
+  1-GiB target. No cap is silently changed to obtain a pass. A separately reviewed
+  1-GiB memory proof or explicit resource-contract revision remains a release gate;
+  neither nginx production opt-in nor whole-task qualification follows from this
+  local proof. CPU1/PIDs128/512-MiB scanner tmpfs caps stay unchanged.
 - Signature/hash/schema/freshness and RO DB inode checks precede actual CVE scan
   and are repeated afterward; freshness is rechecked after hashing/final scratch audit
     and with a clock-only guard in the fenced ledger transaction. Expiry demotes CVE
@@ -91,7 +112,12 @@ HTTP cookie registration, owner/foreign/anonymous routes, no-store, bounded SBOM
 pagination, rejected public replay and attempt cleanup are exercised.
 Chromium proves actual authenticated public POST rejection/repeat rejection,
 server-derived nginx suggestion disabled and no selected target after reload.
-That is **negative DOM evidence**, not positive browser qualification. Positive
-consumer-to-cookie-HTTP results do not prove DOM creation/selection. No entire TASK-2 acceptance, remote npm positive, complete
-adversarial/expiry matrix, two-source provenance completion, independent reviews
-or NEW upstream rotation is claimed. The mixed future spec delta stays unapplied.
+That wrapper is **negative DOM evidence**, not positive browser qualification.
+The separate `test_nginx_dom_path.py` uses isolated auth/ledger volumes and the
+exact proof-only Nest profile for real login/search/selection/combined POST/report/reload,
+without seeded scans or stubs; production remains default-off/unqualified.
+A fresh signed DB is a prerequisite for positive CVE proof. An expired DB must
+reject it, never be bypassed or re-signed to manufacture validation. No entire
+TASK-2 acceptance, remote npm positive, complete adversarial/expiry matrix,
+two-source provenance completion, three final approvals or NEW upstream rotation
+is claimed. The mixed future spec delta stays unapplied.

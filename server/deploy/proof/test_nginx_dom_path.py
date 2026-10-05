@@ -74,6 +74,11 @@ class NginxDomPath(unittest.TestCase):
                     constraints = run(['docker', 'inspect', '--format',
                         '{{json .HostConfig.ReadonlyRootfs}} {{json .HostConfig.CapDrop}} {{json .HostConfig.SecurityOpt}}', container])
                     self.assertEqual(constraints.stdout.decode().strip(), 'true ["ALL"] ["no-new-privileges:true"]')
+                worker = run(compose + ['ps', '-q', 'worker']).stdout.decode().strip()
+                resource = run(['docker', 'inspect', '--format',
+                    '{{json .HostConfig.Memory}} {{json .HostConfig.NanoCpus}} {{json .HostConfig.PidsLimit}}', worker])
+                self.assertEqual(resource.stdout.decode().strip(), '2147483648 1000000000 128',
+                                 'This local proof uses the existing 2-GiB overlay, not a 1-GiB qualification')
                 result = run(['node', 'server/deploy/proof/nginx-browser-positive.mjs', str(credentials)], 700)
                 summary = json.loads(result.stdout)
                 self.assertEqual(result.returncode, 0, 'Real DOM proof failed at ' + str(summary.get('failedPhase')) +

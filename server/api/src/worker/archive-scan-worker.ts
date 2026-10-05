@@ -54,29 +54,39 @@ async function invoke(check: 'secret' | 'sbom' | 'vuln', binding: ArchiveBinding
   return runArchiveProcess(check, binding.archivePath, directory, signal);
 }
 
-// Closed qualification runner: there is intentionally no admission/enable flag.
-// Both exact candidates remain unqualified; the old candidate retains the EOL negative proof.
-export async function scanNginxArchive(checks: Array<'secret' | 'sbom' | 'vuln'>,
-  options: { signal?: AbortSignal; vuln?: VulnScanOptions; target?: ArchiveTarget }): Promise<ArchiveScanReport> {
-  const order = ['secret', 'sbom', 'vuln'];
-  if (!checks.length || checks.length > 3 || checks.some((check, index) => !order.includes(check) ||
-    index > 0 && order.indexOf(checks[index - 1]) >= order.indexOf(check))) throw new Error('Invalid archive checks');
+function requireArchiveScanner(): void {
   const binary = spawnSync('/usr/local/bin/trivy', ['--version'], { timeout: 5000, maxBuffer: 4096,
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp' } });
   if (binary.status !== 0 || !/^Version: 0\.69\.3\r?$/m.test(binary.stdout ?? '')) throw new Error('Archive scanner unavailable');
+}
+// Internal lifecycle injection exercises runner -> ledger failures without network/Trivy.
+// HTTP callers and production options cannot supply these dependencies.
+const archiveLifecycle = { requireScanner: requireArchiveScanner, prepare: prepareNginxArchive,
+  invoke, verifiedDb, audit: auditArchiveScratch };
+
+// Closed qualification runner: there is intentionally no admission/enable flag.
+// Both exact candidates remain unqualified; the old candidate retains the EOL negative proof.
+export async function scanNginxArchive(checks: Array<'secret' | 'sbom' | 'vuln'>,
+  options: { signal?: AbortSignal; vuln?: VulnScanOptions; target?: ArchiveTarget },
+  lifecycle: typeof archiveLifecycle = archiveLifecycle): Promise<ArchiveScanReport> {
+  const order = ['secret', 'sbom', 'vuln'];
+  if (!checks.length || checks.length > 3 || checks.some((check, index) => !order.includes(check) ||
+    index > 0 && order.indexOf(checks[index - 1]) >= order.indexOf(check))) throw new Error('Invalid archive checks');
+  lifecycle.requireScanner();
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, ...(options.signal ? [options.signal] : []), AbortSignal.timeout(600_000)]);
-  const archive = await prepareNginxArchive(signal, options.target ?? NGINX_ARCHIVE_TARGET);
-    const targetImage = `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`;
+  const archive = await lifecycle.prepare(signal, options.target ?? NGINX_ARCHIVE_TARGET);
+  const targetImage = `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`;
   const binding = { receipt: archive.receipt, archivePath: archive.archivePath };
   let scratchPeak = archive.metrics.archiveBytes;
-  let monitoring = false;
+  let monitoring = false, scratchInvalid = false;
+  const abortedFailure = () => failure(scratchInvalid ? 'SCAN_FAILED' : 'SCAN_TIMEOUT');
   const monitor = setInterval(() => {
     if (monitoring) return; monitoring = true;
     void (async () => {
-      const bytes = await auditArchiveScratch(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined);
+      const bytes = await lifecycle.audit(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined);
       scratchPeak = Math.max(scratchPeak, bytes);
-    })().catch(() => controller.abort()).finally(() => { monitoring = false; });
+    })().catch(() => { scratchInvalid = true; controller.abort(); }).finally(() => { monitoring = false; });
   }, 100);
   const report: ArchiveScanReport = { receipt: archive.receipt, scannerVersion: '0.69.3', checkedAt: 0,
     metrics: { ...archive.metrics, scratchPeak } };
@@ -84,28 +94,31 @@ export async function scanNginxArchive(checks: Array<'secret' | 'sbom' | 'vuln'>
     await mkdir(`${archive.directory}/cache`, { mode: 0o700 });
     if (options.vuln) await symlink(`${options.vuln.cacheDir}/db`, `${archive.directory}/cache/db`);
     for (const check of checks) {
-      if (signal.aborted) { report[check] = failure('SCAN_TIMEOUT'); continue; }
+      if (signal.aborted) { report[check] = abortedFailure(); continue; }
       try {
         let db: Readonly<VerifiedDbIdentity> | undefined;
         if (check === 'vuln') {
-          try { if (!options.vuln) throw new Error(); db = await verifiedDb(options.vuln); }
+          try { if (!options.vuln) throw new Error(); db = await lifecycle.verifiedDb(options.vuln); }
           catch { report.vuln = failure('DB_UNAVAILABLE'); continue; }
         }
-        const value = await invoke(check, binding, archive.directory, signal);
+        const value = await lifecycle.invoke(check, binding, archive.directory, signal);
         if (check === 'sbom') report.sbom = { outcome: 'checked', sbom: parseImageSbom(value, targetImage, 'linux/amd64', binding) };
         else {
           const raw = validateArchiveJson(value, binding);
           if (check === 'secret') report.secret = { outcome: 'checked', findings: parseSecretFindings(raw) };
           else {
             const metadata = raw.Metadata as { OS?: { Family?: string; Name?: string; EOSL?: boolean }; };
-            const after = await verifiedDb(options.vuln!);
+            const after = await lifecycle.verifiedDb(options.vuln!);
             if (JSON.stringify(after) !== JSON.stringify(db)) throw new Error('DB changed');
-            // Pinned Trivy v0.69.3 OS.Eosl is `json:"EOSL,omitempty"`:
-                        // https://github.com/aquasecurity/trivy/blob/v0.69.3/pkg/fanal/types/artifact.go
-                        // Missing means false in this validated actual binary schema, not a fabricated field.
-                        if (metadata.OS?.Family !== 'alpine' || !/^3\.[0-9]+\.[0-9]+$/.test(metadata.OS.Name ?? '') ||
-                            metadata.OS.EOSL !== undefined && metadata.OS.EOSL !== false) {
-              const reason = metadata.OS?.EOSL === true ? 'OS_EOL' : 'OS_UNKNOWN';
+            const os = metadata.OS;
+            if (!os || Array.isArray(os) || os.Family !== 'alpine' || typeof os.Name !== 'string' ||
+                !/^3\.[0-9]+\.[0-9]+$/.test(os.Name) || os.EOSL !== undefined && typeof os.EOSL !== 'boolean') {
+              throw new Error('Invalid OS evidence');
+            }
+            // Pinned Trivy 0.69.3 omits false EOSL; only a validated true is EOL evidence.
+            // Missing/unknown/malformed required OS evidence is failed, not unsupported.
+            if (os.EOSL === true) {
+              const reason = 'OS_EOL';
               report.vuln = { outcome: 'unsupported', reason, db, os: { outcome: 'unsupported', reason },
                 node: { outcome: 'unsupported', reason: 'NODE_INVENTORY_ABSENT' } };
             } else {
@@ -117,14 +130,16 @@ export async function scanNginxArchive(checks: Array<'secret' | 'sbom' | 'vuln'>
             }
           }
         }
-      } catch { report[check] = failure(signal.aborted ? 'SCAN_TIMEOUT' : 'SCAN_FAILED'); }
+      } catch { report[check] = signal.aborted ? abortedFailure() : failure(); }
     }
     clearInterval(monitor);
     while (monitoring) await new Promise(resolve => setTimeout(resolve, 10));
-    const finalBytes = await auditArchiveScratch(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined);
-    scratchPeak = Math.max(scratchPeak, finalBytes);
-    if (finalBytes > ARCHIVE_LIMITS.scratchBytes) controller.abort();
-    if (signal.aborted) for (const check of checks) report[check] = failure('SCAN_TIMEOUT');
+    try {
+      const finalBytes = await lifecycle.audit(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined);
+      scratchPeak = Math.max(scratchPeak, finalBytes);
+      if (finalBytes > ARCHIVE_LIMITS.scratchBytes) throw new Error('Invalid archive scratch');
+    } catch { scratchInvalid = true; controller.abort(); }
+    if (signal.aborted) for (const check of checks) report[check] = abortedFailure();
     // Independent checks survive DB expiry while the final scratch audit is running.
     if (report.vuln && report.vuln.outcome !== 'failed' && report.vuln.db) {
       try { assertDbFreshness(report.vuln.db); } catch { report.vuln = failure('DB_UNAVAILABLE'); }

@@ -8,6 +8,7 @@ export const scanChecks = ['secret', 'sbom', 'vuln'] as const;
 export type ScanCheck = typeof scanChecks[number];
 const checkName = z.enum(scanChecks);
 const failureCode = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']);
+const archiveFailureReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE']);
 const archiveReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT']);
 const subCoverage = z.discriminatedUnion('outcome', [z.object({ outcome: z.literal('checked') }),
   z.object({ outcome: z.literal('unsupported'), reason: archiveReason })]);
@@ -39,7 +40,7 @@ export type ScanVuln =
   | ArchiveEvidence & { outcome: 'unsupported'; coverage: 'image'; reason: z.infer<typeof archiveReason>; findings: []; nextCursor: null };
 export type ScanSbom =
   | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; os: { name: 'alpine'; version: string }; componentCount: number; scannerVersion: string; checkedAt: string; components: { ecosystem: 'apk' | 'npm'; name: string; version: string }[]; nextCursor: string | null }
-  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; components: []; nextCursor: null };
+  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; reason?: z.infer<typeof archiveFailureReason>; components: []; nextCursor: null };
 export type ScanCapabilities = { list: boolean; create: boolean; cancel: boolean; events: boolean };
 export type ScanTransport = {
   kind: 'fixture' | 'live';
@@ -84,7 +85,9 @@ const wireStatus = z.object({ imageReference: reportImage.optional(), scanId: z.
 const sbomComponent = z.strictObject({ ecosystem: z.enum(['apk', 'npm']), name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
 const wireSbom = z.discriminatedUnion('outcome', [
   z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), os: z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) }), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
-  z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']), components: z.tuple([]), nextCursor: z.null() }),
+  z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode,
+    reason: archiveFailureReason.optional(), components: z.tuple([]), nextCursor: z.null() })
+    .refine(page => page.reason === undefined || page.errorCode === (page.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED'), 'Несогласованная причина отказа SBOM'),
 ]);
 export function parseCurrentSbom(value: unknown): ScanSbom {
   const page = wireSbom.parse(value);

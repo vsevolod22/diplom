@@ -13,15 +13,26 @@ test('untrusted scanner evidence is reduced to bounded identifiers and numeric l
   assert.throws(() => parseSecretFindings({ Results: [{ Secrets: 'not an array' }] }));
   assert.throws(() => parseSecretFindings({ Results: [{ Vulnerabilities: [{ Title: canary }] }] }));
   assert.throws(() => parseSecretFindings({ Results: [{ Secrets: Array.from({ length: 1001 }, () => ({ RuleID: 'a' })) }] }));
-  assert.deepEqual(parseSecretFindings({ Results: [] }), []);
+  assert.throws(() => parseSecretFindings({ Results: [] }));
+  assert.throws(() => parseSecretFindings({ Results: [{}] }));
+  assert.throws(() => parseSecretFindings({ Results: [[]] }));
   assert.throws(() => parseSecretFindings({}));
 });
 
-test('clean Trivy image has no Results only when layer metadata proves image inspection', () => {
-  const report = { SchemaVersion: 2, ArtifactType: 'container_image', Metadata: {
-    Layers: [{}], DiffIDs: ['sha256:abc'], ImageConfig: {},
-  } };
-  assert.deepEqual(parseSecretFindings(report), []);
-  assert.throws(() => parseSecretFindings({ ...report, Metadata: { Layers: [], DiffIDs: [], ImageConfig: {} } }));
-  assert.throws(() => parseSecretFindings({ ...report, Results: null }));
+test('clean omitted/empty Results require meaningful layer inspection, not only image identity', () => {
+  const diffId = `sha256:${'a'.repeat(64)}`;
+  const metadata = { Layers: [{ DiffID: diffId, Size: 2048 }], DiffIDs: [diffId], ImageConfig: {} };
+  const report = { SchemaVersion: 2, ArtifactType: 'container_image', Metadata: metadata };
+  for (const Results of [undefined, [], [{}], [{ Secrets: [] }]]) {
+    assert.deepEqual(parseSecretFindings({ ...report, Results }), []);
+    for (const Metadata of [undefined, { ...metadata, Layers: undefined }, { ...metadata, Layers: [] },
+      { ...metadata, Layers: [{}] }, { ...metadata, Layers: [null] },
+      { ...metadata, Layers: [{ DiffID: `sha256:${'b'.repeat(64)}` }] },
+      { ...metadata, DiffIDs: [] }, { ...metadata, ImageConfig: [] }]) {
+      assert.throws(() => parseSecretFindings({ ...report, Results, Metadata }));
+    }
+  }
+  for (const Results of [null, {}, [[]], [null], [{ Secrets: 'invalid' }], [{ Vulnerabilities: 'invalid' }]]) {
+    assert.throws(() => parseSecretFindings({ ...report, Results }));
+  }
 });

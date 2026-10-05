@@ -1,9 +1,11 @@
-"""Disposable real-worker archive proof; exact EOL candidate stays unqualified.
+"""Disposable exact-candidate consumer proof; production stays closed/unqualified.
 
-Uses the existing local stand gateway and signed read-only DB, but never opens its
-ledger/auth volumes, reads the private signing key, recreates services or toggles
-admission. This exercises actual consumer/ledger/cookie HTTP routes for negative
-EOL/DB cases, not positive qualification. Chromium proves closed admission.
+Internally seeds real standalone/combined supported OS-CVE jobs plus EOL/DB-failure
+negatives, then exercises consumer/ledger/cookie HTTP reads. These are not browser
+POST/launch proofs: unseeded combined DOM creation lives in test_nginx_dom_path.py.
+Uses the local gateway and signed RO DB, not live auth/ledger volumes or private
+signing key; no live service recreation/admission toggle. Chromium here proves
+only closed public admission. Positive CVE scenarios require a fresh signed DB.
 """
 import json
 from pathlib import Path

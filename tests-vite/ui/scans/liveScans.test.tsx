@@ -485,7 +485,7 @@ describe('cookie-session live scans', () => {
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path.includes('/results?')) return json({ findings: [], nextCursor: null, coverage: secret });
-      if (path.includes('/sbom?')) return json({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null });
+      if (path.includes('/sbom?')) return json({ outcome: 'failed', coverage: 'image', reason: 'SCAN_TIMEOUT', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null });
       if (path.includes('/vuln?')) return json({ outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@${digest}`, platform: 'linux/amd64', findingCount: 2, scannerVersion: '0.69.3', checkedAt: 'today', findings: [finding(path.includes('cursor=1') ? 2 : 1)], nextCursor: path.includes('cursor=1') ? null : 1 });
       return json({ scanId: id, state: 'partial', digest, platform: 'linux/amd64', checks: ['secret', 'sbom', 'vuln'], perCheck: { secret, sbom: failedSbom, vuln: checkedVuln }, result: null });
     });
@@ -548,7 +548,7 @@ describe('cookie-session live scans', () => {
     let failed = false;
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/sbom?')) return json(failed ? { coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null } : path.includes('cursor=1') ? { ...checked, components: [{ ecosystem: 'apk', name: 'musl', version: '2' }], nextCursor: null } : checked);
+      if (path.includes('/sbom?')) return json(failed ? { coverage: 'image', outcome: 'failed', reason: 'SCAN_TIMEOUT', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null } : path.includes('cursor=1') ? { ...checked, components: [{ ecosystem: 'apk', name: 'musl', version: '2' }], nextCursor: null } : checked);
       return json({ scanId: id, state: 'completed', result: failed ? { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' } : { check: 'sbom', coverage: 'image', outcome: 'checked', componentCount: 2, scannerVersion: '0.69.3', checkedAt: '2026-01-01' } });
     });
     vi.stubGlobal('fetch', fetchMock);

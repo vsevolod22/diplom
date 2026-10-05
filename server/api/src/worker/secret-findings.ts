@@ -2,29 +2,32 @@ import { createHash } from 'node:crypto';
 
 export type SecretFinding = { findingId: string; ruleId: string; line: number | null; evidenceRef: string };
 export const MAX_FINDINGS = 1000;
+const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const digest = (value: unknown): value is string => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 
 // Scanner strings are untrusted, and can contain the matched secret itself. Keep only
 // bounded rule identifiers and numeric positions; never persist source text or paths.
 export function parseSecretFindings(value: unknown): SecretFinding[] {
-  if (!value || typeof value !== 'object') throw new Error('Invalid scanner output');
+  if (!object(value)) throw new Error('Invalid scanner output');
   const report = value as { Results?: unknown; SchemaVersion?: unknown; ArtifactType?: unknown;
     Metadata?: { Layers?: unknown; DiffIDs?: unknown; ImageConfig?: unknown } };
-  // Trivy omits Results for a clean image. Only accept that shape after a successful
-  // subprocess and with evidence that an image with layers was actually inspected.
-  const cleanImage = report.Results === undefined && report.SchemaVersion === 2 &&
-    report.ArtifactType === 'container_image' && Array.isArray(report.Metadata?.Layers) &&
-    report.Metadata.Layers.length > 0 && Array.isArray(report.Metadata.DiffIDs) &&
-    report.Metadata.DiffIDs.length > 0 && report.Metadata.ImageConfig !== null &&
-    typeof report.Metadata.ImageConfig === 'object';
-  if (!Array.isArray(report.Results) && !cleanImage) throw new Error('Invalid scanner output');
+  // Trivy can omit Results for a clean image. Empty/meaningless result arrays
+  // need the same positive inspection evidence; identity alone is not coverage.
+  const layers = report.Metadata?.Layers, diffIds = report.Metadata?.DiffIDs;
+  const cleanImage = report.SchemaVersion === 2 && report.ArtifactType === 'container_image' &&
+    Array.isArray(layers) && layers.length > 0 && layers.length <= 32 && Array.isArray(diffIds) &&
+    diffIds.length === layers.length && diffIds.every(digest) && object(report.Metadata?.ImageConfig) &&
+    layers.every((layer, index) => object(layer) && layer.DiffID === diffIds[index] &&
+      (layer.Size === undefined || Number.isSafeInteger(layer.Size) && (layer.Size as number) >= 0));
+  if (report.Results !== undefined && !Array.isArray(report.Results)) throw new Error('Invalid scanner output');
   const findings: SecretFinding[] = [];
   const results = (report.Results ?? []) as unknown[];
   if (results.length > MAX_FINDINGS) throw new Error('Too many scanner results');
   for (let r = 0; r < results.length; r++) {
     const result = results[r];
-    if (!result || typeof result !== 'object') throw new Error('Invalid scanner result');
-    if (Array.isArray((result as { Vulnerabilities?: unknown }).Vulnerabilities) &&
-        ((result as { Vulnerabilities: unknown[] }).Vulnerabilities.length > 0)) throw new Error('Unexpected scanner coverage');
+    if (!object(result)) throw new Error('Invalid scanner result');
+    if (result.Vulnerabilities !== undefined && (!Array.isArray(result.Vulnerabilities) ||
+        result.Vulnerabilities.length > 0)) throw new Error('Unexpected scanner coverage');
     const secrets = (result as { Secrets?: unknown }).Secrets;
     if (secrets !== undefined && !Array.isArray(secrets)) throw new Error('Invalid secrets');
     if (!Array.isArray(secrets)) continue;
@@ -39,5 +42,6 @@ export function parseSecretFindings(value: unknown): SecretFinding[] {
               line, evidenceRef: `result-${r}-secret-${s}` });
     }
   }
+  if (findings.length === 0 && !cleanImage) throw new Error('Missing secret inspection evidence');
   return findings;
 }
