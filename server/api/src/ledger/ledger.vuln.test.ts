@@ -36,7 +36,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   const legacy = ledger.enqueue({ ...target, checks: '["secret"]', idempotencyKey: 'legacy' }).scanId;
   ledger.close();
   const raw = new Database(file);
-  raw.exec('DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7;');
+  raw.exec('DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7;');
   raw.close();
   ledger = new ScanLedger(file);
   assert.equal(ledger.state(legacy, 'alice'), 'queued');
@@ -67,7 +67,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'completed']);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 10);
+  assert.equal(db.pragma('user_version', { simple: true }), 11);
   assert.equal(count(db, 'scan_vuln_results'), 1);
   assert.equal(count(db, 'scan_vuln_findings'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
@@ -186,7 +186,7 @@ test('v8 migration failure rolls back schema and version', () => fixture(file =>
   const ledger = new ScanLedger(file);
   ledger.close();
   const raw = new Database(file);
-  raw.exec('DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7; CREATE TABLE scan_vuln_findings (sentinel TEXT);');
+  raw.exec('DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7; CREATE TABLE scan_vuln_findings (sentinel TEXT);');
   raw.close();
   assert.throws(() => new ScanLedger(file), /already exists/);
   const after = new Database(file);

@@ -60,6 +60,7 @@ export class ScansService {
   }
 
   async create(identity: Identity, body: unknown): Promise<Receipt> {
+    if (!identity.scope.includes('scan:create')) throw new ForbiddenException();
     const ledger = this.ledgerStore.ledger;
     if (!ledger) throw unavailable();
     const reject = (reason: 'INVALID_REQUEST' | 'UNSUPPORTED' | 'CAPACITY' | 'EGRESS') => {
@@ -154,10 +155,16 @@ export class ScansService {
     const ledger = this.ledgerStore.ledger;
     const snapshot = ledger?.snapshot(scanId, identity.subject);
     if (!snapshot) throw new NotFoundException();
+    const config = ledger!.configResult(scanId, identity.subject);
+    const configCoverage = config ? { check: 'config', coverage: 'image', ...config.config,
+      checksVersion: config.checksVersion, resourcePolicyVersion: config.resourcePolicyVersion,
+      supportedRuleIds: config.supportedRuleIds, completedRuleIds: config.completedRuleIds,
+      findingCount: config.findings.length } : null;
     const archive = ledger?.archiveResult(scanId, identity.subject);
     if (archive) {
       const checks = ledger!.requestedChecks(scanId, identity.subject);
       const perCheck = Object.fromEntries(checks.map(check => {
+        if (check === 'config') return [check, configCoverage];
         const result = archive[check as 'secret' | 'sbom' | 'vuln'];
         return [check, result ? { check, coverage: 'image', outcome: result.outcome,
           errorCode: result.outcome === 'failed' ? (result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED') : null,
@@ -170,7 +177,7 @@ export class ScansService {
           scannerVersion: archive.scannerVersion, checksVersion: archive.receipt.checksVersion, checkedAt: new Date(archive.checkedAt).toISOString() } : null];
       }));
       return { scanId, ...snapshot, imageReference: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
-        checks, perCheck, result: checks.length === 1 ? perCheck[checks[0]] : null,
+        checks, perCheck, ...(config ? { config } : {}), result: checks.length === 1 ? perCheck[checks[0]] : null,
         imageProfile: { version: archive.receipt.profileVersion, configDigest: archive.receipt.configDigest,
           resourcePolicyVersion: archive.receipt.resourcePolicyVersion, qualified: false },
         coverage: 'image', checkedIsNotSafe: true };
@@ -192,9 +199,9 @@ export class ScansService {
         ? { check: 'vuln', coverage: vuln.coverage, outcome: vuln.outcome, errorCode: vuln.errorCode }
         : null;
     const perCheck = Object.fromEntries(checks.map(check => [check,
-      check === 'secret' ? secret ?? null : check === 'sbom' ? sbomCoverage : vulnCoverage]));
+      check === 'secret' ? secret ?? null : check === 'sbom' ? sbomCoverage : check === 'vuln' ? vulnCoverage : configCoverage]));
     const check = checks.length === 1 ? checks[0] : undefined;
-    return { scanId, ...snapshot, ...(checks.length ? { checks, perCheck } : {}), ...(check ? { check } : {}),
+    return { scanId, ...snapshot, ...(config ? { config } : {}), ...(checks.length ? { checks, perCheck } : {}), ...(check ? { check } : {}),
       result: checks.length === 1 ? perCheck[checks[0]] : null };
   }
 

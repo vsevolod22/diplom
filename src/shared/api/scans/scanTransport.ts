@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { imageConfigReport, wireConfigCoverage } from './imageConfigReport';
 
 const state = z.enum(['queued', 'running', 'cancelling', 'completed', 'partial', 'failed', 'cancelled']);
 const coverageState = z.enum(['checked', 'unsupported', 'not_authorized', 'failed', 'skipped']);
-const coverage = z.object({ check: z.string(), status: coverageState, reason: z.string().optional(), scannerVersion: z.string().optional(), dbVersion: z.string().optional() });
+const coverage = z.object({ check: z.string(), status: coverageState, reason: z.string().optional(), scannerVersion: z.string().optional(), dbVersion: z.string().optional(), checksVersion: z.string().optional(), resourcePolicyVersion: z.string().optional() });
 const finding = z.object({ findingId: z.string(), category: z.string(), ruleId: z.string(), severity: z.string(), location: z.string().optional(), evidenceRef: z.string().optional() });
-export const scanChecks = ['secret', 'sbom', 'vuln'] as const;
+export const scanChecks = ['secret', 'sbom', 'vuln', 'config'] as const;
 export type ScanCheck = typeof scanChecks[number];
 const checkName = z.enum(scanChecks);
 const failureCode = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']);
@@ -22,7 +23,7 @@ const archiveEvidence = { os: subCoverage.optional(), node: subCoverage.optional
 const reportImage = z.union([z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/),
   z.literal('registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3'),
     z.literal('registry-1.docker.io/library/nginx@sha256:b17b00f7ef0038aeb11362157f49006a130628ee711cefcced871405d046f114')]);
-const status = z.object({ scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional(), reason: archiveReason.optional(), ...archiveEvidence, checksVersion: z.string().max(80).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
+const status = z.object({ config: imageConfigReport.optional(), scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional(), reason: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'CHECK_DISABLED', 'USER_NOT_RESOLVABLE', 'OCI_IDENTITY_REJECTED', 'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG']).optional(), ...archiveEvidence, checksVersion: z.string().max(80).optional(), resourcePolicyVersion: z.string().max(80).optional(), supportedRuleIds: z.array(z.string()).optional(), completedRuleIds: z.array(z.string()).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
 const results = z.object({ findings: z.array(finding), nextCursor: z.string().nullable(), coverage: z.array(coverage) });
 // Receipt URLs may refer to the internal API. Only the ID crosses into browser navigation.
 const receipt = z.object({ scanId: z.string().uuid() });
@@ -54,7 +55,15 @@ export type ScanTransport = {
   cancel(scanId: string): Promise<void>;
   subscribeEvents?(scanId: string, onHint: () => void, onError: () => void, onOpen: () => void): () => void;
 };
-export const parseScanStatus = (value: unknown): ScanStatus => status.parse(value);
+export const parseScanStatus = (value: unknown): ScanStatus => {
+  const parsed = status.parse(value);
+  for (const [key, item] of Object.entries(parsed.perCheck ?? {})) {
+    if (!item) continue;
+    if (key === 'config') wireConfigCoverage.parse(item);
+    else if (item.reason !== undefined) archiveReason.parse(item.reason);
+  }
+  return parsed;
+};
 export const parseScanResults = (value: unknown): ScanResults => results.parse(value);
 export const parseScanReceipt = (value: unknown): ScanReceipt => receipt.parse(value);
 
@@ -74,14 +83,15 @@ const wireArchiveCheck = z.object({ check: checkName, coverage: z.literal('image
   checksVersion: z.string().min(1).max(80), checkedAt: z.string().datetime(),
   findingCount: z.number().int().nonnegative().optional(), componentCount: z.number().int().nonnegative().optional(), ...archiveEvidence });
 const wirePerCheck = z.unknown().transform((value, context) => {
-  const schema = value && typeof value === 'object' && 'checksVersion' in value
-    ? wireArchiveCheck : z.union([wireCoverage, wireSbomResult, wireVulnResult]);
+  const schema = value && typeof value === 'object' && 'check' in value && value.check === 'config'
+    ? wireConfigCoverage : value && typeof value === 'object' && 'checksVersion' in value
+      ? wireArchiveCheck : z.union([wireCoverage, wireSbomResult, wireVulnResult]);
   const parsed = schema.safeParse(value);
   if (!parsed.success) { context.addIssue({ code: 'custom', message: 'Invalid check coverage' }); return z.NEVER; }
   return parsed.data;
 });
-const wireChecks = z.array(checkName).min(1).max(3).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
-const wireStatus = z.object({ imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.string().regex(/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/).optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
+const wireChecks = z.array(checkName).min(1).max(4).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
+const wireStatus = z.object({ config: imageConfigReport.optional(), imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.string().regex(/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/).optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
 const sbomComponent = z.strictObject({ ecosystem: z.enum(['apk', 'npm']), name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
 const wireSbom = z.discriminatedUnion('outcome', [
   z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), os: z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) }), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
@@ -102,7 +112,19 @@ export function parseCurrentStatus(value: unknown): ScanStatus {
   const checks = current.checks ?? (current.check || current.result ? [current.check ?? current.result!.check] : undefined);
   const perCheck = current.perCheck ?? (checks?.length === 1 ? { [checks[0]]: current.result ?? null } : undefined);
   if (checks && perCheck && (Object.keys(perCheck).some(key => !checks.includes(key as ScanCheck) || (perCheck[key as ScanCheck] != null && perCheck[key as ScanCheck]?.check !== key)) || checks.some(key => !(key in perCheck)))) throw new Error('Недопустимый статус проверок');
+  if (current.config) {
+    if ((current.config.config.outcome === 'skipped') === (checks?.includes('config') === true) ||
+        current.config.findings.some(finding => finding.manifestDigest !== current.digest || current.platform !== 'linux/amd64')) throw new Error('Недопустимая цель config');
+    if (checks?.includes('config')) {
+      const expected = { check: 'config', coverage: 'image', ...current.config.config, checksVersion: current.config.checksVersion,
+        resourcePolicyVersion: current.config.resourcePolicyVersion, supportedRuleIds: current.config.supportedRuleIds,
+        completedRuleIds: current.config.completedRuleIds, findingCount: current.config.findings.length };
+      const actual = perCheck?.config;
+      if (!actual || Object.keys(expected).some(key => JSON.stringify(actual[key as keyof typeof actual]) !== JSON.stringify(expected[key as keyof typeof expected]))) throw new Error('Несогласованный config outcome');
+    }
+  } else if (perCheck?.config != null) throw new Error('Нет config evidence');
   return { scanId: current.scanId, state: current.state, percent: null,
+    ...(current.config ? { config: current.config } : {}),
     ...(checks ? { checks, perCheck, ...(checks.length === 1 ? { check: checks[0] } : {}) } : {}),
     ...(current.digest && current.platform ? { digest: current.digest, platform: current.platform } : {}),
     ...(current.imageReference ? { imageReference: current.imageReference } : {}) };

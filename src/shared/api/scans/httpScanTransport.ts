@@ -80,7 +80,7 @@ export function createAuthorizedScanTransport(session: { subject: string; curren
       return parseCurrentVuln(await request(`${path}?limit=50${cursor === undefined ? '' : `&cursor=${cursor}`}`, signal));
     },
     async create(intent) {
-      if (!intent.checks.length || intent.checks.some((check, index) => !['secret', 'sbom', 'vuln'].includes(check) || index > 0 && ['secret', 'sbom', 'vuln'].indexOf(intent.checks[index - 1]) >= ['secret', 'sbom', 'vuln'].indexOf(check))) throw new Error('Недопустимый набор проверок');
+      if (!intent.checks.length || intent.checks.length > 4 || intent.checks.some((check, index) => !['secret', 'sbom', 'vuln', 'config'].includes(check) || index > 0 && ['secret', 'sbom', 'vuln', 'config'].indexOf(intent.checks[index - 1]) >= ['secret', 'sbom', 'vuln', 'config'].indexOf(check))) throw new Error('Недопустимый набор проверок');
       // Ignore receipt URLs: they may point at the internal JWT-only API.
       return parseScanReceipt(await request(BROWSER_SCANS_PATH, undefined, intent));
     },

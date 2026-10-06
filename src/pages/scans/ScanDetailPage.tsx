@@ -85,7 +85,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const isSbom = requested.includes('sbom');
   const isSecret = demo || requested.includes('secret');
   const isVuln = requested.includes('vuln');
-  const sbomOnly = isSbom && !isSecret && !isVuln;
+  const sbomOnly = isSbom && !isSecret && !isVuln && !requested.includes('config');
   const sbom = useQuery({
     queryKey: [...scope, 'sbom', scanId, scan.data?.state, sbomCursor],
     queryFn: ({ signal }) => transport.sbom(scanId, sbomCursor, signal),
@@ -141,7 +141,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const reportData = isSecret && scan.isSuccess && report.isSuccess ? report.data : undefined;
   const liveCoverage = demo ? undefined : scan.data?.checks?.map((check: ScanCheck): ScanCoverage => {
     const outcome = scan.data?.perCheck?.[check];
-    return { check: check === 'secret' ? 'Secrets' : check === 'sbom' ? 'SBOM' : 'CVE', status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined };
+    return { check: { secret: 'Secrets', sbom: 'SBOM', vuln: 'CVE', config: 'Image config' }[check], status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined, checksVersion: outcome?.checksVersion, resourcePolicyVersion: outcome?.resourcePolicyVersion };
   });
   const findings =
     reportData?.findings.filter((finding) => filter === 'all' || finding.category === filter) ?? [];
@@ -257,7 +257,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                     type="button"
                     disabled={cancellation.isPending}
                     onClick={() => {
-                      if (window.confirm('Отменить скан? Уже полученные результаты сохранятся.')) {
+                      if (window.confirm('Отменить скан? Незавершённые результаты не будут опубликованы.')) {
                         cancellation.mutate(scanId);
                       }
                     }}
@@ -269,7 +269,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                     Отмена недоступна
                   </Button>
                 )}
-                <p>{demo ? 'Демо не отправляет серверную отмену.' : 'Неполные результаты не удаляются. Статус подтверждается GET snapshot.'}</p>
+                <p>{demo ? 'Демо не отправляет серверную отмену.' : 'Отмена завершает скан без публикации промежуточных результатов. Статус подтверждается GET snapshot.'}</p>
                 {cancellation.isError ? (
                   <Alert role="alert" tone="danger">
                     Не удалось отменить скан: он недоступен или отмена невозможна в текущем состоянии. Обновите статус.
@@ -293,6 +293,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                         <div>
                           <Badge tone={coverageTone[item.status]}>{coverageLabels[item.status]}</Badge>
                           {item.reason ? <p>{item.reason}</p> : null}
+                          {item.checksVersion ? <p>checks {item.checksVersion} · policy {item.resourcePolicyVersion ?? 'не предоставлена'}</p> : null}
                           {item.scannerVersion || item.dbVersion ? (
                             <small>
                               {item.scannerVersion ? `scanner ${item.scannerVersion}` : ''}
@@ -307,6 +308,20 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 ) : (
                   <p>Нет подтверждённого coverage; тип проверки и результат неизвестны. «0 проблем» недопустимо.</p>
                 )}
+                {!demo ? scan.data.config ? (
+                  <div aria-label="Image config coverage">
+                    <h4>Image config · только метаданные образа</h4>
+                    <p>{coverageLabels[scan.data.config.config.outcome]}{scan.data.config.config.outcome !== 'checked' ? ` · ${scan.data.config.config.reason}` : ''}</p>
+                    <p>checks {scan.data.config.checksVersion} · policy {scan.data.config.resourcePolicyVersion}</p>
+                    <p>Правила: выполнено {scan.data.config.completedRuleIds.length} / поддерживается {scan.data.config.supportedRuleIds.length} · {scan.data.config.supportedRuleIds.join(', ')}</p>
+                    <p>History: {scan.data.config.history.reason}. Dockerfile: {scan.data.config.dockerfile.reason}. IaC: {scan.data.config.iac.reason}.</p>
+                    <p>OCI history не является исходным Dockerfile/IaC. Numeric UID без находки не доказывает non-root runtime.</p>
+                    {scan.data.config.findings.length ? <ul>{scan.data.config.findings.map(finding => <li key={finding.findingId}>
+                      <strong>{finding.ruleId} · {finding.classification} · {finding.severity}</strong>
+                      <p>{finding.message}</p><p>{finding.recommendation}</p>
+                    </li>)}</ul> : scan.data.config.config.outcome === 'checked' ? <p>Root metadata finding отсутствует; это не гарантия безопасности.</p> : <p>Находки config не подтверждены.</p>}
+                  </div>
+                ) : <p>Нет подтверждённого image config coverage: проверка ещё не завершена или это legacy scan без versioned evidence.</p> : null}
                 {isSbom && sbom.isError ? <Alert role="alert" tone="danger">Не удалось загрузить SBOM: данные не подтверждены.</Alert> : null}
                                 {isVuln && vuln.isError ? <Alert role="alert" tone="danger">Не удалось загрузить CVE: данные недоступны, число уязвимостей неизвестно.</Alert> : null}
                 <div className="scan-a1__coverage-guide">

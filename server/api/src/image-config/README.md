@@ -1,8 +1,8 @@
-# Image config v1 — standalone module / integration handoff
+# Image config v1 — bounded module and scan integration
 
 Implemented for `DIP-TASK-7`, run `ed9b6122-f013-445f-a936-f08aa1d57539`, architecture decision `28880b86-5ecf-47d5-bfbe-2d517449005b` and target delta `bb5be648-a2fa-49ee-b0f0-53d0b38a7a44`.
 
-**Partial delivery, not an integrated scan feature.** These files do not register an API endpoint, add a worker option, change the report schema, persist outcomes, or render UI. No production authorization adapter, live registry egress, real HTTP/log redaction, restart/ledger integration, browser proof, or full TASK7 acceptance is claimed.
+The pure module remains independently usable. The TASK7 integration now selects config through the existing ordered HTTP `checks` array, composes a private per-attempt worker authority, loads exact pinned OCI bytes through the existing gateway, atomically persists independent versioned results in SQLite v11 and renders strict parsed status coverage in the browser. No arbitrary repository or production nginx admission is added. Controlled Nest/worker/SQLite tests are not live registry/Trivy/TLS/DNS/egress/deployment proof; those external checks remain pending. Independent integration reviews and task-sourced strict-close documentation are separate from implementation.
 
 Spec-history snapshot checked on **2026-10-06**: feature-source delta `bb5be648-a2fa-49ee-b0f0-53d0b38a7a44` was human-approved at **18:42:31 UTC** and applied as `DIP-DOC-5` version 2 at **18:45:21 UTC**, after the original author handoff. Earlier unapplied statements describe that author-time snapshot, not the current spec state. This later application does not prove production integration, full task acceptance or task-level strict closure. This correction does not approve, apply or undo any delta.
 
@@ -20,7 +20,7 @@ const result = await imageConfig.analyze({
 });
 ```
 
-The names above describe **future composition inputs**, not existing adapters. `TrustedCallerPort.resolveAuthorizedTarget(handle)` resolves a genuine runtime-issued opaque handle to an `AuthorizedImageInput` or returns `undefined`. It may return a promise. The module captures the resolver at construction; no request can replace it. Do not expose module construction, the port, or target minting through HTTP.
+The names above describe trusted composition inputs. The scan adapter is `worker/image-config-runner.ts`; its ledger-derived account/scan/attempt capability is never serialized or supplied by HTTP. `TrustedCallerPort.resolveAuthorizedTarget(handle)` resolves a genuine runtime-issued opaque handle to an `AuthorizedImageInput` or returns `undefined`. It may return a promise. The module captures the resolver at construction; no request can replace it. Do not expose module construction, the port, or target minting through HTTP.
 
 The adapter must recognize handle **object identity/origin**, bind it to the current authorized account/scan/pinned registry+repository+child manifest digest+platform, and reject cloned, serialized, cast, forged, stale or cross-context handles. For example, a server-owned per-authorized-scan handle registry can establish origin; validating `verified: true` or structural DTO fields cannot. `test-fixtures.ts` uses an in-memory registry **only as a test fixture**, not proof of real authorization. Module hashes prove byte binding, not account authorization, publisher authenticity, signature validity, or image security.
 
@@ -106,22 +106,28 @@ Results are built from a closed allowlist, never spreads of config/identity/erro
 
 The module imports no network, filesystem, subprocess, daemon, LLM, ledger or application services. The trusted port is the only external capability; **its implementation remains outside this module's trust/validation proof**.
 
-## Integration owner checklist (not implemented here)
+## Scan integration
 
-1. Add a real authorized API opt-in and opaque pinned-target handle adapter. Current resolver identity alone is not verified byte delivery. Acquire bounded exact manifest/config bytes through the shared owner's OCI path, not a new direct-fetch fallback in this module.
-2. Preserve upstream exact host allowlist, DNS/IP gateway policy, TLS hostname checking, bounded/validated token realm/service/scope and redirect hops, and no credential forwarding across origins. No live egress proof is provided here.
-3. Map this closed schema explicitly into the current exact report schema. Keep vulnerability, secrets, SBOM, container and host outcomes independent; no module failure should erase or downgrade sibling evidence.
-4. Merge and persist independent versioned coverage in the existing attempt-fenced atomic result/terminal/event transaction. Retain scan ownership, idempotency/recovery and restart behavior. Verification/network work stays **outside** SQLite transactions. This delivery edits no schema/DB/config.
-5. Verify redaction in actual HTTP responses, logs, events and persisted reports, plus real UI selection/status/version coverage. Pure module canaries are not end-to-end redaction proof.
-6. Obtain three independent approvals for the reviewed revision, including a correctness recheck after exception-containment rework. The initial standalone spec/security reviews approved; correctness requested changes. TASK7 remains partial/in_progress pending real integration acceptance. Do not mark testing/done as if full delivery occurred. The feature-source applied delta does not satisfy the task-level strict close gate. Do not use a false no-spec-impact declaration to close behavior-changing work.
+- Canonical HTTP selection is `secret,sbom,vuln,config`, with 1–4 distinct values. Config is default-off in UI. No raw metadata, proof, source bytes or policy override DTO is accepted. Existing fingerprints/owner admission/replay semantics stay unchanged; a changed selection with the same idempotency key is a conflict.
+- `oci/pinned-image-config.ts` uses the existing Docker Hub gateway/auth/redirect transport only. Its absolute loader budget is 30s, at most 8 transport requests including token/redirect requests, at most 1MB per manifest/config (32KB token ceiling). Every gateway call receives remaining deadline, byte ceiling and abort signal. The existing manifest/config verifier independently hashes descriptor-linked bytes and checks platform. Loader budget is separate from the unchanged `image-config-policy-v1` parser/rule policy.
+- `worker/image-config-runner.ts` privately registers an opaque handle for the authoritative ledger subject, scan, current attempt and complete pinned job. It rechecks authority before/after I/O, rejects forged job contexts and revokes in finally. `lease_until IS NOT NULL` is required; retry clears it without changing attempt. Cancellation/replacement/abort cannot publish late outcomes. Disabled config issues no handle and loads no config bytes.
+- `ledger.ts` migrates v10→v11 forward only, without legacy backfill or table rewrites. Config + legacy sibling writes + outbox ack + terminal state/event are one transaction. Archive reports retain their exact legacy schema; config is a separate validated argument. DB expiry downgrades only vuln, retaining other outcomes. Terminal aggregation considers selected checks only; unsupported history/source and unselected config do not force partial.
+- New finalized scans expose an owner-scoped bounded `status.config`, even when skipped. Old scans/no finalized row omit it rather than invent v1 evidence. Selected `perCheck.config` has config versions/rule counts, never Trivy scanner/DB attribution. `/results`, `/sbom`, `/vuln` and SSE state hints retain their existing meaning.
+- Browser parsing discriminates by `check`, uses a closed config schema and rejects contradictory rule/outcome/target/selection evidence. The UI displays versions, supported/completed rules, source/history limitations and metadata-only root findings without an extra fetch. Numeric-positive User is not runtime assurance.
+
+## Evidence boundary
+
+Controlled real Nest cookie HTTP→actual consumer→private adapter/module→temporary SQLite→actual GET/SSE/browser parser tests exercise redaction, ownership, replay and independent outcomes. Synthetic gateway/scanner ports are explicitly not external OCI/Trivy proof. Exact nginx archive tests exercise failed/skipped config and DB expiry without pretending synthetic bytes match external pinned digests. A positive live nginx config run, real registry/TLS/gateway/container proof and production deployment remain unverified. No stand DB/auth/keys/volumes are migrated or reset by these tests. Three fresh independent integration reviews are required; historical module approvals and the feature-source applied delta do not close TASK7. Integrator must produce a narrow task-sourced delta from proven behavior, not a future whole-P0 rewrite.
 
 ## Validation
 
 From `server/api`, without Docker:
 
 ```sh
-pnpm exec tsx --test 'src/image-config/*.test.ts'
+pnpm test
 pnpm typecheck
+# Optional Chromium proof against actual disposable Nest + worker + SQLite (root dev dependencies required):
+pnpm exec tsx src/scans/scans.config.browser.ts
 ```
 
 Tests exercise the **public `analyze` entry**, positive/default/numeric/named-user outcomes, fixed versions, off/invalid flags without capability reads, forged/serialized/cloned/foreign target handles, independent identity/hash/size/media type/platform faults, malformed/duplicate decoded JSON keys and known field types, all reachable limit−1/limit/limit+1 boundaries (including unknown fields and UTF-8/escaped keys), deterministic IDs, independent source/history coverage, closed output fields, canaries and no logging. Exception regressions cover synchronous throws and rejected promises, throwing prototype/descriptor traps, revoked proxies, own/inherited reason getters, coercion/property traps and genuine internal failure reasons. Internal tests additionally cover private receipt forgery/cross-instance rejection, post-verification byte/identity mutation, parser edge cases and output encoder bounds. Static runtime import/call checks complement passive metadata tests; they do not validate a production port or live egress.

@@ -320,6 +320,10 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 CVE · доступно только при настроенной сервером базе уязвимостей
               </label>
               <label>
+                <input type="checkbox" value="config" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
+                Image config · OCI User metadata, не runtime / Dockerfile
+              </label>
+              <label>
                 <input type="checkbox" disabled />
                 Host / running container · не поддерживаются (только registry IMAGE)
               </label>

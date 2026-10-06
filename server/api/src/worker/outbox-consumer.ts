@@ -6,15 +6,17 @@ import { scannerFailure } from './scanner-errors.js';
 import { assertArchiveDbFreshness } from './archive-result-contract.js';
 import { scanNginxArchive } from './archive-scan-worker.js';
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
+import { runImageConfig } from './image-config-runner.js';
+import type { ConfigLoader } from '../oci/pinned-image-config.js';
 
-type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal;
+type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal; configLoader?: ConfigLoader;
   vuln?: Omit<VulnScanOptions, 'timeoutMs' | 'signal'> };
-type Check = CombinedOutcome['check'];
-const order: Check[] = ['secret', 'sbom', 'vuln'];
+type Check = CombinedOutcome['check'] | 'config';
+const order: Check[] = ['secret', 'sbom', 'vuln', 'config'];
 function checks(value: string): Check[] | null {
   try {
     const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 3 ||
+    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 4 ||
         parsed.some((check, index) => !order.includes(check) || index > 0 &&
           order.indexOf(parsed[index - 1]) >= order.indexOf(check)) ||
         JSON.stringify(parsed) !== value) return null;
@@ -30,15 +32,15 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   sbomRunner: (job: Job, options: { timeoutMs: number; cacheDir: string; signal?: AbortSignal }) => Promise<SbomScanResult> = scanSbomPinned,
   vulnRunner: (job: Job, options: VulnScanOptions) => Promise<VulnScanResult> = scanVulnPinned,
   archiveRunner: typeof scanNginxArchive = scanNginxArchive): Promise<boolean> {
-  // The claim API cannot inspect checks until after claiming; reserve the maximum
-  // sequential budget for every claim so even a three-check job stays fenced.
+  // Reserve the legacy sequential budget. claim adds the bounded config budget
+  // only when config is selected, preserving existing lease timing for old jobs.
   if (options.signal?.aborted) return false;
   const job = ledger.claim(now, 3 * options.timeoutMs + 27_000, 627_000);
   if (!job) return false;
   const canonical = checks(job.checks);
   // Preserve legacy single-runner injection for unsupported check sets, but
   // never attribute its output to verified coverage.
-  const requested = canonical ?? (['secret'] as const);
+  const requested = (canonical ?? ['secret']).filter((check): check is CombinedOutcome['check'] => check !== 'config');
   if (job.scope !== 'image') {
     ledger.finish(job.scanId, job.attempts, 'failed');
     return true;
@@ -48,7 +50,7 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   options.signal?.addEventListener('abort', callerAbort, { once: true });
   if (options.signal?.aborted) controller.abort();
   const poll = () => {
-    try { if (!ledger.attemptActive(job.scanId, job.attempts)) controller.abort(); }
+    try { if (!ledger.configAttemptContext(job.scanId, job.attempts)) controller.abort(); }
     catch { controller.abort(); }
   };
   poll();
@@ -65,7 +67,10 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   const outcomes: CombinedOutcome[] = [];
   const image = `${job.registry}/${job.repository}@${job.digest}`;
   try {
-    if (job.repository === 'library/nginx') {
+    const config = await runImageConfig(ledger, job, controller.signal, options.configLoader);
+    poll();
+    if (controller.signal.aborted) return true;
+    if (job.repository === 'library/nginx' && requested.length) {
       const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => Object.entries(candidate).every(([key, value]) => key === 'configDigest' || job[key as keyof Job] === value));
       if (!canonical || !target) {
         ledger.finish(job.scanId, job.attempts, 'failed'); return true;
@@ -73,23 +78,28 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
       // Exact-candidate qualification jobs use either internal fixtures or the
       // separately composed proof HTTP ingress. Production admission stays closed.
       try {
-        const report = await archiveRunner(canonical, { signal: controller.signal, target,
-          vuln: options.vuln ? { ...options.vuln, timeoutMs: 120_000, signal: controller.signal } : undefined });
+        const report = await Promise.race([archiveRunner(requested, { signal: controller.signal, target,
+          vuln: options.vuln ? { ...options.vuln, timeoutMs: 120_000, signal: controller.signal } : undefined }), aborted]);
+        if (report === null) return true;
         poll();
         if (!controller.signal.aborted) {
           try { assertArchiveDbFreshness(report); }
           catch { report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' }; }
-          try { ledger.finishArchive(job.scanId, job.attempts, report); }
+          try { ledger.finishArchive(job.scanId, job.attempts, report, config); }
           catch (error) {
             // A NextUpdate crossing inside BEGIN IMMEDIATE must not erase independent checks.
             try { assertArchiveDbFreshness(report); } catch {
               report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
-              ledger.finishArchive(job.scanId, job.attempts, report); return true;
+              ledger.finishArchive(job.scanId, job.attempts, report, config); return true;
             }
             throw error;
           }
         }
-      } catch { if (!controller.signal.aborted) ledger.finish(job.scanId, job.attempts, 'failed'); }
+      } catch {
+        poll();
+        if (!controller.signal.aborted) ledger.finishCombined(job.scanId, job.attempts,
+          requested.map(check => ({ check, outcome: 'failed', errorCode: 'SCAN_FAILED' })), config);
+      }
       return true;
     }
     for (const check of requested) {
@@ -125,6 +135,8 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
           { check, outcome: 'failed', errorCode: result.errorCode });
       }
     }
+    poll();
+    if (!controller.signal.aborted && canonical) ledger.finishCombined(job.scanId, job.attempts, outcomes, config);
   } finally {
     clearInterval(interval);
     controller.signal.removeEventListener('abort', onAbort);
@@ -133,13 +145,6 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   poll();
   if (controller.signal.aborted) return true;
   if (!canonical) ledger.finish(job.scanId, job.attempts, 'failed');
-  else if (requested.length > 1) ledger.finishCombined(job.scanId, job.attempts, outcomes);
-  else {
-    const result = outcomes[0];
-    if (result.outcome === 'failed') ledger.finish(job.scanId, job.attempts, 'failed', result.errorCode);
-    else if (result.check === 'secret') ledger.finishWithResult(job.scanId, job.attempts, result.findings, result.scannerVersion);
-    else if (result.check === 'sbom') ledger.finishWithSbom(job.scanId, job.attempts, result.sbom, result.scannerVersion);
-    else ledger.finishWithVuln(job.scanId, job.attempts, result.image, result.findings, result.scannerVersion);
-  }
+
   return true;
 }

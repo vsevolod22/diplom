@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -9,6 +10,9 @@ import { MAX_VULN_FINDINGS, type VulnFinding } from '../worker/vuln-findings.js'
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 import { assertArchiveDbFreshness, validateArchiveReport } from '../worker/archive-result-contract.js';
 import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
+import type { ImageConfigResult } from '../image-config/contract.js';
+import { validateConfigReport } from '../image-config/report-contract.js';
+import { admittedConfigTarget, CONFIG_LOAD_MS } from '../oci/pinned-image-config.js';
 
 export type PinnedTarget = {
   subject: string;
@@ -39,20 +43,21 @@ const sbomObject = (value: unknown, keys: string[]): value is Record<string, unk
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
 type FailureCode = 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE';
-type CheckName = 'secret' | 'sbom' | 'vuln';
+type LegacyCheck = 'secret' | 'sbom' | 'vuln';
+type CheckName = LegacyCheck | 'config';
 type CheckedPayload =
   | { check: 'secret'; outcome: 'checked'; findings: SecretFinding[]; scannerVersion: '0.69.3' }
   | { check: 'sbom'; outcome: 'checked'; sbom: ImageSbom; scannerVersion: '0.69.3' }
   | { check: 'vuln'; outcome: 'checked'; image: string; findings: VulnFinding[]; scannerVersion: '0.69.3' };
-export type CombinedOutcome = CheckedPayload | { check: CheckName; outcome: 'failed'; errorCode: FailureCode };
+export type CombinedOutcome = CheckedPayload | { check: LegacyCheck; outcome: 'failed'; errorCode: FailureCode };
 const canonicalChecks = (value: string): CheckName[] | null => {
   try {
     const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 3 ||
-        parsed.some(check => !['secret', 'sbom', 'vuln'].includes(check)) ||
+    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 4 ||
+        parsed.some(check => !['secret', 'sbom', 'vuln', 'config'].includes(check)) ||
         JSON.stringify(parsed) !== value ||
-        parsed.some((check, index) => index > 0 && ['secret', 'sbom', 'vuln'].indexOf(parsed[index - 1]) >=
-          ['secret', 'sbom', 'vuln'].indexOf(check))) return null;
+        parsed.some((check, index) => index > 0 && ['secret', 'sbom', 'vuln', 'config'].indexOf(parsed[index - 1]) >=
+          ['secret', 'sbom', 'vuln', 'config'].indexOf(check))) return null;
     return parsed as CheckName[];
   } catch { return null; }
 };
@@ -150,7 +155,7 @@ export class ScanLedger {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 5000');
       const version = Number(this.db.pragma('user_version', { simple: true }));
-      if (version > 10 || version < 0) throw new Error('Unsupported ledger version');
+      if (version > 11 || version < 0) throw new Error('Unsupported ledger version');
       // FK enforcement must be toggled outside a transaction for SQLite's table rebuild.
       // Check the rebuilt references before commit, then restore enforcement afterward.
       if (version < 9) this.db.pragma('foreign_keys = OFF');
@@ -309,6 +314,18 @@ export class ScanLedger {
             report TEXT NOT NULL CHECK (length(report) <= 2000000)
           ); PRAGMA user_version = 10;`);
         }
+        if (version < 11) {
+          this.db.exec(`CREATE TABLE scan_check_results (
+            scan_id TEXT NOT NULL REFERENCES scans(id), check_name TEXT NOT NULL CHECK (check_name = 'config'),
+            attempt INTEGER NOT NULL CHECK (attempt > 0),
+            outcome TEXT NOT NULL CHECK (outcome IN ('checked','unsupported','failed','skipped')),
+            checks_version TEXT NOT NULL CHECK (checks_version = 'image-config-user-v1'),
+            resource_policy_version TEXT NOT NULL CHECK (resource_policy_version = 'image-config-policy-v1'),
+            report TEXT NOT NULL CHECK (length(CAST(report AS BLOB)) <= 16384),
+            checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(scan_id,check_name)
+          ); PRAGMA user_version = 11;`);
+        }
         if ((this.db.pragma('foreign_key_check') as unknown[]).length)
           throw new Error('Ledger migration foreign key mismatch');
       });
@@ -405,7 +422,8 @@ export class ScanLedger {
         ORDER BY s.created_at, s.id LIMIT 1`).get(now, now) as ClaimRow | undefined;
       if (!row) return undefined;
       this.db.prepare('UPDATE outbox SET lease_until = ?, attempts = attempts + 1 WHERE scan_id = ?')
-        .run(now + (row.repository === 'library/nginx' && archiveLeaseMs ? Math.max(leaseMs, archiveLeaseMs) : leaseMs), row.scanId);
+        .run(now + (row.repository === 'library/nginx' && archiveLeaseMs ? Math.max(leaseMs, archiveLeaseMs) : leaseMs) +
+                  (canonicalChecks(row.checks)?.includes('config') ? CONFIG_LOAD_MS + 1000 : 0), row.scanId);
       this.db.prepare("UPDATE scans SET state = 'running' WHERE id = ?").run(row.scanId);
       this.event(row.scanId, 'running');
       return { ...row, attempts: row.attempts + 1 };
@@ -434,6 +452,29 @@ export class ScanLedger {
     return !!this.db.prepare(`SELECT 1 FROM outbox o JOIN scans s ON s.id = o.scan_id
       WHERE o.scan_id = ? AND o.attempts = ? AND o.delivered_at IS NULL AND s.state = 'running'`)
       .get(scanId, attempts);
+  }
+
+  configAttemptContext(scanId: string, attempts: number): { subject: string; job: Job } | undefined {
+    const row = this.db.prepare(`SELECT s.subject,s.id AS scanId,s.registry,s.repository,s.digest,s.platform,s.checks,s.scope,o.attempts
+      FROM scans s JOIN outbox o ON o.scan_id=s.id WHERE s.id=? AND s.state='running'
+      AND o.attempts=? AND o.delivered_at IS NULL AND o.lease_until IS NOT NULL`)
+      .get(scanId, attempts) as (Job & { subject: string }) | undefined;
+    if (!row) return undefined;
+    const { subject, ...job } = row;
+    return { subject, job };
+  }
+
+  configResult(scanId: string, subject: string): ImageConfigResult | undefined {
+    const row = this.db.prepare(`SELECT r.report,s.digest,s.platform,s.checks FROM scan_check_results r JOIN scans s ON s.id=r.scan_id
+      WHERE s.id=? AND s.subject=? AND r.check_name='config'`).get(scanId, subject) as
+      { report: string; digest: string; platform: string; checks: string } | undefined;
+    return row ? validateConfigReport(JSON.parse(row.report), row, canonicalChecks(row.checks)?.includes('config') === true) : undefined;
+  }
+
+  private saveConfig(scanId: string, attempts: number, report: ImageConfigResult): void {
+    this.db.prepare(`INSERT INTO scan_check_results(scan_id,check_name,attempt,outcome,checks_version,resource_policy_version,report)
+      VALUES (?,'config',?,?,?,?,?)`).run(scanId, attempts, report.config.outcome, report.checksVersion,
+        report.resourcePolicyVersion, JSON.stringify(report));
   }
 
   finish(scanId: string, attempts: number, state: 'failed', errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE' = 'SCAN_FAILED'): boolean {
@@ -531,7 +572,10 @@ export class ScanLedger {
   }
 
   // Quarantined exact-candidate attempt output. No public admission or generic profile switch.
-  finishArchive(scanId: string, attempts: number, report: ArchiveScanReport): boolean {
+  finishArchive(scanId: string, attempts: number, report: ArchiveScanReport, config?: ImageConfigResult): boolean {
+    const context = config ? this.configAttemptContext(scanId, attempts) : undefined;
+    if (config && !context) return false;
+    const safeConfig = config ? validateConfigReport(config, context!.job, canonicalChecks(context!.job.checks)?.includes('config') === true) : undefined;
     const requested = ['secret', 'sbom', 'vuln'].filter(check => Object.hasOwn(report, check));
     validateArchiveReport(report, requested);
     const image = `${report.receipt.registry}/${report.receipt.repository}@${report.receipt.digest}`;
@@ -550,20 +594,25 @@ export class ScanLedger {
     const body = JSON.stringify(report);
     if (Buffer.byteLength(body) > 2_000_000) throw new TypeError('Invalid archive result size');
     return this.immediate(() => {
-      const row = this.db.prepare(`SELECT s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
+      const row = this.db.prepare(`SELECT s.subject,s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
         FROM scans s JOIN outbox o ON o.scan_id=s.id WHERE s.id=? AND s.state='running'
-        AND o.attempts=? AND o.delivered_at IS NULL`).get(scanId, attempts) as Job | undefined;
+        AND o.attempts=? AND o.delivered_at IS NULL ${safeConfig ? 'AND o.lease_until IS NOT NULL' : ''}`).get(scanId, attempts) as Job | undefined;
       if (!row) return false;
       const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => candidate.digest === report.receipt.digest);
       if (!target || Object.entries(target).some(([key, value]) => key !== 'configDigest' && row[key as keyof Job] !== value) ||
-          row.scope !== 'image' || row.checks !== JSON.stringify(requested)) throw new TypeError('Archive job mismatch');
+          row.scope !== 'image' || JSON.stringify(canonicalChecks(row.checks)?.filter(check => check !== 'config')) !== JSON.stringify(requested) ||
+          canonicalChecks(row.checks)?.includes('config') && !safeConfig ||
+          safeConfig && !isDeepStrictEqual(context, this.configAttemptContext(scanId, attempts))) throw new TypeError('Archive job mismatch');
       // Freshness is a clock check only; no hashing/network work inside the transaction.
       assertArchiveDbFreshness(report);
       const changed = this.db.prepare(`UPDATE outbox SET delivered_at=CURRENT_TIMESTAMP,lease_until=NULL
         WHERE scan_id=? AND attempts=? AND delivered_at IS NULL`).run(scanId, attempts);
       if (changed.changes !== 1) throw new Error('Archive attempt mismatch');
       this.db.prepare('INSERT INTO scan_archive_results(scan_id,attempt,report) VALUES (?,?,?)').run(scanId, attempts, body);
-      const terminal = checked.length === requested.length ? 'completed' : checked.length ? 'partial' : 'failed';
+      if (safeConfig) this.saveConfig(scanId, attempts, safeConfig);
+      const selectedConfig = canonicalChecks(row.checks)?.includes('config') === true;
+      const count = checked.length + (selectedConfig && safeConfig?.config.outcome === 'checked' ? 1 : 0);
+      const terminal = count === requested.length + (selectedConfig ? 1 : 0) ? 'completed' : count ? 'partial' : 'failed';
       this.db.prepare(`UPDATE scans SET state=?,terminal_at=CURRENT_TIMESTAMP WHERE id=? AND state='running'`).run(terminal, scanId);
       this.event(scanId, terminal);
       return true;
@@ -576,20 +625,26 @@ export class ScanLedger {
     return row ? JSON.parse(row.report) as ArchiveScanReport : undefined;
   }
 
-  finishCombined(scanId: string, attempts: number, outcomes: CombinedOutcome[]): boolean {
-    validateCombined(outcomes);
+  finishCombined(scanId: string, attempts: number, outcomes: CombinedOutcome[], config?: ImageConfigResult): boolean {
+    if (outcomes.length || !config) validateCombined(outcomes);
+    const context = config ? this.configAttemptContext(scanId, attempts) : undefined;
+    if (config && !context) return false;
+    const safeConfig = config ? validateConfigReport(config, context!.job, canonicalChecks(context!.job.checks)?.includes('config') === true) : undefined;
     return this.immediate(() => {
       const row = this.db.prepare(`SELECT s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
         FROM scans s JOIN outbox o ON o.scan_id = s.id
-        WHERE s.id = ? AND s.state = 'running' AND o.attempts = ? AND o.delivered_at IS NULL`)
+        WHERE s.id = ? AND s.state = 'running' AND o.attempts = ? AND o.delivered_at IS NULL
+          ${safeConfig ? 'AND o.lease_until IS NOT NULL' : ''}`)
         .get(scanId, attempts) as { registry: string; repository: string; digest: string;
           platform: string; checks: string; scope: string } | undefined;
       if (!row) return false;
       const requested = canonicalChecks(row.checks);
       if (!requested || row.scope !== 'image' || row.platform !== 'linux/amd64' ||
-          row.registry !== 'registry-1.docker.io' || row.repository !== 'library/alpine' ||
+          !admittedConfigTarget(row) ||
+          (row.repository !== 'library/alpine' && outcomes.some(item => item.outcome === 'checked')) ||
           !/^sha256:[a-f0-9]{64}$/.test(row.digest) ||
-          JSON.stringify(outcomes.map(item => item.check)) !== row.checks)
+          JSON.stringify(outcomes.map(item => item.check)) !== JSON.stringify(requested.filter(check => check !== 'config')) ||
+          requested.includes('config') && !safeConfig || safeConfig && !isDeepStrictEqual(context, this.configAttemptContext(scanId, attempts)))
         throw new Error('Scan combined contract mismatch');
       const image = `${row.registry}/${row.repository}@${row.digest}`;
       for (const item of outcomes) {
@@ -639,8 +694,10 @@ export class ScanLedger {
             f.provenanceRef, f.fixedVersion));
         }
       }
-      const checked = outcomes.filter(item => item.outcome === 'checked').length;
-      const terminal = checked === outcomes.length ? 'completed' : checked === 0 ? 'failed' : 'partial';
+      if (safeConfig) this.saveConfig(scanId, attempts, safeConfig);
+      const checked = outcomes.filter(item => item.outcome === 'checked').length +
+        (requested.includes('config') && safeConfig?.config.outcome === 'checked' ? 1 : 0);
+      const terminal = checked === requested.length ? 'completed' : checked === 0 ? 'failed' : 'partial';
       const changed = this.db.prepare(`UPDATE scans SET state = ?, terminal_at = CURRENT_TIMESTAMP
         WHERE id = ? AND state = 'running' AND checks = ? AND scope = 'image'`)
         .run(terminal, scanId, row.checks);
@@ -872,7 +929,7 @@ export class ScanLedger {
     return this.immediate(() => {
       this.db.prepare('DELETE FROM admission_windows WHERE minute < ?').run(Math.floor(Date.now() / 60000) - 1440);
       this.db.prepare(`DELETE FROM scan_audit WHERE created_at < datetime('now', ?)`).run(`-${days} days`);
-      for (const table of ['scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
+      for (const table of ['scan_check_results', 'scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
       this.db.prepare(`DELETE FROM scan_results WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)
         .run(`-${days} days`);
       this.db.prepare(`DELETE FROM outbox WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)

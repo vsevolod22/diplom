@@ -1,8 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { check, integer, sqliteTable, text, unique } from 'drizzle-orm/sqlite-core';
 
-// Scans/outbox baseline, unchanged through user_version=6. Runtime migrations in ledger.ts
-// own the additional results/findings/events/audit tables; never auto-push this schema.
+// Runtime migrations in ledger.ts exclusively own schema v11, including partial state
+// and keyed scan_check_results. This is the query model, not an auto-push migration.
 export const scans = sqliteTable('scans', {
   id: text('id').primaryKey(),
   subject: text('subject').notNull(),
@@ -19,7 +19,7 @@ export const scans = sqliteTable('scans', {
   terminalAt: text('terminal_at'),
 }, table => [
   unique().on(table.subject, table.idempotencyKey),
-  check('scans_state_check', sql`${table.state} IN ('queued','running','completed','failed','cancelled')`),
+  check('scans_state_check', sql`${table.state} IN ('queued','running','completed','failed','cancelled','partial')`),
 ]);
 
 export const outbox = sqliteTable('outbox', {
