@@ -34,4 +34,6 @@ services:
     tmpfs: !override
       - /tmp:rw,noexec,nosuid,size=16m
       - /tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=512m
-    mem_limit: 2g
+    # RAM and total RAM+swap are equal: no swap allowance for the worker.
+    mem_limit: 1g
+    memswap_limit: 1g

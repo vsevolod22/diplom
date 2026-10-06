@@ -57,6 +57,26 @@ test('valid signed envelope and pinned synthetic bytes: preflight only', async (
   });
 });
 
+test('streaming hash buffer covers multiple blocks and the final partial block without hiding tamper', async (t) => {
+  const { directory, options, descriptor, writeDescriptor } = await fixture(t);
+  const bytes = Buffer.alloc(3 * 64 * 1024 + 17);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = index % 251;
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  await writeFile(join(directory, 'bundle.bin'), bytes);
+  await writeFile(join(directory, 'db', 'trivy.db'), bytes);
+  await writeDescriptor({ ...descriptor, artifactSha256: digest, dbSha256: digest });
+  const pinned = { ...options, expectedArtifactSha256: digest };
+  assert.equal((await preflightVulnDbBundle(pinned)).identity.dbSha256, digest);
+  bytes[bytes.length - 1] ^= 1;
+  await writeFile(join(directory, 'db', 'trivy.db'), bytes);
+  await assert.rejects(preflightVulnDbBundle(pinned), fail);
+  bytes[bytes.length - 1] ^= 1;
+  await writeFile(join(directory, 'db', 'trivy.db'), bytes);
+  bytes[bytes.length - 1] ^= 1;
+  await writeFile(join(directory, 'bundle.bin'), bytes);
+  await assert.rejects(preflightVulnDbBundle(pinned), fail);
+});
+
 test('rejects tamper, invalid signature, wrong independent key and hash, without leaking input', async (t) => {
   const { directory, options, writeDescriptor } = await fixture(t);
   await writeFile(join(directory, 'bundle.bin'), Buffer.from('SECRET RAW ARTIFACT'));

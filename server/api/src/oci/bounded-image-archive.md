@@ -28,7 +28,9 @@ The separate unseeded combined DOM proof is implemented in
 2026-10-04 author run recorded 209 normalized OS CVEs, 72 APK and report reload;
 these dated counts are not timeless expectations or independent reviewer reruns.
 The standalone consumer jobs above are internally seeded real scans, not browser
-POST/launch proofs. Correctness review requested rework; approval is not complete.
+POST/launch proofs. The separate DOM wrapper now also creates a real standalone
+cookie HTTP job before the combined DOM job. Original correctness findings were
+rechecked at293d7f1; new resource/hash-buffer/failure changes require fresh reviews.
 
 ## Boundaries
 
@@ -79,12 +81,17 @@ POST/launch proofs. Correctness review requested rework; approval is not complet
   Missing/unknown/malformed OS evidence fails with SCAN_FAILED; only validated
   Alpine EOSL=true is unsupported/OS_EOL. Omitted EOSL still means false in the
   pinned binary schema when the required OS/inventory evidence is valid.
-- Effective local CVE overlay RAM is **2 GiB**, overriding the base stand's 1 GiB.
-  These proofs validate that existing local resource envelope, not the judge's
-  1-GiB target. No cap is silently changed to obtain a pass. A separately reviewed
-  1-GiB memory proof or explicit resource-contract revision remains a release gate;
-  neither nginx production opt-in nor whole-task qualification follows from this
-  local proof. CPU1/PIDs128/512-MiB scanner tmpfs caps stay unchanged.
+- Local CVE overlay now enforces **1 GiB RAM with no swap** (mem_limit1g,
+  memswap_limit1g; actual cgroup memory.max1073741824/swap.max0). Fresh disposable
+  standalone cookie HTTP plus combined DOM positives passed with actual peak at
+  the limit and hard-limit reclaim, not memory headroom. CPU1/PIDs128 and tmpfs
+  16MiB/512MiB are unchanged. `test_nginx_memory_path.py` separately proves real
+  injector OOM/worker survival, scanner SIGKILL partial/independent outcomes and
+  whole-container SIGKILL/restart through the unchanged627s lease, not parent OOM.
+  See `server/deploy/proof/nginx-dom.md` for dated metrics, exact boundaries and
+  the unclassified earlier positive failure. The previous live2GiB envelope is
+  retained pending fresh reviews; no local nginx opt-in/full qualification follows
+  from passing these disposable tests.
 - Signature/hash/schema/freshness and RO DB inode checks precede actual CVE scan
   and are repeated afterward; freshness is rechecked after hashing/final scratch audit
     and with a clock-only guard in the fenced ledger transaction. Expiry demotes CVE

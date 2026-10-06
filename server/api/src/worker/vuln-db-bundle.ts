@@ -76,8 +76,14 @@ async function readBounded(path: string, limit: number, hashOnly = false): Promi
     const chunks: Buffer[] = [];
     const hash = hashOnly ? createHash('sha256') : null;
     let total = 0;
+    // Hash updates consume bytes synchronously. Reuse one buffer for large DBs
+    // rather than generating gigabytes of short-lived external allocations.
+    // Non-hash reads retain their chunks and must keep distinct buffers.
+    const hashBuffer = hash ? Buffer.allocUnsafe(64 * 1024) : undefined;
     while (true) {
-      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, limit + 1 - total));
+      const chunk = hashBuffer
+        ? hashBuffer.subarray(0, Math.min(hashBuffer.length, limit + 1 - total))
+        : Buffer.allocUnsafe(Math.min(64 * 1024, limit + 1 - total));
       const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
       if (!bytesRead) break;
       total += bytesRead;

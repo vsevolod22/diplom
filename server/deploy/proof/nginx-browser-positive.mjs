@@ -19,6 +19,33 @@ try {
   await page.getByLabel('Пароль', { exact: true }).fill(owner.password);
   await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await page.waitForURL('**/account');
+  phase = 'standalone-http-create';
+  const standaloneIntent = { imageReference: image, scope: 'image', checks: ['vuln'], idempotencyKey: randomUUID() };
+  const standalonePost = await context.request.post(`${origin}/api/v1/browser/scans`, { headers: { Origin: origin }, data: standaloneIntent });
+  assert.equal(standalonePost.status(), 202);
+  const standaloneId = (await standalonePost.json()).scanId;
+  let standaloneStatus;
+  const deadline = Date.now() + 600_000;
+  do {
+    const response = await context.request.get(`${origin}/api/v1/browser/scans/${standaloneId}`);
+    assert.equal(response.status(), 200);
+    standaloneStatus = await response.json();
+    if (['completed', 'partial', 'failed', 'cancelled'].includes(standaloneStatus.state)) break;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  assert.equal(standaloneStatus.state, 'completed');
+  assert.equal(standaloneStatus.digest, digest);
+  assert.equal(standaloneStatus.perCheck.vuln.outcome, 'checked');
+  const standaloneResponse = await context.request.get(`${origin}/api/v1/browser/scans/${standaloneId}/vuln`);
+  assert.equal(standaloneResponse.status(), 200);
+  const standaloneVuln = await standaloneResponse.json();
+  assert.ok(standaloneVuln.findingCount > 0);
+  assert.equal(standaloneVuln.os.outcome, 'checked');
+  assert.equal(standaloneVuln.node.reason, 'NODE_INVENTORY_ABSENT');
+  assert.equal(standaloneVuln.scannerVersion, '0.69.3');
+  const standaloneReplay = await context.request.post(`${origin}/api/v1/browser/scans`, { headers: { Origin: origin }, data: standaloneIntent });
+  assert.equal(standaloneReplay.status(), 202);
+  assert.equal((await standaloneReplay.json()).scanId, standaloneId);
   phase = 'dom-search';
     await page.goto(`${origin}/scans/new`);
   await page.getByLabel('Поиск по доступным образам').fill('nginx');
@@ -88,15 +115,18 @@ try {
   assert.equal(login.status(), 200);
   phase = 'http-ownership';
     for (const suffix of ['', '/results', '/sbom', '/vuln']) assert.equal((await foreign.request.get(`${origin}/api/v1/browser/scans/${scanId}${suffix}`)).status(), 404);
+  for (const suffix of ['', '/vuln']) assert.equal((await foreign.request.get(`${origin}/api/v1/browser/scans/${standaloneId}${suffix}`)).status(), 404);
   const foreignReplay = await foreign.request.post(`${origin}/api/v1/browser/scans`, { headers: { Origin: origin }, data: { ...intent, imageReference: image.replace(digest, `sha256:${'b'.repeat(64)}`) } });
   assert.equal(foreignReplay.status(), 400);
   const anonymous = await browser.newContext();
   try { assert.equal((await anonymous.request.get(`${origin}/api/v1/browser/scans/${scanId}`)).status(), 401); } finally { await anonymous.close(); }
   const scans = await context.request.get(`${origin}/api/v1/browser/scans`);
-  assert.equal((await scans.json()).scans.length, 1);
+  assert.equal((await scans.json()).scans.length, 2);
+  assert.equal(standaloneVuln.db.manifestDigest, vuln.db.manifestDigest);
   console.log(JSON.stringify({ actualChromium: true, domLoginSearchSelectionCreateReportReload: true, isolated: true,
     digest, configDigest: status.imageProfile.configDigest, archiveQualified: false, findings: vuln.findingCount, components: sbom.componentCount,
     os: sbom.os, node: vuln.node, dbManifest: vuln.db.manifestDigest, scannerVersion: vuln.scannerVersion,
+    standaloneHttpCreated: true, standaloneFindings: standaloneVuln.findingCount,
     replay: true, ownership: true, rejectedOtherPins: true, noSeededScan: true }));
 } catch (error) {
   // Deliberately no error message/stack/Playwright trace: those may contain form data.
