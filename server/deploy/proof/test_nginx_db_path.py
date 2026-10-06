@@ -9,7 +9,9 @@ import json
 from pathlib import Path
 import queue
 import secrets
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,22 +26,29 @@ class NginxDbPath(unittest.TestCase):
     def setUpClass(cls):
         cls.env_file = ROOT / '.local-auth/stand.env'
         cls.env_before = cls.env_file.read_bytes()
-        cls.temporary = tempfile.TemporaryDirectory(prefix='nginx-db-proof-', dir=ROOT / '.local-auth')
-        cls.directory = Path(cls.temporary.name)
+        # Explicit lifetime: failed teardown must retain still-mounted fixtures,
+        # including when the test class is torn down or garbage-collected.
+        cls.directory = Path(tempfile.mkdtemp(prefix='nginx-db-proof-', dir=ROOT / '.local-auth'))
+        cls.preserve_fixtures = False
         cls.build_project = 'dip-db-build-' + secrets.token_hex(6)
         cls.bases = ['--env-file', str(cls.env_file), '-f', str(ROOT / 'server/deploy/compose.stand.yaml'),
                      '-f', str(ROOT / 'server/deploy/compose.stand.vuln.local.yaml')]
-        built = cls.invoke(['docker', 'compose', '-p', cls.build_project] + cls.bases + ['build', 'api', 'worker', 'web', 'egress'], 600)
-        if built.returncode != 0:
-            cls.temporary.cleanup()
-            raise AssertionError('Disposable images build failed; diagnostics suppressed')
-        initialized = cls.fixture('init', str(cls.directory))
+        try:
+            built = cls.invoke(['docker', 'compose', '-p', cls.build_project] + cls.bases + ['build', 'api', 'worker', 'web', 'egress'], 600)
+            if built.returncode != 0:
+                raise AssertionError('Disposable images build failed; diagnostics suppressed')
+            initialized = cls.fixture('init', str(cls.directory))
+        except BaseException:
+            # Setup has not started scenario containers or mounted these fixtures.
+            shutil.rmtree(cls.directory, ignore_errors=True)
+            raise
         cls.source = initialized
         print(json.dumps({'fixtureSource': initialized}), flush=True)
 
     @classmethod
     def tearDownClass(cls):
-        cls.temporary.cleanup()
+        if not cls.preserve_fixtures:
+            shutil.rmtree(cls.directory)
         if cls.env_file.read_bytes() != cls.env_before:
             raise AssertionError('Live stand env changed during proof')
 
@@ -242,17 +251,57 @@ for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){try{
                               'ledgerAfter': after, 'cleanup': True, 'mountUnchanged': True,
                               'ledgerAndBoundedLogsRedacted': True, 'resources': cgroup}), flush=True)
         finally:
+            self.cleanup_scenario(compose, stopped_pid, client, case)
+
+    def cleanup_scenario(self, compose, stopped_pid, client, case):
+        primary = sys.exc_info()[1]
+        failures = []
+
+        def attempt(stage, action):
+            try:
+                action()
+                return True
+            except BaseException:
+                # Never expose subprocess argv/output, credentials or raw errors.
+                failures.append(stage)
+                return False
+
+        try:
             if stopped_pid:
-                self.resume(compose, stopped_pid)
-            if client and client.poll() is None:
-                client.kill(); client.wait(timeout=10)
-            if client and client.stdout: client.stdout.close()
-            down = self.invoke(compose + ['down', '--volumes', '--remove-orphans'], 120)
-            self.assertEqual(down.returncode, 0, 'Only disposable project cleanup failed')
-            self.assertEqual(self.env_file.read_bytes(), self.env_before)
-            # Discard each own large clone after evidence; never delete live releases.
-            import shutil
-            shutil.rmtree(case)
+                attempt('resume', lambda: self.resume(compose, stopped_pid))
+        finally:
+            try:
+                if client:
+                    running = True
+                    try:
+                        running = client.poll() is None
+                    except BaseException:
+                        failures.append('client-poll')
+                    if running:
+                        attempt('client-kill', client.kill)
+                        attempt('client-wait', lambda: client.wait(timeout=10))
+                    if client.stdout:
+                        attempt('client-stream', client.stdout.close)
+            finally:
+                def down_project():
+                    down = self.invoke(compose + ['down', '--volumes', '--remove-orphans'], 120)
+                    self.assertEqual(down.returncode, 0, 'Only disposable project cleanup failed')
+
+                down_ok = attempt('compose-down', down_project)
+                if not down_ok:
+                    type(self).preserve_fixtures = True
+                attempt('env-check', lambda: self.assertEqual(self.env_file.read_bytes(), self.env_before,
+                                                            'Live stand env changed during proof'))
+                # Only a confirmed exact-project teardown permits fixture deletion.
+                if down_ok:
+                    attempt('fixture-remove', lambda: shutil.rmtree(case))
+
+        if failures:
+            message = 'Disposable cleanup failed: ' + ', '.join(failures) + '; diagnostics suppressed'
+            if primary is not None:
+                primary.add_note(message)
+            else:
+                raise AssertionError(message) from None
 
     def exec_json(self, compose, code, timeout=60):
         result = self.invoke(compose + ['exec', '-T', 'worker', 'node', '-e', code], timeout)
