@@ -2,7 +2,9 @@
 
 Implemented for `DIP-TASK-7`, run `ed9b6122-f013-445f-a936-f08aa1d57539`, architecture decision `28880b86-5ecf-47d5-bfbe-2d517449005b` and target delta `bb5be648-a2fa-49ee-b0f0-53d0b38a7a44`.
 
-**Partial delivery, not an integrated scan feature.** These files do not register an API endpoint, add a worker option, change the report schema, persist outcomes, or render UI. The target delta is intentionally unapplied. No production authorization adapter, live registry egress, real HTTP/log redaction, restart/ledger integration, browser proof, or full TASK7 acceptance is claimed.
+**Partial delivery, not an integrated scan feature.** These files do not register an API endpoint, add a worker option, change the report schema, persist outcomes, or render UI. No production authorization adapter, live registry egress, real HTTP/log redaction, restart/ledger integration, browser proof, or full TASK7 acceptance is claimed.
+
+Spec-history snapshot checked on **2026-10-06**: feature-source delta `bb5be648-a2fa-49ee-b0f0-53d0b38a7a44` was human-approved at **18:42:31 UTC** and applied as `DIP-DOC-5` version 2 at **18:45:21 UTC**, after the original author handoff. Earlier unapplied statements describe that author-time snapshot, not the current spec state. This later application does not prove production integration, full task acceptance or task-level strict closure. This correction does not approve, apply or undo any delta.
 
 ## Public entry
 
@@ -51,7 +53,7 @@ Private instance-local WeakMap receipts have no enumerable proof fields and are 
 - Absent `enabled` or boolean `false`: `config = skipped / CHECK_DISABLED`, without reading target/bytes/receipts or calling the authority/verifier/rule.
 - Present `undefined`, null, number, string, object or accessor flag: `failed / INVALID_CHECK_FLAG`. Inherited flags do not activate analysis. DTO getters are not executed to obtain source-presence, target or flag data.
 - Present `policy`, `resourcePolicy`, `resourcePolicyVersion` or `checksVersion` on an enabled request: `failed / INVALID_RESOURCE_POLICY`, before target resolution. Callers cannot override/disable fixed policy, even using the current version string. On disabled/invalid flags these unrelated fields are not examined.
-- Unauthorized/unrecognized handle, upstream exception, invalid identity/descriptor or byte/platform mismatch: `failed / OCI_IDENTITY_REJECTED`.
+- Unauthorized/unrecognized handle, upstream exception, invalid identity/descriptor or byte/platform mismatch: `failed / OCI_IDENTITY_REJECTED`. Exception classification is guarded, including `instanceof` and descriptor inspection: throwing/revoked proxies fall back to this fixed reason. Exception getters are not invoked; raw exceptions are never stringified, returned or logged. Only the existing allowlisted internal validation/limit reasons are preserved.
 - Malformed UTF-8/JSON, decoded duplicate keys, non-object config or wrong known metadata types: `failed / INVALID_CONFIG`. Invalid manifest identity structure instead returns `OCI_IDENTITY_REJECTED`. No parser text escapes.
 - Limit exceeded: `failed / CONFIG_LIMIT_EXCEEDED`, no partial findings.
 
@@ -111,7 +113,7 @@ The module imports no network, filesystem, subprocess, daemon, LLM, ledger or ap
 3. Map this closed schema explicitly into the current exact report schema. Keep vulnerability, secrets, SBOM, container and host outcomes independent; no module failure should erase or downgrade sibling evidence.
 4. Merge and persist independent versioned coverage in the existing attempt-fenced atomic result/terminal/event transaction. Retain scan ownership, idempotency/recovery and restart behavior. Verification/network work stays **outside** SQLite transactions. This delivery edits no schema/DB/config.
 5. Verify redaction in actual HTTP responses, logs, events and persisted reports, plus real UI selection/status/version coverage. Pure module canaries are not end-to-end redaction proof.
-6. Obtain three independent harness reviews. TASK7 remains partial/in_progress pending real integration acceptance. Do not mark testing/done as if full delivery occurred. Target feature delta stays unapplied; it also does not satisfy the task-level strict close gate. Do not use a false no-spec-impact declaration to close behavior-changing work.
+6. Obtain three independent approvals for the reviewed revision, including a correctness recheck after exception-containment rework. The initial standalone spec/security reviews approved; correctness requested changes. TASK7 remains partial/in_progress pending real integration acceptance. Do not mark testing/done as if full delivery occurred. The feature-source applied delta does not satisfy the task-level strict close gate. Do not use a false no-spec-impact declaration to close behavior-changing work.
 
 ## Validation
 
@@ -122,6 +124,6 @@ pnpm exec tsx --test 'src/image-config/*.test.ts'
 pnpm typecheck
 ```
 
-Tests exercise the **public `analyze` entry**, positive/default/numeric/named-user outcomes, fixed versions, off/invalid flags without capability reads, forged/serialized/cloned/foreign target handles, independent identity/hash/size/media type/platform faults, malformed/duplicate decoded JSON keys and known field types, all reachable limit−1/limit/limit+1 boundaries (including unknown fields and UTF-8/escaped keys), deterministic IDs, independent source/history coverage, closed output fields, canaries and no logging. Internal tests additionally cover private receipt forgery/cross-instance rejection, post-verification byte/identity mutation, parser edge cases and output encoder bounds. Static runtime import/call checks complement passive metadata tests; they do not validate a production port or live egress.
+Tests exercise the **public `analyze` entry**, positive/default/numeric/named-user outcomes, fixed versions, off/invalid flags without capability reads, forged/serialized/cloned/foreign target handles, independent identity/hash/size/media type/platform faults, malformed/duplicate decoded JSON keys and known field types, all reachable limit−1/limit/limit+1 boundaries (including unknown fields and UTF-8/escaped keys), deterministic IDs, independent source/history coverage, closed output fields, canaries and no logging. Exception regressions cover synchronous throws and rejected promises, throwing prototype/descriptor traps, revoked proxies, own/inherited reason getters, coercion/property traps and genuine internal failure reasons. Internal tests additionally cover private receipt forgery/cross-instance rejection, post-verification byte/identity mutation, parser edge cases and output encoder bounds. Static runtime import/call checks complement passive metadata tests; they do not validate a production port or live egress.
 
 No shared worker/OCI/ledger/controller/UI/broker/compose/package files are part of this delivery; no new dependencies or Docker are required.

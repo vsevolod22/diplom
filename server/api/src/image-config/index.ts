@@ -1,5 +1,5 @@
 import type { AnalyzeRequest, ImageConfigModule, TrustedCallerPort } from './contract.js';
-import { ConfigFailure } from './policy.js';
+import { ConfigFailure, type FailureReason } from './policy.js';
 import { buildResult } from './result.js';
 import { evaluateUser } from './user-rule.js';
 import { createVerifier } from './verified-input.js';
@@ -41,10 +41,19 @@ export function createImageConfigModule(trustedCallerPort: TrustedCallerPort): I
         const rule = evaluateUser(verified.user);
         return buildResult(rule.coverage, sources, verified, rule.classification);
       } catch (error) {
-        const reason = error instanceof ConfigFailure ? Object.getOwnPropertyDescriptor(error, 'reason')?.value : undefined;
-                return buildResult({ outcome: 'failed', reason:
-                  reason === 'INVALID_CONFIG' || reason === 'CONFIG_LIMIT_EXCEEDED' ? reason : 'OCI_IDENTITY_REJECTED' }, sources);
+        return buildResult({ outcome: 'failed', reason: classifyFailure(error) }, sources);
       }
     },
   });
+}
+
+function classifyFailure(error: unknown): FailureReason {
+  try {
+    // Both instanceof and descriptor inspection can execute traps on a thrown Proxy.
+    const reason: unknown = error instanceof ConfigFailure ? Object.getOwnPropertyDescriptor(error, 'reason')?.value : undefined;
+    if (reason === 'INVALID_CONFIG' || reason === 'CONFIG_LIMIT_EXCEEDED') return reason;
+  } catch {
+    // Classification failure must not expose another exception or inspect its payload.
+  }
+  return 'OCI_IDENTITY_REJECTED';
 }
