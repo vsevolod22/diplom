@@ -498,6 +498,24 @@ describe('cookie-session live scans', () => {
     expect(await screen.findByText(/CVE-2026-2/)).toBeTruthy();
     expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/vuln?limit=50&cursor=1`)).toBe(true);
   });
+  it.each(['partial', 'failed'])('renders DB_UNAVAILABLE and unknown CVE count for %s and remount', async state => {
+    const failed = { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE', checksVersion: 'trivy-0.69.3-archive-v1', scannerVersion: '0.69.3', checkedAt: '2026-10-06T16:00:00.000Z' };
+    const secret = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/vuln?')) return json({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE', findings: [], nextCursor: null });
+      if (path.includes('/results?')) return json({ findings: [], nextCursor: null, coverage: secret });
+      return json({ scanId: id, state, digest, platform: 'linux/amd64', checks: state === 'partial' ? ['secret', 'vuln'] : ['vuln'],
+        perCheck: state === 'partial' ? { secret, vuln: failed } : { vuln: failed }, result: null });
+    }));
+    for (let visit = 0; visit < 2; visit++) {
+      mount(`/scans/${id}`);
+      expect(await screen.findByText(/CVE не проверены: DB_UNAVAILABLE/)).toBeTruthy();
+      expect(screen.getByText(/Число уязвимостей неизвестно/)).toBeTruthy();
+      expect(screen.queryByText(/Находок в проверенной области:/)).toBeNull();
+      cleanup();
+    }
+  });
   it('does not attribute CVE counts to a different pinned image', async () => {
     const checkedVuln = { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', checkedAt: 'today' };
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {

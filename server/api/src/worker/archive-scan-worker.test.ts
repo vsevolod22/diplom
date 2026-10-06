@@ -132,6 +132,41 @@ test('real external cancellation remains timeout and own scratch is removed', as
   await assert.rejects(auditArchiveScratch(`${directory}/attempt`), { code: 'ENOENT' });
 }));
 
+test('postscan DB rejection/identity change is DB_UNAVAILABLE, independent Secrets survive', async () => {
+  for (const changed of [false, true]) for (const checks of [['vuln'], ['secret', 'vuln']] as Array<Array<'secret' | 'vuln'>>) {
+    await fixture(async (directory, ledger) => {
+      const deps = lifecycle(directory, async check => check === 'secret' ? raw() : { ...raw(),
+        Results: [{ Class: 'os-pkgs', Type: 'alpine', Target: 'alpine', Packages: [{ Name: 'busybox', Version: '1' }] }] });
+      const identity = db(); let calls = 0;
+      deps.verifiedDb = async () => {
+        if (++calls === 1) return identity;
+        if (!changed) throw new Error('PRIVATE_DB_CANARY');
+        return { ...identity, dbSha256: 'e'.repeat(64) };
+      };
+      const report = await scanNginxArchive(checks, { target, vuln: vulnOptions }, deps);
+      assert.deepEqual(report.vuln, { outcome: 'failed', reason: 'DB_UNAVAILABLE' });
+      if (checks.includes('secret')) assert.equal(report.secret?.outcome, 'checked');
+      assert.equal(JSON.stringify(report).includes('PRIVATE_DB_CANARY'), false);
+      assert.equal(persist(ledger, checks, report), checks.includes('secret') ? 'partial' : 'failed');
+    });
+  }
+});
+
+test('scanner/identity/malformed output is not relabelled as DB_UNAVAILABLE', async () => {
+  for (const output of ['throw', {}, { ...raw(), Metadata: { ...raw().Metadata, ImageID: `sha256:${'e'.repeat(64)}` } }]) {
+    await fixture(async (directory, ledger) => {
+      const report = await scanNginxArchive(['secret', 'vuln'], { target, vuln: vulnOptions }, lifecycle(directory, async check => {
+        if (check === 'secret') return raw();
+        if (output === 'throw') throw new Error('SCANNER_SECRET_CANARY');
+        return output;
+      }));
+      assert.deepEqual(report.vuln, { outcome: 'failed', reason: 'SCAN_FAILED' });
+      assert.equal(report.secret?.outcome, 'checked');
+      assert.equal(persist(ledger, ['secret', 'vuln'], report), 'partial');
+    });
+  }
+});
+
 test('missing/unknown/malformed OS fails, validated EOL is unsupported, EOSL false/omitted remains checked', async () => {
   for (const OS of [undefined, null, [], {}, { Family: 'unknown', Name: '3.23.3' }, { Family: 'alpine' },
     { Family: 'alpine', Name: 3233 }, { Family: 'alpine', Name: '3.23.3', EOSL: 'true' },

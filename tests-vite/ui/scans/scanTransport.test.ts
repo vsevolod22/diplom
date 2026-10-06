@@ -83,6 +83,15 @@ describe('scan transport boundary', () => {
       expect(() => parseCurrentSbom(invalid)).toThrow();
     }
   });
+  it('retains only consistent allowlisted CVE failure reasons for unknown counts', () => {
+    const failed = { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE', findings: [], nextCursor: null };
+    expect(parseCurrentVuln(failed)).toEqual(failed);
+    expect(parseCurrentVuln({ ...failed, reason: undefined })).toMatchObject({ errorCode: 'SCAN_FAILED' });
+    for (const invalid of [{ ...failed, reason: 'PRIVATE_DB_CANARY' }, { ...failed, reason: 'OS_EOL' },
+      { ...failed, errorCode: 'SCAN_TIMEOUT' }, { ...failed, raw: 'SECRET_CANARY' }]) {
+      expect(() => parseCurrentVuln(invalid)).toThrow();
+    }
+  });
   it('keeps simultaneous outcomes independent and strips vulnerability evidence', async () => {
     const id = '00000000-0000-4000-8000-000000000001';
     const checked = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };

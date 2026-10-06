@@ -28,7 +28,8 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   runner: (job: Job, options: { timeoutMs: number; dbDir: string; signal?: AbortSignal }) => Promise<ScanResult> = scanPinned,
   now = Date.now(),
   sbomRunner: (job: Job, options: { timeoutMs: number; cacheDir: string; signal?: AbortSignal }) => Promise<SbomScanResult> = scanSbomPinned,
-  vulnRunner: (job: Job, options: VulnScanOptions) => Promise<VulnScanResult> = scanVulnPinned): Promise<boolean> {
+  vulnRunner: (job: Job, options: VulnScanOptions) => Promise<VulnScanResult> = scanVulnPinned,
+  archiveRunner: typeof scanNginxArchive = scanNginxArchive): Promise<boolean> {
   // The claim API cannot inspect checks until after claiming; reserve the maximum
   // sequential budget for every claim so even a three-check job stays fenced.
   if (options.signal?.aborted) return false;
@@ -69,10 +70,10 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
       if (!canonical || !target) {
         ledger.finish(job.scanId, job.attempts, 'failed'); return true;
       }
-      // Only internally seeded exact-candidate qualification jobs can reach this
-      // branch; public API admission remains closed until independent qualification.
+      // Exact-candidate qualification jobs use either internal fixtures or the
+      // separately composed proof HTTP ingress. Production admission stays closed.
       try {
-        const report = await scanNginxArchive(canonical, { signal: controller.signal, target,
+        const report = await archiveRunner(canonical, { signal: controller.signal, target,
           vuln: options.vuln ? { ...options.vuln, timeoutMs: 120_000, signal: controller.signal } : undefined });
         poll();
         if (!controller.signal.aborted) {

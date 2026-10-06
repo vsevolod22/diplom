@@ -36,7 +36,7 @@ export type ScanIntent = { imageReference: string; scope: 'image'; checks: ScanC
 type ArchiveEvidence = { os?: z.infer<typeof subCoverage>; node?: z.infer<typeof subCoverage>; db?: z.infer<typeof dbIdentity> };
 export type ScanVuln =
   | ArchiveEvidence & { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; findingCount: number; scannerVersion: string; checkedAt: string; findings: { findingId: string; cveId: string; ecosystem: 'apk' | 'npm'; packageName: string; installedVersion: string; severity: 'UNKNOWN' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; fixedVersion: string | null }[]; nextCursor: string | null }
-  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; findings: []; nextCursor: null }
+  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; reason?: z.infer<typeof archiveFailureReason>; findings: []; nextCursor: null }
   | ArchiveEvidence & { outcome: 'unsupported'; coverage: 'image'; reason: z.infer<typeof archiveReason>; findings: []; nextCursor: null };
 export type ScanSbom =
   | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; os: { name: 'alpine'; version: string }; componentCount: number; scannerVersion: string; checkedAt: string; components: { ecosystem: 'apk' | 'npm'; name: string; version: string }[]; nextCursor: string | null }
@@ -129,7 +129,9 @@ export function parseCurrentResults(value: unknown): ScanResults {
 const wireVulnFinding = z.object({ findingId: z.string(), cveId: z.string(), ecosystem: z.enum(['apk', 'npm']), packageName: z.string(), installedVersion: z.string(), severity: z.enum(['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']), fixedVersion: z.string().nullable() });
 const wireVuln = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, ...archiveEvidence, platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
-  z.object({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode, findings: z.tuple([]), nextCursor: z.null() }),
+  z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode,
+      reason: archiveFailureReason.optional(), findings: z.tuple([]), nextCursor: z.null() })
+      .refine(page => page.reason === undefined || page.errorCode === (page.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED'), 'Несогласованная причина отказа CVE'),
   z.object({ outcome: z.literal('unsupported'), coverage: z.literal('image'), reason: archiveReason, ...archiveEvidence, findings: z.tuple([]), nextCursor: z.null() }),
 ]);
 export function parseCurrentVuln(value: unknown): ScanVuln {

@@ -108,8 +108,14 @@ export async function scanNginxArchive(checks: Array<'secret' | 'sbom' | 'vuln'>
           if (check === 'secret') report.secret = { outcome: 'checked', findings: parseSecretFindings(raw) };
           else {
             const metadata = raw.Metadata as { OS?: { Family?: string; Name?: string; EOSL?: boolean }; };
-            const after = await lifecycle.verifiedDb(options.vuln!);
-            if (JSON.stringify(after) !== JSON.stringify(db)) throw new Error('DB changed');
+            let after: Readonly<VerifiedDbIdentity>;
+            try {
+              after = await lifecycle.verifiedDb(options.vuln!);
+              if (JSON.stringify(after) !== JSON.stringify(db)) throw new Error('DB changed');
+            } catch {
+              report.vuln = signal.aborted ? abortedFailure() : failure('DB_UNAVAILABLE');
+              continue;
+            }
             const os = metadata.OS;
             if (!os || Array.isArray(os) || os.Family !== 'alpine' || typeof os.Name !== 'string' ||
                 !/^3\.[0-9]+\.[0-9]+$/.test(os.Name) || os.EOSL !== undefined && typeof os.EOSL !== 'boolean') {
