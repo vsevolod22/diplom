@@ -33,10 +33,18 @@ function cap(v: unknown): string[] | typeof unknown {
     ),
   ].sort();
 }
-function namespace(v: string | undefined): string {
+const privateNamespaceModes = {
+  network: ['bridge', 'none'],
+  pid: [''],
+  ipc: ['private', 'shareable'],
+  user: [],
+} as const;
+function namespace(v: string | undefined, kind: keyof typeof privateNamespaceModes): string {
   if (v === undefined) return unknown;
   if (v === 'host') return 'host';
-  if (['', 'private', 'default', 'none', 'bridge'].includes(v)) return 'private';
+  // Empty user mode depends on daemon UID mappings; inspect does not establish them.
+  if (kind === 'user') return unknown;
+  if ((privateNamespaceModes[kind] as readonly string[]).includes(v)) return 'private';
   if (v.startsWith('container:') && v.length > 10) return 'shared-container';
   return unknown;
 }
@@ -144,10 +152,10 @@ export function project(raw: unknown, pin: Pin, observedAt: number, bound: Limit
       capDrop: cap(host.CapDrop),
       security: security(host.SecurityOpt),
       namespaces: {
-        network: namespace(optionalString(host, 'NetworkMode')),
-        pid: namespace(optionalString(host, 'PidMode')),
-        ipc: namespace(optionalString(host, 'IpcMode')),
-        user: namespace(optionalString(host, 'UsernsMode')),
+        network: namespace(optionalString(host, 'NetworkMode'), 'network'),
+        pid: namespace(optionalString(host, 'PidMode'), 'pid'),
+        ipc: namespace(optionalString(host, 'IpcMode'), 'ipc'),
+        user: namespace(optionalString(host, 'UsernsMode'), 'user'),
       },
       mounts: mounts(top.Mounts),
       ports: ports(host.PortBindings),

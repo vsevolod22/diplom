@@ -7,7 +7,7 @@ import { AuditBuffer } from '../src/audit.js';
 import { UnixEngine } from '../src/engine.js';
 import { LIMITS, limits } from '../src/contracts.js';
 import { harness, rawRequest } from './harness.js';
-import { A, B, route, request, fixtureState } from './support.js';
+import { A, B, route, request, fixtureState, inspect } from './support.js';
 
 test('same real HTTP/Unix authorization path: positive exactly one canonical GET', async () => {
   const h = await harness();
@@ -106,6 +106,51 @@ test('raw parser and exact route matrix: every denied request independently disp
     const audit = h.audit.drain();
     assert.ok(audit.every((r) => r.containerId === 'invalid' && r.context === 'invalid'));
     assert.ok(!JSON.stringify(audit).includes('169.254.169.254'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+for (const [operation, method, path] of [
+  ['image inspect', 'GET', `/v1.47/images/${A}/json`],
+  ['stats', 'GET', `/v1.47/containers/${A}/stats`],
+  ['start', 'POST', `/v1.47/containers/${A}/start`],
+  ['stop', 'POST', `/v1.47/containers/${A}/stop`],
+  ['remove', 'DELETE', `/v1.47/containers/${A}`],
+  ['copy', 'POST', `/v1.47/containers/${A}/copy`],
+]) {
+  test(`explicit ${operation} denial: zero adapter dispatches and fake Engine requests`, async () => {
+    const h = await harness();
+    try {
+      for (const target of [path, route() + '/' + operation.replace(' ', '-')]) {
+        const result = await h.raw(rawRequest(target, method));
+        assert.ok(!result.includes('"checked"'));
+        assert.equal(h.engine.dispatches, 0, target);
+        assert.equal(h.calls.length, 0, target);
+        assert.equal(h.broker.active, 0);
+        assert.equal(h.audit.reservations, 0);
+      }
+    } finally {
+      await h.cleanup();
+    }
+  });
+}
+
+test('empty UsernsMode via authorized HTTP/Unix path is unknown, not private', async () => {
+  const h = await harness({
+    handler: (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...inspect(), HostConfig: { ...inspect().HostConfig, UsernsMode: '' } }));
+    },
+  });
+  try {
+    const reply = await h.ask();
+    assert.equal(reply.status, 'checked');
+    assert.equal(reply.snapshot.facts.namespaces.user, 'unknown');
+    assert.equal(h.engine.dispatches, 1);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].method, 'GET');
+    assert.equal(h.calls[0].path, `/v1.47/containers/${A}/json`);
   } finally {
     await h.cleanup();
   }

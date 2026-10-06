@@ -17,9 +17,14 @@ python3 server/deploy/proof/test_inspect_broker.py
 (and Node types from its dependency tree). No downloads, new dependencies, manifest or
 lockfile changes, NODE_PATH, API/worker/auth imports, or Nest application startup. The
 security boundary uses Node built-ins; the existing Nest toolchain remains untouched.
-Tests create unique owned `server/broker/.f-*` directories, actual private Unix sockets,
-raw HTTP clients and fake Engine servers. They remove only their own fixture directory.
-These are real HTTP/Unix tests **against a fake Engine**, not real Docker/topology proof.
+The suite has 62 tests (the original 50 plus 12 rework regressions). Tests create unique
+owned `server/broker/.f-*` directories, actual private Unix sockets, raw HTTP clients and
+fake Engine servers. They remove only their own fixture directory. These are real
+HTTP/Unix tests **against a fake Engine**, not real Docker/topology proof. Six individually
+named raw denial tests cover image inspect, stats, start, stop, remove and copy, each at
+both the Engine-shaped route and a private inspect-route suffix, with zero adapter
+dispatches and zero fake Engine requests. These supplement the existing exact-route,
+operation, framing and authorization denial matrix; they do not certify every Docker API.
 
 ## Narrow private protocol
 
@@ -69,8 +74,13 @@ audit is tested. Revocation after dispatch blocks publication but cannot undo th
 `Broker` defaults disabled. A disposable library harness must explicitly enable it and
 present an unforgeable in-process permit returned by `verifyPrivateBoundary`: actual
 canonical private directory (0700, current UID) and owned Unix socket (0600), same root,
-no symlinks. The measurements are repeated immediately before dispatch; a plain object,
-a boolean or socket `:ro` cannot substitute. `listenPrivate` supports Unix ingress only,
+no symlinks. The measurements are repeated after the dispatch barrier and again after
+synchronous audit reservation, immediately before dispatch alongside the deadline and
+policy checks. The root-invalidation regression changes the owned root from 0700 to
+0755 during audit reservation: `not_authorized`, no snapshot, zero adapter dispatches
+and fake Engine requests, released audit reservation/active slot, then successful
+recovery after restoring only the owned fixture. A plain object, a boolean or socket
+`:ro` cannot substitute. `listenPrivate` supports Unix ingress only,
 0600 in an owned 0700 parent, fresh path, never unlinking another service's socket.
 
 **This proves a local filesystem boundary only.** Same-UID processes are not isolated
@@ -148,7 +158,17 @@ limits) are `unknown`. Facts are only:
   Not actual process identity, namespace host-root, or runtime UID attestation.
 - privileged/readonlyRootfs booleans; cap-add/drop fixed Linux enum + ALL/unknown, max64.
 - security option classifications default/custom/unconfined/unknown; namespaces
-  host/private/shared-container/unknown. No profile path, peer ID or network name.
+  host/private/shared-container/unknown, classified **per field as configured modes**,
+  not verified effective namespace isolation. No profile path, peer ID or network name.
+  Explicit `host` is retained for each field. Network `bridge`/`none`, PID empty mode,
+  IPC `private`/`shareable` map to configured `private`; `container:<nonempty peer>` maps
+  to `shared-container` only for network/PID/IPC. Missing or unrecognized modes are
+  `unknown`; empty/default network/IPC modes are also `unknown` because defaults may
+  be inherited. User namespace empty/default/missing and all non-`host` strings are
+  `unknown`: inspect does not establish daemon UID mappings/remapping. In particular,
+  `UsernsMode=""` is NOT evidence of a private user namespace. Present non-string values
+  fail schema validation. These configuration hints do not attest daemon, host or
+  process isolation, even when the label is `private`.
 - Mount aggregate fixed type/readOnly/count groups (max256) and socketPresent.
   Known docker.sock signal => true; no mounts => false; arbitrary/missing mounts =>
   unknown, never a claim that other daemon socket paths are ruled out. No mount paths,
@@ -166,10 +186,17 @@ secrets, process behavior or provide a public container scan. No findings != saf
 
 ## Remaining acceptance
 
-See `INTEGRATION.md`. Real Docker Engine/topology proof and three independent reviews
-remain pending. The actual bounded docker info probe on 2026-10-06 timed out at 20.0 s;
+See `INTEGRATION.md`. All three independent reviews of original commit `858cce4` were
+read: correctness requested changes (post-audit boundary and user namespace semantics);
+security/spec approved only the default-off library slice, with namespace/route-coverage
+qualifications. This rework addresses those findings with tests, but is NOT independent
+approval of its own patch. The original correctness reviewer must independently recheck
+the patch before integrator approval; prior reviews must not be silently transferred to
+changed code. Real Docker Engine/API 1.47/topology proof remains pending.
+The actual bounded docker info probe on 2026-10-06 timed out at 20.0 s;
 no reset/restart/mutation. `python3 server/deploy/proof/test_inspect_broker.py --real`
 is an optional prerequisite reporter, exits **1**, never skips/passes unavailable real
 proof; even a responsive daemon is not proof without an owned disposable topology.
-Do not use that reporter as real inspect acceptance. No full future feature spec was
-applied; strict close needs a task-sourced spec for only the independently accepted slice.
+Do not use that reporter as real inspect acceptance. The feature target delta is
+human-approved but remains proposed/unapplied; this rework neither applies it nor closes
+the task. Strict close needs a task-sourced spec for only the independently accepted slice.

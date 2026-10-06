@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AuditBuffer } from '../src/audit.js';
+import { chmodSync } from 'node:fs';
+import { AuditBuffer, type AuditRecord } from '../src/audit.js';
 import { harness, barrier } from './harness.js';
 import { fixtureState } from './support.js';
 
@@ -45,6 +46,49 @@ for (const stage of ['dispatch', 'publication'] as const) {
     });
   }
 }
+
+test('root invalidated during audit reservation denies before dispatch and releases resources', async () => {
+  let invalidate = () => {};
+  class ChangingBoundaryAudit extends AuditBuffer {
+    override reserve(entry: AuditRecord) {
+      const ticket = super.reserve(entry);
+      if (ticket) invalidate();
+      return ticket;
+    }
+  }
+  const h = await harness({ audit: new ChangingBoundaryAudit(2) });
+  invalidate = () => chmodSync(h.root, 0o755);
+  try {
+    const reply = await h.ask();
+    assert.equal(reply.status, 'not_authorized');
+    assert.equal(reply.snapshot, undefined);
+    assert.equal(h.engine.dispatches, 0);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.broker.active, 0);
+    assert.equal(h.audit.reservations, 0);
+    const records = h.audit.drain();
+    assert.deepEqual(
+      records.map((r) => [r.stage, r.decision, r.dispatched]),
+      [
+        ['admission', 'allowed', false],
+        ['publication', 'not_authorized', false],
+      ],
+    );
+    assert.equal(records[0].correlationId, records[1].correlationId);
+    // Restore only the owned fixture; a second admission proves slot/audit capacity recovery.
+    chmodSync(h.root, 0o700);
+    invalidate = () => {};
+    h.refill();
+    assert.equal((await h.ask()).status, 'checked');
+    assert.equal(h.engine.dispatches, 1);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.broker.active, 0);
+    assert.equal(h.audit.reservations, 0);
+  } finally {
+    chmodSync(h.root, 0o700);
+    await h.cleanup();
+  }
+});
 
 test('audit full or unavailable denies dispatch; final failure suppresses success', async () => {
   for (const scenario of ['full', 'unavailable', 'final'] as const) {

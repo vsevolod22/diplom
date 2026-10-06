@@ -142,8 +142,12 @@ export class Broker {
         record(correlationId, this.#clock.wall(), pin, 'admission', 'allowed', 'allowed', false),
       );
       if (!ticket) return final('not_authorized', 'audit_unavailable');
-      // Recheck after synchronous audit/FS work; transport start follows without yielding.
-      if (!live() || !policy.recheck(target, this.#clock.wall(), pin))
+      // Audit admission may invalidate the measured boundary; recheck before transport without yielding.
+      if (
+        !live() ||
+        !boundaryCurrent(boundary, pin.context.endpoint) ||
+        !policy.recheck(target, this.#clock.wall(), pin)
+      )
         return final('not_authorized', 'authorization');
       const body = await interruptible(
         engine.inspect(pin, controller.signal, this.bound, () => {

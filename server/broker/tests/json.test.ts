@@ -87,6 +87,85 @@ test('allowlist projection keeps dangerous facts; all-field canaries never emitt
   assert.equal(project(strictJson(encode(raw)), pin, 100_000).hash, hash);
 });
 
+for (const [field, fact, cases] of [
+  [
+    'NetworkMode',
+    'network',
+    [
+      [undefined, 'unknown'],
+      ['', 'unknown'],
+      ['default', 'unknown'],
+      ['host', 'host'],
+      ['bridge', 'private'],
+      ['none', 'private'],
+      ['private', 'unknown'],
+      ['container:peer', 'shared-container'],
+      ['container:', 'unknown'],
+      ['invalid', 'unknown'],
+    ],
+  ],
+  [
+    'PidMode',
+    'pid',
+    [
+      [undefined, 'unknown'],
+      ['', 'private'],
+      ['host', 'host'],
+      ['private', 'unknown'],
+      ['default', 'unknown'],
+      ['bridge', 'unknown'],
+      ['none', 'unknown'],
+      ['container:peer', 'shared-container'],
+      ['invalid', 'unknown'],
+    ],
+  ],
+  [
+    'IpcMode',
+    'ipc',
+    [
+      [undefined, 'unknown'],
+      ['', 'unknown'],
+      ['default', 'unknown'],
+      ['host', 'host'],
+      ['private', 'private'],
+      ['shareable', 'private'],
+      ['none', 'unknown'],
+      ['bridge', 'unknown'],
+      ['container:peer', 'shared-container'],
+      ['invalid', 'unknown'],
+    ],
+  ],
+  [
+    'UsernsMode',
+    'user',
+    [
+      [undefined, 'unknown'],
+      ['', 'unknown'],
+      ['host', 'host'],
+      ['private', 'unknown'],
+      ['default', 'unknown'],
+      ['none', 'unknown'],
+      ['bridge', 'unknown'],
+      ['container:peer', 'unknown'],
+      ['invalid', 'unknown'],
+    ],
+  ],
+] as const) {
+  test(`${field}: namespace-specific configured modes do not attest effective isolation`, () => {
+    for (const [value, expected] of cases) {
+      const raw: any = inspect();
+      if (value !== undefined) raw.HostConfig[field] = value;
+      const snapshot = project(strictJson(encode(raw)), pin, 100_000);
+      assert.equal(snapshot.facts.namespaces[fact], expected, `${field}=${String(value)}`);
+    }
+    for (const invalid of [null, false, 0, {}, []]) {
+      const raw: any = inspect();
+      raw.HostConfig[field] = invalid;
+      assert.throws(() => project(strictJson(encode(raw)), pin, 100_000));
+    }
+  });
+}
+
 test('optional unknown is not false/safe; missing/mismatched required facts fail', () => {
   const snapshot = project(inspect(), pin, 100_000);
   assert.equal(snapshot.facts.security.seccomp, 'unknown');
