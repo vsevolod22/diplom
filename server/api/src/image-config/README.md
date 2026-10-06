@@ -41,7 +41,7 @@ Supported config media types:
 - `application/vnd.oci.image.config.v1+json`
 - `application/vnd.docker.container.image.v1+json`
 
-Platform strings are closed canonical tokens, not copied arbitrary strings: OS `linux`, `windows`, `freebsd`; architectures `amd64`, `386`, `arm`, `arm64`, `ppc64`, `ppc64le`, `s390x`, `riscv64`, `mips`, `mipsle`, `mips64`, `mips64le`, `loong64`. Optional variants are `v1` through `v9` for `arm`, `arm64`, or `amd64`; no aliases or empty-string variant normalization. Config platform must match exactly; an absent variant differs from null or empty. Unsupported/noncanonical or mismatched tokens fail identity verification without echoing them.
+Platform strings are closed canonical tokens, not copied arbitrary strings: OS `linux`, `windows`, `freebsd`; architectures `amd64`, `386`, `arm`, `arm64`, `ppc64`, `ppc64le`, `s390x`, `riscv64`, `mips`, `mipsle`, `mips64`, `mips64le`, `loong64`. Optional variants are `v1` through `v9` for `arm`, `arm64`, or `amd64`; no aliases or empty-string variant normalization. Config platform must match exactly; schema-optional config `variant:null` equals absent, but differs from a required authoritative variant. Empty or mismatched non-null variants still fail. The authoritative caller identity is not normalized. Unsupported/noncanonical or mismatched tokens fail identity verification without echoing them.
 
 Private instance-local WeakMap receipts have no enumerable proof fields and are not returned by `analyze`. The verifier retains only a frozen, reduced snapshot (validated User string, normalized platform and digests); owned byte copies/parsed raw documents are discarded after verification. Cloning/casting/serializing a receipt, deep-importing another verifier, or passing request `receipt`/`verified`/`descriptor` fields does not grant this instance authority. Internal helper exports exist for tests, not as alternate public analysis entry points. No mutable byte snapshot is exposed.
 
@@ -65,11 +65,11 @@ History is **always** `unsupported / RULE_NOT_IMPLEMENTED`. Env/Labels/history a
 
 | Image config User | Result |
 | --- | --- |
-| config/User absent or exactly empty string | checked, one `DEFAULT_ROOT` metadata finding |
+| config/User absent, schema-optional null, or exactly empty string | checked, one `DEFAULT_ROOT` metadata finding |
 | decimal UID zero, including `000`, `0:1000` | checked, one `NUMERIC_ROOT` metadata finding |
 | decimal UID > 0, including `1000:0` | checked, no root finding; no runtime assurance |
 | names including `root`/`app`, named GID, whitespace, signs, extra colon, overflow | unsupported / `USER_NOT_RESOLVABLE`, no finding |
-| null, number, array, object, boolean User | failed / `INVALID_CONFIG`, no finding |
+| non-null number, array, object, boolean User | failed / `INVALID_CONFIG`, no finding |
 
 UID and optional GID require 1–10 ASCII decimal digits and range `0..4294967295`; leading zeros are allowed. No passwd lookup, filesystem, daemon, container execution, or runtime inspection occurs.
 
@@ -96,7 +96,7 @@ All bounds are inclusive and fixed in frozen `POLICY`:
 
 Combined limit+1 necessarily also exceeds an individual limit; it cannot be isolated while respecting both individual byte caps. Tests cover combined limit−1/limit/limit+1 with this constraint. The sole v1 rule cannot naturally emit two findings; internal output-encoder tests exercise cap enforcement without inventing a second rule.
 
-The parser bounds recursion and node/collection growth **during** parsing, uses fatal UTF-8 decoding (including rejection of a BOM), checks duplicate **decoded** keys, and uses `JSON.parse` only for an individually bounded string token. Null-prototype objects prevent prototype-key interpretation. Invalid escapes, lone surrogate escapes and nonfinite numbers fail. Unknown fields/rootfs-like arrays cannot bypass budgets. Optional Env/Labels/history may be absent; when present they require the documented object/array/string/boolean field types, not coercion or null-as-absence.
+The parser bounds recursion and node/collection growth **during** parsing, uses fatal UTF-8 decoding (including rejection of a BOM), checks duplicate **decoded** keys, and uses `JSON.parse` only for an individually bounded string token. Null-prototype objects prevent prototype-key interpretation. Invalid escapes, lone surrogate escapes and nonfinite numbers fail. Unknown fields/rootfs-like arrays cannot bypass budgets. OCI image-spec v1.1.1 [Properties](https://github.com/opencontainers/image-spec/blob/v1.1.1/config.md#properties) defines optional null as absent and explicitly allows `config:null`. After exact original-byte verification, only the existing schema-view guards for config, User, Env, Labels, history, optional history record fields and config variant apply that semantics. No bytes are stripped, reserialized or rehashed. Non-null fields retain object/array/string/boolean validation and every budget; null Env elements, null label values and null history records remain invalid. Required os/architecture, the manifest config descriptor and root document are not nullable. This bounded metadata view is not a full OCI rootfs/layer validation or unpacker.
 
 ### Redaction and identity
 
@@ -132,4 +132,6 @@ pnpm exec tsx src/scans/scans.config.browser.ts
 
 Tests exercise the **public `analyze` entry**, positive/default/numeric/named-user outcomes, fixed versions, off/invalid flags without capability reads, forged/serialized/cloned/foreign target handles, independent identity/hash/size/media type/platform faults, malformed/duplicate decoded JSON keys and known field types, all reachable limit−1/limit/limit+1 boundaries (including unknown fields and UTF-8/escaped keys), deterministic IDs, independent source/history coverage, closed output fields, canaries and no logging. Exception regressions cover synchronous throws and rejected promises, throwing prototype/descriptor traps, revoked proxies, own/inherited reason getters, coercion/property traps and genuine internal failure reasons. Internal tests additionally cover private receipt forgery/cross-instance rejection, post-verification byte/identity mutation, parser edge cases and output encoder bounds. Static runtime import/call checks complement passive metadata tests; they do not validate a production port or live egress.
 
-No shared worker/OCI/ledger/controller/UI/broker/compose/package files are part of this delivery; no new dependencies or Docker are required.
+The original isolated delivery changed only image-config files; integration commit `4bd2fca47d6d378443a370e816d9886305d29b12` additionally connected worker/OCI/ledger/controller/UI. This optional-null rework changes only image-config runtime/tests/docs, with no shared-file or dependency changes. Module and controlled HTTP tests do not require Docker; live stand checks do.
+
+Compatibility regressions cover both Docker/OCI media-type pairs with absent/null/empty/nonempty optional fields, the Docker nil-map Labels shape, required/variant mismatch and byte-tamper rejection. `optional-null.http.test.ts` exercises 40 actual cookie HTTP→consumer→private adapter→temporary SQLite→owner GET/SSE/strict-parser cases (including sibling preservation and off/no-load). Existing shared `outbox-config.test.ts` and `scans.config.http.test.ts` still contain obsolete User:null→failed expectations and must be updated by their owner; this rework does not bypass the WRITESET to edit them. Their failures must not be reported as a green full suite or as a reason to restore invalid optional-null semantics.

@@ -29,34 +29,35 @@ function canonicalPlatform(value: Platform): Readonly<Platform> {
 
 function validateMetadata(config: JsonObject): string | undefined {
   let user: string | undefined;
-  if (has(config, 'config')) {
+  // OCI optional null is absent in this schema view; never rewrite the hashed bytes.
+  if (has(config, 'config') && config.config !== null) {
     const runtime = config.config;
     if (!isObject(runtime)) return fail('INVALID_CONFIG');
-    if (has(runtime, 'User')) {
+    if (has(runtime, 'User') && runtime.User !== null) {
       if (typeof runtime.User !== 'string') return fail('INVALID_CONFIG');
       if (Buffer.byteLength(runtime.User, 'utf8') > POLICY.userBytes) return fail('CONFIG_LIMIT_EXCEEDED');
       user = runtime.User;
     }
-    if (has(runtime, 'Env')) {
+    if (has(runtime, 'Env') && runtime.Env !== null) {
       if (!Array.isArray(runtime.Env)) return fail('INVALID_CONFIG');
       if (runtime.Env.length > POLICY.env) return fail('CONFIG_LIMIT_EXCEEDED');
       if (!runtime.Env.every(entry => typeof entry === 'string')) return fail('INVALID_CONFIG');
     }
-    if (has(runtime, 'Labels')) {
+    if (has(runtime, 'Labels') && runtime.Labels !== null) {
       if (!isObject(runtime.Labels)) return fail('INVALID_CONFIG');
       if (Object.keys(runtime.Labels).length > POLICY.labels) return fail('CONFIG_LIMIT_EXCEEDED');
       if (!Object.values(runtime.Labels).every(entry => typeof entry === 'string')) return fail('INVALID_CONFIG');
     }
   }
-  if (has(config, 'history')) {
+  if (has(config, 'history') && config.history !== null) {
     if (!Array.isArray(config.history)) return fail('INVALID_CONFIG');
     if (config.history.length > POLICY.history) return fail('CONFIG_LIMIT_EXCEEDED');
     for (const record of config.history) {
       if (!isObject(record)) return fail('INVALID_CONFIG');
       for (const field of ['created', 'created_by', 'author', 'comment']) {
-        if (has(record, field) && typeof record[field] !== 'string') return fail('INVALID_CONFIG');
+        if (has(record, field) && record[field] !== null && typeof record[field] !== 'string') return fail('INVALID_CONFIG');
       }
-      if (has(record, 'empty_layer') && typeof record.empty_layer !== 'boolean') return fail('INVALID_CONFIG');
+      if (has(record, 'empty_layer') && record.empty_layer !== null && typeof record.empty_layer !== 'boolean') return fail('INVALID_CONFIG');
     }
   }
   return user;
@@ -101,7 +102,7 @@ export function createVerifier() {
       const config = parseBoundedJson(configBytes);
       if (!isObject(config)) return fail('INVALID_CONFIG');
       if (config.os !== platform.os || config.architecture !== platform.architecture ||
-        (has(config, 'variant') ? config.variant : undefined) !== platform.variant) return fail('OCI_IDENTITY_REJECTED');
+        (config.variant === null ? undefined : config.variant) !== platform.variant) return fail('OCI_IDENTITY_REJECTED');
       const user = validateMetadata(config);
       const verified = Object.freeze({ manifestDigest, configDigest: descriptor.digest, platform,
         ...(user === undefined ? {} : { user }) });

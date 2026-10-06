@@ -62,7 +62,7 @@ test('identity/parser/limit errors and upstream exceptions never carry raw canar
   for (const key of Object.keys(originals) as (keyof typeof originals)[]) console[key] = (...args: unknown[]) => { logs.push(args); };
   try {
     const inputs = [Buffer.from(`{"${CANARY}"`), encode({ ...baseConfig(), unknown: CANARY.repeat(300) }),
-      encode({ ...baseConfig(), config: { User: null, Labels: { [CANARY]: CANARY } } })];
+      encode({ ...baseConfig(), config: { User: false, Labels: { [CANARY]: CANARY } } })];
     for (const bytes of inputs) assertClosed(await setup(bytes).analyze());
     const wrong = setup();
     wrong.input.identity.platform.os = CANARY;

@@ -5,12 +5,12 @@ import { parseBoundedJson } from './bounded-json.js';
 import { ConfigFailure } from './policy.js';
 
 for (const [label, config] of [
-  ['null root', null], ['array root', []], ['null runtime config', { ...baseConfig(), config: null }],
+  ['null root', null], ['array root', []],
   ['array runtime config', { ...baseConfig(), config: [] }],
-  ...[null, 0, false, [], {}].map(User => ['invalid User', { ...baseConfig(), config: { User } }] as const),
-  ...[null, 'A=B', {}, [null], [1]].map(Env => ['invalid Env', { ...baseConfig(), config: { Env } }] as const),
-  ...[null, [], 'a', { a: null }, { a: 1 }].map(Labels => ['invalid Labels', { ...baseConfig(), config: { Labels } }] as const),
-  ...[null, {}, 'a', [null], [[]], ['a'], [{ created: 1 }], [{ created_by: null }], [{ author: false }],
+  ...[0, false, [], {}].map(User => ['invalid User', { ...baseConfig(), config: { User } }] as const),
+  ...['A=B', {}, [null], [1]].map(Env => ['invalid Env', { ...baseConfig(), config: { Env } }] as const),
+  ...[[], 'a', { a: null }, { a: 1 }].map(Labels => ['invalid Labels', { ...baseConfig(), config: { Labels } }] as const),
+  ...[{}, 'a', [null], [[]], ['a'], [{ created: 1 }], [{ created_by: false }], [{ author: false }],
     [{ comment: [] }], [{ empty_layer: 1 }]].map(history => ['invalid history', { ...baseConfig(), history }] as const),
 ] as const) {
   test(`public entry rejects ${label} ${JSON.stringify(config)}`, async () => {
@@ -43,9 +43,9 @@ test('optional metadata may be absent; config.User absent defaults root', async 
   }
 });
 
-test('missing/invalid platform fields and null variant are identity failures', async () => {
+test('missing/invalid required platform fields and non-null wrong variants are identity failures', async () => {
   for (const config of [{ architecture: 'amd64' }, { os: 'linux' }, { os: 1, architecture: 'amd64' },
-    { os: 'linux', architecture: null }, { ...baseConfig(), variant: null }]) {
+    { os: 'linux', architecture: null }, { ...baseConfig(), variant: false }]) {
     assert.equal((await setup(config).analyze()).config.reason, 'OCI_IDENTITY_REJECTED');
   }
 });

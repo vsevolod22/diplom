@@ -63,7 +63,7 @@ test('platform mismatch, invalid UTF-8, decoded duplicate keys and malformed typ
   const wrongPlatform = fixture({ os: 'linux', architecture: 'arm64' });
   assert.equal((await wrongPlatform.analyze()).config.reason, 'OCI_IDENTITY_REJECTED');
   for (const config of ['{"os":"linux","architecture":"amd64","config":{"User":"0","\\u0055ser":"1"}}', '{',
-    { os: 'linux', architecture: 'amd64', config: { User: null } },
+    { os: 'linux', architecture: 'amd64', config: { User: false } },
     { os: 'linux', architecture: 'amd64', config: { Env: [1] } },
     { os: 'linux', architecture: 'amd64', history: [{ created_by: false }] }]) {
     assert.equal((await fixture(config).analyze()).config.reason, 'INVALID_CONFIG');
