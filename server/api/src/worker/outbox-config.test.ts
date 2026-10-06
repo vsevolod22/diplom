@@ -8,8 +8,9 @@ import { ScanLedger } from '../ledger/ledger.js';
 import { createPinnedConfigLoader } from '../oci/pinned-image-config.js';
 import { consumeOne } from './outbox-consumer.js';
 
-for (const [user, expected] of [['0', 'checked'], ['1000', 'checked'], ['CANARY_USER', 'unsupported'], [null, 'failed']] as const) {
-  test(`actual consumer + pinned loader + module + SQLite config-only ${user}`, async () => {
+for (const [user, expected] of [['0', 'checked'], ['1000', 'checked'], ['CANARY_USER', 'unsupported'], [null, 'checked'],
+  [false, 'failed'], [0, 'failed'], [[], 'failed'], [{}, 'failed']] as const) {
+  test(`actual consumer + pinned loader + module + SQLite config-only ${typeof user}:${JSON.stringify(user)}`, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'outbox-config-'));
     const ledger = new ScanLedger(join(dir, 'ledger.sqlite'));
     try {
@@ -27,6 +28,13 @@ for (const [user, expected] of [['0', 'checked'], ['1000', 'checked'], ['CANARY_
       const result = ledger.configResult(id, 'alice')!;
       assert.equal(result.config.outcome, expected);
       assert.equal(result.checksVersion, 'image-config-user-v1');
+            assert.equal(result.resourcePolicyVersion, 'image-config-policy-v1');
+            assert.deepEqual(result.completedRuleIds, expected === 'checked' ? ['IMGCFG_USER_ROOT'] : []);
+            if (user === null) assert.equal(result.findings[0]?.classification, 'DEFAULT_ROOT');
+            if (expected === 'failed') {
+              assert.equal(result.config.reason, 'INVALID_CONFIG');
+              assert.deepEqual(result.findings, []);
+            }
       assert.equal(result.history.outcome, 'unsupported');
       assert.equal(result.dockerfile.reason, 'SOURCE_NOT_PROVIDED');
       assert.equal(result.iac.reason, 'SOURCE_NOT_PROVIDED');
@@ -43,7 +51,7 @@ for (const configOk of [false, true]) for (const siblingsOk of [false, true]) {
     const dir = mkdtempSync(join(tmpdir(), 'outbox-config-independent-'));
     const ledger = new ScanLedger(join(dir, 'ledger.sqlite'));
     try {
-      const bytes = configBytes(configOk ? '0' : null);
+      const bytes = configBytes(configOk ? '0' : false);
       const image = `registry-1.docker.io/library/alpine@${bytes.digest}`;
       const id = ledger.enqueue({ subject: 'alice', idempotencyKey: 'all-four', registry: 'registry-1.docker.io',
         repository: 'library/alpine', digest: bytes.digest, platform: 'linux/amd64', checks: '["secret","sbom","vuln","config"]' }).scanId;

@@ -54,8 +54,8 @@ test('real browser POST → worker → v11 → GET/SSE → strict parser, indepe
     assert.equal((await post(['config'], 'reject-repo', { imageReference: 'registry-1.docker.io/library/nginx:latest' })).status, 400);
     for (const [index, user, checks, outcome] of [
       [0, '0', ['config'], 'checked'],
-      [2, 'CANARY_USER', ['config'], 'unsupported'], [3, null, ['config'], 'failed'],
-      [4, '0', ['secret'], 'skipped'], [5, null, ['secret', 'sbom', 'vuln', 'config'], 'failed'],
+      [2, 'CANARY_USER', ['config'], 'unsupported'], [3, null, ['config'], 'checked'],
+      [4, '0', ['secret'], 'skipped'], [5, false, ['secret', 'sbom', 'vuln', 'config'], 'failed'],
       [6, '0', ['secret', 'sbom', 'vuln', 'config'], 'checked'],
     ] as const) {
       bytes = configBytes(user);
@@ -78,6 +78,11 @@ test('real browser POST → worker → v11 → GET/SSE → strict parser, indepe
       const text = await actual.text(); assert.equal(text.includes('CANARY'), false);
       const parsed = parseCurrentStatus(JSON.parse(text));
       assert.deepEqual(parsed.checks, checks); assert.equal(parsed.config.config.outcome, outcome);
+            assert.equal(parsed.config.checksVersion, 'image-config-user-v1');
+            assert.equal(parsed.config.resourcePolicyVersion, 'image-config-policy-v1');
+            assert.deepEqual(parsed.config.completedRuleIds, outcome === 'checked' ? ['IMGCFG_USER_ROOT'] : []);
+            if (user === null) assert.equal(parsed.config.findings[0]?.classification, 'DEFAULT_ROOT');
+            if (outcome === 'failed') assert.equal(parsed.config.config.reason, 'INVALID_CONFIG');
       if (checks.some(check => check === 'secret')) assert.equal(parsed.perCheck.secret.outcome, 'checked');
       if (checks.some(check => check === 'sbom')) assert.equal(parsed.perCheck.sbom.outcome, 'failed');
       assert.equal(parsed.state, checks.length > 1 ? 'partial' : ['checked', 'skipped'].includes(outcome) ? 'completed' : 'failed');
