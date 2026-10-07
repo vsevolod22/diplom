@@ -8,8 +8,9 @@ import { scanNginxArchive } from './archive-scan-worker.js';
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 import { runImageConfig } from './image-config-runner.js';
 import type { ConfigLoader } from '../oci/pinned-image-config.js';
+import { exactLocalTarget, localChecksAllowed, validLocalBinding } from '../oci/nginx-local-policy.js';
 
-type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal; configLoader?: ConfigLoader;
+type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal; configLoader?: ConfigLoader; archivePolicy?: 'local' | 'proof';
   vuln?: Omit<VulnScanOptions, 'timeoutMs' | 'signal'> };
 type Check = CombinedOutcome['check'] | 'config';
 const order: Check[] = ['secret', 'sbom', 'vuln', 'config'];
@@ -38,6 +39,13 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   const job = ledger.claim(now, 3 * options.timeoutMs + 27_000, 627_000);
   if (!job) return false;
   const canonical = checks(job.checks);
+  // Composition policy precedes config loading, archive acquisition and every scanner.
+  if ((job.executionProfile || job.repository === 'library/nginx') && !(options.archivePolicy === 'local'
+    ? exactLocalTarget(job) && validLocalBinding(job.executionProfile) && !!canonical && localChecksAllowed(canonical)
+    : options.archivePolicy === 'proof' && !job.executionProfile && !!canonical && NGINX_ARCHIVE_CANDIDATES.some(target =>
+      target.registry === job.registry && target.repository === job.repository && target.digest === job.digest && target.platform === job.platform))) {
+    ledger.finish(job.scanId, job.attempts, 'failed'); return true;
+  }
   // Preserve legacy single-runner injection for unsupported check sets, but
   // never attribute its output to verified coverage.
   const requested = (canonical ?? ['secret']).filter((check): check is CombinedOutcome['check'] => check !== 'config');
@@ -75,8 +83,8 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
       if (!canonical || !target) {
         ledger.finish(job.scanId, job.attempts, 'failed'); return true;
       }
-      // Exact-candidate qualification jobs use either internal fixtures or the
-      // separately composed proof HTTP ingress. Production admission stays closed.
+      // Only the selected exact LOCAL composition or explicit isolated proof
+      // reaches this path; the default API and worker remain closed.
       try {
         const report = await Promise.race([archiveRunner(requested, { signal: controller.signal, target,
           vuln: options.vuln ? { ...options.vuln, timeoutMs: 120_000, signal: controller.signal } : undefined }), aborted]);

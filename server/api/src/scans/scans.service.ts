@@ -13,6 +13,7 @@ import { chainReady } from './scan-readiness.js';
 import type { Identity } from '../security/identity.js';
 import type { ImageReference } from './image-reference.js';
 import type { ImageSuggestion } from './image-search.js';
+import { localReceiptMatches, type LocalExecutionBinding } from '../oci/nginx-local-policy.js';
 
 const allowed = new Set(['registry-1.docker.io']);
 const unavailable = () => new ServiceUnavailableException({ errorCode: 'SCANNER_UNAVAILABLE' });
@@ -33,6 +34,11 @@ export class ScansService {
   // server overrides these hooks; there is deliberately no environment enable flag.
   protected acceptsReference(reference: ImageReference): boolean {
     return reference.registry === 'registry-1.docker.io' && reference.repository === 'library/alpine';
+  }
+  protected acceptsChecks(_reference: ImageReference, _checks: readonly string[]): boolean { return true; }
+  protected executionBinding(_reference: ImageReference): LocalExecutionBinding | undefined { return undefined; }
+  protected allowedCheckSets(_reference: ImageReference): readonly (readonly string[])[] {
+    return Array.from({ length: 15 }, (_, mask) => ['secret', 'sbom', 'vuln', 'config'].filter((_, bit) => (mask + 1) & (1 << bit)));
   }
   protected resolveTarget(reference: ImageReference) { return this.resolver.resolvePublicAlpine(reference); }
   protected acceptsPinned(pinned: { registry: string; repository: string; platform: string; digest: string }): boolean {
@@ -71,7 +77,7 @@ export class ScansService {
     try { request = parseScanRequest(body, allowed); }
     catch { reject('INVALID_REQUEST'); throw new BadRequestException({ errorCode: 'INVALID_SCAN_REQUEST' }); }
     // Check policy before replay too: a seeded closed candidate cannot gain public admission.
-    if (!this.acceptsReference(request.reference)) {
+    if (!this.acceptsReference(request.reference) || !this.acceptsChecks(request.reference, request.checks)) {
       reject('UNSUPPORTED');
       throw new BadRequestException({ errorCode: 'UNSUPPORTED_SCAN' });
     }
@@ -100,7 +106,8 @@ export class ScansService {
       if (!(await this.readiness())) { reject('EGRESS'); throw unavailable(); }
       const { scanId } = ledger.enqueue({ subject: identity.subject, idempotencyKey: request.idempotencyKey,
         registry: pinned.registry, repository: pinned.repository, digest: pinned.digest, platform: pinned.platform,
-        fingerprint: request.fingerprint, checks: JSON.stringify(request.checks), scope: request.scope });
+        fingerprint: request.fingerprint, checks: JSON.stringify(request.checks), scope: request.scope,
+        executionProfile: this.executionBinding(request.reference) });
       return receipt(scanId);
     } catch (error) {
       if (error instanceof IdempotencyConflict || error instanceof AdmissionLimited) {
@@ -121,6 +128,40 @@ export class ScansService {
       // No registry response, raw SQLite diagnostic or signed redirect URL in HTTP.
       throw unavailable();
     }
+  }
+
+  private readonly eligibilityRates = new Map<string, { until: number; count: number; active: number }>();
+  private eligibilityActive = 0;
+  async eligibility(identity: Identity, body: unknown) {
+    if (!identity.scope.includes('scan:create')) throw new ForbiddenException();
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['imageReference', 'checks'].includes(key)))
+      throw new BadRequestException({ errorCode: 'INVALID_SCAN_REQUEST' });
+    let request;
+    try { request = parseScanRequest({ ...body, scope: 'image', idempotencyKey: 'eligibility-only' }, allowed); }
+    catch { throw new BadRequestException({ errorCode: 'INVALID_SCAN_REQUEST' }); }
+    const now = Date.now();
+    for (const [subject, rate] of this.eligibilityRates) if (!rate.active && rate.until <= now) this.eligibilityRates.delete(subject);
+    let rate = this.eligibilityRates.get(identity.subject);
+    if (!rate) {
+      if (this.eligibilityRates.size >= 1024) throw new HttpException({ errorCode: 'IMAGE_SEARCH_CAPACITY' }, 429);
+      rate = { until: now + 60_000, count: 0, active: 0 }; this.eligibilityRates.set(identity.subject, rate);
+    }
+    if (++rate.count > 30 || rate.active >= 2 || this.eligibilityActive >= 8) throw new HttpException({ errorCode: 'IMAGE_SEARCH_RATE_LIMITED' }, 429);
+    const allowedReference = this.acceptsReference(request.reference);
+    const sets = allowedReference ? this.allowedCheckSets(request.reference) : [];
+    const binding = allowedReference ? this.executionBinding(request.reference) : undefined;
+    const result = (eligible: boolean, reason: string) => ({ imageReference: request.reference.canonical, eligible,
+      eligibility: binding ? 'qualified-exact-profile' : allowedReference ? request.reference.repository === 'library/alpine' ? 'alpine-only' : 'isolated-exact-profile' : 'unsupported',
+      allowedCheckSets: sets, ...(binding ? { qualificationId: binding.qualificationId } : {}), reason });
+    if (!allowedReference || !this.acceptsChecks(request.reference, request.checks)) return result(false, 'UNSUPPORTED_SCAN');
+    rate.active++; this.eligibilityActive++;
+    try {
+      if (!this.ledgerStore.ledger || !(await this.readiness())) return result(false, 'SCANNER_UNAVAILABLE');
+      if (request.checks.includes('vuln') && (process.env.SCAN_VULN_ENABLED !== 'true' || !(await this.vulnDbReady()))) return result(false, 'DB_UNAVAILABLE');
+      const pinned = await this.resolveTarget(request.reference);
+      return this.acceptsPinned(pinned) && await this.readiness() ? result(true, 'READY') : result(false, 'SCANNER_UNAVAILABLE');
+    } catch { return result(false, 'SCANNER_UNAVAILABLE'); }
+    finally { rate.active--; this.eligibilityActive--; }
   }
 
   cancel(identity: Identity, scanId: string, body: unknown) {
@@ -176,10 +217,13 @@ export class ScansService {
             { os: archive.vuln.os, node: archive.vuln.node, db: archive.vuln.db } : {}),
           scannerVersion: archive.scannerVersion, checksVersion: archive.receipt.checksVersion, checkedAt: new Date(archive.checkedAt).toISOString() } : null];
       }));
+      const executionProfile = ledger!.executionProfile(scanId);
+      const qualified = !!executionProfile && localReceiptMatches(archive.receipt, archive.scannerVersion);
       return { scanId, ...snapshot, imageReference: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
         checks, perCheck, ...(config ? { config } : {}), result: checks.length === 1 ? perCheck[checks[0]] : null,
         imageProfile: { version: archive.receipt.profileVersion, configDigest: archive.receipt.configDigest,
-          resourcePolicyVersion: archive.receipt.resourcePolicyVersion, qualified: false },
+          resourcePolicyVersion: archive.receipt.resourcePolicyVersion, qualified },
+        ...(qualified ? { executedQualification: executionProfile } : {}),
         coverage: 'image', checkedIsNotSafe: true };
     }
     const sbom = ledger?.sbom(scanId, identity.subject);

@@ -13,6 +13,7 @@ import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
 import type { ImageConfigResult } from '../image-config/contract.js';
 import { validateConfigReport } from '../image-config/report-contract.js';
 import { admittedConfigTarget, CONFIG_LOAD_MS } from '../oci/pinned-image-config.js';
+import { exactLocalTarget, localChecksAllowed, localReceiptMatches, validLocalBinding, type LocalExecutionBinding } from '../oci/nginx-local-policy.js';
 
 export type PinnedTarget = {
   subject: string;
@@ -24,8 +25,9 @@ export type PinnedTarget = {
   fingerprint?: string;
   checks?: string;
   scope?: string;
+  executionProfile?: LocalExecutionBinding;
 };
-export type Job = { scanId: string; registry: string; repository: string; digest: string; platform: string; checks: string; scope: string; attempts: number };
+export type Job = { scanId: string; registry: string; repository: string; digest: string; platform: string; checks: string; scope: string; attempts: number; executionProfile?: LocalExecutionBinding };
 export class IdempotencyConflict extends Error {}
 export class AdmissionLimited extends Error {}
 const SUBJECT_ACTIVE_LIMIT = 3;
@@ -155,7 +157,7 @@ export class ScanLedger {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 5000');
       const version = Number(this.db.pragma('user_version', { simple: true }));
-      if (version > 11 || version < 0) throw new Error('Unsupported ledger version');
+      if (version > 12 || version < 0) throw new Error('Unsupported ledger version');
       // FK enforcement must be toggled outside a transaction for SQLite's table rebuild.
       // Check the rebuilt references before commit, then restore enforcement afterward.
       if (version < 9) this.db.pragma('foreign_keys = OFF');
@@ -326,6 +328,9 @@ export class ScanLedger {
             PRIMARY KEY(scan_id,check_name)
           ); PRAGMA user_version = 11;`);
         }
+        if (version < 12) this.db.exec(`CREATE TABLE scan_execution_profiles (
+          scan_id TEXT PRIMARY KEY REFERENCES scans(id), binding TEXT NOT NULL CHECK(length(CAST(binding AS BLOB)) <= 1024)
+        ); PRAGMA user_version = 12;`);
         if ((this.db.pragma('foreign_key_check') as unknown[]).length)
           throw new Error('Ledger migration foreign key mismatch');
       });
@@ -381,6 +386,8 @@ export class ScanLedger {
         !/^sha256:[a-f0-9]{64}$/.test(target.digest) ||
         !/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/.test(target.platform) ||
         (target.fingerprint !== undefined && !/^[a-f0-9]{64}$/.test(target.fingerprint))) throw new TypeError('Invalid pinned target');
+    if (target.executionProfile !== undefined && (!validLocalBinding(target.executionProfile) || !exactLocalTarget(target) ||
+        !localChecksAllowed(canonicalChecks(target.checks ?? '') ?? []) || target.scope !== 'image')) throw new TypeError('Invalid execution binding');
     return this.immediate(() => {
       const existing = this.db.prepare('SELECT * FROM scans WHERE subject = ? AND idempotency_key = ?')
         .get(target.subject, target.idempotencyKey) as ScanRow | undefined;
@@ -398,6 +405,8 @@ export class ScanLedger {
                        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`).run(
         scanId, target.subject, target.idempotencyKey, target.registry, target.repository,
         target.digest, target.platform, target.fingerprint ?? null, target.checks ?? '[]', target.scope ?? 'image');
+      if (target.executionProfile) this.db.prepare('INSERT INTO scan_execution_profiles(scan_id,binding) VALUES (?,?)')
+        .run(scanId, JSON.stringify(target.executionProfile));
       this.db.prepare('INSERT INTO outbox (scan_id) VALUES (?)').run(scanId);
       this.event(scanId, 'queued');
       this.audit(target.subject, 'alpine', 'image', 'accepted', 'CREATED', scanId);
@@ -426,7 +435,8 @@ export class ScanLedger {
                   (canonicalChecks(row.checks)?.includes('config') ? CONFIG_LOAD_MS + 1000 : 0), row.scanId);
       this.db.prepare("UPDATE scans SET state = 'running' WHERE id = ?").run(row.scanId);
       this.event(row.scanId, 'running');
-      return { ...row, attempts: row.attempts + 1 };
+      const executionProfile = this.executionProfile(row.scanId);
+      return { ...row, attempts: row.attempts + 1, ...(executionProfile ? { executionProfile } : {}) };
     });
   }
 
@@ -596,13 +606,16 @@ export class ScanLedger {
     return this.immediate(() => {
       const row = this.db.prepare(`SELECT s.subject,s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
         FROM scans s JOIN outbox o ON o.scan_id=s.id WHERE s.id=? AND s.state='running'
-        AND o.attempts=? AND o.delivered_at IS NULL ${safeConfig ? 'AND o.lease_until IS NOT NULL' : ''}`).get(scanId, attempts) as Job | undefined;
+        AND o.attempts=? AND o.delivered_at IS NULL AND o.lease_until IS NOT NULL`).get(scanId, attempts) as Job | undefined;
       if (!row) return false;
       const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => candidate.digest === report.receipt.digest);
       if (!target || Object.entries(target).some(([key, value]) => key !== 'configDigest' && row[key as keyof Job] !== value) ||
           row.scope !== 'image' || JSON.stringify(canonicalChecks(row.checks)?.filter(check => check !== 'config')) !== JSON.stringify(requested) ||
           canonicalChecks(row.checks)?.includes('config') && !safeConfig ||
           safeConfig && !isDeepStrictEqual(context, this.configAttemptContext(scanId, attempts))) throw new TypeError('Archive job mismatch');
+      const binding = this.executionProfile(scanId);
+      if (binding && (!validLocalBinding(binding) || !localChecksAllowed(requested) || !localReceiptMatches(report.receipt, report.scannerVersion)))
+        throw new TypeError('Execution receipt mismatch');
       // Freshness is a clock check only; no hashing/network work inside the transaction.
       assertArchiveDbFreshness(report);
       const changed = this.db.prepare(`UPDATE outbox SET delivered_at=CURRENT_TIMESTAMP,lease_until=NULL
@@ -617,6 +630,14 @@ export class ScanLedger {
       this.event(scanId, terminal);
       return true;
     });
+  }
+
+  executionProfile(scanId: string): LocalExecutionBinding | undefined {
+    const row = this.db.prepare('SELECT binding FROM scan_execution_profiles WHERE scan_id=?').get(scanId) as { binding: string } | undefined;
+    if (!row) return undefined;
+    const value: unknown = JSON.parse(row.binding);
+    if (!validLocalBinding(value)) throw new TypeError('Invalid stored execution binding');
+    return value;
   }
 
   archiveResult(scanId: string, subject: string): ArchiveScanReport | undefined {
@@ -929,7 +950,7 @@ export class ScanLedger {
     return this.immediate(() => {
       this.db.prepare('DELETE FROM admission_windows WHERE minute < ?').run(Math.floor(Date.now() / 60000) - 1440);
       this.db.prepare(`DELETE FROM scan_audit WHERE created_at < datetime('now', ?)`).run(`-${days} days`);
-      for (const table of ['scan_check_results', 'scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
+      for (const table of ['scan_execution_profiles', 'scan_check_results', 'scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
       this.db.prepare(`DELETE FROM scan_results WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)
         .run(`-${days} days`);
       this.db.prepare(`DELETE FROM outbox WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)

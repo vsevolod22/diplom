@@ -31,7 +31,7 @@ for (const target of NGINX_ARCHIVE_CANDIDATES) for (const selected of [false, tr
       let loaded = false;
       // No synthetic bytes can pretend to hash to an externally pinned nginx digest.
       // Actual config module returns redacted loader failure; positive live nginx remains pending.
-      await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', configLoader: async () => { loaded = true; throw Error('CANARY_OCI_ERROR'); } },
+      await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', archivePolicy: 'proof', configLoader: async () => { loaded = true; throw Error('CANARY_OCI_ERROR'); } },
         async () => { throw Error('normal runner must not receive archive'); }, now, undefined, undefined,
         async requested => { assert.deepEqual(requested, ['secret','sbom','vuln']); return report; });
       assert.equal(loaded, selected);

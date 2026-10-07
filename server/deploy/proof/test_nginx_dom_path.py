@@ -40,6 +40,8 @@ class NginxDomPath(unittest.TestCase):
         target: /proof/credentials.json
         read_only: true
         bind: { create_host_path: false }
+  worker:
+    command: [node, --import, tsx, src/worker/nginx-proof-worker.main.ts]
   web:
     ports: !override ["127.0.0.1:18080:8080"]
 ''')

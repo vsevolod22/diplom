@@ -18,13 +18,28 @@ const alpineTargets = [
   { label: 'Alpine · 3.20', reference: 'registry-1.docker.io/library/alpine:3.20' },
   { label: 'Alpine · 3.16 (архивный · CVE-пример)', reference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6' },
 ] as const;
-type ImageSuggestion = { label: string; reference: string; scannable: boolean; reason?: string; tagConfirmed?: boolean };
+const pinnedExample = { label: 'nginx · закреплённый пример с большим числом находок', reference: 'registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3', scannable: false };
+type ImageSuggestion = { label: string; reference: string; scannable: boolean; reason?: string; tagConfirmed?: boolean;
+  eligibility?: 'alpine-only' | 'isolated-exact-profile' | 'qualified-exact-profile' | 'unsupported'; allowedCheckSets?: readonly (readonly string[])[]; qualificationId?: string };
+const checkSetSchema = z.array(z.enum(scanChecks)).min(1).max(4).refine(set =>
+  JSON.stringify(set) === JSON.stringify(scanChecks.filter(check => set.includes(check))), 'Invalid canonical check set');
+const eligibilitySchema = z.object({ imageReference: z.string().max(256), eligible: z.boolean(),
+  eligibility: z.enum(['alpine-only', 'isolated-exact-profile', 'qualified-exact-profile', 'unsupported']),
+  allowedCheckSets: z.array(checkSetSchema).max(15), qualificationId: z.string().max(64).optional(),
+  reason: z.enum(['READY', 'UNSUPPORTED_SCAN', 'SCANNER_UNAVAILABLE', 'DB_UNAVAILABLE']) }).strict().superRefine((result, context) => {
+    if (result.eligible !== (result.reason === 'READY') ||
+      new Set(result.allowedCheckSets.map(set => set.join(','))).size !== result.allowedCheckSets.length ||
+      result.eligibility === 'unsupported' && (result.eligible || result.allowedCheckSets.length || result.qualificationId) ||
+      result.eligibility === 'qualified-exact-profile' && (!result.qualificationId || !result.allowedCheckSets.length || result.allowedCheckSets.some(set => set.includes('config')))) {
+      context.addIssue({ code: 'custom', message: 'Invalid current eligibility' });
+    }
+  });
 const searchPageSchema = z.object({
-  items: z.array(z.object({ label: z.string().min(1).max(256), reference: z.string().regex(/^registry-1\.docker\.io\/[a-z0-9._/-]+(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/), scannable: z.boolean(), eligibility: z.enum(['alpine-only', 'isolated-exact-profile', 'unsupported']), reason: z.string().min(1).max(256), kind: z.enum(['tag', 'repository']), tagConfirmed: z.boolean(), checks: z.object({ secret: z.boolean(), sbom: z.boolean(), vuln: z.enum(['conditional', 'unsupported']) }) })).max(12),
+  items: z.array(z.object({ label: z.string().min(1).max(256), reference: z.string().regex(/^registry-1\.docker\.io\/[a-z0-9._/-]+(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/), scannable: z.boolean(), eligibility: z.enum(['alpine-only', 'isolated-exact-profile', 'qualified-exact-profile', 'unsupported']), allowedCheckSets: z.array(checkSetSchema).max(15).optional(), qualificationId: z.string().max(64).optional(), reason: z.string().min(1).max(256), kind: z.enum(['tag', 'repository']), tagConfirmed: z.boolean(), checks: z.object({ secret: z.boolean(), sbom: z.boolean(), vuln: z.enum(['conditional', 'unsupported']) }) })).max(12),
   nextCursor: z.string().regex(/^[a-f0-9]{48}$/).nullable(), state: z.enum(['more-available', 'terminal', 'quota-exhausted']), loaded: z.number().int().min(0).max(60), pages: z.number().int().min(1).max(5),
   policy: z.object({ pageSize: z.literal(12), maxPages: z.literal(5), maxCandidates: z.literal(60), maxActivePerProcess: z.literal(8), maxActivePerSubject: z.literal(2), maxRequestsPerSubject: z.literal(30), rateWindowMs: z.literal(60_000), maxSessions: z.literal(1024), maxRateEntries: z.literal(1024), scope: z.literal('process-local') }),
 }).superRefine((page, context) => {
-  if ((page.state === 'more-available') !== (page.nextCursor !== null) || page.loaded < page.items.length || page.items.some(item => item.scannable !== (item.eligibility !== 'unsupported') || (item.eligibility === 'alpine-only' && !item.reference.startsWith('registry-1.docker.io/library/alpine:')) || (item.eligibility === 'isolated-exact-profile' && !/^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(item.reference)) || (item.scannable && (!item.checks.secret || !item.checks.sbom || item.checks.vuln !== 'conditional')) || item.tagConfirmed !== (item.kind === 'tag'))) context.addIssue({ code: 'custom', message: 'Invalid discovery eligibility' });
+  if ((page.state === 'more-available') !== (page.nextCursor !== null) || page.loaded < page.items.length || page.items.some(item => item.scannable !== (item.eligibility !== 'unsupported') || (item.eligibility === 'alpine-only' && !item.reference.startsWith('registry-1.docker.io/library/alpine:')) || (['isolated-exact-profile', 'qualified-exact-profile'].includes(item.eligibility) && !/^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(item.reference)) || (item.scannable && (!item.checks.secret || !item.checks.sbom || item.checks.vuln !== 'conditional')) || item.tagConfirmed !== (item.kind === 'tag'))) context.addIssue({ code: 'custom', message: 'Invalid discovery eligibility' });
 });
 const formSchema = z.object({
   imageReference: z.string().regex(/^registry-1\.docker\.io\/library\/(?:alpine(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})|nginx@sha256:[a-f0-9]{64})$/, 'Выберите образ с серверным допуском'),
@@ -64,9 +79,58 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const selectedTarget = useRef<ImageSuggestion | null>(null);
+  const [localEligibility, setLocalEligibility] = useState<z.infer<typeof eligibilitySchema> | null>(null);
+  const [eligibilityBusy, setEligibilityBusy] = useState(false);
+  const [eligibilityRefresh, setEligibilityRefresh] = useState(0);
+  const savedIdentity = useRef('');
   const attempt = useRef<{ target: string; checks: string; key: string } | null>(null);
   const live = useLiveScanSession();
   const navigate = useNavigate();
+  useEffect(() => {
+    if (!live || demo) return;
+    const key = `scan-target-v1:${live.scope[2]}`;
+    if (savedIdentity.current && savedIdentity.current !== key) sessionStorage.removeItem(savedIdentity.current);
+    savedIdentity.current = key;
+    const saved = sessionStorage.getItem(key);
+    if (saved && /^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(saved)) {
+      selectedTarget.current = { label: 'Сохранённая закреплённая цель', reference: saved, scannable: false };
+      setValue('imageReference', saved);
+    } else if (saved) sessionStorage.removeItem(key);
+    const currentEpoch = live.scope[1];
+    return () => {
+      const session = scanSession();
+      if (session.subject !== live.scope[2] || session.generation !== currentEpoch) sessionStorage.removeItem(key);
+    };
+  }, [live, demo, setValue]);
+  const eligibilityReference = imageReference?.includes('/nginx@') ? imageReference : pinnedExample.reference;
+  const canonicalSelected = scanChecks.filter(check => checks.includes(check));
+  const checkIdentity = canonicalSelected.join(',');
+  useEffect(() => {
+    if (!live || demo) return;
+    const controller = new AbortController();
+    const current = () => !controller.signal.aborted && scanSession().subject === live.scope[2] && scanSession().generation === live.scope[1];
+    setEligibilityBusy(true);
+    setLocalEligibility(previous => previous?.imageReference === eligibilityReference ? { ...previous, eligible: false } : null);
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch('/api/v1/browser/scans/images/eligibility', { method: 'POST', credentials: 'same-origin', signal: controller.signal,
+          headers: { 'content-type': 'application/json' }, body: JSON.stringify({ imageReference: eligibilityReference,
+            checks: checkIdentity ? checkIdentity.split(',') : ['secret'] }) });
+        if (!response.ok) throw new Error('Eligibility unavailable');
+        const result = eligibilitySchema.parse(await response.json());
+        if (result.imageReference !== eligibilityReference || result.eligible &&
+          !result.allowedCheckSets.some(set => set.join(',') === (checkIdentity || 'secret'))) throw new Error('Eligibility identity mismatch');
+        if (current()) setLocalEligibility(result);
+      } catch { if (current()) setLocalEligibility(null); }
+      finally { if (current()) setEligibilityBusy(false); }
+    }, 150);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [live, demo, eligibilityReference, checkIdentity, eligibilityRefresh]);
+  useEffect(() => {
+    const refresh = () => setEligibilityRefresh(value => value + 1);
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, []);
   useEffect(() => {
     const query = search.trim().toLowerCase().replace(/ +/g, ' ');
     const generation = ++searchGeneration.current;
@@ -75,7 +139,12 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     const identity = live?.scope.join(':') ?? '';
     if (discovery.current.identity !== identity) {
       setConfirmed(false); attempt.current = null; selectedTarget.current = null;
-      setValue('imageReference', '');
+      // Preserve only this subject's saved reference, never persisted eligibility.
+      const saved = live ? sessionStorage.getItem(`scan-target-v1:${live.scope[2]}`) : null;
+      if (saved && /^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(saved)) {
+        selectedTarget.current = { label: 'Сохранённая закреплённая цель', reference: saved, scannable: false };
+        setValue('imageReference', saved);
+      } else setValue('imageReference', '');
     }
     const append = pageRequest > 0 && discovery.current.cursor !== null && discovery.current.identity === identity && discovery.current.query === query;
     const restart = restarting.current && discovery.current.identity === identity && discovery.current.query === query;
@@ -193,19 +262,39 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     setPageRequest(value => value + 1);
   }
   const matches = alpineTargets.filter(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const localSelected = imageReference?.includes('/nginx@') && localEligibility?.eligibility !== 'isolated-exact-profile';
+  const localCheckSets = localEligibility?.eligibility === 'qualified-exact-profile' ? localEligibility.allowedCheckSets : [];
+  const retainedTarget = imageReference?.includes('/nginx@') ? { ...pinnedExample, reference: imageReference } : pinnedExample;
+  const localCard: ImageSuggestion = { ...retainedTarget, scannable: localEligibility?.imageReference === retainedTarget.reference && localEligibility.eligible === true,
+    eligibility: localEligibility?.eligibility, allowedCheckSets: localEligibility?.allowedCheckSets, qualificationId: localEligibility?.qualificationId,
+    reason: eligibilityBusy ? 'Проверяем актуальный серверный допуск…' : localEligibility?.eligible ? 'Серверный допуск подтверждён; новый запуск проверяется повторно' : 'Локальный профиль недоступен для выбранных проверок' };
   const visible: ImageSuggestion[] = [
+    localCard,
     ...matches.map(target => ({ ...target, scannable: true })),
-    ...suggestions.filter(target => !matches.some(item => item.reference === target.reference)),
-  ];
+    ...suggestions.filter(target => target.reference !== localCard.reference && !matches.some(item => item.reference === target.reference)),
+  ].map(target => target.reference.includes('/nginx@') && localEligibility?.imageReference === target.reference ?
+    { ...target, scannable: localEligibility.eligible, eligibility: localEligibility.eligibility, allowedCheckSets: localEligibility.allowedCheckSets } : target);
+
   async function create(values: FormValues) {
     if (demo || !live || !confirmed || busy) return;
-    const eligible = alpineTargets.some(target => target.reference === values.imageReference) || (selectedTarget.current?.reference === values.imageReference && selectedTarget.current.scannable === true);
-    if (!eligible) { setConfirmed(false); setError('Выберите цель с подтверждённым серверным допуском.'); return; }
+    const eligible = alpineTargets.some(target => target.reference === values.imageReference) ||
+      localEligibility?.imageReference === values.imageReference && localEligibility.eligible ||
+      selectedTarget.current?.reference === values.imageReference && selectedTarget.current.eligibility === 'isolated-exact-profile' && selectedTarget.current.scannable === true;
+    const sameAttempt = attempt.current?.target === values.imageReference && attempt.current?.checks === scanChecks.filter(check => values.checks.includes(check)).join(',');
+    if (!eligible && !sameAttempt) { setConfirmed(false); setError('Выберите цель с подтверждённым серверным допуском.'); return; }
     setBusy(true);
     setError('');
     try {
       const selected = scanChecks.filter(check => values.checks.includes(check));
       if (attempt.current?.target !== values.imageReference || attempt.current?.checks !== selected.join(',')) {
+        if (values.imageReference.includes('/nginx@')) {
+          const response = await fetch('/api/v1/browser/scans/images/eligibility', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ imageReference: values.imageReference, checks: selected }) });
+          const result = response.ok ? eligibilitySchema.parse(await response.json()) : null;
+          if (scanSession().subject !== live.scope[2] || scanSession().generation !== live.scope[1]) return;
+          if (!result?.eligible || result.imageReference !== values.imageReference ||
+            !result.allowedCheckSets.some(set => set.join(',') === selected.join(','))) { setConfirmed(false); setError('Актуальный серверный допуск недоступен. Скан не создан.'); return; }
+        }
         attempt.current = { target: values.imageReference, checks: selected.join(','), key: crypto.randomUUID() };
       }
       const receipt = await live.transport.create({ imageReference: values.imageReference, scope: 'image', checks: selected, idempotencyKey: attempt.current.key });
@@ -278,6 +367,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     disabled={!target.scannable}
                     onClick={() => {
                       selectedTarget.current = target;
+                      if (target.reference.includes('/nginx@') && live) sessionStorage.setItem(`scan-target-v1:${live.scope[2]}`, target.reference);
                       setValue('imageReference', target.reference, { shouldValidate: true });
                       setConfirmed(false);
                       if (imageReference !== target.reference) attempt.current = null;
@@ -285,7 +375,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     }}
                   >
                     <strong>{target.label}</strong>
-                    <span>{target.reference}{target.reason ? ` · ${target.reason}` : ''}{target.tagConfirmed === false ? ' · latest — предлагаемая цель, наличие тега и платформы не подтверждено' : ''}{alpineTargets.some(saved => saved.reference === target.reference) ? ' · сохранённая цель' : ' · найдено в Docker Hub'}</span>
+                    <span>{target.reference}{target.reason ? ` · ${target.reason}` : ''}{target.reference.includes('@sha256:') ? ' · закреплённый digest, не latest' : target.tagConfirmed === false ? ' · latest — предлагаемая цель, наличие тега и платформы не подтверждено' : ''}{alpineTargets.some(saved => saved.reference === target.reference) || target.reference === localCard.reference ? ' · сохранённая закреплённая цель' : ' · найдено в Docker Hub'}</span>
                   </button>
                 ))}
                 <p ref={discoveryStatus} role="status" tabIndex={-1} aria-label="Состояние поиска Docker Hub">
@@ -303,10 +393,17 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 {imageReference ? <p className="scan-a1__muted">Выбранная цель (сохраняется отдельно от поиска): {imageReference}</p> : null}
               </div>
               {imageReference === alpineTargets[3].reference ? <p className="scan-a1__muted">Архивный образ: при проверке закреплённого digest 04.10.2026 локальная DB нашла 4 CVE. Результат нового запуска зависит от актуальной DB и доступности scanner; этот образ не используйте для рабочих нагрузок.</p> : null}
+              <p className="scan-a1__muted">Закреплённый nginx — исторический пример с большим числом OS CVE (72 APK в доказательстве 06.10.2026). Число находок нового скана определяется текущей DB; это не гарантия результата и не рекомендация для рабочих нагрузок.</p>
               {errors.imageReference ? <p id="image-reference-error" role="alert">{errors.imageReference.message}</p> : null}
             </div>
             <fieldset>
               <legend>Проверки · одновременно, область registry IMAGE</legend>
+              {localSelected ? <div role="group" aria-label="Доказанные наборы локального профиля">
+                {localCheckSets.map(set => <label key={set.join(',')}><input type="radio" name="local-check-set"
+                  checked={JSON.stringify(canonicalSelected) === JSON.stringify(set)} onChange={() => { setValue('checks', [...set]); setConfirmed(false); attempt.current = null; setError(''); }} />
+                  {set.length === 1 ? set[0] : 'Secrets + SBOM + CVE'}</label>)}
+                <p>Image config и недоказанные сочетания для этого профиля недоступны.</p>
+              </div> : <>
               <label>
                 <input type="checkbox" value="secret" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
                 Secrets · проверка образа
@@ -323,6 +420,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 <input type="checkbox" value="config" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
                 Image config · OCI User metadata, не runtime / Dockerfile
               </label>
+              </>}
               <label>
                 <input type="checkbox" disabled />
                 Host / running container · не поддерживаются (только registry IMAGE)
@@ -343,7 +441,8 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
             <button
               className="scan-a1__disabled"
               type="submit"
-              disabled={demo || !live || !confirmed || !checks.length || busy}
+              disabled={demo || !live || !confirmed || !checks.length || busy ||
+                              (imageReference?.includes('/nginx@') && !attempt.current && (eligibilityBusy || !localEligibility?.eligible))}
               title={demo ? 'Демо не запускает реальные сканы' : undefined}
             >
               <LockKeyhole size={17} className="mr-2 inline" aria-hidden="true" />
@@ -379,8 +478,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 <span className="scan-a1__guide-kicker">ПЕРЕД ПРОВЕРКОЙ</span>
                 <h3>Начните с точного адреса.</h3>
                 <p>
-                  Выберите Alpine из доступных тегов и подтвердите область. Другие репозитории сервер сейчас
-                  не принимает. Tag сам по себе не доказывает digest.
+                  Выберите Alpine или точный профиль с актуальным серверным допуском и подтвердите область. Произвольные репозитории недоступны. Tag сам по себе не доказывает digest.
                 </p>
               </GuideTabsContent>
               <GuideTabsContent value="limits">

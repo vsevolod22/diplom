@@ -96,7 +96,7 @@ test('real browser POST → worker → v11 → GET/SSE → strict parser, indepe
     }
     const reader = new Database(env.SCAN_LEDGER_PATH);
     try {
-      assert.equal(reader.pragma('user_version', { simple: true }), 11);
+      assert.equal(reader.pragma('user_version', { simple: true }), 12);
       assert.equal(JSON.stringify(reader.prepare('SELECT * FROM scan_check_results').all()).includes('CANARY'), false);
       assert.equal(JSON.stringify(reader.prepare('SELECT * FROM scan_audit').all()).includes('CANARY'), false);
       assert.equal(reader.pragma('integrity_check', { simple: true }), 'ok');

@@ -55,7 +55,7 @@ try {
   while (!stopping) {
     await heartbeat();
     if (config.phase !== 'queued' || existsSync('/data/db-proof.go'))
-      await consumeOne(ledger, { timeoutMs: 60_000, dbDir: '/tmp/trivy', vuln }, undefined, Date.now(), undefined, undefined, archiveRunner);
+      await consumeOne(ledger, { timeoutMs: 60_000, dbDir: '/tmp/trivy', vuln, archivePolicy: 'proof' }, undefined, Date.now(), undefined, undefined, archiveRunner);
     await sleep(500);
   }
 } finally {

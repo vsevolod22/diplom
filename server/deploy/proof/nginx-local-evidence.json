@@ -1,0 +1,96 @@
+{
+  "scope": "fresh compiled LOCAL, ordinary existing isolated accounts, no LIVE activation",
+  "metadata": {
+    "Version": 2,
+    "NextUpdate": "2026-10-07T13:07:05.606377538Z",
+    "UpdatedAt": "2026-10-06T13:07:05.606377799Z",
+    "DownloadedAt": "2026-10-06T13:58:43.680115Z"
+  },
+  "ledger": {
+    "rows": 2,
+    "version": 12
+  },
+  "before": {
+    "memory.max": "1073741824",
+    "memory.swap.max": "0",
+    "memory.current": "1036185600",
+    "memory.peak": "1073741824",
+    "memory.events": "low 0\nhigh 0\nmax 2584\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu.max": "100000 100000",
+    "pids.max": "128"
+  },
+  "after": {
+    "memory.max": "1073741824",
+    "memory.swap.max": "0",
+    "memory.current": "1021681664",
+    "memory.peak": "1073745920",
+    "memory.events": "low 0\nhigh 0\nmax 13490\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu.max": "100000 100000",
+    "pids.max": "128"
+  },
+  "samples": 67,
+  "sampledPeakBytes": 1073717248,
+  "recreation": true,
+  "proof": {
+    "scanIds": [
+      "439ac75d-b59c-4538-938e-becb33a86c0e",
+      "84a45a75-9309-41a7-b49b-b02e5300484d"
+    ],
+    "readonlyEligibility": true,
+    "unsupportedSetsBeforeReplay": true,
+    "logout": true,
+    "actualChromium": true,
+    "domLoginSearchSelectionCreateReportReload": true,
+    "isolated": true,
+    "digest": "sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3",
+    "configDigest": "sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5",
+    "archiveQualified": true,
+    "savedCardReload": true,
+    "qualification": {
+      "qualificationId": "nginx-local-0dcc-v1",
+      "version": 1,
+      "configDigest": "sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5",
+      "profileVersion": "nginx-alpine-amd64-v2-candidate",
+      "checksVersion": "trivy-0.69.3-archive-v1",
+      "resourcePolicyVersion": "nginx-archive-resources-v1",
+      "scannerVersion": "0.69.3"
+    },
+    "findings": 209,
+    "components": 72,
+    "os": {
+      "name": "alpine",
+      "version": "3.23.3"
+    },
+    "node": {
+      "outcome": "unsupported",
+      "reason": "NODE_INVENTORY_ABSENT"
+    },
+    "dbManifest": "sha256:018edd6b1a4c854dc5e47ef8303b90d219ca64a661dec52d843753fbc5e1f56a",
+    "scannerVersion": "0.69.3",
+    "standaloneHttpCreated": true,
+    "standaloneFindings": 209,
+    "replay": true,
+    "ownership": true,
+    "rejectedOtherPins": true,
+    "noSeededScan": true
+  },
+  "testedAtUtc": "2026-10-07T07:18:24.671310+00:00",
+  "testedSourceSha256": {
+    "server/api/src/oci/nginx-local-policy.ts": "2514e707d06ec90a4197bd4f43340c3c8bb060174e1e275f019a8b2f7bb05ee5",
+    "server/api/src/oci/nginx-local-profile.ts": "186858f50343a595329cb962a54b7e78a558333be23bee4e3d72cface237062c",
+    "server/api/src/oci/nginx-local.main.ts": "9338bc0f71f8abc19c9709a38eb51c85a87909a39f77d69d86577be18f6a44b1",
+    "server/api/src/oci/nginx-local.module.ts": "48ad0e2c4bf308be683c82652d2170cd40dee8be5a7efcfa30bb09c16fcc01f6",
+    "server/api/src/worker/worker-runtime.ts": "79b5c7e9659a98203faef37b41a773746f202583ca0cb1ea0e2abfe508c8f61e",
+    "server/api/src/worker/outbox-consumer.ts": "98a1a46a02daad0df0a4234330efff12c57a584ea076392b4cf3be0e10dbcb51",
+    "server/api/src/ledger/ledger.ts": "8b0c98c71474a490e3bf50de0100f6fc0cfe5f65c26c9052a8b6915697d764db",
+    "server/api/src/scans/scans.service.ts": "69872af952c1ac20c752e2a008b679103350ae9455caff3afb329d47af806727",
+    "server/api/src/scans/browser-scans.controller.ts": "7e7c5f0ddb0a6594f52336674374a4c0d0c26eed6958b2783296ebcfaabeccd5",
+    "src/pages/scans/ScanCreatePage.tsx": "daddfcd9943d7de2fabf81fd47e4476dcec1ddea0f189f153de4f8088523c20b",
+    "server/deploy/compose.stand.nginx.local.yaml": "f6587a7a355ac1c51610d65f1851223a72b9e0e64e09f548c3e8faca0ab0e3a6",
+    "server/deploy/stand.nginx.conf": "fd6d5b35cd3d4d0eedf09415523e31746497001453084b2b82ae07bed1a25a5f",
+    "server/deploy/trust/stand_composition.py": "64d2d51935caca408082388ed2d4cd74cb7e0bf6e7112862f780004824daada6",
+    "server/deploy/trust/refresh-local-stand.py": "b9a6163518a9da168613f0defd8fccfaa3eed7f9bf279b399627473ce229ffb7",
+    "server/deploy/proof/test_nginx_local_path.py": "513563db12eaa6996df32a47e4c53cb22dc6cb387a113f5485c6b2c8b928b7bf",
+    "server/deploy/proof/nginx-local-browser.mjs": "bf218a12e9720417cbbb35b8c317d11ff96ebc0ba858f24da1d2b993753e82f4"
+  }
+}

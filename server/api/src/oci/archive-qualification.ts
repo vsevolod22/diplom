@@ -57,7 +57,7 @@ try {
         const target = { ...candidate, digest: candidate.digest as `sha256:${string}`, subject: owner.id,
       idempotencyKey: `qualification-${scenario.name}`, checks: JSON.stringify(checks), scope: 'image', fingerprint: createHash('sha256').update(`exact-nginx-v1-${scenario.name}`).digest('hex') };
     const id = ledger.enqueue(target).scanId;
-    assert.equal(await consumeOne(ledger, scenario.options), true);
+    assert.equal(await consumeOne(ledger, { ...scenario.options, archivePolicy: 'proof' }), true);
     const report = ledger.archiveResult(id, target.subject);
     assert.ok(report, 'actual consumer must persist bounded receipt report');
     assert.equal(report.vuln?.outcome, scenario.expected, `Candidate outcome mismatch (${report.vuln?.outcome === 'failed' ? report.vuln.reason : report.vuln?.outcome})`);
@@ -106,7 +106,7 @@ try {
       scope: 'image', checks, idempotencyKey: target.idempotencyKey }) });
     assert.equal(denied.status, 400, 'closed public admission cannot replay internally seeded jobs');
     assert.equal(ledger.enqueue(target).scanId, id);
-    assert.equal(await consumeOne(ledger, scenario.options), false);
+    assert.equal(await consumeOne(ledger, { ...scenario.options, archivePolicy: 'proof' }), false);
     const residue = await readdir('/tmp/trivy/jobs'); assert.equal(residue.length, 0, 'attempt tree cleaned including fanal/cache');
     console.log(JSON.stringify({ scenario: scenario.name, checks, terminal: ledger.state(id, target.subject),
       secret: report.secret?.outcome, sbom: report.sbom?.outcome, vuln: report.vuln?.outcome,

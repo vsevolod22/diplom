@@ -52,6 +52,13 @@ export class BrowserScansController {
     return this.imageSearch.search(subject, query, generation, cursor);
   }
 
+  @Post('images/eligibility')
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(200)
+  eligibility(@Req() req: BrowserRequest, @Body() body: unknown) {
+    return this.scans.eligibility(this.identity(req, true), body);
+  }
+
   @Post()
   @Header('Cache-Control', 'no-store')
   @HttpCode(202)

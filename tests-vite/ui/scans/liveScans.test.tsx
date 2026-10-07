@@ -27,7 +27,15 @@ const imagePage = (items: Array<{ label: string; reference: string; scannable: b
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-function mount(path: string) {
+function mount(path: string, ownEligibility = false) {
+  // Existing discovery tests mock Hub pages only. Dispatch the new independent
+  // read-only endpoint without consuming those pagination fixtures.
+  if (!ownEligibility) {
+    const original = fetch;
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => input === '/api/v1/browser/scans/images/eligibility'
+      ? Promise.resolve(json({ imageReference: JSON.parse(String(init?.body)).imageReference, eligible: false,
+        eligibility: 'unsupported', allowedCheckSets: [], reason: 'UNSUPPORTED_SCAN' })) : original(input, init)));
+  }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Routes>
     <Route path="/account" element={<DemoAuthPage mode="account" />} />
@@ -46,6 +54,114 @@ function emulateDisabledBlur(element: HTMLElement) {
   element.blur();
   if (disabled) element.setAttribute('disabled', '');
 }
+
+describe('LOCAL server-authoritative saved target', () => {
+  const reference = 'registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3';
+  const sets = [['secret'], ['sbom'], ['vuln'], ['secret','sbom','vuln']];
+  const eligibility = (eligible = true, reason = eligible ? 'READY' : 'SCANNER_UNAVAILABLE') => ({ imageReference: reference, eligible,
+    eligibility: 'qualified-exact-profile', allowedCheckSets: sets, qualificationId: 'nginx-local-0dcc-v1', reason });
+  beforeEach(() => sessionStorage.clear());
+  afterEach(() => sessionStorage.clear());
+
+  it('revalidates saved digest without Hub, retains four sets through readiness changes and uses historical copy', async () => {
+    sessionStorage.setItem('scan-target-v1:alice', reference);
+    let ready = false;
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      requests.push(path);
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) return json(eligibility(ready));
+      return json({ scans: [], nextCursor: null });
+    }));
+    mount('/scans/new', true);
+    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
+    await screen.findByRole('radio', { name: 'Secrets + SBOM + CVE' });
+    expect(card.hasAttribute('disabled')).toBe(true);
+    expect(card.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText(/72 APK.*не гарантия результата/)).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: /Image config · OCI/ })).toBeNull();
+    expect(requests.some(path => path.includes('/images?'))).toBe(false);
+    ready = true; fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(screen.getByRole('radio', { name: 'Secrets + SBOM + CVE' }));
+    await waitFor(() => expect((screen.getByRole('radio', { name: 'Secrets + SBOM + CVE' }) as HTMLInputElement).checked).toBe(true));
+    expect(screen.getAllByRole('radio')).toHaveLength(4);
+    ready = false; fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(true));
+    expect(screen.getAllByRole('radio')).toHaveLength(4);
+    expect(sessionStorage.getItem('scan-target-v1:alice')).toBe(reference);
+  });
+
+  it('rechecks before new POST but preserves exact ambiguous replay key when eligibility closes', async () => {
+    const posts: Array<{ imageReference: string; checks: string[]; idempotencyKey: string }> = [];
+    let ready = true, eligibilityRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) { eligibilityRequests++; return json(eligibility(ready)); }
+      if (path === '/api/v1/browser/scans' && init?.method === 'POST') { posts.push(JSON.parse(String(init.body))); throw new TypeError('response lost after acceptance'); }
+      return json({ scans: [], nextCursor: null });
+    }));
+    mount('/scans/new', true);
+    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    await screen.findByRole('radio', { name: 'secret' });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    await screen.findByText(/результат запроса неизвестен/);
+    expect(eligibilityRequests).toBeGreaterThanOrEqual(2);
+    ready = false; fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(true));
+    const reads = eligibilityRequests;
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1]).toEqual(posts[0]); expect(eligibilityRequests).toBe(reads);
+    expect(posts[0]).toMatchObject({ imageReference: reference, checks: ['secret'] });
+  });
+
+  it('new POST never enqueues when the fresh eligibility probe closes', async () => {
+    let reads = 0, posts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) return json(eligibility(++reads === 1));
+      if (init?.method === 'POST') posts++;
+      return json({ scans: [], nextCursor: null });
+    }));
+    mount('/scans/new', true);
+    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await screen.findByText(/Актуальный серверный допуск недоступен/);
+    expect(posts).toBe(0);
+  });
+
+  for (const change of ['checks', 'subject'] as const) it(`ignores stale eligibility after ${change}`, async () => {
+    sessionStorage.setItem('scan-target-v1:alice', reference);
+    let finish!: (value: ReturnType<typeof json>) => void;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) {
+        if (++reads === 1) return json(eligibility());
+        return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+      }
+      return json({ scans: [], nextCursor: null });
+    }));
+    const client = mount('/scans/new', true);
+    await screen.findByRole('radio', { name: 'sbom' });
+    fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (change === 'checks') fireEvent.click(screen.getByRole('radio', { name: 'vuln' }));
+    else {
+      act(() => { transitionScanSession('bob', client); client.setQueryData(['demo-auth', 'me'], { id: 'bob', email: 'bob@example.com' }); });
+      await waitFor(() => expect(sessionStorage.getItem('scan-target-v1:alice')).toBeNull());
+    }
+    await act(async () => finish(json(eligibility())));
+    if (change === 'checks') expect(screen.getByRole('button', { name: /nginx · закреплённый пример/ }).hasAttribute('disabled')).toBe(true);
+    else expect(sessionStorage.getItem('scan-target-v1:alice')).toBeNull();
+  });
+});
 
 describe('cookie-session live scans', () => {
   for (const action of ['restore', 'search', 'target', 'checks', 'moved-then-body', 'tab', 'unowned', 'pointer'] as const) it(`surviving pagination after native disabled blur: ${action}`, async () => {

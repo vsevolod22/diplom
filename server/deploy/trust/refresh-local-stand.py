@@ -21,6 +21,9 @@ REPO = Path(__file__).resolve().parents[3]
 TRUST = REPO / 'server/deploy/trust'
 ROOT = REPO / '.local-auth'
 ENV = ROOT / 'stand.env'
+sys.path.insert(0, str(TRUST))
+from stand_composition import select, refresh_lock
+
 COMPOSE = ['docker', 'compose', '--env-file', str(ENV), '-f', str(REPO / 'server/deploy/compose.stand.yaml'),
            '-f', str(REPO / 'server/deploy/compose.stand.vuln.local.yaml')]
 
@@ -112,7 +115,9 @@ def container_preflight(manifest, bundle):
 
 def scan_chain_ready():
     run(*COMPOSE, 'exec', '-T', 'api', 'node', '--import', 'tsx', '--input-type=module', '-e',
-        "import {chainReady} from './src/scans/scan-readiness.ts'; process.exit((await chainReady()) ? 0 : 1)",
+        "import {chainReady} from './src/scans/scan-readiness.ts'; " +
+        ("import {localWorkerReady} from './src/oci/nginx-local-profile.ts'; " if str(REPO / 'server/deploy/compose.stand.nginx.local.yaml') in COMPOSE else '') +
+        "process.exit((await chainReady()" + (" && await localWorkerReady()" if str(REPO / 'server/deploy/compose.stand.nginx.local.yaml') in COMPOSE else '') + ") ? 0 : 1)",
         timeout=30)
 
 
@@ -140,8 +145,19 @@ def switch(text, updated, manifest, bundle):
 
 def refresh():
     check(ROOT.is_dir() and not ROOT.is_symlink())
-    lock = ROOT / '.trivy-refresh.lock'
-    lock.mkdir(mode=0o700)  # exclusive across timer/manual runs
+    global COMPOSE
+    previous_compose = COMPOSE
+    with refresh_lock(ROOT):
+        composition = select(REPO, ROOT, ENV)
+        COMPOSE = list(composition.command)
+        try:
+            refresh_selected()
+        finally:
+            COMPOSE = previous_compose
+
+
+def refresh_selected():
+    # The composition selection is immutable for candidate/switch/verify/rollback.
     try:
         current = ENV.read_text()
         values = env_values(current)
@@ -200,7 +216,7 @@ def refresh():
         switch(current, replace_pins(current, release, manifest, hashes['bundle']), manifest, hashes['bundle'])
         print('DB release activated; TLS/OCI/local signature verified (NOT publisher identity)')
     finally:
-        lock.rmdir()
+        pass
 
 
 if __name__ == '__main__':

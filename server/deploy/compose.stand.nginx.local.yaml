@@ -1,0 +1,7 @@
+# Explicit operator composition only. Defaults/Dockerfile commands stay closed.
+# Apply after BOTH stand bases; no proof auth/trust or resource overrides.
+services:
+  api:
+    command: [node, --import, tsx, src/oci/nginx-local.main.ts]
+  worker:
+    command: [node, --import, tsx, src/worker/nginx-local-worker.main.ts]
