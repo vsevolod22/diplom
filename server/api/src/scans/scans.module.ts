@@ -7,5 +7,5 @@ import { ScansService } from './scans.service.js';
 import { BrowserScansController } from './browser-scans.controller.js';
 import { AuthModule } from '../auth/auth.module.js';
 
-@Module({ imports: [SecurityModule, OciModule, LedgerModule, AuthModule], controllers: [ScansController, BrowserScansController], providers: [ScansService] })
+@Module({ imports: [SecurityModule, OciModule, LedgerModule, AuthModule], controllers: [ScansController, BrowserScansController], providers: [ScansService], exports: [ScansService] })
 export class ScansModule {}
