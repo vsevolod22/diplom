@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -188,6 +189,159 @@ class BrokerProofMockControllerTests(unittest.TestCase):
                 self.controller.evidence = copy.deepcopy(original)
                 mutation(self.controller.evidence)
                 self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+
+    def test_actual_raw_ingress_rejections_preserve_all_denial_callbacks(self):
+        # Actual existing parser/Broker.deny + stub transport, NOT real Engine proof.
+        root = Path(__file__).resolve().parents[3]
+        script = r"""
+const { createIngress } = require('./server/broker/src/ingress.ts');
+const { Broker } = require('./server/broker/src/broker.ts');
+const { AuditBuffer } = require('./server/broker/src/audit.ts');
+const { PolicyStore } = require('./server/broker/src/policy.ts');
+const net = require('node:net');
+const fs = require('node:fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+(async () => {
+  const observations = [];
+  for (const request of input.requests) {
+    const audit = new AuditBuffer();
+    let adapterCalls = 0, handleCalls = 0, denialCallbacks = 0;
+    const broker = new Broker({ policy: new PolicyStore(), audit,
+      engine: { inspect: async () => { adapterCalls++; throw new Error('unexpected dispatch'); } } });
+    const originalDeny = broker.deny.bind(broker);
+    broker.deny = (...args) => { denialCallbacks++; return originalDeny(...args); };
+    const originalHandle = broker.handle.bind(broker);
+    broker.handle = (...args) => { handleCalls++; return originalHandle(...args); };
+    const server = createIngress(broker);
+    try {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject); server.listen(input.socket, resolve);
+      });
+      fs.chmodSync(input.socket, 0o600);
+      const wireBytes = await new Promise((resolve, reject) => {
+        const client = net.createConnection(input.socket);
+        let bytes = 0;
+        client.setTimeout(1000, () => { client.destroy(); reject(new Error('probe deadline')); });
+        client.on('error', reject);
+        client.on('data', chunk => { bytes += chunk.length; });
+        client.on('close', () => resolve(bytes));
+        client.on('connect', () => client.write(request.method + ' ' + request.path +
+          ' HTTP/1.1\r\nHost: broker\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'));
+      });
+      await new Promise(resolve => setImmediate(resolve));
+      const records = audit.drain();
+      observations.push({ adapterCalls, audit: records,
+        response: { status: 'ingress_rejected', wireBytes, closed: true, handleCalls,
+          denialCallbacks, auditCorrelations: records.map(record => record.correlationId) } });
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  }
+  process.stdout.write(JSON.stringify(observations));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        loader = "const r=require('node:module').createRequire(process.cwd()+'/server/api/package.json'); const s=require('node:child_process').spawnSync(process.execPath,[r.resolve('tsx/cli'),'--eval',process.argv[1]],{stdio:'inherit',timeout:8000}); process.exit(s.status??1);"
+        result = subprocess.run(["node", "-e", loader, script], cwd=root, text=True,
+                                input=json.dumps({"socket": str(self.root / "raw.sock"),
+                                                  "requests": [proof.client_request(n, self.enrolled) for n in ("exec", "create", "export")]}),
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        observations = json.loads(result.stdout)
+        self.assertEqual(len(observations), 3)
+        for index, observation in enumerate(observations, 1):
+            self.assertEqual(observation["adapterCalls"], 0)
+            self.assertEqual(observation["response"]["wireBytes"], 0)
+            self.assertEqual(observation["response"]["handleCalls"], 0)
+            self.assertEqual(observation["response"]["denialCallbacks"], 2)
+            self.assertEqual(len(observation["audit"]), 2)
+            self.controller.evidence["cases"][index].update(response=observation["response"], audit=observation["audit"])
+        result = self.run_mock()
+        self.assertEqual(result["status"], "EVIDENCE_CANDIDATE")
+        self.assertFalse(result["realProofAccepted"])
+        self.assertEqual(result["counters"][1]["response"], observations[0]["response"])
+        original = copy.deepcopy(self.controller.evidence)
+        mutations = [lambda c: c["audit"].pop(), lambda c: c["audit"].append(copy.deepcopy(c["audit"][0])),
+                     lambda c: c["audit"][1].update(correlationId=c["audit"][0]["correlationId"]),
+                     lambda c: c["audit"][1].update(stage="publication"),
+                     lambda c: c["audit"][1].update(reason="overload"),
+                     lambda c: c["audit"][1].update(subject="subject-a"),
+                     lambda c: c["response"]["auditCorrelations"].reverse(),
+                     lambda c: c["response"].update(wireBytes=1), lambda c: c["response"].update(closed=False),
+                     lambda c: c["response"].update(handleCalls=1), lambda c: c["response"].update(denialCallbacks=1),
+                     lambda c: c["response"].update(wireBytes=False), lambda c: c["response"].update(wireBytes=0.0),
+                     lambda c: c["response"].update(handleCalls=False), lambda c: c["response"].update(handleCalls=0.0),
+                     lambda c: c["response"].update(denialCallbacks=2.0),
+                     lambda c: c["response"].update(status="not_authorized")]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.controller.evidence = copy.deepcopy(original)
+                mutation(self.controller.evidence["cases"][1])
+                self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+        self.controller.evidence = copy.deepcopy(original)
+        case = self.controller.evidence["cases"][1]
+        replay = self.controller.evidence["cases"][0]["audit"][0]["correlationId"]
+        case["audit"][0]["correlationId"] = replay
+        case["response"]["auditCorrelations"][0] = replay
+        self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+        self.controller.evidence = copy.deepcopy(original)
+        self.controller.evidence["cases"][4]["audit"].append(copy.deepcopy(self.controller.evidence["cases"][4]["audit"][0]))
+        self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+        for name in proof.CASES[1:]:
+            for counter in ("adapter", "received", "forwarded"):
+                self.controller.evidence = copy.deepcopy(original)
+                self.controller.evidence["cases"][proof.CASES.index(name)]["after"][counter] += 1
+                self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+        for index in (4, 5, 6):
+            self.controller.evidence = copy.deepcopy(original)
+            self.controller.evidence["cases"][index].update(response=observations[0]["response"], audit=observations[0]["audit"])
+            self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+
+    def test_snapshot_context_is_exact_string_id_and_strict_integer_version(self):
+        original = copy.deepcopy(self.controller.evidence)
+        contexts = [{"id": self.enrolled["context"], "version": value} for value in (True, False, 1.0, "1", 0, -1, 2)]
+        contexts += [{"id": 1, "version": 1}, {"id": self.enrolled["context"]},
+                     {"id": self.enrolled["context"], "version": 1, "extra": 0}]
+        for context in contexts:
+            with self.subTest(context=context):
+                self.controller.evidence = copy.deepcopy(original)
+                snapshot = self.controller.evidence["cases"][0]["response"]["snapshot"]
+                snapshot["context"] = context
+                snapshot["hash"] = hashlib.sha256(json.dumps({k: v for k, v in snapshot.items() if k != "hash"}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                self.assertEqual(self.run_mock()["status"], "PROOF_FAILED")
+
+    def test_candidate_numeric_fields_reject_bool_float_and_integer_lookalikes(self):
+        original = copy.deepcopy(self.controller.evidence)
+        paths = [("caller", "bytes"), ("defaultOff", "listeners"),
+                 ("topology", "budget", "cpuMillis"), ("topology", "budget", "memoryBytes"),
+                 ("topology", "processes", "client", "uid"), ("topology", "processes", "client", "namespaces", "mnt"),
+                 ("topology", "mounts", "client", 0, "device"), ("topology", "mounts", "client", 0, "inode"),
+                 ("topology", "mounts", "client", 0, "uid"), ("topology", "access", 0, "errno")]
+        paths += [("cases", i, phase, counter) for i in range(len(proof.CASES))
+                  for phase in ("before", "after") for counter in ("adapter", "received", "forwarded")]
+        for path in paths:
+            for kind in (bool, float, str):
+                with self.subTest(path=path, kind=kind):
+                    evidence = copy.deepcopy(original)
+                    parent = evidence
+                    for key in path[:-1]:
+                        parent = parent[key]
+                    parent[path[-1]] = kind(parent[path[-1]])
+                    with self.assertRaises(proof.Failure):
+                        proof.verify_run(evidence, self.enrolled)
+        for value in (True, False, float(os.getuid()), str(os.getuid())):
+            enrollment = {**self.enrolled, "ownerUid": value}
+            self.path.write_text(json.dumps(enrollment))
+            with self.assertRaises(proof.Failure):
+                proof.enrollment(self.path, "mock-owned")
+        self.path.write_text(json.dumps(self.enrolled))
+        for facts in ({"resources": {k: True for k in ("memory", "nanoCpus", "pids", "cpuQuota", "cpuPeriod")}},
+                      {"mounts": {"groups": [{"type": "bind", "readOnly": True, "count": True}], "socketPresent": False}},
+                      {"ports": [{"port": True, "protocol": "tcp", "published": False}]}):
+            snapshot = copy.deepcopy(original["cases"][0]["response"]["snapshot"])
+            snapshot["facts"].update(facts)
+            snapshot["hash"] = hashlib.sha256(json.dumps({k: v for k, v in snapshot.items() if k != "hash"}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            with self.assertRaises(proof.Failure):
+                proof.snapshot_hash(snapshot, self.enrolled)
 
     def test_ambiguous_run_and_cleanup_failure_are_not_pass(self):
         self.controller.run_fails = True

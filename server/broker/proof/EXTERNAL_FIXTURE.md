@@ -14,6 +14,8 @@ python3 server/deploy/proof/brokerproof_runner.py
 ```
 
 The group uses simulated measurements and a fake **control-protocol** Unix socket.
+One focused regression also executes the unchanged actual raw ingress and `Broker.deny`
+with a stub transport on an owned temporary Unix socket, retaining all callback records.
 It is NOT a real Engine, topology, namespace, mount or no-bypass test. The second
 command, without enrollment, outputs `TOPOLOGY_UNQUALIFIED` and exits **1**. It does
 not discover Docker, read Docker environment variables, or contact any daemon.
@@ -160,6 +162,11 @@ Evidence exact keys `cases,caller,defaultOff,topology`:
   `clientRequest.brokerMode=disposable`, except `ro-only-no-permit`: fresh isolated
   broker variant with merely socket `:ro` and no boundary permit, must deny. Keep
   counters cumulative across variants; do not replace real Engine with fake transport.
+- All numeric enrollment/measurement fields require strict Python/JSON safe integers:
+  booleans, floats (`1.0`), strings and nonintegers are rejected, not coerced. Positive
+  version/size/UID/inode fields have minimum1; actual owner UID, device, errno,
+  zero counters/listeners/handle calls/wire bytes may be0. Snapshot context has exactly
+  `{id:<enrolled string>,version:1}` with integer version, never `true`.
 - Counters `before/after={adapter,received,forwarded}` are measured cumulative safe
   integers. Consecutive cases' counters join exactly. Positive increments ALL by1 and
   observed `requests=[{method:"GET",path:"/v1.47/containers/<A>/json"}]`. Every negative
@@ -167,14 +174,36 @@ Evidence exact keys `cases,caller,defaultOff,topology`:
   Engine traffic. Rate limiter must not mask authorization: denial audit reason must
   be invalid_request/authorization/disabled for the corresponding case, not overload.
 - Positive response `{status:"checked",snapshot:<actual sanitized snapshot v1>}`;
-  negatives exactly `{status:"not_authorized"}`. Runner recomputes the documented
-  canonical sanitized hash with ASCII/fixed-schema facts and safe integers, checks
-  nested output allowlists/types, and accepts no Env/labels/path/error fields.
+  a **parsed broker denial** has exactly `{status:"not_authorized"}` and exactly one
+  admission audit. This represents an actual parsed wire reply, never a synthetic
+  replacement for a closed connection. Runner recomputes the documented canonical
+  sanitized hash with ASCII/fixed-schema facts and safe integers, checks nested output
+  allowlists/types, and accepts no Env/labels/path/error fields.
+- For exec/create/export only, the existing complete-frame **raw ingress rejection**
+  closes with no response bytes before `handle`. The controller instead returns the
+  observation (NOT a broker reply) with exactly:
+  `{status:"ingress_rejected",wireBytes:0,closed:true,handleCalls:0,denialCallbacks:2,auditCorrelations:[<first UUID>,<second UUID>]}`.
+  Instrument the actual connection's receive/close, broker handle/deny callbacks and
+  complete audit capture; count independently, not by deriving callback count from
+  the retained array. The current raw guard and request callback each call `deny`,
+  producing **two distinct actual UUIDs**. Retain both complete records in callback
+  order, never deduplicate, invent a JSON response, or filter unrelated audit into the
+  case. Drain/flush a quiet isolated broker between sequential case connections and
+  independently map every captured callback UUID to that connection. Timeout/error
+  alone is not an observed close/reject; missing callbacks, unknown counts or extra
+  records fail qualification. A different callback count requires separate protocol
+  review, not silent relaxation. All three adapter/received/forwarded deltas remain0;
+  empty wire or denial counts alone do not prove zero Engine traffic.
 - Full fixed-schema broker `audit` records: positive correlated allowed admission +
-  checked publication; each negative one not_authorized admission, expected reason,
-  dispatched=false. Correlations unique between cases. Unauthorized B is never logged
-  as a verified target. Parser-close/missing audit evidence fails this candidate rather
-  than silently weakening the requested proof.
+  checked publication; parsed denial one not_authorized admission; raw rejection two
+  not_authorized admissions with anonymous/invalid target/context, invalid_request,
+  dispatched=false. Raw audit UUIDs must exactly match the connection observation's
+  ordered list, be distinct and not reused by any other case. Parsed/positive records
+  retain their single within-request correlation, unique across cases. Every denial
+  has its expected reason (authorization for wrong-ID/context, disabled for ro-only).
+  Unauthorized B is never logged as a verified target. Wrong-ID/context/ro-only cannot
+  substitute a raw-close observation. Missing, excessive, unrelated, replayed or
+  publication/dispatch audit records fail; no proof counts are weakened.
 
 **cleanup** — sent only after a qualified `run` was attempted, including timeout or
 invalid response (start may be ambiguous). Additional field is exact enrolled
@@ -190,7 +219,8 @@ with 10s reserved for cleanup, bounded 128KiB response, duplicate keys/non-finit
 rejected, no retry, stream, shell, dependency install or Engine fallback. Fixed status
 output does not copy control exceptions/raw inspect/credentials. Safe candidate output
 contains challenge/source pin/topology digest/sanitized snapshot hash and joined
-counter/request/audit records for review; raw daemon data is never retained by runner.
+counter/request/validated response/audit records for review; raw daemon data is never
+retained by runner. Raw-close observations remain explicitly distinct from wire replies.
 
 - Missing enrollment/unsafe evidence: `TOPOLOGY_UNQUALIFIED`, exit1.
 - Explicit fixture endpoint/Engine unavailable: `DOCKER_ENGINE_UNAVAILABLE`, exit1.

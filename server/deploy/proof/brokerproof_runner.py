@@ -95,7 +95,7 @@ def enrollment(path: Path, authorization: str):
                           "resources", "containerA", "containerB", "context")))
     require(value["schema"] == "owned-broker-fixture-v1")
     require(identifier(value["fixture"]) and authorization == value["fixture"])
-    require(type(value["ownerUid"]) is int and value["ownerUid"] == os.getuid())
+    require(integer(value["ownerUid"]) and value["ownerUid"] == os.getuid())
     require(hex_id(value["controllerDigest"]))
     require(isinstance(value["controllerSocket"], str) and len(value["controllerSocket"]) <= 100)
     require(hex_id(value["containerA"]) and hex_id(value["containerB"]))
@@ -168,6 +168,8 @@ def qualify(e, enrolled):
     require(e["backend"] == "real-engine" and e["controllerDigest"] == enrolled["controllerDigest"])
     require(e["resources"] == enrolled["resources"])
     require(e["hostSocketMounts"] == [] and e["hostNamespaceJoins"] == [])
+    require(exact(e["budget"], ("cpuMillis", "memoryBytes")))
+    require(all(integer(v, 1) for v in e["budget"].values()))
     require(e["budget"] == {"cpuMillis": 2000, "memoryBytes": 1_073_741_824})
     processes = e["processes"]
     require(exact(processes, ROLES))
@@ -226,7 +228,10 @@ def qualify(e, enrolled):
 def snapshot_hash(snapshot, enrolled):
     require(exact(snapshot, ("schemaVersion", "containerId", "context", "observedAt", "coverage", "facts", "hash")), "PROOF_FAILED")
     require(snapshot["schemaVersion"] == "inspect-snapshot-v1" and snapshot["containerId"] == enrolled["containerA"], "PROOF_FAILED")
-    require(snapshot["context"] == {"id": enrolled["context"], "version": 1}, "PROOF_FAILED")
+    context = snapshot["context"]
+    require(exact(context, ("id", "version")), "PROOF_FAILED")
+    require(isinstance(context["id"], str) and context["id"] == enrolled["context"], "PROOF_FAILED")
+    require(integer(context["version"], 1) and context["version"] == 1, "PROOF_FAILED")
     require(snapshot["coverage"] == "runtime-config-inspect" and hex_id(snapshot["hash"]), "PROOF_FAILED")
     require(isinstance(snapshot["observedAt"], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", snapshot["observedAt"]) is not None, "PROOF_FAILED")
     require(exact(snapshot["facts"], ("configuredUser", "privileged", "readonlyRootfs", "capAdd", "capDrop", "security", "namespaces", "mounts", "ports", "resources")), "PROOF_FAILED")
@@ -294,9 +299,9 @@ def client_request(name, enrolled):
 
 def verify_run(e, enrolled):
     require(exact(e, ("cases", "caller", "defaultOff", "topology")), "PROOF_FAILED")
-    require(e["defaultOff"] == {"stdout": "inspect_broker_disabled\n", "listeners": 0} and type(e["defaultOff"]["listeners"]) is int, "PROOF_FAILED")
+    require(e["defaultOff"] == {"stdout": "inspect_broker_disabled\n", "listeners": 0} and integer(e["defaultOff"]["listeners"]), "PROOF_FAILED")
     require(exact(e["caller"], ("digest", "bytes", "grant", "consent", "subject")), "PROOF_FAILED")
-    require(hex_id(e["caller"]["digest"]) and e["caller"]["bytes"] == 32, "PROOF_FAILED")
+    require(hex_id(e["caller"]["digest"]) and integer(e["caller"]["bytes"], 1) and e["caller"]["bytes"] == 32, "PROOF_FAILED")
     require(e["caller"]["grant"] == "grant-a" and e["caller"]["consent"] == "consent-a" and e["caller"]["subject"] == "subject-a", "PROOF_FAILED")
     cases = e["cases"]
     require(isinstance(cases, list) and len(cases) == len(CASES), "PROOF_FAILED")
@@ -314,30 +319,49 @@ def verify_run(e, enrolled):
         path = "/v1.47/containers/" + enrolled["containerA"] + "/json"
         require(case["requests"] == ([{"method": "GET", "path": path}] if delta else []), "PROOF_FAILED")
         response = case["response"]
-        require(exact(response, ("status", "snapshot") if delta else ("status",)), "PROOF_FAILED")
-        require(response["status"] == ("checked" if delta else "not_authorized"), "PROOF_FAILED")
+        raw_reject = isinstance(response, dict) and response.get("status") == "ingress_rejected"
+        if raw_reject:
+            require(name in ("exec", "create", "export"), "PROOF_FAILED")
+            require(exact(response, ("status", "wireBytes", "closed", "handleCalls", "denialCallbacks", "auditCorrelations")), "PROOF_FAILED")
+            require(integer(response["wireBytes"]) and response["wireBytes"] == 0 and response["closed"] is True, "PROOF_FAILED")
+            require(integer(response["handleCalls"]) and response["handleCalls"] == 0, "PROOF_FAILED")
+            # Current complete-frame raw guard and request callback each call deny().
+            # Each actual deny gets its own UUID; never deduplicate or fabricate a reply.
+            require(integer(response["denialCallbacks"], 1) and response["denialCallbacks"] == 2, "PROOF_FAILED")
+        else:
+            require(exact(response, ("status", "snapshot") if delta else ("status",)), "PROOF_FAILED")
+            require(response["status"] == ("checked" if delta else "not_authorized"), "PROOF_FAILED")
         if delta:
             snapshot_hash(response["snapshot"], enrolled)
         audit = case["audit"]
-        require(isinstance(audit, list) and len(audit) == (2 if delta else 1), "PROOF_FAILED")
+        require(isinstance(audit, list) and len(audit) == (2 if delta or raw_reject else 1), "PROOF_FAILED")
+        if raw_reject:
+            require(isinstance(response["auditCorrelations"], list) and
+                    response["auditCorrelations"] == [r.get("correlationId") if isinstance(r, dict) else None for r in audit], "PROOF_FAILED")
         correlation = None
+        case_correlations = set()
         for index, record in enumerate(audit):
             require(exact(record, AUDIT_KEYS), "PROOF_FAILED")
             require(isinstance(record["correlationId"], str) and re.fullmatch(r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}", record["correlationId"]) is not None, "PROOF_FAILED")
             require(isinstance(record["time"], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", record["time"]) is not None, "PROOF_FAILED")
-            require(correlation is None or record["correlationId"] == correlation, "PROOF_FAILED")
+            require(record["correlationId"] not in correlations, "PROOF_FAILED")
+            if raw_reject:
+                require(record["correlationId"] not in case_correlations, "PROOF_FAILED")
+                require(record["subject"] == "anonymous" and record["containerId"] == "invalid" and record["context"] == "invalid", "PROOF_FAILED")
+            else:
+                require(correlation is None or record["correlationId"] == correlation, "PROOF_FAILED")
             correlation = record["correlationId"]
+            case_correlations.add(correlation)
             require(record["operation"] == "inspect" and record["scope"] == "container:inspect", "PROOF_FAILED")
             require(record["subject"] in ("anonymous", "subject-a") and record["containerId"] in ("invalid", enrolled["containerA"]) and record["context"] in ("invalid", enrolled["context"]), "PROOF_FAILED")
-            require(record["stage"] == ("publication" if index == 1 else "admission"), "PROOF_FAILED")
+            require(record["stage"] == ("publication" if delta and index == 1 else "admission"), "PROOF_FAILED")
             require(type(record["dispatched"]) is bool and record["dispatched"] == (delta == 1 and index == 1), "PROOF_FAILED")
             require(record["decision"] == (("allowed" if index == 0 else "checked") if delta else "not_authorized"), "PROOF_FAILED")
             reason = "allowed" if delta else "disabled" if name == "ro-only" else "authorization" if name.startswith("wrong-") else "invalid_request"
             require(record["reason"] == reason and len(json.dumps(record)) <= 1024, "PROOF_FAILED")
             if delta:
                 require(record["subject"] == "subject-a" and record["containerId"] == enrolled["containerA"] and record["context"] == enrolled["context"], "PROOF_FAILED")
-        require(correlation not in correlations, "PROOF_FAILED")
-        correlations.add(correlation)
+        correlations.update(case_correlations)
     qualify(e["topology"], enrolled)
 
 
@@ -368,7 +392,7 @@ def run(path=None, authorization=None, controller_factory=Controller):
                       topologyDigest=hashlib.sha256(json.dumps(topology, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                       snapshotHash=evidence["cases"][0]["response"]["snapshot"]["hash"],
                       counters=[{"case": c["name"], "clientRequest": c["clientRequest"], "before": c["before"], "after": c["after"],
-                                 "requests": c["requests"], "audit": c["audit"]} for c in evidence["cases"]])
+                                 "requests": c["requests"], "response": c["response"], "audit": c["audit"]} for c in evidence["cases"]])
     except Failure as error:
         result["status"] = error.status
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
