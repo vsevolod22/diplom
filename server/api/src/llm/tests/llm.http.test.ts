@@ -17,7 +17,7 @@ import { ReportReader, type ReportContext } from '../report-context.js';
 import { BrowserIdentity } from '../browser-identity.js';
 import { policyFromEnvironment, type LlmPolicy } from '../policy.js';
 import { productionProvider } from '../openrouter-provider.js';
-import { digest, fixtureEnv, fixturePolicy, image, reply, vuln } from './fixtures.js';
+import { archiveFixture, digest, fixtureEnv, fixturePolicy, image, reply, vuln } from './fixtures.js';
 
 const origin = 'http://127.0.0.1:8080';
 test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model, never live acceptance)', async t => {
@@ -70,6 +70,14 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
     ], buildResult({ outcome: 'checked' }, { dockerfile: false, iac: false }, {
       manifestDigest: digest, configDigest: `sha256:${'d'.repeat(64)}`, platform: { os: 'linux', architecture: 'amd64' },
     }, 'DEFAULT_ROOT')), true);
+    const archive = (key: string, results: Pick<ReturnType<typeof archiveFixture>, 'secret' | 'sbom' | 'vuln'>) => {
+      const value = { ...archiveFixture(), ...results };
+      const scanId = ledger.enqueue({ ...value.receipt, subject: owner.id, idempotencyKey: key,
+        scope: 'image', checks: JSON.stringify(Object.keys(results)) }).scanId;
+      const attempt = ledger.claim()!;
+      assert.equal(ledger.finishArchive(scanId, attempt.attempts, value), true);
+      return scanId;
+    };
     const path = (scanId = id) => `${base}/browser/scans/${scanId}/llm`;
     const context = async (scanId = id) => {
       const response = await fetch(`${path(scanId)}/context`, { headers: { cookie: owner.cookie } });
@@ -267,6 +275,123 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       generate = async r => reply(r);
       await new Promise(resolve => setTimeout(resolve, 10));
       assert.equal((await post(await consent())).status, 200);
+    });
+    await t.test('router-equivalent LLM boundaries redact parser errors; encoded literals and unrelated API stay outside filter', async () => {
+      const before = calls, beforeFactories = factories;
+      const body = await consent();
+      let acceptedSummaries = 0;
+      for (const url of ['/summary', '/summary/', '/SUMMARY', '/SuMmArY/?probe=1', '/context', '/CONTEXT/'].map(s => path() + s)
+        .concat(path().replace('/api/v1/browser/scans/', '/API/V1/BROWSER/SCANS/').replace('/llm', '/LLM') + '/SUMMARY/')) {
+        const isContext = /\/context\/?$/i.test(url);
+        const accepted = await fetch(url, { method: isContext ? 'GET' : 'POST',
+          headers: { cookie: owner.cookie, origin, 'content-type': 'application/json' },
+          ...(isContext ? {} : { body: JSON.stringify(body) }) });
+        assert.equal(accepted.status, 200, url);
+        assert.equal(accepted.headers.get('cache-control'), 'no-store');
+        await accepted.json();
+        if (!isContext) acceptedSummaries++;
+        const response = await fetch(url, { method: isContext ? 'GET' : 'POST',
+          headers: { origin, 'content-type': 'application/json' }, ...(isContext ? {} : { body: '{}' }) });
+        assert.equal(response.status, 401, url); // Real router acceptance, not a regex-only test.
+        assert.deepEqual(await response.json(), { errorCode: 'UNAUTHORIZED' });
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        for (const raw of ['{"CANARY-private": BROKEN}', `{"prompt":"CANARY-private${'x'.repeat(120000)}"}`]) {
+          const malformed = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: raw });
+          assert.equal(malformed.status, raw.length > 100000 ? 413 : 400, url);
+          assert.equal(malformed.headers.get('cache-control'), 'no-store');
+          assert.deepEqual(await malformed.json(), { errorCode: 'LLM_INVALID_REQUEST' });
+        }
+      }
+      for (const url of [path().replace('/api/', '/%61pi/') + '/summary', path() + '/%73ummary',
+        path() + '/summary/extra', path() + '/summary-other']) {
+        const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        assert.equal(response.status, 404); // Express does not decode literal route segments.
+        assert.equal(response.headers.get('cache-control'), null);
+        assert.equal((await response.json() as { statusCode: number }).statusCode, 404);
+      }
+      const unrelated = await fetch(`${base}/scans/${id}`);
+      assert.equal(unrelated.status, 401); assert.equal(unrelated.headers.get('cache-control'), null);
+      assert.deepEqual(await unrelated.json(), { errorCode: 'UNAUTHORIZED' }); // Existing ScanAuthGuard's body, unchanged.
+      assert.equal(calls, before + acceptedSummaries); assert.equal(factories, beforeFactories + acceptedSummaries);
+    });
+
+    await t.test('archive partial/failed/unsupported projections retain authoritative metadata; real conflicts still fail closed', async () => {
+      const identity = app.get(BrowserIdentity).resolve({ headers: { cookie: owner.cookie }, socket: {} });
+      const reader = app.get(ReportReader);
+      const partial = archive('archive-partial', { secret: { outcome: 'checked', findings: [secrets[0]] },
+        sbom: { outcome: 'failed', reason: 'SCAN_TIMEOUT' }, vuln: { outcome: 'failed', reason: 'DB_UNAVAILABLE' } });
+      const report = reader.read(identity, partial);
+      assert.equal(report.state, 'partial'); assert.equal(report.findings[0].findingId, secrets[0].findingId);
+      for (const check of ['secret', 'sbom', 'vuln'] as const) {
+        const c = report.coverage[check] as Record<string, unknown>;
+        assert.equal(c.scannerVersion, '0.69.3'); assert.equal(typeof c.checkedAt, 'string');
+      }
+      assert.equal((report.coverage.vuln as Record<string, unknown>).reason, 'DB_UNAVAILABLE');
+      assert.equal((report.coverage.vuln as Record<string, unknown>).findingCount, undefined);
+      const before = calls;
+      assert.equal((await post(await consent(partial), owner.cookie, partial)).status, 200);
+      assert.equal(calls, before + 1);
+      for (const check of ['secret', 'sbom', 'vuln'] as const) {
+        const failed = archive(`archive-failed-${check}`, { [check]: { outcome: 'failed', reason: 'SCAN_FAILED' } });
+        const r = reader.read(identity, failed);
+        assert.equal((r.coverage[check] as Record<string, unknown>).outcome, 'failed');
+        assert.equal((r.coverage[check] as Record<string, unknown>).scannerVersion, '0.69.3');
+      }
+      const manifestDigest = `sha256:${'d'.repeat(64)}`;
+      const unsupported = archive('archive-unsupported', { vuln: { outcome: 'unsupported', reason: 'OS_EOL',
+        os: { outcome: 'unsupported', reason: 'OS_EOL' }, node: { outcome: 'unsupported', reason: 'NODE_INVENTORY_ABSENT' },
+        db: { envelopeVersion: 1, schemaVersion: 2, signer: 'local-db-operator-v1', manifestDigest,
+          source: `ghcr.io/aquasecurity/trivy-db@${manifestDigest}`, artifactSha256: 'a'.repeat(64), metadataSha256: 'b'.repeat(64), dbSha256: 'c'.repeat(64),
+          updatedAt: new Date(Date.now() - 60000).toISOString(), downloadedAt: new Date(Date.now() - 30000).toISOString(),
+          nextUpdate: new Date(Date.now() + 120000).toISOString() } } });
+      assert.equal((reader.read(identity, unsupported).coverage.vuln as Record<string, unknown>).outcome, 'unsupported');
+      const service = app.get(ScansService), original = service.vuln.bind(service);
+      try {
+        for (const corrupt of [
+          (page: any) => ({ ...page, scannerVersion: '9.9.9' }),
+          (page: any) => ({ ...page, checkedAt: '2020-01-01T00:00:00.000Z' }),
+          (page: any) => ({ ...page, platform: 'linux/arm64' }),
+          (page: any) => ({ ...page, image: `image@sha256:${'f'.repeat(64)}` }),
+          (page: any) => ({ ...page, findingCount: 0 }),
+          (page: any) => ({ ...page, outcome: 'checked', findingCount: 0 }),
+        ]) {
+          service.vuln = (...args) => corrupt(original(...args));
+          assert.throws(() => reader.read(identity, partial), /LLM_REPORT_UNAVAILABLE|Conflict/);
+        }
+      } finally { service.vuln = original; }
+      const version = reader.read(identity, partial).reportVersion;
+      const mutate = new Database(join(directory, 'ledger.sqlite'));
+      try { mutate.prepare('UPDATE outbox SET attempts=attempts+1 WHERE scan_id=?').run(partial); }
+      finally { mutate.close(); }
+      assert.notEqual(reader.read(identity, partial).reportVersion, version);
+    });
+
+    await t.test('zero evidence clean/incomplete/unknown reports refuse before provider/key lookup; unknown is never zero coverage', async () => {
+      const clean = enqueue('zero-clean', ['secret']), attempt = ledger.claim()!;
+      assert.equal(ledger.finishCombined(clean, attempt.attempts, [
+        { check: 'secret', outcome: 'checked', findings: [], scannerVersion: '0.69.3' },
+      ]), true);
+      const failed = archive('zero-failed', { secret: { outcome: 'failed', reason: 'SCAN_FAILED' } });
+      const unknown = enqueue('zero-unknown', ['secret', 'vuln']); ledger.cancel(unknown, owner.id);
+      const identity = app.get(BrowserIdentity).resolve({ headers: { cookie: owner.cookie }, socket: {} });
+      for (const scanId of [clean, failed, unknown]) {
+        const r = app.get(ReportReader).read(identity, scanId);
+        const c = r.coverage.secret as Record<string, unknown>;
+        assert.equal(c.findingCount, scanId === clean ? 0 : undefined);
+        if (scanId === unknown) assert.deepEqual(c, { outcome: 'unknown', reason: 'NO_RESULT' });
+        const before = calls, beforeFactories = factories;
+        const response = await post(await consent(scanId), owner.cookie, scanId);
+        assert.equal(response.status, 409); assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(await response.json(), { errorCode: 'LLM_NO_EVIDENCE' });
+        assert.equal(calls, before); assert.equal(factories, beforeFactories);
+      }
+      const service = app.get(ScansService), original = service.results.bind(service);
+      try {
+        // Deliberately invalid trusted projection, like the corruption fixtures above.
+        const corrupt = (page: any) => ({ ...page, coverage: { ...page.coverage, outcome: undefined } });
+        service.results = (...args) => corrupt(original(...args));
+        await denied(post({ reportVersion: 'unknown', consent: { accepted: true, policyVersion: fixturePolicy.version } }, owner.cookie, clean), 409);
+      } finally { service.results = original; }
     });
   } finally {
     await app.close();

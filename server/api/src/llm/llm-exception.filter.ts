@@ -3,7 +3,7 @@ import { APP_FILTER, BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
 import type { ServerResponse } from 'node:http';
 
 const safeCodes = new Set(['LLM_UNAVAILABLE', 'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_STALE_REPORT',
-  'LLM_STALE_POLICY', 'LLM_CONTEXT_LIMIT', 'LLM_CAPACITY', 'LLM_REQUEST_ABORTED', 'LLM_RESPONSE_LIMIT',
+  'LLM_STALE_POLICY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_CAPACITY', 'LLM_REQUEST_ABORTED', 'LLM_RESPONSE_LIMIT',
   'LLM_PROVIDER_UNAVAILABLE', 'LLM_INVALID_RESPONSE', 'LLM_REPORT_UNAVAILABLE', 'LLM_CONFIGURATION_UNAVAILABLE',
   'SCAN_ACCESS_DENIED', 'SCAN_ACCESS_DISABLED', 'SCAN_NOT_FOUND', 'INVALID_BROWSER_REQUEST', 'UNAUTHORIZED',
   'INVALID_ORIGIN', 'INVALID_CONTENT_TYPE', 'AUTH_UNAVAILABLE']);
@@ -16,7 +16,9 @@ export class LlmExceptionFilter extends BaseExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const http = host.switchToHttp();
     const request = http.getRequest<{ originalUrl?: string; url?: string }>();
-    if (!/^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/(?:context|summary)(?:\?|$)/.test(request.originalUrl ?? request.url ?? ''))
+    // Match Express's case-insensitive, optional-trailing-slash literal routes.
+    // Do not decode static segments: Express does not route their encoded aliases.
+    if (!/^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/(?:context|summary)\/?(?:\?|$)/i.test(request.originalUrl ?? request.url ?? ''))
       return super.catch(exception, host);
     const response = http.getResponse<ServerResponse>();
     const adapter = this.adapters.httpAdapter;

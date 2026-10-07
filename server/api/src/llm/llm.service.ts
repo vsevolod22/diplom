@@ -42,6 +42,9 @@ export class LlmService {
     const deadline = setTimeout(abort, policy.timeoutMs);
     try {
       this.current(authorize, identity, report, policy, signal);
+      // Every published hypothesis requires a real finding citation. An empty set
+      // cannot support a reply; refuse locally, not after a paid/impossible request.
+      if (!report.findings.length) throw new ConflictException({ errorCode: 'LLM_NO_EVIDENCE' });
       const provider = this.runtime.provider();
       if (signal.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
       const stopped = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () =>

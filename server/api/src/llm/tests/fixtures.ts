@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { policyFromEnvironment } from '../policy.js';
 import type { ReportContext } from '../report-context.js';
+import { NGINX_ARCHIVE_TARGET } from '../../oci/bounded-image-archive.js';
+import type { ArchiveScanReport } from '../../worker/archive-scan-worker.js';
 
 // Explicit fake settings, NOT approved production choices. No live requests in these tests.
 export const fixtureEnv: NodeJS.ProcessEnv = {
@@ -32,6 +34,14 @@ export const fixtureReport: ReportContext = {
   }, findings: [{ check: 'vuln', findingId: vuln(0).findingId, severity: 'LOW' }], findingCount: 1,
   checkedIsNotSafe: true, omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded',
 };
+// Synthetic validated archive envelope, never scanner/live qualification evidence.
+export function archiveFixture(): ArchiveScanReport {
+  return { receipt: { ...NGINX_ARCHIVE_TARGET, layerDigests: [`sha256:${'a'.repeat(64)}`], diffIds: [`sha256:${'b'.repeat(64)}`],
+    archiveSha256: `sha256:${'c'.repeat(64)}`, profileVersion: 'nginx-alpine-amd64-v1',
+    resourcePolicyVersion: 'nginx-archive-resources-v1', checksVersion: 'trivy-0.69.3-archive-v1' },
+    scannerVersion: '0.69.3', checkedAt: Date.now(), metrics: { wireBytes: 100, requests: 5, compressedBytes: 50,
+      expandedBytes: 2048, entries: 1, archiveBytes: 4096, reservationPeak: 4096, scratchPeak: 4096 } };
+}
 export function envelope(content: unknown = reply(fixtureReport)) {
   return { id: 'fixture-id', model: fixturePolicy.model, choices: [{ finish_reason: 'stop', message: {
     role: 'assistant', content: JSON.stringify(content), refusal: null, reasoning: null,

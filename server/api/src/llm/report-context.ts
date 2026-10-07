@@ -181,15 +181,25 @@ export class ReportReader {
           check === 'vuln' ? this.scans.vuln(identity, scanId, String(cursor), '100') : this.scans.sbom(identity, scanId, String(cursor), '100'));
         raw.push(page);
         const current = coverage(check === 'secret' ? page.coverage : page, check === 'sbom');
+        // Nonchecked archive pages omit optional identity metadata that status
+        // supplies authoritatively. Retain it without accepting supplied conflicts.
+        if (current.outcome !== 'checked') {
+          for (const key of ['scannerVersion', 'checkedAt'])
+            if (current[key] === undefined && expected[key] !== undefined) current[key] = expected[key];
+          // A null failed-page count is unknown, equivalent to an absent status
+          // count, never a verified zero. Numeric counts still have to agree.
+          if (current.findingCount === null && expected.findingCount === undefined) delete current.findingCount;
+        }
         const projected = JSON.stringify(current);
         if (firstCoverage !== undefined && firstCoverage !== projected) return invalid();
         firstCoverage = projected;
         if (current.outcome !== expected.outcome || current.reason !== expected.reason ||
             current.errorCode !== expected.errorCode || current.scannerVersion !== expected.scannerVersion ||
-                        current.checkedAt !== expected.checkedAt ||
-                        JSON.stringify([current.os, current.node, current.db]) !== JSON.stringify([expected.os, expected.node, expected.db]) ||
+            current.checkedAt !== expected.checkedAt ||
+            JSON.stringify([current.os, current.node, current.db]) !== JSON.stringify([expected.os, expected.node, expected.db]) ||
             (check === 'sbom' ? current.componentCount !== expected.componentCount : current.findingCount !== expected.findingCount)) return invalid();
-        if (check !== 'secret' && page.image !== undefined && (typeof page.image !== 'string' || !page.image.endsWith(`@${digest}`) || page.platform !== platform)) return invalid();
+        if (check !== 'secret' && (page.image !== undefined && (typeof page.image !== 'string' || !page.image.endsWith(`@${digest}`) ||
+            current.outcome === 'checked' && page.platform !== platform) || page.platform !== undefined && page.platform !== platform)) return invalid();
         const entries = check === 'sbom' ? page.components : page.findings;
         if (!Array.isArray(entries) || entries.length > 100 || current.outcome !== 'checked' && entries.length) return invalid();
         for (const f of entries) if (check !== 'sbom') append(finding(f, check));
