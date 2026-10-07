@@ -1,9 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createAuthorizedScanTransport } from '@/shared/api/scans/httpScanTransport';
+import { createAuthorizedScanTransport, scanResponseError } from '@/shared/api/scans/httpScanTransport';
 import { parseCurrentList, parseCurrentResults, parseCurrentSbom, parseCurrentVuln, parseCurrentStatus, parseScanReceipt, parseScanResults, parseScanStatus, reconcileSnapshot, sameOriginScanUrl } from '@/shared/api/scans/scanTransport';
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('scan transport boundary', () => {
+  it('TASK35 validates bounded matching Retry-After without timed retries for auth errors', async () => {
+    for (const [seconds, header, reason, expected] of [[5, '5', 'rate', 5], [1, '1', 'concurrency', 1], [60, '60', 'capacity', 60],
+      [0, '0', 'rate', 60], [61, '61', 'rate', 60], [3.5, '3.5', 'rate', 60], [2, null, 'rate', 60], [2, '3', 'rate', 60], [2, '2', 'unknown', 60]] as const) {
+      const response = new Response(JSON.stringify({ errorCode: reason === 'capacity' ? 'IMAGE_SEARCH_CAPACITY' : 'IMAGE_SEARCH_RATE_LIMITED', retryAfterSeconds: seconds, limitReason: reason }),
+        { status: 429, headers: header ? { 'Retry-After': header } : {} });
+      expect(await scanResponseError(response)).toMatchObject({ status: 429, retryAfterSeconds: expected });
+    }
+    expect(await scanResponseError(new Response('{}', { status: 429 }))).toMatchObject({ retryAfterSeconds: 60 });
+    for (const status of [401, 403]) expect(await scanResponseError(new Response('{}', { status }))).toMatchObject({ status });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ errorCode: 'SCAN_CAPACITY', retryAfterSeconds: 60 }),
+      { status: 429, headers: { 'Retry-After': '60' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createAuthorizedScanTransport({ subject: 'alice', currentSubject: () => 'alice' });
+    await expect(transport.create({ imageReference: 'library/alpine:3.21', scope: 'image', checks: ['secret'], idempotencyKey: 'test-intent' })).rejects.toMatchObject({ code: 'SCAN_CAPACITY', retryAfterSeconds: 60 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
   it('rejects malformed states and findings rather than claiming a checked scan', () => {
     expect(() => parseScanStatus({ scanId: 'x', state: 'safe' })).toThrow();
     expect(() => parseScanResults({ findings: [{ findingId: 'a', category: 'secret', ruleId: 'b', severity: 'high', secretValue: 'raw' }], nextCursor: null, coverage: [{ check: 'CVE', status: 'ok' }] })).toThrow();

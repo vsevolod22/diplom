@@ -132,6 +132,7 @@ export class ScansService {
 
   private readonly eligibilityRates = new Map<string, { until: number; count: number; active: number }>();
   private eligibilityActive = 0;
+  protected eligibilityNow(): number { return Date.now(); }
   async eligibility(identity: Identity, body: unknown) {
     if (!identity.scope.includes('scan:create')) throw new ForbiddenException();
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['imageReference', 'checks'].includes(key)))
@@ -139,14 +140,22 @@ export class ScansService {
     let request;
     try { request = parseScanRequest({ ...body, scope: 'image', idempotencyKey: 'eligibility-only' }, allowed); }
     catch { throw new BadRequestException({ errorCode: 'INVALID_SCAN_REQUEST' }); }
-    const now = Date.now();
+    const now = this.eligibilityNow();
+    const limited = (limitReason: 'rate' | 'concurrency' | 'capacity', retryAfterSeconds: number) => new HttpException({
+      errorCode: limitReason === 'capacity' ? 'IMAGE_SEARCH_CAPACITY' : 'IMAGE_SEARCH_RATE_LIMITED',
+      limitReason, retryAfterSeconds,
+    }, HttpStatus.TOO_MANY_REQUESTS);
     for (const [subject, rate] of this.eligibilityRates) if (!rate.active && rate.until <= now) this.eligibilityRates.delete(subject);
     let rate = this.eligibilityRates.get(identity.subject);
     if (!rate) {
-      if (this.eligibilityRates.size >= 1024) throw new HttpException({ errorCode: 'IMAGE_SEARCH_CAPACITY' }, 429);
+      if (this.eligibilityRates.size >= 1024) throw limited('capacity', 60);
       rate = { until: now + 60_000, count: 0, active: 0 }; this.eligibilityRates.set(identity.subject, rate);
     }
-    if (++rate.count > 30 || rate.active >= 2 || this.eligibilityActive >= 8) throw new HttpException({ errorCode: 'IMAGE_SEARCH_RATE_LIMITED' }, 429);
+    // Keep the same entry while old work finishes: replacing it would lose active
+    // accounting. Rollover and admission are synchronous, before the first await.
+    if (rate.until <= now) { rate.until = now + 60_000; rate.count = 0; }
+    if (++rate.count > 30) throw limited('rate', Math.max(1, Math.min(60, Math.ceil((rate.until - now) / 1000))));
+    if (rate.active >= 2 || this.eligibilityActive >= 8) throw limited('concurrency', 1);
     const allowedReference = this.acceptsReference(request.reference);
     const sets = allowedReference ? this.allowedCheckSets(request.reference) : [];
     const binding = allowedReference ? this.executionBinding(request.reference) : undefined;

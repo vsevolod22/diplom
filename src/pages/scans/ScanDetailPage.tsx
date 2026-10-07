@@ -17,7 +17,7 @@ import { ScanScene } from '@/features/scans/ScanScene';
 import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
-import { ScanHttpError } from '@/shared/api/scans/httpScanTransport';
+import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import type { ScanCheck, ScanCoverage, ScanStatus } from '@/shared/api/scans/scanTransport';
 import { Alert, Badge, Button } from '@/shared/ui/scan-primitives';
 import { VulnAdvisoryCard } from './VulnAdvisoryCard';
@@ -69,6 +69,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
   const scope = live?.scope ?? unavailableScope;
   const streamKey = `${scope.join(':')}:${scanId}`;
   const [connectedStream, setConnectedStream] = useState<string | null>(null);
+  const [realtime, setRealtime] = useState<'connecting' | 'connected' | 'reconnecting' | 'polling'>('polling');
   const cancellation = useMutation({
     mutationFn: (id: string) => transport.cancel(id),
     onSuccess: async (_, id) => {
@@ -85,8 +86,9 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
     queryFn: ({ signal }) => transport.get(scanId, signal),
     enabled,
     retry: false,
-    refetchOnWindowFocus: !demo,
+    refetchOnWindowFocus: false,
     refetchInterval: demo ? false : (query) => {
+      if (query.state.error instanceof ScanAccessError) return false;
       const snapshot = query.state.data as ScanStatus | undefined;
       return snapshot && ['queued', 'running', 'cancelling'].includes(snapshot.state) && connectedStream !== streamKey ? 2000 : false;
     },
@@ -120,36 +122,51 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
     let mounted = true;
     let refreshing = false;
     let pending = false;
-    const refresh = async () => {
+    let lastRefresh = Date.now();
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    setRealtime('connecting');
+    const refresh = () => {
       pending = true;
-      if (refreshing) return;
-      refreshing = true;
-      try {
-        while (pending && mounted) {
-          pending = false;
-          // Event state and percent are hints only. GET status and results are authoritative.
-          await queryClient.invalidateQueries({ queryKey: [...scope, 'scan', scanId] });
+      if (refreshing || refreshTimer || !mounted) return;
+      refreshTimer = setTimeout(async () => {
+        refreshTimer = undefined;
+        if (!mounted) return;
+        pending = false; refreshing = true; lastRefresh = Date.now();
+        try {
+          // Hints never replace status. Do not cancel/restart an overlapping GET.
+          await queryClient.invalidateQueries({ queryKey: [...scope, 'scan', scanId] }, { cancelRefetch: false });
           if (mounted) await Promise.all([
-                      queryClient.invalidateQueries({ queryKey: [...scope, 'results', scanId] }),
-                      queryClient.invalidateQueries({ queryKey: [...scope, 'sbom', scanId] }),
-                      queryClient.invalidateQueries({ queryKey: [...scope, 'vuln', scanId] }),
-                    ]);
-        }
-      } finally { refreshing = false; }
+            queryClient.invalidateQueries({ queryKey: [...scope, 'results', scanId] }, { cancelRefetch: false }),
+            queryClient.invalidateQueries({ queryKey: [...scope, 'sbom', scanId] }, { cancelRefetch: false }),
+            queryClient.invalidateQueries({ queryKey: [...scope, 'vuln', scanId] }, { cancelRefetch: false }),
+          ]);
+        } finally { refreshing = false; if (pending && mounted) refresh(); }
+      }, Math.max(0, 1000 - (Date.now() - lastRefresh)));
     };
     let close: () => void;
     try {
-      close = transport.subscribeEvents(scanId, () => { void refresh(); },
-        () => { if (mounted) setConnectedStream(null); },
-        () => { if (mounted) { setConnectedStream(streamKey); void refresh(); } });
+      close = transport.subscribeEvents(scanId, refresh,
+        () => {
+          if (!mounted) return;
+          setConnectedStream(null); setRealtime('reconnecting');
+          reconnectTimer ??= setTimeout(() => { if (mounted) setRealtime('polling'); }, 15_000);
+        },
+        () => {
+          if (!mounted) return;
+          clearTimeout(reconnectTimer); reconnectTimer = undefined;
+          setConnectedStream(streamKey); setRealtime('connected'); refresh();
+        });
     } catch {
       // Invalid ID or unavailable EventSource: keep polling the GET snapshot.
+      setRealtime('polling');
       return;
     }
-    return () => { mounted = false; close(); };
+    return () => { mounted = false; clearTimeout(refreshTimer); clearTimeout(reconnectTimer); close(); };
   }, [demo, active, transport, queryClient, scanId, streamKey, scope]);
   const reportData = isSecret && scan.isSuccess && report.isSuccess ? report.data : undefined;
-  const liveCoverage = demo ? undefined : scan.data?.checks?.map((check: ScanCheck): ScanCoverage => {
+  const pendingChecks = demo ? [] : requested.filter(check => !scan.data?.perCheck?.[check]);
+  const liveCoverage = demo ? undefined : scan.data?.checks?.filter(check => !!scan.data?.perCheck?.[check]).map((check: ScanCheck): ScanCoverage => {
     const outcome = scan.data?.perCheck?.[check];
     return { check: { secret: 'Secrets', sbom: 'SBOM', vuln: 'CVE', config: 'Image config' }[check], status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined, checksVersion: outcome?.checksVersion, resourcePolicyVersion: outcome?.resourcePolicyVersion };
   });
@@ -196,7 +213,14 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
           {scan.isSuccess && scan.data.scanId === scanId ? (
             <div className="scan-a1__summary">
               <Badge tone={stateTone[scan.data.state]}>{stateLabels[scan.data.state]}</Badge>
+              <span>Текущая фаза: {stateLabels[scan.data.state]}</span>
               <span>Прогресс: {scan.data.percent == null ? 'неизвестен' : `${scan.data.percent}%`}</span>
+              {!demo ? <span role="status" aria-label="Состояние realtime">{active ? {
+                connecting: 'SSE: подключаемся; статус обновляется через GET',
+                connected: 'SSE: подключён; этап подтверждается GET',
+                reconnecting: 'SSE: переподключение; статус обновляется через GET',
+                polling: 'SSE: недоступен; статус обновляется через GET',
+              }[realtime] : 'Скан завершён; realtime остановлен'}</span> : null}
             </div>
           ) : null}
         </div>
@@ -305,6 +329,9 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 <p className="scan-a1__eyebrow">02 / ПОКРЫТИЕ</p>
                 <h3 id="scan-a1-coverage">Покрытие проверок</h3>
                 <p className="scan-a1__muted">Исход каждой проверки отдельно от статуса скана.</p>
+                {pendingChecks.length ? <ul aria-label="Проверки без подтверждённого результата">{pendingChecks.map(check => <li key={check}>
+                  {check}: {active ? 'ожидаем подтверждённый результат; текущий этап указан сервером выше' : 'результат не предоставлен сервером'}
+                </li>)}</ul> : null}
                 {(liveCoverage ?? reportData?.coverage) ? (
                   <ul className="scan-a1__coverage">
                     {(liveCoverage ?? reportData?.coverage ?? []).map((item) => (

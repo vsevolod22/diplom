@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, LockKeyhole } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
@@ -11,6 +11,7 @@ import { ScanScene } from '@/features/scans/ScanScene';
 import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import { scanChecks } from '@/shared/api/scans/scanTransport';
 import { scanSession } from '@/shared/api/auth/scanSession';
+import { EligibilityClient, type ScanWait } from '@/shared/api/scans/eligibilityClient';
 
 const alpineTargets = [
   { label: 'Alpine · latest', reference: 'registry-1.docker.io/library/alpine:latest' },
@@ -88,11 +89,38 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   // Changing back to the same values must not revive a preflight for an earlier consent.
   const submissionVersion = useRef(0);
   const live = useLiveScanSession();
+  const subject = live?.scope[2] ?? null;
+  const epoch = live?.scope[1] ?? -1;
+  const sessionIdentity = live?.scope.join(':') ?? '';
+  const [eligibilityWait, setEligibilityWait] = useState<ScanWait | null>(null);
+  const [admissionWait, setAdmissionWait] = useState<ScanWait | null>(null);
+  const [eligibilityError, setEligibilityError] = useState('');
+  const eligibilityClient = useMemo(() => subject && !demo ? new EligibilityClient(
+    () => scanSession().subject === subject && scanSession().generation === epoch, wait => {
+      setEligibilityWait(wait);
+      setLocalEligibility(previous => previous ? { ...previous, eligible: false } : null);
+    }) : null, [subject, epoch, demo]);
+  useEffect(() => {
+    eligibilityClient?.activate();
+    setLocalEligibility(null); setEligibilityWait(null); setAdmissionWait(null); setEligibilityError(''); setError(''); setBusy(false);
+    return () => eligibilityClient?.retire();
+  }, [eligibilityClient]);
+  const wait = admissionWait ?? eligibilityWait;
+  const [waitSeconds, setWaitSeconds] = useState(0);
+  useEffect(() => {
+    if (!wait) { setWaitSeconds(0); return; }
+    const tick = () => setWaitSeconds(Math.max(0, Math.ceil((wait.until - Date.now()) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [wait]);
+  const eligibilityWaiting = !!eligibilityWait && eligibilityWait.until > Date.now();
+  const admissionWaiting = !!admissionWait && admissionWait.until > Date.now();
   const navigate = useNavigate();
   useEffect(() => () => { ++submissionVersion.current; }, []);
   useEffect(() => {
-    if (!live || demo) return;
-    const key = `scan-target-v1:${live.scope[2]}`;
+    if (!subject || demo) return;
+    const key = `scan-target-v1:${subject}`;
     if (savedIdentity.current && savedIdentity.current !== key) sessionStorage.removeItem(savedIdentity.current);
     savedIdentity.current = key;
     const saved = sessionStorage.getItem(key);
@@ -100,52 +128,56 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       selectedTarget.current = { label: 'Сохранённая закреплённая цель', reference: saved, scannable: false };
       setValue('imageReference', saved);
     } else if (saved) sessionStorage.removeItem(key);
-    const currentEpoch = live.scope[1];
+    const currentEpoch = epoch;
     return () => {
       const session = scanSession();
-      if (session.subject !== live.scope[2] || session.generation !== currentEpoch) sessionStorage.removeItem(key);
+      if (session.subject !== subject || session.generation !== currentEpoch) sessionStorage.removeItem(key);
     };
-  }, [live, demo, setValue]);
+  }, [subject, epoch, demo, setValue]);
   const eligibilityReference = imageReference?.includes('/nginx@') ? imageReference : pinnedExample.reference;
   const canonicalSelected = scanChecks.filter(check => checks.includes(check));
   const checkIdentity = canonicalSelected.join(',');
   useEffect(() => {
-    if (!live || demo) return;
-    const controller = new AbortController();
-    const current = () => !controller.signal.aborted && scanSession().subject === live.scope[2] && scanSession().generation === live.scope[1];
+    if (!eligibilityClient) return;
+    let mounted = true;
+    const current = () => mounted && scanSession().subject === subject && scanSession().generation === epoch;
     setEligibilityBusy(true);
     setLocalEligibility(previous => previous?.imageReference === eligibilityReference ? { ...previous, eligible: false } : null);
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch('/api/v1/browser/scans/images/eligibility', { method: 'POST', credentials: 'same-origin', signal: controller.signal,
-          headers: { 'content-type': 'application/json' }, body: JSON.stringify({ imageReference: eligibilityReference,
-            checks: checkIdentity ? checkIdentity.split(',') : ['secret'] }) });
-        if (!response.ok) throw new Error('Eligibility unavailable');
-        const result = eligibilitySchema.parse(await response.json());
+        const result = eligibilitySchema.parse(await eligibilityClient.request(eligibilityReference, checkIdentity ? checkIdentity.split(',') : ['secret']));
         if (result.imageReference !== eligibilityReference || result.eligible &&
           !result.allowedCheckSets.some(set => set.join(',') === (checkIdentity || 'secret'))) throw new Error('Eligibility identity mismatch');
-        if (current()) setLocalEligibility(result);
-      } catch { if (current()) setLocalEligibility(null); }
+        if (current()) { setLocalEligibility(result); setEligibilityError(''); }
+      } catch (reason) {
+        if (!current()) return;
+        if (reason instanceof ScanHttpError && reason.status === 429) {
+          setLocalEligibility(previous => previous ? { ...previous, eligible: false } : null);
+        } else {
+          setLocalEligibility(null);
+          setEligibilityError(reason instanceof ScanAccessError ? reason.status === 401 ? 'Сессия недействительна. Войдите заново.' : 'Аккаунту не выдан доступ к сканированию.' : 'Не удалось проверить серверный допуск. Повторите проверку вручную.');
+        }
+      }
       finally { if (current()) setEligibilityBusy(false); }
     }, 150);
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [live, demo, eligibilityReference, checkIdentity, eligibilityRefresh]);
+    return () => { mounted = false; window.clearTimeout(timer); };
+  }, [eligibilityClient, subject, epoch, eligibilityReference, checkIdentity, eligibilityRefresh]);
   useEffect(() => {
-    const refresh = () => setEligibilityRefresh(value => value + 1);
+    const refresh = () => { if (eligibilityClient?.focusAllowed()) setEligibilityRefresh(value => value + 1); };
     window.addEventListener('focus', refresh);
     return () => window.removeEventListener('focus', refresh);
-  }, []);
+  }, [eligibilityClient]);
   useEffect(() => {
     const query = search.trim().toLowerCase().replace(/ +/g, ' ');
     const generation = ++searchGeneration.current;
     const activation = activatedControl.current;
     activatedControl.current = null;
-    const identity = live?.scope.join(':') ?? '';
+    const identity = sessionIdentity;
     if (discovery.current.identity !== identity) {
       ++submissionVersion.current;
       setConfirmed(false); attempt.current = null; selectedTarget.current = null;
       // Preserve only this subject's saved reference, never persisted eligibility.
-      const saved = live ? sessionStorage.getItem(`scan-target-v1:${live.scope[2]}`) : null;
+      const saved = subject ? sessionStorage.getItem(`scan-target-v1:${subject}`) : null;
       if (saved && /^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(saved)) {
         selectedTarget.current = { label: 'Сохранённая закреплённая цель', reference: saved, scannable: false };
         setValue('imageReference', saved);
@@ -160,7 +192,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       if (!restart) { setSuggestions([]); setRetainedResults(false); }
       setNextCursor(null); setPageState(null);
     }
-    if (demo || !live || query.length < 2 || query.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(query) || query.includes('..') || query.includes('//') || query.includes('://')) {
+    if (demo || !subject || query.length < 2 || query.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(query) || query.includes('..') || query.includes('//') || query.includes('://')) {
       setSuggestions([]);
       setSearchState('idle');
       activation?.stop();
@@ -170,12 +202,12 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     const controller = new AbortController();
     const current = () => {
       const session = scanSession();
-      return searchGeneration.current === generation && !controller.signal.aborted && session.generation === live.scope[1] && session.subject === live.scope[2];
+      return searchGeneration.current === generation && !controller.signal.aborted && session.generation === epoch && session.subject === subject;
     };
     const cursor = append ? discovery.current.cursor : null;
     const serverGeneration = discovery.current.generation;
     const handoff = () => {
-      if (current() && activation) focusHandoff.current = { activation, generation, subject: live.scope[2], epoch: live.scope[1] };
+      if (current() && activation) focusHandoff.current = { activation, generation, subject, epoch };
     };
     if (restart) handoff();
     const timer = window.setTimeout(async () => {
@@ -216,7 +248,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       }
     }, append ? 0 : 350);
     return () => { controller.abort(); window.clearTimeout(timer); activation?.stop(); };
-  }, [search, demo, live, pageRequest, setValue]);
+  }, [search, demo, subject, epoch, sessionIdentity, pageRequest, setValue]);
   useLayoutEffect(() => {
     const pending = focusHandoff.current;
     if (!pending) return;
@@ -272,7 +304,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const retainedTarget = imageReference?.includes('/nginx@') ? { ...pinnedExample, reference: imageReference } : pinnedExample;
   const localCard: ImageSuggestion = { ...retainedTarget, scannable: localEligibility?.imageReference === retainedTarget.reference && localEligibility.eligible === true,
     eligibility: localEligibility?.eligibility, allowedCheckSets: localEligibility?.allowedCheckSets, qualificationId: localEligibility?.qualificationId,
-    reason: eligibilityBusy ? 'Проверяем актуальный серверный допуск…' : localEligibility?.eligible ? 'Серверный допуск подтверждён; новый запуск проверяется повторно' : 'Локальный профиль недоступен для выбранных проверок' };
+    reason: eligibilityWaiting ? 'Сервер просит подождать перед проверкой допуска' : eligibilityError || (eligibilityBusy ? 'Проверяем актуальный серверный допуск…' : localEligibility?.eligible ? 'Серверный допуск подтверждён; новый запуск проверяется повторно' : 'Локальный профиль недоступен для выбранных проверок') };
   const visible: ImageSuggestion[] = [
     localCard,
     ...matches.map(target => ({ ...target, scannable: true })),
@@ -288,6 +320,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         (selectedTarget.current.eligibility === 'isolated-exact-profile' || selectedTarget.current.eligibility === 'alpine-only' &&
           values.imageReference.startsWith('registry-1.docker.io/library/alpine:'));
     const sameAttempt = attempt.current?.target === values.imageReference && attempt.current?.checks === scanChecks.filter(check => values.checks.includes(check)).join(',');
+    if (admissionWaiting || eligibilityWaiting && !sameAttempt) return;
     if (!eligible && !sameAttempt) { setConfirmed(false); setError('Выберите цель с подтверждённым серверным допуском.'); return; }
     const selected = scanChecks.filter(check => values.checks.includes(check));
     const version = submissionVersion.current;
@@ -302,9 +335,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     try {
       if (attempt.current?.target !== values.imageReference || attempt.current?.checks !== selected.join(',')) {
         if (values.imageReference.includes('/nginx@')) {
-          const response = await fetch('/api/v1/browser/scans/images/eligibility', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ imageReference: values.imageReference, checks: selected }) });
-          const result = response.ok ? eligibilitySchema.parse(await response.json()) : null;
+          const result = eligibilityClient ? eligibilitySchema.parse(await eligibilityClient.request(values.imageReference, selected, true)) : null;
           if (!current()) return;
           if (!result?.eligible || result.imageReference !== values.imageReference ||
             !result.allowedCheckSets.some(set => set.join(',') === selected.join(','))) { setConfirmed(false); setError('Актуальный серверный допуск недоступен. Скан не создан.'); return; }
@@ -321,7 +352,10 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       } else if (reason instanceof ScanHttpError && reason.status === 400) {
         setError('Сервер отклонил цель или параметры сканирования. Скан не создан.');
       } else if (reason instanceof ScanHttpError && reason.status === 429) {
-        setError('Лимит запусков исчерпан. Скан не создан, повторите позже.');
+        if (reason.code === 'SCAN_CAPACITY') {
+          setAdmissionWait({ until: Date.now() + (reason.retryAfterSeconds ?? 60) * 1000, reason: 'admission' });
+          setError('Сервер пока не принимает новый запуск. Скан не создан; повтор возможен вручную после ожидания.');
+        } else setError('Сервер ограничил проверку допуска. Цель и проверки сохранены; повтор возможен вручную после ожидания.');
       } else if (reason instanceof ScanHttpError && reason.status === 503) {
         setError(values.checks.includes('vuln') ? 'Проверка CVE недоступна: база уязвимостей не настроена или недоступна. Запуск не подтверждён; обратитесь к администратору и проверьте список перед повтором.' : 'Сканер или registry сейчас недоступны. Запуск не подтверждён; проверьте список перед повтором.');
       } else if (reason instanceof ScanHttpError && reason.code === 'IDEMPOTENCY_CONFLICT') {
@@ -330,7 +364,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         setError('Не удалось подтвердить запуск. Проверьте список перед повтором: результат запроса неизвестен.');
       }
     } finally {
-      setBusy(false);
+      if (scanSession().subject === subject && scanSession().generation === epoch) setBusy(false);
     }
   }
   return (
@@ -455,10 +489,16 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 <strong className="[overflow-wrap:anywhere]">{imageReference || 'цель не указана'} · {scanChecks.filter(item => checks.includes(item)).join(', ') || 'проверки не выбраны'}</strong>
               </span>
             </label>
+            {wait ? <p role="status" aria-label="Ожидание сервера">
+              {wait.reason === 'admission' ? 'Ожидание допуска запуска' : wait.reason === 'capacity' ? 'Сервер проверки допуска заполнен' : wait.reason === 'concurrency' ? 'Проверка допуска уже выполняется' : 'Лимит частоты проверки допуска'}:
+              {waitSeconds > 0 ? ` повтор не раньше чем через ${waitSeconds} с.` : ' можно повторить вручную.'} Это не гарантия доступности; автоматического запуска нет.
+            </p> : null}
+            {!demo && live ? <button type="button" disabled={eligibilityBusy || eligibilityWaiting || admissionWaiting}
+              onClick={() => { setEligibilityWait(null); setAdmissionWait(null); setEligibilityRefresh(value => value + 1); }}>Проверить допуск снова</button> : null}
             <button
               className="scan-a1__disabled"
               type="submit"
-              disabled={demo || !live || !confirmed || !checks.length || busy ||
+              disabled={demo || !live || !confirmed || !checks.length || busy || admissionWaiting || (eligibilityWaiting && !attempt.current) ||
                               (imageReference?.includes('/nginx@') && !attempt.current && (eligibilityBusy || !localEligibility?.eligible))}
               title={demo ? 'Демо не запускает реальные сканы' : undefined}
             >

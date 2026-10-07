@@ -25,7 +25,7 @@ const imagePage = (items: Array<{ label: string; reference: string; scannable: b
   nextCursor, state: nextCursor ? 'more-available' : 'terminal', loaded: items.length, pages, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' },
 });
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 function mount(path: string, ownEligibility = false) {
   // Existing discovery tests mock Hub pages only. Dispatch the new independent
@@ -63,9 +63,42 @@ describe('LOCAL server-authoritative saved target', () => {
   beforeEach(() => sessionStorage.clear());
   afterEach(() => sessionStorage.clear());
 
+  it('TASK35 counts slow overlap, settled rerenders and focus TTL without an identity storm', async () => {
+    let finish!: (value: ReturnType<typeof json>) => void;
+    let reads = 0;
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) {
+        reads++;
+        if (reads === 1) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+        return json(eligibility());
+      }
+      return json({ scans: [], nextCursor: null });
+    }));
+    mount('/scans/new', true);
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    const pause = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    fireEvent(window, new Event('focus')); await pause();
+    fireEvent(window, new Event('focus')); await pause();
+    expect(reads).toBe(1);
+    await act(async () => finish(json(eligibility())));
+    const card = screen.getByRole('button', { name: /nginx · закреплённый пример/ });
+    fireEvent.click(card);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    fireEvent(window, new Event('focus')); await pause();
+    expect(reads).toBe(1);
+    now += 5001;
+    fireEvent(window, new Event('focus')); await pause();
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
+    expect(reads).toBe(2);
+  });
+
   it('revalidates saved digest without Hub, retains four sets through readiness changes and uses historical copy', async () => {
     sessionStorage.setItem('scan-target-v1:alice', reference);
-    let ready = false;
+    let ready = false, now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
     const requests: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       requests.push(path);
@@ -81,12 +114,12 @@ describe('LOCAL server-authoritative saved target', () => {
     expect(screen.getByText(/72 APK.*не гарантия результата/)).toBeTruthy();
     expect(screen.queryByRole('checkbox', { name: /Image config · OCI/ })).toBeNull();
     expect(requests.some(path => path.includes('/images?'))).toBe(false);
-    ready = true; fireEvent(window, new Event('focus'));
+    ready = true; now += 5001; fireEvent(window, new Event('focus'));
     await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
     fireEvent.click(screen.getByRole('radio', { name: 'Secrets + SBOM + CVE' }));
     await waitFor(() => expect((screen.getByRole('radio', { name: 'Secrets + SBOM + CVE' }) as HTMLInputElement).checked).toBe(true));
     expect(screen.getAllByRole('radio')).toHaveLength(4);
-    ready = false; fireEvent(window, new Event('focus'));
+    ready = false; now += 5001; fireEvent(window, new Event('focus'));
     await waitFor(() => expect(card.hasAttribute('disabled')).toBe(true));
     expect(screen.getAllByRole('radio')).toHaveLength(4);
     expect(sessionStorage.getItem('scan-target-v1:alice')).toBe(reference);
@@ -94,7 +127,8 @@ describe('LOCAL server-authoritative saved target', () => {
 
   it('rechecks before new POST but preserves exact ambiguous replay key when eligibility closes', async () => {
     const posts: Array<{ imageReference: string; checks: string[]; idempotencyKey: string }> = [];
-    let ready = true, eligibilityRequests = 0;
+    let ready = true, eligibilityRequests = 0, now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
     vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path.endsWith('/images/eligibility')) { eligibilityRequests++; return json(eligibility(ready)); }
@@ -109,8 +143,8 @@ describe('LOCAL server-authoritative saved target', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
     await waitFor(() => expect(posts).toHaveLength(1));
     await screen.findByText(/результат запроса неизвестен/);
-    expect(eligibilityRequests).toBeGreaterThanOrEqual(2);
-    ready = false; fireEvent(window, new Event('focus'));
+    expect(eligibilityRequests).toBe(2);
+    ready = false; now += 5001; fireEvent(window, new Event('focus'));
     await waitFor(() => expect(card.hasAttribute('disabled')).toBe(true));
     const reads = eligibilityRequests;
     fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
@@ -173,6 +207,94 @@ describe('LOCAL server-authoritative saved target', () => {
       checks: change === 'checks' ? ['sbom'] : ['secret'],
     });
     expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+  });
+
+  it('TASK35 rate wait spans checks, retains consent and never automatically launches or polls eligibility', async () => {
+    let reads = 0, posts = 0, now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) {
+        if (++reads === 2 || reads === 4) return { ok: false, status: 429, headers: new Headers({ 'Retry-After': '5' }),
+          json: async () => ({ errorCode: 'IMAGE_SEARCH_RATE_LIMITED', limitReason: 'rate', retryAfterSeconds: 5 }) };
+        return json({ ...eligibility(), allowedCheckSets: sets });
+      }
+      if (init?.method === 'POST') posts++;
+      return json({ scans: [], nextCursor: null });
+    }));
+    const client = mount('/scans/new', true);
+    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    const consent = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement;
+    fireEvent.click(consent);
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await screen.findByRole('status', { name: 'Ожидание сервера' });
+    expect(consent.checked).toBe(true); expect(posts).toBe(0); expect(reads).toBe(2);
+    expect(card.getAttribute('aria-pressed')).toBe('true'); expect(screen.getAllByRole('radio')).toHaveLength(4);
+    fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
+    fireEvent(window, new Event('focus'));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    expect(reads).toBe(2); expect(posts).toBe(0);
+    now += 5001;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1050)); });
+    expect(reads).toBe(2); // Expiry is not an automatic request.
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить допуск снова' }));
+    await waitFor(() => expect(reads).toBe(3));
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
+    expect((screen.getByRole('radio', { name: 'sbom' }) as HTMLInputElement).checked).toBe(true);
+    expect(posts).toBe(0);
+    now += 5001; fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(reads).toBe(4));
+    expect(screen.getByRole('status', { name: 'Ожидание сервера' })).toBeTruthy();
+    act(() => { transitionScanSession('bob', client); client.setQueryData(['demo-auth', 'me'], { id: 'bob', email: 'bob@example.com' }); });
+    await waitFor(() => expect(sessionStorage.getItem('scan-target-v1:alice')).toBeNull());
+    expect(screen.queryByRole('status', { name: 'Ожидание сервера' })).toBeNull();
+    expect(screen.queryByText(/Выбранная цель \(сохраняется отдельно/)).toBeNull();
+  });
+
+  for (const status of [401, 403]) it(`TASK35 auth ${status} never schedules eligibility retry`, async () => {
+    let reads = 0, now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      reads++;
+      return { ok: false, status };
+    }));
+    mount('/scans/new', true);
+    const message = status === 401 ? /Сессия недействительна/ : /Аккаунту не выдан доступ/;
+    await screen.findByRole('button', { name: message });
+    now += 60_001; fireEvent(window, new Event('focus'));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    expect(reads).toBe(1); expect(screen.queryByRole('status', { name: 'Ожидание сервера' })).toBeNull();
+  });
+
+  it('TASK35 admission wait blocks repeat POST until manual retry, without eligibility polling', async () => {
+    const posts: unknown[] = [];
+    let reads = 0, now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) { reads++; return json(eligibility()); }
+      if (init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)));
+        return { ok: false, status: 429, headers: new Headers({ 'Retry-After': '60' }), json: async () => ({ errorCode: 'SCAN_CAPACITY', retryAfterSeconds: 60 }) };
+      }
+      return json({ scans: [], nextCursor: null });
+    }));
+    mount('/scans/new', true);
+    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    const submit = screen.getByRole('button', { name: 'Запустить скан' }); fireEvent.click(submit);
+    await screen.findByText(/Сервер пока не принимает новый запуск/);
+    expect(screen.getByRole('status', { name: 'Ожидание сервера' }).textContent).toContain('Ожидание допуска запуска');
+    expect(submit.hasAttribute('disabled')).toBe(true); fireEvent.click(submit);
+    expect(posts).toHaveLength(1); expect(reads).toBe(2);
+    now += 60_001;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1050)); });
+    expect(posts).toHaveLength(1); expect(reads).toBe(2);
+    fireEvent.click(submit); await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1]).toEqual(posts[0]); expect(reads).toBe(2);
   });
 
   it('new POST never enqueues when the fresh eligibility probe closes', async () => {
@@ -471,6 +593,61 @@ describe('cookie-session live scans', () => {
     await waitFor(() => expect(screen.getByText(/Поиск Docker Hub сейчас недоступен/)).toBeTruthy());
     expect(screen.queryByRole('button', { name: /Alpine · unique-tag/ })).toBeNull();
   });
+  it('TASK35 GET access fence stops disconnected polling after session rejection', async () => {
+    let reads = 0;
+    vi.stubGlobal('EventSource', undefined);
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      reads++;
+      return reads === 1 ? json({ scanId: id, state: 'running', checks: ['sbom'], perCheck: { sbom: null }, result: null }) : { ok: false, status: 401 };
+    }));
+    mount(`/scans/${id}`);
+    await screen.findByText('Прогресс: неизвестен');
+    await screen.findByText(/Не удалось получить данные скана/, {}, { timeout: 3000 });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 2100)); });
+    expect(reads).toBe(2);
+  });
+
+  it('TASK35 SSE bursts coalesce around a slow GET; stage/checks stay authoritative and terminal closes stream', async () => {
+    let emit!: (type: string, data?: unknown) => void;
+    const close = vi.fn();
+    vi.stubGlobal('EventSource', class {
+      close = close;
+      handlers = new Map<string, (event: MessageEvent) => void>();
+      constructor() { emit = (type, data) => this.handlers.get(type)?.(new MessageEvent(type, { data: JSON.stringify(data) })); }
+      addEventListener(type: string, handler: (event: MessageEvent) => void) { this.handlers.set(type, handler); }
+    });
+    let reads = 0;
+    let finish!: (value: ReturnType<typeof json>) => void;
+    const snapshot = (state = 'running') => ({ scanId: id, state, checks: ['secret', 'sbom'], perCheck: { secret: null, sbom: null }, result: null });
+    const fetchMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/results?limit=50')) return json({ findings: [], nextCursor: null, coverage: null });
+      if (++reads === 2) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+      return json(snapshot(reads >= 3 ? 'completed' : 'running'));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    mount(`/scans/${id}`);
+    await waitFor(() => expect(emit).toBeTypeOf('function'));
+    expect(screen.getByText('Этап: не предоставлен')).toBeTruthy();
+    expect(screen.getByText('Прогресс: неизвестен')).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Проверки без подтверждённого результата' }).textContent).not.toContain('Пропущено');
+    act(() => { emit('open'); for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
+    expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('подключён');
+    await waitFor(() => expect(finish).toBeTypeOf('function'), { timeout: 2000 });
+    act(() => { for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    expect(reads).toBe(2); expect(screen.getByText('Прогресс: неизвестен')).toBeTruthy();
+    act(() => emit('error'));
+    expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('переподключение');
+    act(() => emit('open'));
+    await act(async () => finish(json(snapshot())));
+    await waitFor(() => expect(close).toHaveBeenCalled(), { timeout: 2000 });
+    expect(reads).toBe(3);
+    expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('realtime остановлен');
+    expect(fetchMock.mock.calls.some(([path]) => path.includes('eligibility'))).toBe(false);
+  });
+
   it('uses SSE only as a hint for a fresh GET and closes after terminal snapshot', async () => {
     const streams: Array<{ path: string; close: ReturnType<typeof vi.fn>; emit: (type: string, data?: unknown) => void }> = [];
     vi.stubGlobal('EventSource', class {
@@ -497,7 +674,7 @@ describe('cookie-session live scans', () => {
     const before = fetchMock.mock.calls.filter(([path]) => path === `/api/v1/browser/scans/${id}`).length;
     state = 'completed';
     act(() => streams[0].emit('scan', { scanId: id, state: 'completed', percent: null }));
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => path === `/api/v1/browser/scans/${id}`).length).toBeGreaterThan(before));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => path === `/api/v1/browser/scans/${id}`).length).toBeGreaterThan(before), { timeout: 2000 });
     await waitFor(() => expect(streams[0].close).toHaveBeenCalled());
     expect(screen.getAllByText('Завершён').length).toBeGreaterThan(0);
   });

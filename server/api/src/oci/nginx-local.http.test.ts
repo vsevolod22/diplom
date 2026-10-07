@@ -14,6 +14,91 @@ import { NGINX_LOCAL_POLICY as p } from './nginx-local-policy.js';
 const origin = 'http://127.0.0.1:8080';
 const imageReference = `${p.registry}/${p.repository}@${p.digest}`;
 
+// Disposable auth/ledger only. No LIVE state, worker, registry or CVE bundle.
+test('TASK35 retry contract keeps fixed-window rollover, active accounting and browser headers', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'retry-http-'));
+  const values = { AUTH_DB_PATH: join(directory, 'auth.sqlite'), SCAN_LEDGER_PATH: join(directory, 'ledger.sqlite'), AUTH_ORIGIN: origin,
+    AUTH_ALLOW_INSECURE_LOCAL_HTTP: 'true', SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS: 'false', SCAN_BROWSER_ALLOWED_USER_IDS: '' };
+  const previous = Object.keys(values).map(key => process.env[key]); Object.assign(process.env, values);
+  const app = await NestFactory.create(NginxLocalModule, { logger: false });
+  try {
+    const service = app.get(ScansService);
+    let now = 100_000;
+    let hold = false;
+    const releases: Array<() => void> = [];
+    Object.defineProperties(service, {
+      eligibilityNow: { value: () => now },
+      readiness: { value: async () => { if (hold) await new Promise<void>(resolve => releases.push(resolve)); return true; } },
+      resolveTarget: { value: async () => p },
+    });
+    await app.listen(0, '127.0.0.1');
+    const base = `http://127.0.0.1:${(app.getHttpServer().address() as { port: number }).port}/api/v1`;
+    const registered = await fetch(`${base}/auth/register`, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'retry@example.test', password: 'ordinary-long-password-123' }) });
+    assert.equal(registered.status, 201);
+    const cookie = registered.headers.get('set-cookie')!.split(';')[0];
+    const { id } = await registered.json() as { id: string };
+    process.env.SCAN_BROWSER_ALLOWED_USER_IDS = id;
+    const identity = { subject: id, scope: ['scan:create'] };
+    const body = { imageReference, checks: ['secret'] };
+    const unsupported = { ...body, checks: ['config'] };
+    const post = (data: unknown = body, suffix = '/images/eligibility', requestCookie = cookie, requestOrigin = origin) =>
+      fetch(`${base}/browser/scans${suffix}`, { method: 'POST', headers: { cookie: requestCookie, origin: requestOrigin, 'content-type': 'application/json' }, body: JSON.stringify(data) });
+    const unauthorized = await post(body, '/images/eligibility', '');
+    assert.equal(unauthorized.status, 401); assert.equal((await unauthorized.json() as { errorCode: string }).errorCode, 'UNAUTHORIZED');
+    assert.equal(unauthorized.headers.get('retry-after'), null);
+    assert.equal((await post(body, '/images/eligibility', cookie, 'https://wrong.invalid')).status, 403);
+    const check = async (response: Response, errorCode: string, limitReason: string | null, seconds: number) => {
+      assert.equal(response.status, 429); assert.equal(response.headers.get('retry-after'), String(seconds));
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(await response.json(), { errorCode, ...(limitReason ? { limitReason } : {}), retryAfterSeconds: seconds });
+    };
+    for (let count = 0; count < 30; count++) assert.equal((await post(unsupported)).status, 200);
+    now += 59_001;
+    await check(await post(unsupported), 'IMAGE_SEARCH_RATE_LIMITED', 'rate', 1);
+    now = 160_000;
+    assert.equal((await post(unsupported)).status, 200);
+    hold = true;
+    const first = service.eligibility(identity, body), second = service.eligibility(identity, body);
+    assert.equal(releases.length, 2);
+    await check(await post(), 'IMAGE_SEARCH_RATE_LIMITED', 'concurrency', 1);
+    // Rollover during active work resets only count, never active counters.
+    now += 60_000;
+    await check(await post(), 'IMAGE_SEARCH_RATE_LIMITED', 'concurrency', 1);
+    hold = false; releases.splice(0).forEach(release => release());
+    await Promise.all([first, second]);
+    assert.equal((await post()).status, 200);
+    // Process-wide 8 remains intact, across distinct subjects.
+    hold = true;
+    const active = Array.from({ length: 8 }, (_, index) => service.eligibility({ ...identity, subject: `parallel-${index}` }, body));
+    assert.equal(releases.length, 8);
+    await check(await post(), 'IMAGE_SEARCH_RATE_LIMITED', 'concurrency', 1);
+    hold = false; releases.splice(0).forEach(release => release()); await Promise.all(active);
+    // Atomic scan admission and exact replay are unchanged; only the header is new.
+    const intent = { ...body, scope: 'image', idempotencyKey: 'retry-admission-1' };
+    assert.equal((await post(intent, '')).status, 202);
+    assert.equal((await post({ ...intent, idempotencyKey: 'retry-admission-2' }, '')).status, 202);
+    assert.equal((await post({ ...intent, idempotencyKey: 'retry-admission-3' }, '')).status, 202);
+    await check(await post({ ...intent, idempotencyKey: 'retry-admission-4' }, ''), 'SCAN_CAPACITY', null, 60);
+    assert.equal((await post(intent, '')).status, 202);
+    // Fill the bounded subject map through public service calls, not weakened limits.
+    for (let index = 0; index < 1015; index++) await service.eligibility({ ...identity, subject: `capacity-${index}` }, unsupported);
+    assert.equal((await post()).status, 200);
+    const another = await fetch(`${base}/auth/register`, { method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'capacity@example.test', password: 'ordinary-long-password-123' }) });
+    assert.equal(another.status, 201);
+    const anotherCookie = another.headers.get('set-cookie')!.split(';')[0];
+    const anotherId = (await another.json() as { id: string }).id;
+    process.env.SCAN_BROWSER_ALLOWED_USER_IDS += `,${anotherId}`;
+    await check(await post(unsupported, '/images/eligibility', anotherCookie), 'IMAGE_SEARCH_CAPACITY', 'capacity', 60);
+    now += 60_000;
+    assert.equal((await post(unsupported, '/images/eligibility', anotherCookie)).status, 200);
+  } finally {
+    await app.close(); Object.keys(values).forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index]; });
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('real Nest cookie HTTP eligibility keeps auth/origin/media/readonly guards; policy before replay, current readiness, default closed', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'local-http-'));
   const values = { AUTH_DB_PATH: join(directory,'auth.sqlite'), SCAN_LEDGER_PATH: join(directory,'ledger.sqlite'), AUTH_ORIGIN: origin,

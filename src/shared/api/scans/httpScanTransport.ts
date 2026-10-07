@@ -7,9 +7,27 @@ export class ScanAccessError extends Error {
 }
 
 export class ScanHttpError extends Error {
-  constructor(readonly status: number, readonly code: string | null) {
+  constructor(readonly status: number, readonly code: string | null,
+    readonly retryAfterSeconds: number | null = null, readonly limitReason: 'rate' | 'concurrency' | 'capacity' | null = null) {
     super(status === 409 ? 'Отмена невозможна в текущем состоянии' : 'Запрос скана не выполнен');
   }
+}
+
+export async function scanResponseError(response: Response): Promise<Error> {
+  if (response.status === 401 || response.status === 403) return new ScanAccessError(response.status);
+  const payload: unknown = await response.json().catch(() => null);
+  const body = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const code = typeof body.errorCode === 'string' && body.errorCode.length <= 64 ? body.errorCode : null;
+  if (response.status !== 429) return new ScanHttpError(response.status, code);
+  const header = response.headers?.get('Retry-After');
+  const seconds = body.retryAfterSeconds;
+  const valid = typeof seconds === 'number' && Number.isInteger(seconds) && seconds >= 1 && seconds <= 60 &&
+    header === String(seconds);
+  const limitReason = valid && (code === 'IMAGE_SEARCH_RATE_LIMITED' && ['rate', 'concurrency'].includes(String(body.limitReason)) ||
+    code === 'IMAGE_SEARCH_CAPACITY' && body.limitReason === 'capacity')
+    ? body.limitReason as 'rate' | 'concurrency' | 'capacity' : null;
+  // Unknown/malformed timing must never become an immediate retry.
+  return new ScanHttpError(429, code, valid && (code === 'SCAN_CAPACITY' || limitReason) ? seconds : 60, limitReason);
 }
 
 /** Session-bound, same-origin cookie transport. The server enforces authorization for every request. */
@@ -32,10 +50,9 @@ export function createAuthorizedScanTransport(session: { subject: string; curren
       if (response.status === 401 || response.status === 403) throw new ScanAccessError(response.status);
       if (response.status === 404) throw new Error('Скан недоступен');
       if ([400, 409, 429, 503].includes(response.status)) {
-        const payload: unknown = typeof response.json === 'function' ? await response.json().catch(() => null) : null;
-        const code = payload && typeof payload === 'object' && 'errorCode' in payload && typeof payload.errorCode === 'string'
-          ? payload.errorCode : null;
-        throw new ScanHttpError(response.status, code);
+        const error = await scanResponseError(response);
+        if (session.currentSubject() !== session.subject) throw new Error('Сессия изменилась: ответ отклонён');
+        throw error;
       }
       if (response.status === 409) throw new Error('Отмена невозможна в текущем состоянии');
       throw new Error('Запрос скана не выполнен');

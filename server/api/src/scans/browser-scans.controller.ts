@@ -52,18 +52,32 @@ export class BrowserScansController {
     return this.imageSearch.search(subject, query, generation, cursor);
   }
 
+  private async withRetryHeaders(response: ServerResponse, operation: () => Promise<unknown>) {
+    response.setHeader('Cache-Control', 'no-store');
+    try { return await operation(); }
+    catch (error) {
+      if (error instanceof HttpException && error.getStatus() === 429) {
+        const body = error.getResponse();
+        const seconds = typeof body === 'object' && body !== null && 'retryAfterSeconds' in body ? body.retryAfterSeconds : undefined;
+        if (typeof seconds === 'number' && Number.isInteger(seconds) && seconds >= 1 && seconds <= 60)
+          response.setHeader('Retry-After', String(seconds));
+      }
+      throw error;
+    }
+  }
+
   @Post('images/eligibility')
   @Header('Cache-Control', 'no-store')
   @HttpCode(200)
-  eligibility(@Req() req: BrowserRequest, @Body() body: unknown) {
-    return this.scans.eligibility(this.identity(req, true), body);
+  eligibility(@Req() req: BrowserRequest, @Body() body: unknown, @Res({ passthrough: true }) response: ServerResponse) {
+    return this.withRetryHeaders(response, () => this.scans.eligibility(this.identity(req, true), body));
   }
 
   @Post()
   @Header('Cache-Control', 'no-store')
   @HttpCode(202)
-  create(@Req() req: BrowserRequest, @Body() body: unknown) {
-    return this.scans.create(this.identity(req, true), body);
+  create(@Req() req: BrowserRequest, @Body() body: unknown, @Res({ passthrough: true }) response: ServerResponse) {
+    return this.withRetryHeaders(response, () => this.scans.create(this.identity(req, true), body));
   }
 
   @Get()
