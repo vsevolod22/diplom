@@ -258,7 +258,7 @@ export class ScansService {
         if (archive?.secret) {
           const result = archive.secret;
           if (result.outcome !== 'checked') return { findings: [], nextCursor: null, coverage: {
-            check: 'secret', coverage: 'image', outcome: result.outcome, reason: result.reason, findingCount: 0,
+            check: 'secret', coverage: 'image', outcome: result.outcome, reason: result.reason, findingCount: null,
             errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', scannerVersion: archive.scannerVersion } };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
           if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });

@@ -20,7 +20,10 @@ import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/sca
 import { ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import type { ScanCheck, ScanCoverage, ScanStatus } from '@/shared/api/scans/scanTransport';
 import { Alert, Badge, Button } from '@/shared/ui/scan-primitives';
+import { VulnAdvisoryCard } from './VulnAdvisoryCard';
 import './scan-detail-a1.css';
+
+const unavailableScope = ['live-scans', 'unavailable'] as const;
 
 const coverageLabels: Record<ScanCoverage['status'], string> = {
   checked: 'Выполнено (не гарантия безопасности)',
@@ -48,6 +51,13 @@ const stateTone: Record<ScanStatus['state'], 'neutral' | 'info' | 'warning' | 'd
 
 export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const { scanId = '' } = useParams();
+  const live = useLiveScanSession();
+  // Remount all page state before requesting a different route, subject or session.
+  return <ScanDetailContent key={JSON.stringify([demo, live?.scope, scanId])} demo={demo} />;
+}
+
+function ScanDetailContent({ demo }: { demo: boolean }) {
+  const { scanId = '' } = useParams();
   const [filter, setFilter] = useState('all');
   const [cursor, setCursor] = useState<string | undefined>();
   const [sbomCursor, setSbomCursor] = useState<string | undefined>();
@@ -56,7 +66,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const transport = demo ? fixtureScanTransport : live?.transport ?? unavailableScanTransport;
   const enabled = !!scanId && (demo || transport.capabilities.list);
   const queryClient = useQueryClient();
-  const scope = live?.scope ?? ['live-scans', 'unavailable'];
+  const scope = live?.scope ?? unavailableScope;
   const streamKey = `${scope.join(':')}:${scanId}`;
   const [connectedStream, setConnectedStream] = useState<string | null>(null);
   const cancellation = useMutation({
@@ -89,19 +99,19 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
   const sbom = useQuery({
     queryKey: [...scope, 'sbom', scanId, scan.data?.state, sbomCursor],
     queryFn: ({ signal }) => transport.sbom(scanId, sbomCursor, signal),
-    enabled: enabled && scan.isSuccess && isSbom && scan.data.perCheck?.sbom?.outcome != null && ['completed', 'partial', 'failed'].includes(scan.data.state),
+    enabled: enabled && scan.isSuccess && scan.data.scanId === scanId && isSbom && scan.data.perCheck?.sbom?.outcome != null && ['completed', 'partial', 'failed'].includes(scan.data.state),
     retry: false,
   });
   const vuln = useQuery({
     queryKey: [...scope, 'vuln', scanId, scan.data?.state, vulnCursor],
     queryFn: ({ signal }) => transport.vuln(scanId, vulnCursor, signal),
-    enabled: enabled && scan.isSuccess && isVuln && scan.data.perCheck?.vuln?.outcome != null && ['completed', 'partial', 'failed'].includes(scan.data.state),
+    enabled: enabled && scan.isSuccess && scan.data.scanId === scanId && isVuln && scan.data.perCheck?.vuln?.outcome != null && ['completed', 'partial', 'failed'].includes(scan.data.state),
     retry: false,
   });
   const report = useQuery({
-    queryKey: demo ? ['scan-results', 'fixture', scanId, filter, cursor] : [...(live?.scope ?? ['live-scans', 'unavailable']), 'results', scanId, scan.data?.state, filter, cursor],
+    queryKey: demo ? ['scan-results', 'fixture', scanId, cursor] : [...(live?.scope ?? ['live-scans', 'unavailable']), 'results', scanId, scan.data?.state, cursor],
     queryFn: ({ signal }) => transport.results(scanId, cursor, signal),
-    enabled: enabled && scan.isSuccess && isSecret,
+    enabled: enabled && scan.isSuccess && scan.data.scanId === scanId && isSecret,
     retry: false,
   });
   const active = scan.isSuccess && scan.data?.scanId === scanId && ['queued', 'running', 'cancelling'].includes(scan.data.state);
@@ -143,12 +153,22 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
     const outcome = scan.data?.perCheck?.[check];
     return { check: { secret: 'Secrets', sbom: 'SBOM', vuln: 'CVE', config: 'Image config' }[check], status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined, checksVersion: outcome?.checksVersion, resourcePolicyVersion: outcome?.resourcePolicyVersion };
   });
-  const findings =
-    reportData?.findings.filter((finding) => filter === 'all' || finding.category === filter) ?? [];
-  const changeFilter = (value: string) => {
-    setFilter(value);
-    setCursor(undefined);
-  };
+  const findings = reportData?.findings.filter(item => !demo || filter === 'all' || item.category === filter) ?? [];
+  const changeFilter = setFilter;
+  const [confirmedVulnCount, setConfirmedVulnCount] = useState<number | null>(null);
+  const [confirmedSecretCount, setConfirmedSecretCount] = useState<number | null>(null);
+  const vulnPage = vuln.isSuccess && vuln.data.outcome === 'checked' ? vuln.data : undefined;
+  const identityMatches = !!vulnPage && !!scan.data?.digest && scan.data.platform === vulnPage.platform &&
+    vulnPage.image === (scan.data.imageReference ?? `registry-1.docker.io/library/alpine@${scan.data.digest}`);
+  const secretCoverage = reportData?.coverage.find(item => item.check === 'Secrets');
+  const statusSecret = scan.data?.perCheck?.secret;
+  useEffect(() => {
+    if (identityMatches && vulnPage) setConfirmedVulnCount(vulnPage.findingCount);
+  }, [identityMatches, vulnPage]);
+  useEffect(() => {
+    if (statusSecret?.outcome === 'checked' && statusSecret.findingCount != null) setConfirmedSecretCount(statusSecret.findingCount);
+    else if (secretCoverage?.status === 'checked' && secretCoverage.findingCount != null) setConfirmedSecretCount(secretCoverage.findingCount);
+  }, [statusSecret, secretCoverage]);
 
   return (
     <ScanShell demo={demo}>
@@ -173,7 +193,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
             </p>
           </div>
 
-          {scan.isSuccess && scan.data ? (
+          {scan.isSuccess && scan.data.scanId === scanId ? (
             <div className="scan-a1__summary">
               <Badge tone={stateTone[scan.data.state]}>{stateLabels[scan.data.state]}</Badge>
               <span>Прогресс: {scan.data.percent == null ? 'неизвестен' : `${scan.data.percent}%`}</span>
@@ -191,7 +211,7 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
             Не удалось получить данные скана. Его существование и доступность не подтверждены.
           </Alert>
         ) : null}
-        {scan.isSuccess && scan.data ? (
+        {scan.isSuccess && scan.data.scanId === scanId ? (
           <>
             <MagicCard className="scan-a1__reading-card">
               <p className="scan-a1__reading-copy">
@@ -323,7 +343,6 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                   </div>
                 ) : <p>Нет подтверждённого image config coverage: проверка ещё не завершена или это legacy scan без versioned evidence.</p> : null}
                 {isSbom && sbom.isError ? <Alert role="alert" tone="danger">Не удалось загрузить SBOM: данные не подтверждены.</Alert> : null}
-                                {isVuln && vuln.isError ? <Alert role="alert" tone="danger">Не удалось загрузить CVE: данные недоступны, число уязвимостей неизвестно.</Alert> : null}
                 <div className="scan-a1__coverage-guide">
                   <span className="scan-a1__eyebrow">КАК ЧИТАТЬ ПОКРЫТИЕ / СПРАВКА</span>
                   <p>Статус, исходы и причины проверок показаны выше без раскрытия подсказок.</p>
@@ -365,83 +384,46 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                       {sbom.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setSbomCursor(sbom.data.nextCursor ?? undefined)}>Следующая страница SBOM</Button> : null}
                     </div>
                   )
-                ) : isSecret ? (<>
-                <p className="scan-a1__muted">
-                  Фильтр действует только на загруженную страницу, не на весь отчёт.
-                </p>
-                <ScanFilterSheet filter={filter} onFilterChange={changeFilter} />
+                ) : isSecret || isVuln ? (<>
+                <p className="scan-a1__muted">CVE и Secrets — отдельные наборы данных. Общий итог не суммируется из неполных результатов.</p>
+                <ScanFilterSheet filter={filter} onFilterChange={changeFilter} cveValue={demo ? 'vulnerability' : 'cve'} />
                 <div className="scan-a1__desktop-filter">
                   <label htmlFor="finding-filter">Категория</label>
-                  <select
-                    id="finding-filter"
-                    className={controlClass}
-                    value={filter}
-                    onChange={(event) => changeFilter(event.target.value)}
-                  >
-                    <option value="all">Все на загруженной странице</option>
-                    <option value="secret">Secrets</option>
-                    <option value="vulnerability">CVE</option>
+                  <select id="finding-filter" className={controlClass} value={filter} onChange={event => changeFilter(event.target.value)}>
+                    <option value="all">Все категории</option><option value={demo ? 'vulnerability' : 'cve'}>CVE</option><option value="secret">Secrets</option>
                   </select>
                 </div>
-                <p className="scan-a1__muted">
-                  Категория: {filter === 'all' ? 'Все' : filter === 'secret' ? 'Secrets' : 'CVE'} (на
-                  загруженной странице)
-                </p>
-                {report.isPending ? <p>Загружаем результаты…</p> : null}
-                {report.isError ? (
-                  <Alert role="alert" tone="danger">
-                    Не удалось загрузить результаты; число находок неизвестно.
-                  </Alert>
-                ) : null}
-                {reportData && findings.length > 0 ? (
-                  <ul className="scan-a1__findings">
-                    {findings.map((finding) => (
-                      <li key={finding.findingId}>
-                        <span className="scan-a1__eyebrow">НАХОДКА / {finding.severity}</span>
-                        <strong>
-                          {finding.category} · {finding.ruleId}
-                        </strong>
-                        <p>ID: {finding.findingId}</p>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                {reportData && findings.length === 0 && filter !== 'all' ? (
-                  <Alert tone="neutral" className="scan-a1__empty">
-                    Нет совпадений фильтра на загруженной странице. Это не означает отсутствие находок во всём
-                    отчёте.{' '}
-                    <button type="button" className="scan-a1__link" onClick={() => changeFilter('all')}>
-                      Сбросить фильтр
-                    </button>
-                  </Alert>
-                ) : null}
-                {reportData &&
-                findings.length === 0 &&
-                filter === 'all' &&
-                (reportData.nextCursor || cursor) ? (
-                  <p>На текущей странице находок нет; общий результат не подтверждён.</p>
-                ) : null}
-                {reportData &&
-                findings.length === 0 &&
-                filter === 'all' &&
-                !reportData.nextCursor &&
-                !cursor ? (
-                  <p>
-                    {(liveCoverage ?? reportData.coverage).some((item) => item.check === 'Secrets' && item.status === 'checked')
-                      ? '0 находок в выполненной проверенной области; другие области не исключены.'
-                      : 'Нет подтверждённых находок: область не проверена полностью. Это не «0 CVE».'}
-                  </p>
-                ) : null}
-                {reportData?.nextCursor ? (
-                  <Button
-                    variant="secondary"
-                    type="button"
-                    onClick={() => setCursor(reportData.nextCursor ?? undefined)}
-                  >
-                    Следующая страница
-                  </Button>
-                ) : null}
-                </>) : isVuln ? <p>Результаты CVE показаны ниже отдельно от Secrets.</p> : <p>Тип проверки пока не указан в ответе статуса. Результаты не запрашиваются до подтверждения типа сервером.</p>}
+                <p className="scan-a1__muted">Категория: {filter === 'all' ? 'Все' : filter === 'secret' ? 'Secrets' : 'CVE'}. Показаны загруженные страницы.</p>
+            {isVuln && filter !== 'secret' ? <section className="scan-a1__panel" aria-label="Результаты CVE">
+              <h4>CVE · registry IMAGE</h4>
+              {confirmedVulnCount !== null ? <p>Подтверждённое число CVE: {confirmedVulnCount}</p> : null}
+              {vuln.isSuccess ? vuln.data.outcome === 'failed' ? <p>CVE не проверены: {vuln.data.reason ?? vuln.data.errorCode}. Число уязвимостей неизвестно.</p> : vuln.data.outcome === 'unsupported' ? <p>CVE не поддерживаются: {vuln.data.reason}. Это не нулевое число находок.</p> : !identityMatches ? <p>Идентичность образа в CVE-отчёте не совпадает со статусом; результат неизвестен.</p> : <>
+                <p>Находок в проверенной области: {vuln.data.findingCount}. Это не гарантия безопасности; другие области не проверялись.</p>
+                                {vuln.data.os ? <p>OS CVE: {coverageLabels[vuln.data.os.outcome]}{vuln.data.os.outcome === 'unsupported' ? ` · ${vuln.data.os.reason}` : ''}</p> : null}
+                                {vuln.data.node ? <p>Node/npm CVE: {coverageLabels[vuln.data.node.outcome]}{vuln.data.node.outcome === 'unsupported' ? ` · ${vuln.data.node.reason}` : ''}</p> : null}
+                                {vuln.data.db ? <p className="scan-a1__muted">DB {vuln.data.db.manifestDigest} · {vuln.data.db.signer} (локальная аттестация, не подпись издателя) · обновлена {vuln.data.db.updatedAt} · срок {vuln.data.db.nextUpdate}</p> : null}
+                                <p className="scan-a1__muted">scanner {vuln.data.scannerVersion} · проверено {vuln.data.checkedAt}{scan.data.perCheck?.vuln?.checksVersion ? ` · checks ${scan.data.perCheck.vuln.checksVersion}` : ''}</p>
+                <ul className="scan-a1__findings">{vuln.data.findings.map(finding => <VulnAdvisoryCard key={finding.findingId} finding={finding} />)}</ul>
+                {vuln.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setVulnCursor(vuln.data.nextCursor ?? undefined)}>Следующая страница CVE</Button> : null}
+              </> : <p>{vuln.isError ? confirmedVulnCount !== null ? 'Страница CVE недоступна; ранее подтверждённое число сохранено.' : vuln.error instanceof ScanHttpError && vuln.error.status === 503 ? 'CVE недоступны: проверьте настройку базы уязвимостей у администратора. Число находок неизвестно.' : 'CVE недоступны; число уязвимостей неизвестно.' : !scan.data.perCheck?.vuln && ['completed', 'partial', 'failed'].includes(scan.data.state) ? 'Нет подтверждённого результата CVE; число находок неизвестно.' : 'Ожидаем результат CVE. Нулевое число не подтверждено.'}</p>}
+            </section> : null}
+                {isSecret && filter !== 'cve' ? <section aria-label="Результаты Secrets">
+                  <h4>Secrets</h4>
+                  {!demo ? confirmedSecretCount !== null ? <p>Подтверждённое число Secrets: {confirmedSecretCount}</p> : <p>Число Secrets неизвестно.</p> : null}
+                  {report.isPending ? <p>Загружаем результаты Secrets…</p> : null}
+                  {report.isError ? <Alert role="alert" tone="danger">{confirmedSecretCount !== null ? 'Страница Secrets недоступна; ранее подтверждённое число сохранено.' : 'Не удалось загрузить результаты; число находок неизвестно.'}</Alert> : null}
+                  {secretCoverage && secretCoverage.status !== 'checked' ? <p>Secrets: {coverageLabels[secretCoverage.status]}{secretCoverage.reason ? ` · ${secretCoverage.reason}` : ''}</p> : null}
+                  {findings.length > 0 ? <ul className="scan-a1__findings">{findings.map(finding => <li key={finding.findingId}>
+                    <span className="scan-a1__eyebrow">НАХОДКА / {finding.severity}</span><strong>{finding.category} · {finding.ruleId}</strong><p>ID: {finding.findingId}</p>
+                  </li>)}</ul> : null}
+                  {reportData && confirmedSecretCount === 0 ? <p>0 находок в выполненной проверенной области Secrets; другие области не исключены.</p> : null}
+                  {demo && reportData && findings.length === 0 ? filter !== 'all' ? <Alert tone="neutral">Нет совпадений фильтра на загруженной странице. <button type="button" className="scan-a1__link" onClick={() => changeFilter('all')}>Сбросить фильтр</button></Alert> : !cursor && !reportData.nextCursor ? <p>{secretCoverage?.status === 'checked' ? '0 находок в выполненной проверенной области; другие области не исключены.' : 'Нет подтверждённых находок: область не проверена полностью.'}</p> : null : null}
+                  {!demo && reportData && findings.length === 0 && confirmedSecretCount !== 0 ? <p>На текущей странице находок Secrets нет; это не подтверждает нулевой итог.</p> : null}
+                  {reportData?.nextCursor ? <Button variant="secondary" type="button" onClick={() => setCursor(reportData.nextCursor ?? undefined)}>Следующая страница</Button> : null}
+                </section> : null}
+                {filter === 'cve' && !isVuln ? <p>CVE не запрашивались для этого скана.</p> : null}
+                {filter === 'secret' && !isSecret ? <p>Secrets не запрашивались для этого скана.</p> : null}
+                </>) : <p>Тип проверки пока не указан в ответе статуса. Результаты не запрашиваются до подтверждения типа сервером.</p>}
               </section>
             </div>
             {isSbom && !sbomOnly ? <section className="scan-a1__panel" aria-label="Пакеты SBOM">
@@ -451,18 +433,6 @@ export function ScanDetailPage({ demo = false }: { demo?: boolean }) {
                 <ul className="scan-a1__findings">{sbom.data.components.map((component, index) => <li key={`${sbomCursor ?? '0'}-${index}`}><strong>{component.name}</strong><p>{component.ecosystem} · {component.version}</p></li>)}</ul>
                 {sbom.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setSbomCursor(sbom.data.nextCursor ?? undefined)}>Следующая страница SBOM</Button> : null}
               </> : <p>{sbom.isError ? 'SBOM недоступен; число пакетов неизвестно.' : 'Ожидаем результат SBOM.'}</p>}
-            </section> : null}
-            {isVuln ? <section className="scan-a1__panel" aria-label="Результаты CVE">
-              <h3>CVE · registry IMAGE</h3>
-              {vuln.isSuccess ? vuln.data.outcome === 'failed' ? <p>CVE не проверены: {vuln.data.reason ?? vuln.data.errorCode}. Число уязвимостей неизвестно.</p> : vuln.data.outcome === 'unsupported' ? <p>CVE не поддерживаются: {vuln.data.reason}. Это не нулевое число находок.</p> : !scan.data.digest || scan.data.platform !== vuln.data.platform || vuln.data.image !== (scan.data.imageReference ?? `registry-1.docker.io/library/alpine@${scan.data.digest}`) ? <p>Идентичность образа в CVE-отчёте не совпадает со статусом; результат неизвестен.</p> : <>
-                <p>Находок в проверенной области: {vuln.data.findingCount}. Это не гарантия безопасности; другие области не проверялись.</p>
-                                {vuln.data.os ? <p>OS CVE: {coverageLabels[vuln.data.os.outcome]}{vuln.data.os.outcome === 'unsupported' ? ` · ${vuln.data.os.reason}` : ''}</p> : null}
-                                {vuln.data.node ? <p>Node/npm CVE: {coverageLabels[vuln.data.node.outcome]}{vuln.data.node.outcome === 'unsupported' ? ` · ${vuln.data.node.reason}` : ''}</p> : null}
-                                {vuln.data.db ? <p className="scan-a1__muted">DB {vuln.data.db.manifestDigest} · {vuln.data.db.signer} (локальная аттестация, не подпись издателя) · обновлена {vuln.data.db.updatedAt} · срок {vuln.data.db.nextUpdate}</p> : null}
-                                <p className="scan-a1__muted">scanner {vuln.data.scannerVersion} · проверено {vuln.data.checkedAt}{scan.data.perCheck?.vuln?.checksVersion ? ` · checks ${scan.data.perCheck.vuln.checksVersion}` : ''}</p>
-                <ul className="scan-a1__findings">{vuln.data.findings.map(finding => <li key={finding.findingId}><strong>{finding.cveId} · {finding.severity}</strong><p>{finding.ecosystem} · {finding.packageName} {finding.installedVersion} · исправление: {finding.fixedVersion ?? 'не указано'}</p></li>)}</ul>
-                {vuln.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setVulnCursor(vuln.data.nextCursor ?? undefined)}>Следующая страница CVE</Button> : null}
-              </> : <p>{vuln.isError ? vuln.error instanceof ScanHttpError && vuln.error.status === 503 ? 'CVE недоступны: проверьте настройку базы уязвимостей у администратора. Число находок неизвестно.' : 'CVE недоступны; число уязвимостей неизвестно.' : !scan.data.perCheck?.vuln && ['completed', 'partial', 'failed'].includes(scan.data.state) ? 'Нет подтверждённого результата CVE; число находок неизвестно.' : 'Ожидаем результат CVE. Нулевое число не подтверждено.'}</p>}
             </section> : null}
             <section className="scan-a1__ai" aria-labelledby="scan-a1-ai">
               <div>

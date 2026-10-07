@@ -7,6 +7,7 @@ import { scans } from './schema.js';
 import { MAX_FINDINGS, type SecretFinding } from '../worker/secret-findings.js';
 import type { ImageSbom, SbomComponent } from '../worker/cyclonedx-components.js';
 import { MAX_VULN_FINDINGS, type VulnFinding } from '../worker/vuln-findings.js';
+import { omittedAdvisory, plainObject, validateAdvisoryBudget } from '../worker/vuln-advisory.js';
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 import { assertArchiveDbFreshness, validateArchiveReport } from '../worker/archive-result-contract.js';
 import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
@@ -41,7 +42,7 @@ const sbomIdentifier = (value: unknown, max: number): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= max &&
   /^[A-Za-z0-9@][A-Za-z0-9@._+/-]*$/.test(value);
 const sbomObject = (value: unknown, keys: string[]): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value) &&
+  plainObject(value) &&
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
 type FailureCode = 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE';
@@ -118,7 +119,7 @@ function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string): v
       const seen = new Set<string>();
       for (const f of item.findings) {
         if (!sbomObject(f, ['findingId','cveId','ecosystem','packageName','installedVersion',
-          'severity','severitySources','provenanceRef','fixedVersion']) ||
+          'severity','severitySources','provenanceRef','fixedVersion', ...(Object.hasOwn(f, 'advisory') ? ['advisory'] : [])]) ||
             typeof f.cveId !== 'string' || !/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(f.cveId) ||
             f.ecosystem !== 'apk' && f.ecosystem !== 'npm' ||
             typeof f.packageName !== 'string' || f.packageName.length > 128 ||
@@ -139,8 +140,29 @@ function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string): v
           throw new TypeError('Invalid or duplicate vulnerability finding');
         seen.add(key);
       }
+      validateAdvisoryBudget(item.findings);
     }
   }
+}
+
+function validateStoredArchive(report: ArchiveScanReport): { requested: string[]; checked: CombinedOutcome[] } {
+  const requested = ['secret', 'sbom', 'vuln'].filter(check => Object.hasOwn(report, check));
+  validateArchiveReport(report, requested);
+  assertArchiveDbFreshness(report, report.checkedAt);
+  const image = `${report.receipt.registry}/${report.receipt.repository}@${report.receipt.digest}`;
+  const checked: CombinedOutcome[] = [];
+  if (report.secret?.outcome === 'checked') checked.push({ check: 'secret', ...report.secret, scannerVersion: report.scannerVersion });
+  if (report.sbom?.outcome === 'checked') checked.push({ check: 'sbom', ...report.sbom, scannerVersion: report.scannerVersion });
+  if (report.vuln?.outcome === 'checked') {
+    if (!sbomObject(report.vuln, ['outcome', 'findings', 'db', 'os', 'node']) ||
+      !sbomObject(report.vuln.os, ['outcome']) || report.vuln.os.outcome !== 'checked' ||
+      !(sbomObject(report.vuln.node, ['outcome']) && report.vuln.node.outcome === 'checked' ||
+      sbomObject(report.vuln.node, ['outcome','reason']) && report.vuln.node.outcome === 'unsupported' &&
+      report.vuln.node.reason === 'NODE_INVENTORY_ABSENT')) throw new TypeError('Invalid archive coverage');
+    checked.push({ check: 'vuln', outcome: 'checked', image, findings: report.vuln.findings, scannerVersion: report.scannerVersion });
+  }
+  if (checked.length) validateCombined(checked, image);
+  return { requested, checked };
 }
 
 type ScanRow = { id: string; registry: string; repository: string; digest: string; platform: string; fingerprint: string | null };
@@ -157,7 +179,7 @@ export class ScanLedger {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 5000');
       const version = Number(this.db.pragma('user_version', { simple: true }));
-      if (version > 12 || version < 0) throw new Error('Unsupported ledger version');
+      if (version > 13 || version < 0) throw new Error('Unsupported ledger version');
       // FK enforcement must be toggled outside a transaction for SQLite's table rebuild.
       // Check the rebuilt references before commit, then restore enforcement afterward.
       if (version < 9) this.db.pragma('foreign_keys = OFF');
@@ -331,6 +353,9 @@ export class ScanLedger {
         if (version < 12) this.db.exec(`CREATE TABLE scan_execution_profiles (
           scan_id TEXT PRIMARY KEY REFERENCES scans(id), binding TEXT NOT NULL CHECK(length(CAST(binding AS BLOB)) <= 1024)
         ); PRAGMA user_version = 12;`);
+        if (version < 13) this.db.exec(`ALTER TABLE scan_vuln_findings ADD COLUMN advisory TEXT
+          CHECK(advisory IS NULL OR length(CAST(advisory AS BLOB)) <= 16384);
+          PRAGMA user_version = 13;`);
         if ((this.db.pragma('foreign_key_check') as unknown[]).length)
           throw new Error('Ledger migration foreign key mismatch');
       });
@@ -586,22 +611,20 @@ export class ScanLedger {
     const context = config ? this.configAttemptContext(scanId, attempts) : undefined;
     if (config && !context) return false;
     const safeConfig = config ? validateConfigReport(config, context!.job, canonicalChecks(context!.job.checks)?.includes('config') === true) : undefined;
-    const requested = ['secret', 'sbom', 'vuln'].filter(check => Object.hasOwn(report, check));
-    validateArchiveReport(report, requested);
-    const image = `${report.receipt.registry}/${report.receipt.repository}@${report.receipt.digest}`;
-    const checked: CombinedOutcome[] = [];
-    if (report.secret?.outcome === 'checked') checked.push({ check: 'secret', ...report.secret, scannerVersion: report.scannerVersion });
-    if (report.sbom?.outcome === 'checked') checked.push({ check: 'sbom', ...report.sbom, scannerVersion: report.scannerVersion });
-    if (report.vuln?.outcome === 'checked') {
-      if (!sbomObject(report.vuln, ['outcome', 'findings', 'db', 'os', 'node']) ||
-          !sbomObject(report.vuln.os, ['outcome']) || report.vuln.os.outcome !== 'checked' ||
-          !(sbomObject(report.vuln.node, ['outcome']) && report.vuln.node.outcome === 'checked' ||
-            sbomObject(report.vuln.node, ['outcome','reason']) && report.vuln.node.outcome === 'unsupported' &&
-            report.vuln.node.reason === 'NODE_INVENTORY_ABSENT')) throw new TypeError('Invalid archive coverage');
-      checked.push({ check: 'vuln', outcome: 'checked', image, findings: report.vuln.findings, scannerVersion: report.scannerVersion });
+    const { requested, checked } = validateStoredArchive(report);
+    // Optional report metadata is dropped deterministically before the fenced transaction.
+    let body = JSON.stringify(report);
+    if (Buffer.byteLength(body) > 2_000_000 && report.vuln?.outcome === 'checked') {
+      report = { ...report, vuln: { ...report.vuln, findings: report.vuln.findings.map(f => ({ ...f })) } };
+      if (report.vuln?.outcome === 'checked') {
+        for (const finding of [...report.vuln.findings].sort((a, b) => a.findingId < b.findingId ? 1 : -1)) {
+          if (!finding.advisory) continue;
+          finding.advisory = omittedAdvisory('report_budget');
+          body = JSON.stringify(report);
+          if (Buffer.byteLength(body) <= 2_000_000) break;
+        }
+      }
     }
-    if (checked.length) validateCombined(checked, image);
-    const body = JSON.stringify(report);
     if (Buffer.byteLength(body) > 2_000_000) throw new TypeError('Invalid archive result size');
     return this.immediate(() => {
       const row = this.db.prepare(`SELECT s.subject,s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
@@ -641,9 +664,16 @@ export class ScanLedger {
   }
 
   archiveResult(scanId: string, subject: string): ArchiveScanReport | undefined {
-    const row = this.db.prepare(`SELECT r.report FROM scan_archive_results r JOIN scans s ON s.id=r.scan_id
-      WHERE s.id=? AND s.subject=?`).get(scanId, subject) as { report: string } | undefined;
-    return row ? JSON.parse(row.report) as ArchiveScanReport : undefined;
+    const row = this.db.prepare(`SELECT r.report, s.registry, s.repository, s.digest, s.platform, s.checks FROM scan_archive_results r JOIN scans s ON s.id=r.scan_id
+      WHERE s.id=? AND s.subject=?`).get(scanId, subject) as { report: string; registry: string; repository: string; digest: string; platform: string; checks: string } | undefined;
+    if (!row) return undefined;
+    if (Buffer.byteLength(row.report) > 2_000_000) throw new TypeError('Invalid stored archive size');
+    const report: ArchiveScanReport = JSON.parse(row.report);
+    const { requested } = validateStoredArchive(report);
+    if (['registry', 'repository', 'digest', 'platform'].some(key => report.receipt[key as keyof typeof report.receipt] !== row[key as 'registry' | 'repository' | 'digest' | 'platform']) ||
+        JSON.stringify(requested) !== JSON.stringify(canonicalChecks(row.checks)?.filter(check => check !== 'config')))
+      throw new TypeError('Invalid stored archive binding');
+    return report;
   }
 
   finishCombined(scanId: string, attempts: number, outcomes: CombinedOutcome[], config?: ImageConfigResult): boolean {
@@ -708,11 +738,11 @@ export class ScanLedger {
             VALUES (?,?,?,?,'image','checked',?,CURRENT_TIMESTAMP)`).run(scanId,
               item.image, row.platform, item.findings.length, item.scannerVersion);
           const insert = this.db.prepare(`INSERT INTO scan_vuln_findings
-            (scan_id,ordinal,finding_id,cve_id,ecosystem,package_name,installed_version,severity,severity_sources,provenance_ref,fixed_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+            (scan_id,ordinal,finding_id,cve_id,ecosystem,package_name,installed_version,severity,severity_sources,provenance_ref,fixed_version,advisory)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
           item.findings.forEach((f, ordinal) => insert.run(scanId, ordinal, f.findingId, f.cveId,
             f.ecosystem, f.packageName, f.installedVersion, f.severity, JSON.stringify(f.severitySources),
-            f.provenanceRef, f.fixedVersion));
+            f.provenanceRef, f.fixedVersion, f.advisory == null ? null : JSON.stringify(f.advisory)));
         }
       }
       if (safeConfig) this.saveConfig(scanId, attempts, safeConfig);
@@ -730,36 +760,8 @@ export class ScanLedger {
 
   // The image is supplied by the pinned worker job, not reconstructed from untrusted findings.
   finishWithVuln(scanId: string, attempts: number, image: string, findings: VulnFinding[], scannerVersion: string): boolean {
-    if (typeof image !== 'string' ||
-        !/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(image) ||
-        scannerVersion !== '0.69.3' || !Array.isArray(findings) || findings.length > MAX_VULN_FINDINGS)
-      throw new TypeError('Invalid vulnerability result');
-    const seen = new Set<string>();
-    for (const finding of findings) {
-      if (!sbomObject(finding, ['findingId', 'cveId', 'ecosystem', 'packageName', 'installedVersion',
-        'severity', 'severitySources', 'provenanceRef', 'fixedVersion']) ||
-          typeof finding.cveId !== 'string' || !/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(finding.cveId) ||
-          finding.ecosystem !== 'apk' && finding.ecosystem !== 'npm' ||
-          typeof finding.packageName !== 'string' || finding.packageName.length > 128 ||
-          !(finding.ecosystem === 'apk' ? /^[a-z0-9][a-z0-9._+-]{0,127}$/ :
-            /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/).test(finding.packageName) ||
-          typeof finding.installedVersion !== 'string' ||
-          !/^[A-Za-z0-9][A-Za-z0-9._+~:-]{0,79}$/.test(finding.installedVersion) ||
-          finding.fixedVersion !== null && (typeof finding.fixedVersion !== 'string' ||
-            !/^[A-Za-z0-9][A-Za-z0-9._+~:-]{0,79}$/.test(finding.fixedVersion)) ||
-          !['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(finding.severity) ||
-          typeof finding.provenanceRef !== 'string' || !/^target-[a-f0-9]{64}$/.test(finding.provenanceRef) ||
-          !Array.isArray(finding.severitySources) || finding.severitySources.length < 1 ||
-          finding.severitySources.length > vulnSources.size ||
-          finding.severitySources.some((source, i) => typeof source !== 'string' || !vulnSources.has(source) ||
-            i > 0 && finding.severitySources[i - 1] >= source))
-        throw new TypeError('Invalid vulnerability finding');
-      const key = JSON.stringify([finding.ecosystem, finding.provenanceRef, finding.cveId,
-        finding.packageName, finding.installedVersion]);
-      if (finding.findingId !== `vuln-${createHash('sha256').update(key).digest('hex')}` || seen.has(key))
-        throw new TypeError('Invalid or duplicate vulnerability finding');
-      seen.add(key);
-    }
+    if (scannerVersion !== '0.69.3') throw new TypeError('Invalid vulnerability result');
+    validateCombined([{ check: 'vuln', outcome: 'checked', image, findings, scannerVersion }]);
     return this.immediate(() => {
       const delivered = this.db.prepare(`UPDATE outbox SET delivered_at = CURRENT_TIMESTAMP, lease_until = NULL
         WHERE scan_id = ? AND attempts = ? AND delivered_at IS NULL
@@ -775,11 +777,11 @@ export class ScanLedger {
         VALUES (?,?,?,?,'image','checked',?,CURRENT_TIMESTAMP)`)
         .run(scanId, image, row.platform, findings.length, scannerVersion);
       const insert = this.db.prepare(`INSERT INTO scan_vuln_findings
-        (scan_id,ordinal,finding_id,cve_id,ecosystem,package_name,installed_version,severity,severity_sources,provenance_ref,fixed_version)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+        (scan_id,ordinal,finding_id,cve_id,ecosystem,package_name,installed_version,severity,severity_sources,provenance_ref,fixed_version,advisory)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
       findings.forEach((finding, ordinal) => insert.run(scanId, ordinal, finding.findingId, finding.cveId,
         finding.ecosystem, finding.packageName, finding.installedVersion, finding.severity,
-        JSON.stringify(finding.severitySources), finding.provenanceRef, finding.fixedVersion));
+        JSON.stringify(finding.severitySources), finding.provenanceRef, finding.fixedVersion, finding.advisory == null ? null : JSON.stringify(finding.advisory)));
       const state = this.db.prepare(`UPDATE scans SET state = 'completed', terminal_at = CURRENT_TIMESTAMP
         WHERE id = ? AND state = 'running' AND checks = '["vuln"]' AND scope = 'image'`).run(scanId);
       if (state.changes !== 1) throw new Error('Scan vulnerability contract mismatch');
@@ -805,15 +807,25 @@ export class ScanLedger {
     if (!row) return undefined;
     if (row.outcome === 'failed') return { coverage: 'image', outcome: 'failed', errorCode: row.errorCode!,
       findings: [], nextCursor: null };
-    const findings = this.db.prepare(`SELECT finding_id AS findingId, cve_id AS cveId, ecosystem,
+    // Validate the complete bounded durable dataset before projecting a page.
+    const stored = this.db.prepare(`SELECT finding_id AS findingId, cve_id AS cveId, ecosystem,
       package_name AS packageName, installed_version AS installedVersion, severity,
-      severity_sources AS severitySources, provenance_ref AS provenanceRef, fixed_version AS fixedVersion
-      FROM scan_vuln_findings WHERE scan_id = ? AND ordinal >= ? ORDER BY ordinal LIMIT ?`)
-      .all(scanId, cursor, limit) as Array<Omit<VulnFinding, 'severitySources'> & { severitySources: string }>;
-    return { image: row.image!, platform: row.platform!, findingCount: row.findingCount!, coverage: 'image',
-      outcome: 'checked', scannerVersion: row.scannerVersion!, checkedAt: row.checkedAt!,
-      findings: findings.map(finding => ({ ...finding, severitySources: JSON.parse(finding.severitySources) as string[] })),
-      nextCursor: cursor + findings.length < row.findingCount! ? cursor + findings.length : null };
+      severity_sources AS severitySources, provenance_ref AS provenanceRef, fixed_version AS fixedVersion, advisory
+      FROM scan_vuln_findings WHERE scan_id = ? ORDER BY ordinal LIMIT 1001`)
+      .all(scanId) as Array<Omit<VulnFinding, 'severitySources' | 'advisory'> & { severitySources: string; advisory: string | null }>;
+    const all = stored.map(({ advisory, ...finding }) => {
+      if (Buffer.byteLength(finding.severitySources) > 1024 || advisory !== null && Buffer.byteLength(advisory) > 16_384)
+        throw new TypeError('Invalid stored vulnerability finding');
+      return { ...finding, severitySources: JSON.parse(finding.severitySources) as string[],
+        ...(advisory === null ? {} : { advisory: JSON.parse(advisory) }) };
+    });
+    if (row.platform !== 'linux/amd64' || row.scannerVersion !== '0.69.3' || row.findingCount !== all.length)
+      throw new TypeError('Invalid stored vulnerability result');
+    validateCombined([{ check: 'vuln', outcome: 'checked', image: row.image!, scannerVersion: row.scannerVersion, findings: all }]);
+    const findings = all.slice(cursor, cursor + limit);
+    return { image: row.image!, platform: row.platform, findingCount: row.findingCount, coverage: 'image',
+      outcome: 'checked', scannerVersion: row.scannerVersion, checkedAt: row.checkedAt!, findings,
+      nextCursor: cursor + findings.length < row.findingCount ? cursor + findings.length : null };
   }
 
   sbom(scanId: string, subject: string, cursor = 0, limit = 50): ({

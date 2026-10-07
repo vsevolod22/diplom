@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { LiveScanSession } from '@/features/scans/LiveScanSession';
@@ -888,5 +888,187 @@ describe('cookie-session live scans', () => {
     expect(client.getQueryData(old[0].queryKey)).toBeUndefined();
     transitionScanSession('bob', client, true);
     expect(client.getQueryCache().findAll({ queryKey: ['live-scans'] })).toHaveLength(0);
+  });
+});
+
+describe('Stage2 unified Findings detail', () => {
+  const image = `registry-1.docker.io/library/alpine@${digest}`;
+  const checkedAt = '2026-10-07T08:00:00.000Z';
+  const source = (name: string, severity = 'HIGH') => ({ source: name, provenanceRef: `target-${'a'.repeat(64)}`,
+    title: { value: 'Bounds: 1 < 2 & 3 > 2', state: 'available', redacted: false },
+    description: { value: 'Safe source text', state: 'truncated', redacted: true }, language: null, severity, fixedVersion: null,
+    cvss: { family: 'v3', version: '3.1', versionState: 'available', reportedScore: 0, scoreState: 'available', vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', vectorState: 'available' } });
+  const finding = (n: number, advisory = true) => ({ findingId: `vuln-${n}`, cveId: `CVE-2026-${String(n).padStart(4, '0')}`, ecosystem: 'apk', packageName: `package-${n}`, installedVersion: '1', severity: 'HIGH', fixedVersion: null,
+    severitySources: ['alpine'], provenanceRef: `target-${'a'.repeat(64)}`,
+    ...(advisory ? { advisory: { schemaVersion: 1, state: 'available', assessments: [source('alpine'), source('nvd', 'LOW')], references: [], conflicts: ['severity'], conflictState: 'present', limitations: ['redaction', 'field_limit'] } } : {}) });
+  const vulnPage = (cursor = 0, count = 51, advisory = false) => ({ outcome: 'checked', coverage: 'image', image, platform: 'linux/amd64', findingCount: count,
+    scannerVersion: '0.69.3', checkedAt, findings: Array.from({ length: Math.min(50, count - cursor) }, (_, n) => finding(cursor + n + 1, advisory)), nextCursor: cursor + 50 < count ? cursor + 50 : null });
+  const secret = (count: number) => ({ check: 'secret', coverage: 'image', outcome: 'checked', findingCount: count, scannerVersion: '0.69.3', errorCode: null });
+  const secretPage = (cursor = 0, count = 52) => ({ findings: Array.from({ length: Math.min(50, count - cursor) }, (_, n) => ({ findingId: `secret-${cursor + n + 1}`, ruleId: `secret-rule-${cursor + n + 1}`, line: 1, evidenceRef: 'redacted' })), nextCursor: cursor + 50 < count ? cursor + 50 : null, coverage: secret(count) });
+  const status = (checks = ['secret', 'vuln'], scanId = id, secrets = 52, cves = 51) => ({ scanId, state: 'completed', digest, platform: 'linux/amd64', checks,
+    perCheck: { ...(checks.includes('secret') ? { secret: secret(secrets) } : {}), ...(checks.includes('vuln') ? { vuln: { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: cves, scannerVersion: '0.69.3', checkedAt } } : {}) }, result: null });
+
+  it('shows CVE-only cards in the single visible Findings section, escaped source rows and explicit safe links without external requests', async () => {
+    // Less-than/plain ampersand remain text; no HTML, Markdown or source URL rendering.
+    const f = finding(1234);
+    f.advisory!.assessments.forEach(item => { item.title.value = 'Bounds 1 < 2 & comparison'; });
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      requests.push(path);
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/vuln?')) return json({ ...vulnPage(0, 1), findings: [f] });
+      return json(status(['vuln'], id, 0, 1));
+    }));
+    mount(`/scans/${id}`);
+    await screen.findByText('CVE-2026-1234 · HIGH');
+    const findings = screen.getByRole('region', { name: 'Находки' });
+    expect(screen.getAllByRole('heading', { name: 'Находки' })).toHaveLength(1);
+    expect(within(findings).getAllByText(/Bounds 1 < 2 & comparison/)).toHaveLength(2);
+    expect(within(findings).getAllByText(/Язык источника: не указан/)).toHaveLength(2);
+    expect(within(findings).getByText(/Источники расходятся: severity/)).toBeTruthy();
+    expect(within(findings).getAllByText(/оценка источника: 0/)).toHaveLength(2);
+    expect(within(findings).getAllByText(/Текст сокращён/)).toHaveLength(2);
+    expect(within(findings).getByText(/наличие записи и её содержимое не проверены/)).toBeTruthy();
+    expect(within(findings).getByText(/Проверенный русский источник/)).toBeTruthy();
+    const links = within(findings).getAllByRole('link');
+    expect(links.map(link => link.getAttribute('href'))).toEqual(['https://www.cve.org/CVERecord?id=CVE-2026-1234', 'https://nvd.nist.gov/vuln/detail/CVE-2026-1234', 'https://www.first.org/cvss/calculator/3.1']);
+    for (const link of links) {
+      expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+      expect(link.getAttribute('target')).toBe('_blank');
+      expect(link.getAttribute('referrerpolicy')).toBe('no-referrer');
+      fireEvent.mouseOver(link);
+    }
+    expect(findings.querySelector('img, iframe, script')).toBeNull();
+    expect(requests.every(path => path.startsWith('/api/v1/'))).toBe(true);
+    expect(requests.some(path => path.includes('/results?'))).toBe(false);
+    await user.click(within(findings).getAllByRole('button', { name: 'Копировать вектор CVSS 3.1' })[0]);
+    expect(writeText).toHaveBeenCalledWith(f.advisory!.assessments[0].cvss.vector);
+    expect(await within(findings).findByText('Вектор скопирован')).toBeTruthy();
+    writeText.mockRestore();
+  });
+
+  it('keeps independent >50-page cursors and totals across actual all/CVE/Secrets filters', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      requests.push(path);
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/vuln?')) return json(vulnPage(path.includes('cursor=50') ? 50 : 0));
+      if (path.includes('/results?')) return json(secretPage(path.includes('cursor=50') ? 50 : 0));
+      return json(status());
+    }));
+    mount(`/scans/${id}`);
+    await screen.findByText('CVE-2026-0001 · HIGH');
+    await screen.findByText('secret · secret-rule-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
+    await screen.findByText('CVE-2026-0051 · HIGH');
+    expect(screen.getByText('secret · secret-rule-1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница' }));
+    await screen.findByText('secret · secret-rule-51');
+    const beforeFilter = requests.length;
+    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'cve' } });
+    expect(screen.queryByText('secret · secret-rule-51')).toBeNull();
+    expect(screen.getByText('CVE-2026-0051 · HIGH')).toBeTruthy();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'secret' } });
+    expect(screen.queryByText('CVE-2026-0051 · HIGH')).toBeNull();
+    expect(screen.getByText('secret · secret-rule-51')).toBeTruthy();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'all' } });
+    expect(screen.getByText('CVE-2026-0051 · HIGH')).toBeTruthy();
+    expect(screen.getByText('Подтверждённое число CVE: 51')).toBeTruthy();
+    expect(screen.getByText('Подтверждённое число Secrets: 52')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('103');
+    expect(requests).toHaveLength(beforeFilter);
+  });
+
+  it('renders Secrets checked zero alongside CVE without substituting a combined zero', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/vuln?')) return json(vulnPage(0, 1));
+      if (path.includes('/results?')) return json(secretPage(0, 0));
+      return json(status(['secret', 'vuln'], id, 0, 1));
+    }));
+    mount(`/scans/${id}`);
+    await screen.findByText('CVE-2026-0001 · HIGH');
+    await screen.findByText('Подтверждённое число Secrets: 0');
+    expect(screen.getByText(/0 находок в выполненной проверенной области Secrets/)).toBeTruthy();
+    expect(screen.getByText(/исторический отчёт без advisory/)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /FIRST/ })).toBeNull();
+  });
+
+  it('retains confirmed totals on independent later-page failures, without hiding the other dataset', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('cursor=50')) return { ok: false, status: 503, json: async () => ({}) };
+      if (path.includes('/vuln?')) return json(vulnPage());
+      if (path.includes('/results?')) return json(secretPage());
+      return json(status());
+    }));
+    mount(`/scans/${id}`);
+    await screen.findByText('CVE-2026-0001 · HIGH');
+    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
+    await screen.findByText('Страница CVE недоступна; ранее подтверждённое число сохранено.');
+    expect(screen.getByText('Подтверждённое число CVE: 51')).toBeTruthy();
+    expect(screen.getByText('secret · secret-rule-1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница' }));
+    await screen.findByText('Страница Secrets недоступна; ранее подтверждённое число сохранено.');
+    expect(screen.getByText('Подтверждённое число Secrets: 52')).toBeTruthy();
+  });
+
+  it('keeps unknown schema and nonchecked Secrets outcomes unknown, with no raw fallback', async () => {
+    const failed = { check: 'secret', coverage: 'image', outcome: 'failed', findingCount: null, scannerVersion: '0.69.3', errorCode: 'SCAN_FAILED' };
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/vuln?')) return json({ ...vulnPage(0, 1), findings: [{ ...finding(1), advisory: { schemaVersion: 99, raw: 'DO_NOT_RENDER_RAW' } }] });
+      if (path.includes('/results?')) return json({ findings: [], nextCursor: null, coverage: failed });
+      return json({ ...status(), perCheck: { ...status().perCheck, secret: failed } });
+    }));
+    mount(`/scans/${id}`);
+    await screen.findByText('CVE недоступны; число уязвимостей неизвестно.');
+    expect(screen.getByText('Число Secrets неизвестно.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('DO_NOT_RENDER_RAW');
+    expect(screen.queryByText(/Подтверждённое число/)).toBeNull();
+    expect(screen.queryByText(/0 находок/)).toBeNull();
+  });
+
+  it.each(['subject', 'session', 'route'] as const)('resets filters and all cursors and discards a pending CVE page after %s changes', async change => {
+    const nextId = '00000000-0000-4000-8000-000000000002';
+    let changed = false;
+    let finish!: (value: ReturnType<typeof json>) => void;
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      requests.push(path);
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/vuln?') && path.includes('cursor=50')) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+      if (path.includes('/vuln?')) return json(vulnPage(0, changed ? 1 : 51));
+      if (path.includes('/results?')) return json(secretPage(path.includes('cursor=50') ? 50 : 0, changed ? 1 : 52));
+      return json(status(['secret', 'vuln'], path.includes(nextId) ? nextId : id, changed ? 1 : 52, changed ? 1 : 51));
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/scans/${id}`]}>
+      <Link to={`/scans/${nextId}`}>Другой скан</Link>
+      <Routes><Route path="/scans/:scanId" element={<LiveScanSession><ScanDetailPage /></LiveScanSession>} /></Routes>
+    </MemoryRouter></QueryClientProvider>);
+    await screen.findByText('CVE-2026-0001 · HIGH');
+    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница' }));
+    await screen.findByText('secret · secret-rule-51');
+    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'secret' } });
+    changed = true;
+    const boundary = requests.length;
+    if (change === 'route') fireEvent.click(screen.getByRole('link', { name: 'Другой скан' }));
+    else act(() => {
+      const subject = change === 'subject' ? 'bob' : 'alice';
+      transitionScanSession(subject, client, change === 'session');
+      client.setQueryData(['demo-auth', 'me'], { id: subject, email: `${subject}${change === 'session' ? '+renewed' : ''}@example.com` });
+    });
+    await screen.findByText('Подтверждённое число CVE: 1');
+    expect((screen.getByRole('combobox', { name: 'Категория' }) as HTMLSelectElement).value).toBe('all');
+    expect(screen.getByText('secret · secret-rule-1')).toBeTruthy();
+    await act(async () => finish(json(vulnPage(50))));
+    expect(screen.queryByText('CVE-2026-0051 · HIGH')).toBeNull();
+    expect(screen.queryByText('secret · secret-rule-51')).toBeNull();
+    expect(requests.slice(boundary).some(path => path.includes('cursor='))).toBe(false);
   });
 });

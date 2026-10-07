@@ -10,6 +10,7 @@ import { AppModule } from '../app.module.js';
 import { LedgerStore } from '../ledger/ledger-store.js';
 import { OciResolver } from '../oci/oci-resolver.js';
 import { ScansService } from './scans.service.js';
+import { normalizeAdvisory } from '../worker/vuln-advisory.js';
 
 const origin = 'http://127.0.0.1:8080';
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -23,6 +24,7 @@ function token(subject: string) {
 }
 
 test('HTTP vulnerability admission fails closed; combined status and vuln pages remain subject scoped', async () => {
+  const { parseCurrentVuln } = await import(new URL('../../../../src/shared/api/scans/scanTransport.ts', import.meta.url).href);
   const dir = mkdtempSync(join(tmpdir(), 'vuln-http-'));
   const keys = ['SCAN_LEDGER_PATH', 'SCAN_JWT_SECRET', 'SCAN_JWT_ISSUER', 'SCAN_JWT_AUDIENCE',
     'AUTH_DB_PATH', 'AUTH_ORIGIN', 'AUTH_ALLOW_INSECURE_LOCAL_HTTP', 'SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS',
@@ -91,7 +93,9 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
     const findingId = `vuln-${createHash('sha256').update(JSON.stringify(['apk', provenanceRef, cveId, 'busybox', '1.2-r0'])).digest('hex')}`;
     const finding = { findingId, cveId, ecosystem: 'apk' as const, packageName: 'busybox',
       installedVersion: '1.2-r0', fixedVersion: null, severity: 'HIGH' as const,
-      severitySources: ['alpine', 'nvd'], provenanceRef };
+      severitySources: ['alpine', 'nvd'], provenanceRef,
+      advisory: normalizeAdvisory({ Title: 'Busybox issue', Description: 'Safe text CANARY-secret', DataSource: { ID: 'alpine' },
+        Severity: 'HIGH', SeveritySource: 'alpine', CVSS: { nvd: { V3Score: 0, V3Vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H' } } }, provenanceRef, cveId) };
     assert.equal(ledger.finishCombined(scanId, job.attempts, [
       { check: 'secret', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' },
       { check: 'sbom', outcome: 'checked', scannerVersion: '0.69.3', sbom: { image,
@@ -131,7 +135,12 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
     const browserReport = await fetch(`${browserPath}?limit=1`, { headers: { cookie: owner.cookie } });
     assert.equal(browserReport.status, 200);
     assert.equal(browserReport.headers.get('cache-control'), 'no-store');
-    assert.deepEqual((await browserReport.json() as { findings: unknown[] }).findings, [finding]);
+    const browserValue: unknown = await browserReport.json();
+    const parsed = parseCurrentVuln(browserValue);
+    assert.equal(parsed.outcome, 'checked');
+    assert.deepEqual(parsed.findings, [finding]);
+    assert.ok(!JSON.stringify(parsed).includes('CANARY'));
+    assert.deepEqual(parseCurrentVuln(await (await fetch(`${browserPath}?limit=1`, { headers: { cookie: owner.cookie } })).json()).findings, [finding]);
     assert.equal((await fetch(`${base}/browser/scans/${scanId}/vuln`, { headers: { cookie: owner.cookie } })).status, 404);
   } finally {
     await app.close();

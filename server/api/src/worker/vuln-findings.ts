@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { allocateAdvisoryBudget, normalizeAdvisory, plainObject, type AdvisoryV1 } from './vuln-advisory.js';
 import { validateArchiveJson, type ArchiveBinding } from '../oci/archive-identity.js';
 
 // Data-only normalizer. The caller must separately enforce a successful Trivy 0.69.3
@@ -13,6 +14,7 @@ export type VulnFinding = {
   severitySources: string[];
   provenanceRef: string;
   fixedVersion: string | null;
+  advisory?: AdvisoryV1 | null;
 };
 export const MAX_VULN_FINDINGS = 1000;
 const imagePattern = /^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/;
@@ -28,7 +30,7 @@ const sources = new Set([
 ]);
 
 const object = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
+  plainObject(value);
 function validSource(value: unknown): value is string {
   return typeof value === 'string' && sources.has(value);
 }
@@ -103,41 +105,40 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
           typeof raw.PkgName !== 'string' || raw.PkgName.length > 128 ||
           !(ecosystem === 'apk' ? apkNamePattern : npmNamePattern).test(raw.PkgName) ||
           !validVersion(raw.InstalledVersion) ||
-          (raw.FixedVersion !== undefined && raw.FixedVersion !== '' && !validVersion(raw.FixedVersion)) ||
           typeof raw.Severity !== 'string' || !severities.includes(raw.Severity as typeof severities[number]) ||
-          (raw.SeveritySource != null && !validSource(raw.SeveritySource)) ||
           (ecosystem === 'npm' && !validPackagePath(raw.PkgPath))) throw new Error('Invalid vulnerability');
       // Missing/null source is not evidence that Alpine (or any vendor) supplied the severity.
-      const severitySources = new Set<string>([raw.SeveritySource == null ? 'unknown' : raw.SeveritySource as string]);
-      if (raw.VendorSeverity !== undefined) {
-        if (!object(raw.VendorSeverity) || Object.keys(raw.VendorSeverity).length > 16)
-          throw new Error('Invalid severity sources');
+      const severitySources = new Set<string>([validSource(raw.SeveritySource) ? raw.SeveritySource : 'unknown']);
+      if (object(raw.VendorSeverity)) {
         for (const [source, level] of Object.entries(raw.VendorSeverity)) {
-          if (!validSource(source) || !Number.isInteger(level) || (level as number) < 0 || (level as number) > 4)
-            throw new Error('Invalid severity source');
-          severitySources.add(source);
+          if (validSource(source) && Number.isInteger(level) && (level as number) >= 0 && (level as number) <= 4)
+            severitySources.add(source);
         }
       }
-      const fixedVersion = raw.FixedVersion === undefined || raw.FixedVersion === '' ? null : raw.FixedVersion as string;
+      const fixedVersion = validVersion(raw.FixedVersion) ? raw.FixedVersion : null;
       const provenanceRef = ecosystem === 'npm'
         ? `target-${createHash('sha256').update(JSON.stringify([result.Target, raw.PkgPath])).digest('hex')}`
         : targetRef;
       const key = JSON.stringify([...(binding ? [image, platform, 'vuln'] : []), ecosystem, provenanceRef, raw.VulnerabilityID, raw.PkgName, raw.InstalledVersion]);
+      const advisory = normalizeAdvisory(raw, provenanceRef, raw.VulnerabilityID);
       const existing = byLocation.get(key);
       if (existing) {
-        if (existing.severity !== raw.Severity || existing.fixedVersion !== fixedVersion)
-          throw new Error('Conflicting vulnerability assessments');
+        // Stable compatibility representative; never select the maximum severity.
+        existing.severity = [existing.severity, raw.Severity as VulnFinding['severity']].sort()[0];
+        existing.fixedVersion = [existing.fixedVersion, fixedVersion].filter((v): v is string => v !== null).sort()[0] ?? null;
+        existing.advisory!.assessments.push(...advisory.assessments);
+        existing.advisory!.limitations = [...new Set([...existing.advisory!.limitations, ...advisory.limitations])];
         existing.severitySources = [...new Set([...existing.severitySources, ...severitySources])].sort();
         continue;
       }
       const finding: VulnFinding = { findingId: `vuln-${createHash('sha256').update(key).digest('hex')}`,
         cveId: raw.VulnerabilityID, ecosystem, packageName: raw.PkgName,
         installedVersion: raw.InstalledVersion, severity: raw.Severity as VulnFinding['severity'],
-        severitySources: [...severitySources].sort(), provenanceRef, fixedVersion };
+        severitySources: [...severitySources].sort(), provenanceRef, fixedVersion, advisory };
       byLocation.set(key, finding);
       findings.push(finding);
     }
   }
   if (!verifiedOsCoverage) throw new Error('No verified OS coverage');
-  return findings;
+  return allocateAdvisoryBudget(findings);
 }

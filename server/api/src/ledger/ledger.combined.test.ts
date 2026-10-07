@@ -55,6 +55,7 @@ test('v8 to v9 migration preserves rows, FKs, events, outbox and legacy secret r
     DROP TABLE scans; ALTER TABLE scans_v8 RENAME TO scans;
     DROP TABLE scan_check_results;
     DROP TABLE scan_execution_profiles;
+    ALTER TABLE scan_vuln_findings DROP COLUMN advisory;
     PRAGMA user_version = 8;
     COMMIT;`);
   raw.pragma('foreign_keys = ON');
@@ -80,7 +81,7 @@ test('v8 to v9 migration preserves rows, FKs, events, outbox and legacy secret r
   assert.equal(ledger.vuln(queued, 'bob'), undefined);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 12);
+  assert.equal(db.pragma('user_version', { simple: true }), 13);
   db.pragma('foreign_keys = ON');
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
   assert.deepEqual(db.pragma('foreign_key_check'), []);

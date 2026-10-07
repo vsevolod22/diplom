@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import test from 'node:test';
 import { ScanLedger, type PinnedTarget } from './ledger.js';
+import { normalizeAdvisory } from '../worker/vuln-advisory.js';
 import type { VulnFinding } from '../worker/vuln-findings.js';
 
 const target: PinnedTarget = { subject: 'alice', idempotencyKey: 'vuln', registry: 'registry-1.docker.io',
@@ -67,7 +68,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'completed']);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 12);
+  assert.equal(db.pragma('user_version', { simple: true }), 13);
   assert.equal(count(db, 'scan_vuln_results'), 1);
   assert.equal(count(db, 'scan_vuln_findings'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
@@ -194,4 +195,57 @@ test('v8 migration failure rolls back schema and version', () => fixture(file =>
   assert.equal((after.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'scan_vuln_results'").get() as { n: number }).n, 0);
   assert.equal(after.pragma('integrity_check', { simple: true }), 'ok');
   after.close();
+}));
+
+test('v12 to v13 is nullable, preserves legacy rows/config tables, and rolls back a partial ALTER', () => fixture(file => {
+  let ledger = new ScanLedger(file);
+  const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
+  ledger.finishWithVuln(id, job.attempts, image, findings, '0.69.3');
+  ledger.close();
+  let raw = new Database(file);
+  raw.exec('ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=12');
+  const before = raw.prepare('SELECT * FROM scan_vuln_findings').all();
+  const configSchema = raw.prepare("SELECT sql FROM sqlite_master WHERE name IN ('scan_check_results','scan_execution_profiles') ORDER BY name").all();
+  raw.close();
+  ledger = new ScanLedger(file);
+  assert.deepEqual(ledger.vuln(id, 'alice')?.findings, findings); ledger.close();
+  raw = new Database(file);
+  assert.equal(raw.pragma('user_version', { simple: true }), 13);
+  assert.deepEqual(raw.prepare('SELECT * FROM scan_vuln_findings').all(), before.map(row => ({ ...row as object, advisory: null })));
+  assert.deepEqual(raw.prepare("SELECT sql FROM sqlite_master WHERE name IN ('scan_check_results','scan_execution_profiles') ORDER BY name").all(), configSchema);
+  assert.throws(() => raw.prepare('UPDATE scan_vuln_findings SET advisory=?').run('界'.repeat(5462)), /CHECK/);
+  raw.pragma('user_version=12'); raw.close();
+  assert.throws(() => new ScanLedger(file), /duplicate column/);
+  raw = new Database(file); assert.equal(raw.pragma('user_version', { simple: true }), 12); raw.close();
+}));
+
+test('ordinary advisory persists/reopens; off-page stored tampering and write injection reject atomically', () => fixture(file => {
+  let ledger = new ScanLedger(file);
+  const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
+  const values = findings.map(f => ({ ...f, advisory: normalizeAdvisory({ Title: 'Safe title', Description: 'CANARY-secret safe remainder', DataSource: { ID: 'alpine' }, CVSS: { nvd: { V3Score: 0 } } }, f.provenanceRef, f.cveId) }));
+  const invalid = structuredClone(values); invalid[0].advisory.references[0].url = 'https://evil.test';
+  assert.throws(() => ledger.finishWithVuln(id, job.attempts, image, invalid, '0.69.3'));
+  assert.equal(ledger.vuln(id, 'alice'), undefined);
+  assert.equal(ledger.finishWithVuln(id, job.attempts, image, values, '0.69.3'), true);
+  ledger.close(); ledger = new ScanLedger(file);
+  assert.deepEqual(ledger.vuln(id, 'alice', 0, 1)?.findings, [values[0]]);
+  assert.equal(ledger.vuln(id, 'bob'), undefined);
+  const raw = new Database(file);
+  const body = raw.prepare('SELECT advisory FROM scan_vuln_findings WHERE scan_id=? AND ordinal=0').get(id) as { advisory: string };
+  assert.ok(!body.advisory.includes('CANARY'));
+  const tampered = { ...values[1].advisory, raw: 'unsafe' };
+  raw.prepare('UPDATE scan_vuln_findings SET advisory=? WHERE scan_id=? AND ordinal=1').run(JSON.stringify(tampered), id);
+  assert.throws(() => ledger.vuln(id, 'alice', 0, 1), /Invalid vulnerability advisory/);
+  assert.equal(ledger.vuln(id, 'bob'), undefined);
+  raw.close(); ledger.close();
+}));
+test('ordinary aggregate read validates the entire scan across page boundaries', () => fixture(file => {
+  const ledger = new ScanLedger(file), id = ledger.enqueue(target).scanId, job = ledger.claim()!;
+  const values = Array.from({ length: 300 }, (_, i) => finding(`CVE-2025-${String(i).padStart(4, '0')}`));
+  assert.equal(ledger.finishWithVuln(id, job.attempts, image, values, '0.69.3'), true);
+  const raw = new Database(file), update = raw.prepare('UPDATE scan_vuln_findings SET advisory=? WHERE scan_id=? AND ordinal=?');
+  raw.transaction(() => values.forEach((f, i) => update.run(JSON.stringify(normalizeAdvisory({ Title: 'Title', Description: 'x'.repeat(4096) }, f.provenanceRef, f.cveId)), id, i)))();
+  assert.throws(() => ledger.vuln(id, 'alice', 299, 1), /Invalid vulnerability advisory/);
+  assert.equal(ledger.vuln(id, 'bob'), undefined);
+  raw.close(); ledger.close();
 }));

@@ -38,7 +38,7 @@ test('actual DB Bottlerocket severity assessment is allowlisted but arbitrary so
   const base = report();
   const value = { ...base, Results: [{ ...base.Results[0], Vulnerabilities: [{ ...vuln(), VendorSeverity: { alpine: 3, bottlerocket: 4 } }] }] };
   assert.deepEqual(parse(value)[0].severitySources, ['alpine', 'bottlerocket']);
-  assert.throws(() => parse({ ...value, Results: [{ ...value.Results[0], Vulnerabilities: [{ ...vuln(), VendorSeverity: { bottlerocket: 5 } }] }] }));
+  assert.equal(parse({ ...value, Results: [{ ...value.Results[0], Vulnerabilities: [{ ...vuln(), VendorSeverity: { bottlerocket: 5 } }] }] })[0].advisory?.limitations.includes('invalid_metadata'), true);
 });
 test('same location merges sources; distinct target provenance survives', () => {
   const base = report();
@@ -72,9 +72,7 @@ test('invalid CVE, package, versions, severity and unbounded input are rejected'
     { ...base.Results[0], Vulnerabilities: [{ ...vuln(), ...change }] }] });
   for (const change of [
     { VulnerabilityID: 'GHSA-1234' }, { PkgName: `https://${canary}` },
-    { InstalledVersion: `1.0?token=${canary}` }, { FixedVersion: `https://${canary}` },
-    { Severity: 'EXTREME' }, { SeveritySource: canary }, { VendorSeverity: { [canary]: 3 } },
-    { VendorSeverity: { alpine: 99 } }, { FixedVersion: null },
+    { InstalledVersion: `1.0?token=${canary}` }, { Severity: 'EXTREME' },
   ]) assert.throws(() => parse(withVuln(change)));
   assert.throws(() => parse({ ...base, Results: Array(MAX_VULN_FINDINGS + 1).fill(base.Results[0]) }));
   assert.throws(() => parse({ ...base, Results: [{ ...base.Results[0], Vulnerabilities: Array(MAX_VULN_FINDINGS + 1).fill(vuln()) }] }));
@@ -98,10 +96,10 @@ test('Trivy 0.69.3 OS missing/null SeveritySource is unknown; Node ghsa is retai
   assert.equal(result[0].findingId, parse({ ...base, Results: [{ ...os, Vulnerabilities: [vuln()] }] })[0].findingId);
   assert.equal(result[0].findingId, parse({ ...base, Results: [
     { ...os, Vulnerabilities: [{ ...vuln(), Severity: 'LOW', FixedVersion: '' }] }] })[0].findingId);
-  assert.throws(() => parse({ ...base, Results: [{ ...os, Vulnerabilities: [vuln(),
-    { ...vuln(), Severity: 'LOW' }] }] }));
-  assert.throws(() => parse({ ...base, Results: [{ ...os, Vulnerabilities: [vuln(),
-    { ...vuln(), FixedVersion: '1.36.1-r4' }] }] }));
+  assert.equal(parse({ ...base, Results: [{ ...os, Vulnerabilities: [vuln(),
+    { ...vuln(), Severity: 'LOW' }] }] }).length, 1);
+  assert.equal(parse({ ...base, Results: [{ ...os, Vulnerabilities: [vuln(),
+    { ...vuln(), FixedVersion: '1.36.1-r4' }] }] })[0].advisory?.conflicts.includes('fixedVersion'), true);
 });
 
 test('real clean Alpine shape requires verified positive OS package inventory', () => {
@@ -135,9 +133,9 @@ test('observed Trivy 0.69.3 vendor sources remain bounded and validated', () => 
   assert.deepEqual(findings[0].severitySources, [...authorities, 'unknown'].sort());
   assert.deepEqual(findings[1].severitySources, ['ghsa']);
   assert.ok(!JSON.stringify(findings).includes(canary));
-  assert.throws(() => parse({ ...base, Results: [{ ...os, Vulnerabilities: [
+  assert.equal(parse({ ...base, Results: [{ ...os, Vulnerabilities: [
     { ...vuln(), VendorSeverity: { ...vendor, [canary]: 3 } },
-  ] }] }));
+  ] }] })[0].advisory?.limitations.includes('invalid_metadata'), true);
 });
 
 test('Node package path distinguishes location without leaking raw path', () => {
@@ -159,4 +157,20 @@ test('Node package path distinguishes location without leaking raw path', () => 
     assert.throws(() => parse({ ...base, Results: [base.Results[0],
       { ...node, Vulnerabilities: [{ ...item, PkgPath: path }] }] }));
   }
+});
+
+ test('invalid optional metadata preserves core coverage and conflicting duplicates preserve IDs', () => {
+  const base = report(), os = base.Results[0];
+  const first = { ...vuln(), Severity: 'LOW', FixedVersion: '1.36.1-r4' };
+  const parseItems = (items: unknown[]) => parse({ ...base, Results: [{ ...os, Vulnerabilities: items }] });
+  const both = parseItems([vuln(), first]);
+  assert.equal(both.length, 1);
+  assert.equal(both[0].findingId, parseItems([vuln()])[0].findingId);
+  assert.deepEqual(both, parseItems([first, vuln()]));
+  for (const change of [{ Title: {} }, { CVSS: { nvd: { V3Score: 'NaN', V3Vector: 'invalid' } } }, { VendorSeverity: { unsafe: 99 } }, { SeveritySource: 'CANARY' }, { FixedVersion: 'https://CANARY' }]) {
+    const value = parseItems([{ ...vuln(), ...change }]);
+    assert.equal(value.length, 1); assert.equal(value[0].findingId, both[0].findingId);
+    assert.ok(!JSON.stringify(value).includes('CANARY'));
+  }
+  assert.equal(parseItems([vuln(), { ...vuln(), InstalledVersion: '1.36.1-r1' }]).length, 2);
 });

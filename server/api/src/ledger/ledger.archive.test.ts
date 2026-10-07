@@ -1,4 +1,7 @@
 import test from 'node:test';
+import { createHash } from 'node:crypto';
+import { allocateAdvisoryBudget, normalizeAdvisory, jsonBytes } from '../worker/vuln-advisory.js';
+import type { VulnFinding } from '../worker/vuln-findings.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -73,4 +76,67 @@ test('receipt/check mismatch rolls back all terminal writes', () => fixture(ledg
   const id = ledger.enqueue({ ...target, repository: 'library/alpine' }).scanId, job = ledger.claim()!;
   assert.throws(() => ledger.finishArchive(id, job.attempts, report()), /Archive job mismatch/);
   assert.equal(ledger.state(id, 'alice'), 'running'); assert.equal(ledger.archiveResult(id, 'alice'), undefined);
+}));
+
+function advisoryReport(count = 1): ArchiveScanReport {
+  const value = report();
+  const image = `${target.registry}/${target.repository}@${target.digest}`;
+  const provenanceRef = `target-${'b'.repeat(64)}`;
+  const findings: VulnFinding[] = Array.from({ length: count }, (_, i) => {
+    const cveId = `CVE-2025-${String(i).padStart(4, '0')}`, packageName = 'x'.repeat(128), installedVersion = '1'.repeat(80);
+    const key = JSON.stringify([image, 'linux/amd64', 'vuln', 'apk', provenanceRef, cveId, packageName, installedVersion]);
+    return { findingId: `vuln-${createHash('sha256').update(key).digest('hex')}`, cveId, ecosystem: 'apk', packageName, installedVersion,
+      fixedVersion: '2'.repeat(80), severity: 'HIGH', severitySources: ['alpine'], provenanceRef,
+      advisory: normalizeAdvisory({ DataSource: { ID: 'alpine' }, Title: 'Safe', Description: '界'.repeat(1365), Severity: 'HIGH', SeveritySource: 'alpine' }, provenanceRef, cveId) };
+  });
+  value.vuln = { outcome: 'checked', findings: allocateAdvisoryBudget(findings), db: dbIdentity(new Date(Date.now() + 60_000).toISOString()),
+    os: { outcome: 'checked' }, node: { outcome: 'unsupported', reason: 'NODE_INVENTORY_ABSENT' } };
+  return value;
+}
+test('embedded advisory roundtrip rejects stored injection and never rechecks historical freshness against now', () => fixture((ledger, file) => {
+  const id = ledger.enqueue(target).scanId, job = ledger.claim()!, value = advisoryReport();
+  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  const now = Date.now; Date.now = () => now() + 365 * 86400_000;
+  try { assert.deepEqual(ledger.archiveResult(id, 'alice'), value); } finally { Date.now = now; }
+  const raw = new Database(file);
+  const malformed = structuredClone(value);
+  if (malformed.vuln?.outcome !== 'checked') throw new Error('fixture');
+  malformed.vuln.findings[0].advisory!.references[0].url = 'https://evil.test/?token=CANARY';
+  raw.prepare('UPDATE scan_archive_results SET report=? WHERE scan_id=?').run(JSON.stringify(malformed), id);
+  assert.equal(ledger.archiveResult(id, 'bob'), undefined);
+  assert.throws(() => ledger.archiveResult(id, 'alice'), /Invalid vulnerability advisory/);
+  raw.prepare('UPDATE scan_archive_results SET report=? WHERE scan_id=?').run(JSON.stringify({ ...value, raw: 'CANARY' }), id);
+  assert.throws(() => ledger.archiveResult(id, 'alice'), /Invalid archive result/);
+  raw.close();
+}));
+test('archive report budget omits metadata before commit and preserves core N/IDs under two million bytes', () => fixture((ledger, file) => {
+  const value = advisoryReport(1000);
+  value.secret = { outcome: 'checked', findings: Array.from({ length: 1000 }, (_, i) => ({ findingId: `secret-${i}-0`, ruleId: 'r'.repeat(80), line: i, evidenceRef: `result-${i}-secret-0` })) };
+  if (value.sbom?.outcome !== 'checked' || value.vuln?.outcome !== 'checked') throw new Error('fixture');
+  value.sbom.sbom.components = Array.from({ length: 1000 }, (_, i) => ({ ecosystem: 'apk', name: `p${i}`.padEnd(128, 'x'), version: '1'.repeat(80) }));
+  assert.ok(jsonBytes(value) > 2_000_000, `fixture must cross cap: ${jsonBytes(value)}`);
+  const ids = value.vuln.findings.map(f => f.findingId);
+  const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
+  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  const saved = ledger.archiveResult(id, 'alice');
+  if (saved?.vuln?.outcome !== 'checked') throw new Error('checked expected');
+  assert.equal(saved.vuln.findings.length, 1000); assert.deepEqual(saved.vuln.findings.map(f => f.findingId), ids);
+  assert.ok(saved.vuln.findings.some(f => f.advisory?.limitations.includes('report_budget')));
+  assert.ok(jsonBytes(saved) <= 2_000_000);
+  const reopened = new ScanLedger(file);
+  try { assert.deepEqual(reopened.archiveResult(id, 'alice'), saved); } finally { reopened.close(); }
+}));
+test('embedded aggregate metadata limit is enforced both before write and on stored read', () => fixture((ledger, file) => {
+  const value = advisoryReport(300), excessive = structuredClone(value);
+  if (value.vuln?.outcome !== 'checked' || excessive.vuln?.outcome !== 'checked') throw new Error('fixture');
+  for (const f of excessive.vuln.findings) f.advisory = normalizeAdvisory({ Title: 'Title', Description: 'x'.repeat(4096) }, f.provenanceRef, f.cveId);
+  assert.ok(jsonBytes(excessive) < 2_000_000);
+  const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
+  assert.throws(() => ledger.finishArchive(id, job.attempts, excessive), /Invalid vulnerability advisory/);
+  assert.equal(ledger.state(id, 'alice'), 'running');
+  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  const raw = new Database(file);
+  raw.prepare('UPDATE scan_archive_results SET report=? WHERE scan_id=?').run(JSON.stringify(excessive), id);
+  assert.throws(() => ledger.archiveResult(id, 'alice'), /Invalid vulnerability advisory/);
+  raw.close();
 }));

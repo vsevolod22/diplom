@@ -1,9 +1,10 @@
+import { plainObject } from './vuln-advisory.js';
 import { NGINX_ARCHIVE_TARGET } from '../oci/bounded-image-archive.js';
 import { validArchiveBinding } from '../oci/archive-identity.js';
 import { ARCHIVE_LIMITS as L } from '../oci/layer-tar-validator.js';
 import { assertDbFreshness } from './vuln-db-bundle.js';
 import type { ArchiveScanReport } from './archive-scan-worker.js';
-const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const object = (value: unknown): value is Record<string, unknown> => plainObject(value);
 const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => object(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const invalid = (): never => { throw new TypeError('Invalid archive result'); };
 export function assertArchiveDbFreshness(report: ArchiveScanReport, now = Date.now()): void {

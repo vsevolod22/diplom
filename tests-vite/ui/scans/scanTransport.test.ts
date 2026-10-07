@@ -92,16 +92,16 @@ describe('scan transport boundary', () => {
       expect(() => parseCurrentVuln(invalid)).toThrow();
     }
   });
-  it('keeps simultaneous outcomes independent and strips vulnerability evidence', async () => {
+  it('keeps simultaneous outcomes independent and retains bounded vulnerability provenance', async () => {
     const id = '00000000-0000-4000-8000-000000000001';
     const checked = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };
     const failed = { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_UNAVAILABLE' };
     expect(parseCurrentStatus({ scanId: id, state: 'partial', checks: ['secret', 'sbom', 'vuln'], perCheck: { secret: checked, sbom: null, vuln: failed }, result: null })).toMatchObject({ state: 'partial', checks: ['secret', 'sbom', 'vuln'], perCheck: { sbom: null, vuln: failed } });
     expect(() => parseCurrentStatus({ scanId: id, state: 'completed', checks: ['vuln', 'secret'], perCheck: {}, result: null })).toThrow();
-    const finding = { findingId: 'vuln-1', cveId: 'CVE-2026-1', ecosystem: 'apk', packageName: 'busybox', installedVersion: '1', severity: 'HIGH', fixedVersion: null, provenanceRef: 'private', severitySources: ['private'] };
+    const finding = { findingId: 'vuln-1', cveId: 'CVE-2026-1', ecosystem: 'apk', packageName: 'busybox', installedVersion: '1', severity: 'HIGH', fixedVersion: null, provenanceRef: `target-${'a'.repeat(64)}`, severitySources: ['alpine'] };
     const report = parseCurrentVuln({ outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@sha256:${'a'.repeat(64)}`, platform: 'linux/amd64', findingCount: 2, scannerVersion: '0.69.3', checkedAt: 'today', findings: [finding], nextCursor: 1 });
     expect(report.nextCursor).toBe('1');
-    expect(JSON.stringify(report)).not.toContain('private');
+    expect(report.findings[0]).toMatchObject({ provenanceRef: finding.provenanceRef, severitySources: ['alpine'] });
     expect(parseCurrentVuln({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_UNAVAILABLE', findings: [], nextCursor: null }).outcome).toBe('failed');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@sha256:${'a'.repeat(64)}`, platform: 'linux/amd64', findingCount: 2, scannerVersion: '0.69.3', checkedAt: 'today', findings: [finding], nextCursor: 1 }) });
     vi.stubGlobal('fetch', fetchMock);
@@ -248,5 +248,142 @@ describe('scan transport boundary', () => {
     expect(reconcileSnapshot(partial, parseScanStatus({ scanId: 'abc', state: 'running', percent: 99 }))).toEqual(partial);
     expect(reconcileSnapshot(partial, parseScanStatus({ scanId: 'other', state: 'completed', percent: 100 }))).toEqual(partial);
     expect(partial.percent).toBeNull();
+  });
+});
+
+const advisoryFixture = () => ({
+  schemaVersion: 1, state: 'available', assessments: [{ source: 'alpine', provenanceRef: `target-${'a'.repeat(64)}`,
+    title: { value: 'Package advisory', state: 'available', redacted: false }, description: { value: null, state: 'missing', redacted: false },
+    language: null, severity: 'HIGH', fixedVersion: null,
+    cvss: { family: 'v3', version: '3.1', versionState: 'available', reportedScore: 0, scoreState: 'available', vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', vectorState: 'available' } }],
+  references: [{ kind: 'canonical', authority: 'cve', url: 'https://www.cve.org/CVERecord?id=CVE-2026-1234' },
+    { kind: 'canonical', authority: 'nvd', url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-1234' },
+    { kind: 'calculator', authority: 'first', url: 'https://www.first.org/cvss/calculator/3.1' }], conflicts: [], conflictState: 'none', limitations: [],
+});
+const advisoryFinding = () => ({ findingId: 'vuln-1', cveId: 'CVE-2026-1234', ecosystem: 'apk', packageName: 'busybox', installedVersion: '1', severity: 'HIGH', fixedVersion: null,
+  severitySources: ['alpine'], provenanceRef: `target-${'a'.repeat(64)}`, advisory: advisoryFixture() });
+const advisoryPage = (findings: unknown[] = [advisoryFinding()]) => ({ outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@sha256:${'a'.repeat(64)}`,
+  platform: 'linux/amd64', findingCount: findings.length, scannerVersion: '0.69.3', checkedAt: '2026-10-07T08:00:00.000Z', findings, nextCursor: null });
+
+describe('frozen advisory-v1 browser wire', () => {
+  it('retains all nine core fields, score zero, nullable advisory and seven-field legacy', () => {
+    const finding = advisoryFinding();
+    expect(parseCurrentVuln(advisoryPage()).findings[0]).toEqual(finding);
+    const legacy = { findingId: finding.findingId, cveId: finding.cveId, ecosystem: finding.ecosystem, packageName: finding.packageName, installedVersion: finding.installedVersion, severity: finding.severity, fixedVersion: finding.fixedVersion };
+    expect(parseCurrentVuln(advisoryPage([legacy])).findings[0]).toEqual(legacy);
+    expect(parseCurrentVuln(advisoryPage([{ ...legacy, advisory: null }])).findings[0]).toEqual({ ...legacy, advisory: null });
+  });
+  it('bounds core identities and requires nonempty stable source provenance when supplied', () => {
+    const f = advisoryFinding();
+    for (const finding of [{ ...f, findingId: 'x'.repeat(70) }, { ...f, cveId: 'x'.repeat(22) }, { ...f, cveId: 'invalid-id', advisory: { ...f.advisory, references: [] } }, { ...f, severitySources: [] }, { ...f, severitySources: ['nvd', 'alpine'] }]) expect(() => parseCurrentVuln(advisoryPage([finding]))).toThrow();
+  });
+  it('rejects unknown versions/keys at every nesting level and never falls back to raw data', () => {
+    const a = advisoryFixture();
+    const f = advisoryFinding();
+    const bad = [
+      { ...advisoryPage(), raw: true }, { ...advisoryPage(), os: { outcome: 'checked', raw: true } },
+      advisoryPage([{ ...f, raw: true }]), advisoryPage([{ ...f, advisory: { ...a, schemaVersion: 2 } }]),
+      advisoryPage([{ ...f, advisory: { ...a, raw: true } }]),
+      advisoryPage([{ ...f, advisory: { ...a, assessments: [{ ...a.assessments[0], raw: true }] } }]),
+      advisoryPage([{ ...f, advisory: { ...a, assessments: [{ ...a.assessments[0], title: { ...a.assessments[0].title, raw: true } }] } }]),
+      advisoryPage([{ ...f, advisory: { ...a, assessments: [{ ...a.assessments[0], cvss: { ...a.assessments[0].cvss, raw: true } }] } }]),
+      advisoryPage([{ ...f, advisory: { ...a, references: [{ ...a.references[0], raw: true }] } }]),
+    ];
+    bad.forEach(value => expect(() => parseCurrentVuln(value)).toThrow());
+    expect(() => parseCurrentVuln({ outcome: 'unsupported', coverage: 'image', reason: 'OS_EOL', findings: [], nextCursor: null, node: { outcome: 'checked', raw: true } })).toThrow();
+  });
+  it('rejects prototype-bearing objects, magic own keys, accessors and cycles without executing getters', () => {
+    const inherited = Object.assign(Object.create({ attacker: true }), advisoryFixture());
+    const getter = vi.fn(() => 1);
+    const accessor = Object.defineProperty(advisoryFixture(), 'state', { get: getter });
+    const magic = JSON.parse('{"__proto__":{"attacker":true}}');
+    for (const advisory of [inherited, accessor, { ...advisoryFixture(), ...magic }]) {
+      expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory }]))).toThrow();
+    }
+    expect(getter).not.toHaveBeenCalled();
+    const cycle: Record<string, unknown> = {}; cycle.self = cycle;
+    expect(() => parseCurrentVuln(cycle)).toThrow();
+  });
+  it('enforces UTF-8 field limits and safe normalized plaintext states', () => {
+    const a = advisoryFixture(), source = a.assessments[0];
+    const parse = (title: unknown, description: unknown = source.description) => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, assessments: [{ ...source, title, description }] } }]));
+    expect(() => parse({ value: 'я'.repeat(256), state: 'truncated', redacted: true })).not.toThrow();
+    for (const value of ['я'.repeat(257), '<script>alert(1)</script>', 'text\u202eevil', 'https://host.test/?token=x', 'CANARY_PAYLOAD', 'password=private', 'x\u0000y']) expect(() => parse({ value, state: 'available', redacted: false })).toThrow();
+    for (const field of [{ value: '', state: 'available', redacted: false }, { value: 'x', state: 'missing', redacted: false }, { value: null, state: 'redacted', redacted: false }]) expect(() => parse(field)).toThrow();
+    expect(() => parse(source.title, { value: 'я'.repeat(2048), state: 'truncated', redacted: false })).not.toThrow();
+    expect(() => parse(source.title, { value: 'я'.repeat(2049), state: 'truncated', redacted: false })).toThrow();
+  });
+  it('rejects quoted credential labels and multiword payloads rather than trusting normalized flags', () => {
+    const a = advisoryFixture(), source = a.assessments[0];
+    for (const value of ['Safe {"password":"PRIVATE_SENTINEL words"} tail', "Safe {'api_key':'PRIVATE_SENTINEL words'} tail", 'Safe password="PRIVATE_SENTINEL words" tail', 'Safe credentials: PRIVATE_SENTINEL words']) {
+      const title = { value, state: 'available', redacted: true };
+      expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, assessments: [{ ...source, title }] } }]))).toThrow();
+    }
+  });
+  it('enforces vector family/version/metrics and preserves score with missing vector without inventing 3.1', () => {
+    const a = advisoryFixture(), source = a.assessments[0], c = source.cvss;
+    const parse = (cvss: unknown) => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, references: [], assessments: [{ ...source, cvss }] } }]));
+    expect(() => parse({ ...c, version: null, versionState: 'missing', vector: null, vectorState: 'missing' })).not.toThrow();
+    expect(() => parse({ ...c, family: 'v2', version: '2.0', vector: null, vectorState: 'unsupported' })).not.toThrow();
+    expect(() => parse({ ...c, version: '3.0', vector: c.vector.replace('3.1', '3.0') })).not.toThrow();
+    for (const score of ['0', NaN, Infinity, -1, 11]) expect(() => parse({ ...c, reportedScore: score })).toThrow();
+    for (const vector of [c.vector.replace('3.1', '3.0'), c.vector.replace('3.1', '4.0'), c.vector + '/AV:N', c.vector + '/E:X', c.vector.replace('/A:H', ''), c.vector.replace('AV:N', 'AV:X'), c.vector + '/constructor:X']) expect(() => parse({ ...c, vector })).toThrow();
+    expect(() => parse({ ...c, family: 'v2' })).toThrow();
+  });
+  it('allows only exact canonical links and the basic calculator for an actual 3.1 vector', () => {
+    const a = advisoryFixture();
+    const parse = (references: unknown[]) => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, references } }]));
+    for (const url of ['http://www.cve.org/CVERecord?id=CVE-2026-1234', 'https://www.cve.org.evil/CVERecord?id=CVE-2026-1234', 'https://user@www.cve.org/CVERecord?id=CVE-2026-1234', 'https://www.cve.org:443/CVERecord?id=CVE-2026-1234', 'https://127.0.0.1/', 'https://www.cve.org/CVERecord?id=CVE-2026-1234#x', 'https://www.cve.org/CVERecord?id=CVE-2026-1234&token=x', 'https://www.cve.org/CVERecord?id=CVE-2026-1234%0a', 'https://www.cve.org\\evil', 'https://ｗｗｗ.cve.org/', 'https://nvd.nist.gov/vuln/detail/CVE-2026-9999']) expect(() => parse([{ ...a.references[0], url }])).toThrow();
+    expect(() => parse([...a.references].reverse())).toThrow();
+    expect(() => parse([a.references[0], a.references[0]])).toThrow();
+    expect(() => parse([{ ...a.references[2], url: a.references[2].url + '#CVSS:3.1' }])).toThrow();
+    expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, assessments: [] } }]))).toThrow();
+  });
+  it('enforces serialized finding and aggregate page budgets including JSON escapes', () => {
+    const a = advisoryFixture();
+    const source = a.assessments[0];
+    const large = (count: number) => ({ ...a, assessments: Array.from({ length: count }, (_, n) => ({ ...source, provenanceRef: `target-${String(n).padStart(64, '0')}`, description: { value: '"'.repeat(4096), state: 'available', redacted: false } })) });
+    expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: large(1) }]))).not.toThrow();
+    expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: large(2) }]))).toThrow();
+    const almostFull = { ...a, assessments: Array.from({ length: 3 }, (_, n) => ({ ...source, provenanceRef: `target-${String(n).padStart(64, '0')}`, description: { value: 'x'.repeat(4096), state: 'available', redacted: false } })) };
+    expect(() => parseCurrentVuln(advisoryPage(Array.from({ length: 70 }, (_, n) => ({ ...advisoryFinding(), findingId: `vuln-${n}`, advisory: almostFull }))))).not.toThrow();
+    expect(() => parseCurrentVuln(advisoryPage(Array.from({ length: 100 }, (_, n) => ({ ...advisoryFinding(), findingId: `vuln-${n}`, advisory: almostFull }))))).toThrow();
+    expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, assessments: Array.from({ length: 17 }, (_, n) => ({ ...source, provenanceRef: `target-${String(n).padStart(64, '0')}` })) } }]))).toThrow();
+  });
+  it('rejects exactly one serialized byte over the complete finding cap', () => {
+    const a = advisoryFixture(), source = a.assessments[0];
+    const f = { ...advisoryFinding(), advisory: { ...a, assessments: Array.from({ length: 4 }, (_, n) => ({ ...source, provenanceRef: `target-${String(n).padStart(64, '0')}`, description: { value: n < 3 ? 'x'.repeat(4096) : 'x', state: 'available', redacted: false } })) } };
+    const tail = f.advisory.assessments[3].description;
+    const remaining = 16384 - new TextEncoder().encode(JSON.stringify(f)).length;
+    expect(remaining).toBeGreaterThan(0);
+    tail.value += 'x'.repeat(remaining);
+    expect(new TextEncoder().encode(JSON.stringify(f))).toHaveLength(16384);
+    expect(() => parseCurrentVuln(advisoryPage([f]))).not.toThrow();
+    tail.value += 'x';
+    expect(() => parseCurrentVuln(advisoryPage([f]))).toThrow();
+  });
+  it('keeps closed known DB evidence without treating historical nextUpdate as current freshness', () => {
+    const db = { envelopeVersion: 1, signer: 'local-db-operator-v1', source: `ghcr.io/aquasecurity/trivy-db@sha256:${'a'.repeat(64)}`, schemaVersion: 2,
+      manifestDigest: `sha256:${'a'.repeat(64)}`, artifactSha256: 'b'.repeat(64), metadataSha256: 'c'.repeat(64), dbSha256: 'd'.repeat(64),
+      updatedAt: '2025-01-01T00:00:00.000Z', downloadedAt: '2025-01-01T00:00:00.000Z', nextUpdate: '2025-01-02T00:00:00.000Z' };
+    expect(parseCurrentVuln({ ...advisoryPage(), db })).toMatchObject({ db });
+    for (const invalid of [{ ...db, schemaVersion: 99 }, { ...db, signer: 'publisher' }, { ...db, raw: true }, { ...db, source: db.source.replace('ghcr.io', 'evil.test') }]) expect(() => parseCurrentVuln({ ...advisoryPage(), db: invalid })).toThrow();
+  });
+  it('retains omitted and conflict-unknown evidence, rejects malformed conflicts and duplicate observations', () => {
+    const a = advisoryFixture();
+    const parse = (advisory: unknown) => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory }]));
+    expect(() => parse({ ...a, conflicts: ['severity'], conflictState: 'unknown', limitations: ['assessment_limit'] })).not.toThrow();
+    expect(() => parse({ ...a, state: 'omitted', assessments: [], references: [], conflictState: 'unknown', limitations: ['scan_budget'] })).not.toThrow();
+    for (const advisory of [{ ...a, state: 'omitted' }, { ...a, conflictState: 'present' }, { ...a, conflicts: ['severity'] }, { ...a, assessments: [a.assessments[0], a.assessments[0]] }, { ...a, conflicts: ['cvss', 'title'], conflictState: 'present' }]) expect(() => parse(advisory)).toThrow();
+  });
+  it('accepts archive Secrets null/absent nonchecked counts while requiring checked counts', () => {
+    const coverage = { check: 'secret', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_FAILED', scannerVersion: '0.69.3', reason: 'SCAN_FAILED' };
+    for (const value of [coverage, { ...coverage, findingCount: null }, { ...coverage, findingCount: 0 }]) {
+      expect(parseCurrentResults({ findings: [], nextCursor: null, coverage: value }).coverage[0].findingCount).toBeUndefined();
+      expect(parseCurrentStatus({ scanId: 'x', state: 'failed', result: value }).perCheck?.secret?.outcome).toBe('failed');
+    }
+    const checked = { ...coverage, outcome: 'checked', reason: undefined, errorCode: null, findingCount: 0, checkedAt: '2026-10-07T08:00:00.000Z' };
+    expect(parseCurrentResults({ findings: [], nextCursor: null, coverage: checked }).coverage[0].findingCount).toBe(0);
+    for (const value of [{ ...checked, findingCount: null }, { ...checked, findingCount: undefined }, { ...coverage, findingCount: 1 }]) expect(() => parseCurrentResults({ findings: [], nextCursor: null, coverage: value })).toThrow();
   });
 });
