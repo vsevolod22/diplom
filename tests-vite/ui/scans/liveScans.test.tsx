@@ -119,6 +119,62 @@ describe('LOCAL server-authoritative saved target', () => {
     expect(posts[0]).toMatchObject({ imageReference: reference, checks: ['secret'] });
   });
 
+  for (const change of ['checks', 'target', 'consent', 'checks-back', 'target-back', 'consent-back', 'subject', 'unmount'] as const) it(`cancels pending submit after ${change}, even if eligibility later succeeds`, async () => {
+    const posts: Array<{ imageReference: string; checks: string[]; idempotencyKey: string }> = [];
+    let holdNext = false;
+    let finish!: (value: ReturnType<typeof json>) => void;
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) {
+        if (holdNext) {
+          holdNext = false;
+          return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+        }
+        return json(eligibility());
+      }
+      if (path === '/api/v1/browser/scans' && init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)));
+        return json({ scanId: id });
+      }
+      if (path.endsWith('/results?limit=50')) return json({ findings: [], nextCursor: null, coverage: null });
+      return json({ scanId: id, state: 'queued', result: null });
+    }));
+    const client = mount('/scans/new', true);
+    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
+    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(card);
+    const consent = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement;
+    fireEvent.click(consent);
+    holdNext = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (change.startsWith('checks')) {
+      fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
+      if (change === 'checks-back') fireEvent.click(screen.getByRole('radio', { name: 'secret' }));
+    } else if (change.startsWith('target')) {
+      fireEvent.click(screen.getByRole('button', { name: /Alpine · latest/ }));
+      if (change === 'target-back') fireEvent.click(card);
+    } else if (change.startsWith('consent')) {
+      fireEvent.click(consent);
+      if (change === 'consent-back') fireEvent.click(consent);
+    } else if (change === 'subject') {
+      act(() => { transitionScanSession('bob', client); client.setQueryData(['demo-auth', 'me'], { id: 'bob', email: 'bob@example.com' }); });
+    } else cleanup();
+    await act(async () => finish(json(eligibility())));
+    expect(posts).toHaveLength(0);
+    if (change === 'subject' || change === 'unmount') return;
+    const submit = await screen.findByRole('button', { name: 'Запустить скан' });
+    if (!consent.checked) fireEvent.click(consent);
+    await waitFor(() => expect(submit.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({
+      imageReference: change === 'target' ? 'registry-1.docker.io/library/alpine:latest' : reference,
+      checks: change === 'checks' ? ['sbom'] : ['secret'],
+    });
+    expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+  });
+
   it('new POST never enqueues when the fresh eligibility probe closes', async () => {
     let reads = 0, posts = 0;
     vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
@@ -503,6 +559,35 @@ describe('cookie-session live scans', () => {
     expect(alpine.hasAttribute('disabled')).toBe(false);
     fireEvent.click(alpine);
     expect(screen.getByText(/Выбранная цель.*registry-1.docker.io\/library\/alpine:3.16.9/)).toBeTruthy();
+  });
+
+  for (const tag of ['3.16.9', '3.21.3']) it(`submits server-discovered Alpine ${tag} outside presets, retaining selection after pagination failure`, async () => {
+    const reference = `registry-1.docker.io/library/alpine:${tag}`;
+    const posts: Array<{ imageReference: string; scope: string; checks: string[]; idempotencyKey: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.includes('/images?')) {
+        if (path.includes('cursor=')) return { ok: false, status: 503 };
+        return json(imagePage([{ label: `Alpine · ${tag}`, reference, scannable: true }], 'a'.repeat(48)));
+      }
+      if (path === '/api/v1/browser/scans' && init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)));
+        return json({ scanId: id });
+      }
+      if (path.endsWith('/results?limit=50')) return json({ findings: [], nextCursor: null, coverage: null });
+      return json({ scanId: id, state: 'queued', result: null });
+    }));
+    mount('/scans/new');
+    fireEvent.change(await screen.findByRole('searchbox'), { target: { value: `alpine ${tag}` } });
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(`Alpine · ${tag.replaceAll('.', '\\.')}`) }));
+    fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
+    await screen.findByText(/Поиск Docker Hub сейчас недоступен/);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toEqual({ imageReference: reference, scope: 'image', checks: ['secret'], idempotencyKey: expect.any(String) });
+    expect(posts[0].idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+    expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
   });
 
   it('selects the verified old Alpine digest without substituting a mutable tag', async () => {

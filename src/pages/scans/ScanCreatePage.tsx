@@ -52,6 +52,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     register,
     control,
     setValue,
+    getValues,
     handleSubmit,
     formState: { errors },
   } = useForm<FormValues>({
@@ -84,8 +85,11 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const [eligibilityRefresh, setEligibilityRefresh] = useState(0);
   const savedIdentity = useRef('');
   const attempt = useRef<{ target: string; checks: string; key: string } | null>(null);
+  // Changing back to the same values must not revive a preflight for an earlier consent.
+  const submissionVersion = useRef(0);
   const live = useLiveScanSession();
   const navigate = useNavigate();
+  useEffect(() => () => { ++submissionVersion.current; }, []);
   useEffect(() => {
     if (!live || demo) return;
     const key = `scan-target-v1:${live.scope[2]}`;
@@ -138,6 +142,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     activatedControl.current = null;
     const identity = live?.scope.join(':') ?? '';
     if (discovery.current.identity !== identity) {
+      ++submissionVersion.current;
       setConfirmed(false); attempt.current = null; selectedTarget.current = null;
       // Preserve only this subject's saved reference, never persisted eligibility.
       const saved = live ? sessionStorage.getItem(`scan-target-v1:${live.scope[2]}`) : null;
@@ -279,27 +284,38 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     if (demo || !live || !confirmed || busy) return;
     const eligible = alpineTargets.some(target => target.reference === values.imageReference) ||
       localEligibility?.imageReference === values.imageReference && localEligibility.eligible ||
-      selectedTarget.current?.reference === values.imageReference && selectedTarget.current.eligibility === 'isolated-exact-profile' && selectedTarget.current.scannable === true;
+      selectedTarget.current?.reference === values.imageReference && selectedTarget.current.scannable === true &&
+        (selectedTarget.current.eligibility === 'isolated-exact-profile' || selectedTarget.current.eligibility === 'alpine-only' &&
+          values.imageReference.startsWith('registry-1.docker.io/library/alpine:'));
     const sameAttempt = attempt.current?.target === values.imageReference && attempt.current?.checks === scanChecks.filter(check => values.checks.includes(check)).join(',');
     if (!eligible && !sameAttempt) { setConfirmed(false); setError('Выберите цель с подтверждённым серверным допуском.'); return; }
+    const selected = scanChecks.filter(check => values.checks.includes(check));
+    const version = submissionVersion.current;
+    const current = () => {
+      const session = scanSession();
+      return submissionVersion.current === version && session.subject === live.scope[2] && session.generation === live.scope[1] &&
+        getValues('imageReference') === values.imageReference && scanChecks.filter(check => getValues('checks').includes(check)).join(',') === selected.join(',');
+    };
+    if (!current()) return;
     setBusy(true);
     setError('');
     try {
-      const selected = scanChecks.filter(check => values.checks.includes(check));
       if (attempt.current?.target !== values.imageReference || attempt.current?.checks !== selected.join(',')) {
         if (values.imageReference.includes('/nginx@')) {
           const response = await fetch('/api/v1/browser/scans/images/eligibility', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ imageReference: values.imageReference, checks: selected }) });
           const result = response.ok ? eligibilitySchema.parse(await response.json()) : null;
-          if (scanSession().subject !== live.scope[2] || scanSession().generation !== live.scope[1]) return;
+          if (!current()) return;
           if (!result?.eligible || result.imageReference !== values.imageReference ||
             !result.allowedCheckSets.some(set => set.join(',') === selected.join(','))) { setConfirmed(false); setError('Актуальный серверный допуск недоступен. Скан не создан.'); return; }
         }
         attempt.current = { target: values.imageReference, checks: selected.join(','), key: crypto.randomUUID() };
       }
+      if (!current()) return;
       const receipt = await live.transport.create({ imageReference: values.imageReference, scope: 'image', checks: selected, idempotencyKey: attempt.current.key });
-      navigate(`/scans/${encodeURIComponent(receipt.scanId)}`);
+      if (current()) navigate(`/scans/${encodeURIComponent(receipt.scanId)}`);
     } catch (reason) {
+      if (!current()) return;
       if (reason instanceof ScanAccessError) {
         setError(reason.status === 403 ? 'Аккаунту не выдан доступ к сканированию. Проверьте разрешение на странице аккаунта.' : 'Сессия недействительна. Войдите заново.');
       } else if (reason instanceof ScanHttpError && reason.status === 400) {
@@ -366,6 +382,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                     aria-pressed={imageReference === target.reference}
                     disabled={!target.scannable}
                     onClick={() => {
+                      ++submissionVersion.current;
                       selectedTarget.current = target;
                       if (target.reference.includes('/nginx@') && live) sessionStorage.setItem(`scan-target-v1:${live.scope[2]}`, target.reference);
                       setValue('imageReference', target.reference, { shouldValidate: true });
@@ -400,24 +417,24 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               <legend>Проверки · одновременно, область registry IMAGE</legend>
               {localSelected ? <div role="group" aria-label="Доказанные наборы локального профиля">
                 {localCheckSets.map(set => <label key={set.join(',')}><input type="radio" name="local-check-set"
-                  checked={JSON.stringify(canonicalSelected) === JSON.stringify(set)} onChange={() => { setValue('checks', [...set]); setConfirmed(false); attempt.current = null; setError(''); }} />
+                  checked={JSON.stringify(canonicalSelected) === JSON.stringify(set)} onChange={() => { ++submissionVersion.current; setValue('checks', [...set]); setConfirmed(false); attempt.current = null; setError(''); }} />
                   {set.length === 1 ? set[0] : 'Secrets + SBOM + CVE'}</label>)}
                 <p>Image config и недоказанные сочетания для этого профиля недоступны.</p>
               </div> : <>
               <label>
-                <input type="checkbox" value="secret" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
+                <input type="checkbox" value="secret" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
                 Secrets · проверка образа
               </label>
               <label>
-                <input type="checkbox" value="sbom" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
+                <input type="checkbox" value="sbom" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
                 SBOM · перечень пакетов, не проверка уязвимостей
               </label>
               <label>
-                <input type="checkbox" value="vuln" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
+                <input type="checkbox" value="vuln" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
                 CVE · доступно только при настроенной сервером базе уязвимостей
               </label>
               <label>
-                <input type="checkbox" value="config" {...register('checks', { onChange: () => { setConfirmed(false); attempt.current = null; setError(''); } })} />
+                <input type="checkbox" value="config" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
                 Image config · OCI User metadata, не runtime / Dockerfile
               </label>
               </>}
@@ -431,7 +448,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               <input
                 type="checkbox"
                 checked={confirmed}
-                onChange={(event) => setConfirmed(event.target.checked)}
+                onChange={(event) => { ++submissionVersion.current; setConfirmed(event.target.checked); }}
               />
               <span>
                 Подтверждаю выбранную цель и область:{' '}
