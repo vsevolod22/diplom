@@ -48,6 +48,9 @@ function CopyVector({ vector }: { vector: string }) {
 export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
   const advisory = finding.advisory;
   const references = canonicalReferences(finding.cveId);
+  const incompleteAssessments = !advisory || advisory.state === 'omitted' || advisory.conflictState === 'unknown';
+  const representativeSeverity = incompleteAssessments || advisory.conflicts.includes('severity');
+  const representativeFix = incompleteAssessments || advisory.conflicts.includes('fixedVersion');
   const calculator =
     references.length > 0 &&
     advisory?.assessments.some(
@@ -63,8 +66,14 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
         {finding.ecosystem} · {finding.packageName} {finding.installedVersion} · исправление:{' '}
         {finding.fixedVersion ?? 'не указано'}
       </p>
+      {representativeSeverity ? (
+        <p>Совместимое значение severity, не авторитетная оценка источника. Отдельные оценки приведены ниже, если доступны.</p>
+      ) : null}
+      {representativeFix ? (
+        <p>Совместимое значение исправления, не авторитетная оценка источника. Отдельные оценки приведены ниже, если доступны.</p>
+      ) : null}
       <p>
-        Источник severity: {finding.severitySources?.join(', ') || 'неизвестен'} · provenance:{' '}
+        Источники отдельных оценок: {finding.severitySources?.join(', ') || 'неизвестны'} · provenance:{' '}
         {finding.provenanceRef ?? 'не предоставлен'}
       </p>
       {!advisory ? (
@@ -108,9 +117,10 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
           ))}
         </>
       )}
-      {advisory?.conflictState === 'present' ? (
+      {advisory && advisory.conflicts.length > 0 ? (
         <p>Источники расходятся: {advisory.conflicts.join(', ')}. Сохранены отдельные оценки источников.</p>
-      ) : advisory?.conflictState === 'unknown' ? (
+      ) : null}
+      {advisory?.conflictState === 'unknown' ? (
         <p>Согласованность источников неизвестна: часть наблюдений недоступна.</p>
       ) : null}
       {advisory && advisory.limitations.length > 0 ? (

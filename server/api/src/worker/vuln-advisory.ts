@@ -26,23 +26,37 @@ function utf8Prefix(value: string, max: number): string {
   for (const character of value) { bytes += Buffer.byteLength(character); if (bytes > max) break; result += character; }
   return result;
 }
-export function normalizePlain(value: unknown, max: number): PlainField {
-  if (value == null || value === '') return missing();
-  if (typeof value !== 'string') return { value: null, state: 'invalid', redacted: false };
-  const safe = value
+function sanitizePlain(value: string): string {
+  return value
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gi, '')
     .replace(/<(script|style|iframe|object|svg)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
-    .replace(/<[^>]*>/g, '')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^<>]*>/g, '')
+    .replace(/!?\[([^\[\]]*)\]\([^)]*\)/g, '$1')
     .replace(/(?:https?:\/\/|www\.)[^\s<>]+/gi, '')
-    .replace(/\b(?:bearer\s+(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\r\n,;}]+)|(?:password|passwd|secret|credentials?|api[_-]?key|access[_-]?key|token|signature|x-amz-[\w-]+)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\r\n,;}]+))/gi, '')
+    .replace(/\b(?:(?:basic|bearer)\s+(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\r\n,;}]+)|(?:password|passwd|secret|credentials?|api[_-]?key|access[_-]?key|token|signature|x-amz-[\w-]+)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\r\n,;}]+))/gi, '')
     .replace(/\b(?:CANARY[\w-]*|[\w-]*CANARY[\w-]*|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gi, '')
     .replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ufeff\ud800-\udfff]/gu, ' ')
     .trim();
-  const redacted = safe !== value.trim();
-  if (!safe) return { value: null, state: redacted ? 'redacted' : 'missing', redacted };
-  const truncated = Buffer.byteLength(safe) > max;
-  return { value: utf8Prefix(safe, max).trimEnd(), state: truncated ? 'truncated' : 'available', redacted };
+}
+export function normalizePlain(value: unknown, max: number): PlainField {
+  if (value == null || value === '') return missing();
+  if (typeof value !== 'string') return { value: null, state: 'invalid', redacted: false };
+  let safe = value, redacted = false, truncated = false;
+  // Removing nested markup/controls can expose another link or credential. Bound
+  // closure work; unsafe optional text must not invalidate a core CVE or siblings.
+  for (let pass = 0; pass < 8; pass++) {
+    const cleaned = sanitizePlain(safe);
+    redacted ||= cleaned !== safe.trim();
+    if (!cleaned) return { value: null, state: redacted ? 'redacted' : 'missing', redacted };
+    truncated ||= Buffer.byteLength(cleaned) > max;
+    const next = utf8Prefix(cleaned, max).trimEnd();
+    if (next === safe) return { value: next, state: truncated ? 'truncated' : 'available', redacted };
+    safe = next;
+  }
+  // Validate the final bounded/truncated representation as well, without weakening
+  // the stored validator or retaining text that would change on its next pass.
+  if (sanitizePlain(safe) !== safe) return { value: null, state: 'invalid', redacted };
+  return { value: safe, state: truncated ? 'truncated' : 'available', redacted };
 }
 // Only base metrics are implemented. Optional or unknown metrics fail closed.
 export function validV3Vector(value: unknown): value is string {

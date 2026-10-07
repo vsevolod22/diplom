@@ -62,7 +62,7 @@ const safePlainText = (value: string) =>
   // eslint-disable-next-line no-control-regex
   !/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ufeff\ud800-\udfff]/u.test(value) &&
   !/<[^>]*>|!?\[[^\]]*\]\([^)]*\)|(?:https?:\/\/|www\.)|-----BEGIN [^-]*PRIVATE KEY-----/i.test(value) &&
-  !/\b(?:bearer\s+\S+|(?:password|passwd|secret|credentials?|api[_-]?key|access[_-]?key|token|signature|x-amz-[\w-]+)["']?\s*[:=]\s*[^\s]+|[\w-]*CANARY[\w-]*|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/i.test(
+  !/\b(?:(?:basic|bearer)\s+\S+|(?:password|passwd|secret|credentials?|api[_-]?key|access[_-]?key|token|signature|x-amz-[\w-]+)["']?\s*[:=]\s*[^\s]+|[\w-]*CANARY[\w-]*|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/i.test(
     value,
   );
 const fieldState = z.enum([

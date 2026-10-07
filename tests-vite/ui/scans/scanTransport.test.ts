@@ -320,6 +320,22 @@ describe('frozen advisory-v1 browser wire', () => {
       expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, assessments: [{ ...source, title }] } }]))).toThrow();
     }
   });
+  it('rejects Basic credentials in both text fields even with trusted-looking redaction flags', () => {
+    const encoded = btoa('synthetic-user:PRIVATE_BASIC_PASSWORD');
+    const a = advisoryFixture(), source = a.assessments[0];
+    for (const value of [`Authorization: Basic ${encoded}`, `pRoXy-AuThOrIzAtIoN:\t bAsIc\t${encoded}`,
+      `Authorization: Basic "${encoded}"`, `Authorization: Basic '${encoded}'`, `{"Authorization":"Basic ${encoded}"}`]) {
+      for (const key of ['title', 'description']) for (const redacted of [true, false]) {
+        const field = { value, state: 'available', redacted };
+        expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a,
+          assessments: [{ ...source, [key]: field }] } }]))).toThrow();
+      }
+    }
+    for (const value of ['[issue](outer)', '<b>Basic</b> payload', 'Basic\u0000 payload']) {
+      expect(() => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a,
+        assessments: [{ ...source, description: { value, state: 'available', redacted: true } }] } }]))).toThrow();
+    }
+  });
   it('enforces vector family/version/metrics and preserves score with missing vector without inventing 3.1', () => {
     const a = advisoryFixture(), source = a.assessments[0], c = source.cvss;
     const parse = (cvss: unknown) => parseCurrentVuln(advisoryPage([{ ...advisoryFinding(), advisory: { ...a, references: [], assessments: [{ ...source, cvss }] } }]));

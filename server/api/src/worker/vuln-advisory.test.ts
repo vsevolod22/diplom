@@ -68,6 +68,72 @@ test('quoted credential labels and multiword payloads are redacted before durabl
     assert.ok(!JSON.stringify(normalized).includes('PRIVATE_SENTINEL'));
   }
 });
+test('Basic credential presentations are redacted before field limits and strict durable validation', () => {
+  const encoded = Buffer.from('synthetic-user:PRIVATE_BASIC_PASSWORD').toString('base64');
+  for (const text of [
+    `Authorization: Basic ${encoded}`, `pRoXy-AuThOrIzAtIoN:\t bAsIc\t${encoded}`,
+    `Authorization: Basic "${encoded}"`, `Authorization: Basic '${encoded}'`,
+    `{"Authorization":"Basic ${encoded}"}`, `Basic\n${encoded}`,
+    `Safe <b>Basic</b> ${encoded} tail`, `Safe Basic\u0000 ${encoded} tail`,
+    `x`.repeat(510) + ` Basic ${encoded}`,
+  ]) {
+    const value = advisory({ Title: text, Description: text });
+    validateAdvisory(value, cve);
+    assert.ok(value.limitations.includes('redaction'));
+    assert.ok(!JSON.stringify(value).includes(encoded));
+    assert.ok(!JSON.stringify(value).includes('PRIVATE_BASIC_PASSWORD'));
+    for (const row of value.assessments) for (const field of [row.title, row.description]) {
+      if (field.value) assert.equal(normalizePlain(field.value, 4096).value, field.value);
+    }
+    const unsafe = advisory({ Title: 'safe' });
+    unsafe.assessments.find(row => row.title.value)!.title = { value: text.slice(0, 512), state: 'available', redacted: true };
+    if (Buffer.byteLength(text) <= 512) assert.throws(() => validateAdvisory(unsafe, cve));
+  }
+});
+test('bounded plaintext normalization closes nested/exposed markup or degrades only optional fields', () => {
+  const nested = (n: number) => '['.repeat(n) + 'issue' + '](doc)'.repeat(n);
+  for (const text of [
+    '[[issue](doc)](outer)', '[[[issue](doc)](middle)](outer)', '[issue](outer(inner))',
+    '<b<[x](y)>>issue', 'ht<script>removed</script>tps://evil.test/secret',
+    'be<b>removed</b>arer PRIVATE_SENTINEL', nested(32), '界'.repeat(300) + '[[issue](doc)](outer)',
+  ]) {
+    for (const max of [512, 4096]) {
+      const field = normalizePlain(text, max);
+      if (field.value) {
+        assert.ok(Buffer.byteLength(field.value) <= max);
+        assert.equal(normalizePlain(field.value, max).value, field.value);
+      }
+      validateAdvisory(advisory({ Title: text, Description: text }), cve);
+    }
+  }
+  assert.equal(normalizePlain('[[issue](doc)](outer)', 512).value, 'issue');
+  assert.equal(normalizePlain(nested(32), 4096).state, 'invalid');
+  assert.equal(normalizePlain(nested(32), 4096).value, null);
+  // Unclosed delimiters cannot trigger a suffix rescan for every opening byte.
+  assert.equal(normalizePlain('['.repeat(1_000_000), 512).value, '['.repeat(512));
+  assert.equal(normalizePlain('<'.repeat(1_000_000), 512).value, '<'.repeat(512));
+});
+test('generated optional plaintext remains acceptable to the independent strict browser predicate', async () => {
+  const { parseCurrentVuln } = await import(new URL('../../../../src/shared/api/scans/scanTransport.ts', import.meta.url).href);
+  const fragments = ['[', '](doc)', '<b>', '</b>', '\u0000', '\u202e', 'Basic payload', 'ht', 'tps://host.test', 'word', '界', '😀'];
+  let seed = 7;
+  for (let iteration = 0; iteration < 128; iteration++) {
+    let text = '';
+    for (let part = 0; part < 12; part++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      text += fragments[seed % fragments.length];
+    }
+    const value = allocateAdvisoryBudget([{ findingId: `vuln-${iteration}`, cveId: cve, ecosystem: 'apk',
+      packageName: 'busybox', installedVersion: '1.2', severity: 'HIGH', fixedVersion: null,
+      advisory: advisory({ Title: text, Description: text }) }]);
+    validateAdvisoryBudget(value);
+    const parsed = parseCurrentVuln({ outcome: 'checked', coverage: 'image',
+      image: `registry-1.docker.io/library/alpine@sha256:${'a'.repeat(64)}`, platform: 'linux/amd64',
+      findingCount: 1, scannerVersion: '0.69.3', checkedAt: '2026-10-07T08:00:00.000Z', findings: value, nextCursor: null });
+    assert.equal(parsed.findings.length, 1);
+  }
+});
+
 test('missing is not disagreement; duplicate assessments merge deterministically', () => {
   const a = advisory(), b = advisory({ ...raw(), Title: 'Other issue', Severity: 'LOW', FixedVersion: '1.3-r0' });
   const merged = mergeAdvisories(a, b, cve);
