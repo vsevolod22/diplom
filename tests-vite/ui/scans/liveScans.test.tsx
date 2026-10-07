@@ -95,6 +95,40 @@ describe('LOCAL server-authoritative saved target', () => {
     expect(reads).toBe(2);
   });
 
+  it('TASK35 drops superseded queued SBOM behind slow Secrets and sends only latest CVE', async () => {
+    sessionStorage.setItem('scan-target-v1:alice', reference);
+    const reads: string[] = [];
+    let finish!: (value: ReturnType<typeof json>) => void;
+    let activeSignal!: AbortSignal;
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path.endsWith('/images/eligibility')) {
+        reads.push(JSON.parse(String(init?.body)).checks.join(','));
+        if (reads.length === 2) {
+          activeSignal = init?.signal as AbortSignal;
+          return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+        }
+        return json(eligibility());
+      }
+      return json({ scans: [], nextCursor: null });
+    }));
+    mount('/scans/new', true);
+    await screen.findByRole('radio', { name: 'sbom' });
+    now += 5001; fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    const debounce = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    fireEvent.click(screen.getByRole('radio', { name: 'sbom' })); await debounce();
+    fireEvent.click(screen.getByRole('radio', { name: 'vuln' })); await debounce();
+    expect(reads).toEqual(['secret', 'secret']);
+    expect(activeSignal.aborted).toBe(false);
+    await act(async () => finish(json(eligibility())));
+    await waitFor(() => expect(screen.getByRole('button', { name: /nginx · закреплённый пример/ }).hasAttribute('disabled')).toBe(false));
+    expect(reads).toEqual(['secret', 'secret', 'vuln']);
+    expect((screen.getByRole('radio', { name: 'vuln' }) as HTMLInputElement).checked).toBe(true);
+  });
+
   it('revalidates saved digest without Hub, retains four sets through readiness changes and uses historical copy', async () => {
     sessionStorage.setItem('scan-target-v1:alice', reference);
     let ready = false, now = Date.now();
@@ -631,7 +665,10 @@ describe('cookie-session live scans', () => {
     await waitFor(() => expect(emit).toBeTypeOf('function'));
     expect(screen.getByText('Этап: не предоставлен')).toBeTruthy();
     expect(screen.getByText('Прогресс: неизвестен')).toBeTruthy();
-    expect(screen.getByRole('list', { name: 'Проверки без подтверждённого результата' }).textContent).not.toContain('Пропущено');
+    const pending = screen.getByRole('list', { name: 'Проверки без подтверждённого результата' });
+    expect(pending.textContent).not.toContain('Пропущено');
+    expect(pending.textContent).toContain('внутренний этап не предоставлен сервером');
+    expect(pending.textContent).not.toContain('текущий этап указан сервером выше');
     act(() => { emit('open'); for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
     expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('подключён');
     await waitFor(() => expect(finish).toBeTypeOf('function'), { timeout: 2000 });

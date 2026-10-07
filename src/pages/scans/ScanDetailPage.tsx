@@ -330,7 +330,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 <h3 id="scan-a1-coverage">Покрытие проверок</h3>
                 <p className="scan-a1__muted">Исход каждой проверки отдельно от статуса скана.</p>
                 {pendingChecks.length ? <ul aria-label="Проверки без подтверждённого результата">{pendingChecks.map(check => <li key={check}>
-                  {check}: {active ? 'ожидаем подтверждённый результат; текущий этап указан сервером выше' : 'результат не предоставлен сервером'}
+                  {check}: {active ? `ожидаем подтверждённый результат; ${scan.data.stage ? 'текущий этап указан сервером выше' : 'внутренний этап не предоставлен сервером'}` : 'результат не предоставлен сервером'}
                 </li>)}</ul> : null}
                 {(liveCoverage ?? reportData?.coverage) ? (
                   <ul className="scan-a1__coverage">

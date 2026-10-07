@@ -145,7 +145,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     setLocalEligibility(previous => previous?.imageReference === eligibilityReference ? { ...previous, eligible: false } : null);
     const timer = window.setTimeout(async () => {
       try {
-        const result = eligibilitySchema.parse(await eligibilityClient.request(eligibilityReference, checkIdentity ? checkIdentity.split(',') : ['secret']));
+        const result = eligibilitySchema.parse(await eligibilityClient.request(eligibilityReference, checkIdentity ? checkIdentity.split(',') : ['secret'], false, current));
         if (result.imageReference !== eligibilityReference || result.eligible &&
           !result.allowedCheckSets.some(set => set.join(',') === (checkIdentity || 'secret'))) throw new Error('Eligibility identity mismatch');
         if (current()) { setLocalEligibility(result); setEligibilityError(''); }
@@ -335,7 +335,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     try {
       if (attempt.current?.target !== values.imageReference || attempt.current?.checks !== selected.join(',')) {
         if (values.imageReference.includes('/nginx@')) {
-          const result = eligibilityClient ? eligibilitySchema.parse(await eligibilityClient.request(values.imageReference, selected, true)) : null;
+          const result = eligibilityClient ? eligibilitySchema.parse(await eligibilityClient.request(values.imageReference, selected, true, current)) : null;
           if (!current()) return;
           if (!result?.eligible || result.imageReference !== values.imageReference ||
             !result.allowedCheckSets.some(set => set.join(',') === selected.join(','))) { setConfirmed(false); setError('Актуальный серверный допуск недоступен. Скан не создан.'); return; }

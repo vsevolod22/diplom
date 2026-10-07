@@ -24,7 +24,9 @@ export class EligibilityClient {
   activate(): void { this.retired = false; }
   retire(): void { this.retired = true; this.flight?.controller.abort(); }
 
-  async request(imageReference: string, checks: readonly string[], fresh = false): Promise<unknown> {
+  async request(imageReference: string, checks: readonly string[], fresh = false, consumerCurrent: () => boolean = () => true): Promise<unknown> {
+    // Cleanup invalidates queued consumers, not the shared active server read.
+    if (!consumerCurrent()) throw new DOMException('Проверка больше не нужна', 'AbortError');
     if (this.retired || !this.current()) throw new Error('Сессия изменилась');
     if (this.accessError) throw this.accessError;
     if (this.wait && this.wait.until > Date.now()) {
@@ -36,7 +38,7 @@ export class EligibilityClient {
       if (!fresh && this.flight.key === key) return this.flight.promise;
       // Changed targets serialize too; aborted browser reads may still occupy server work.
       await this.flight.promise.catch(() => undefined);
-      return this.request(imageReference, checks, fresh);
+      return this.request(imageReference, checks, fresh, consumerCurrent);
     }
     const controller = new AbortController();
     const promise = this.fetchEligibility(imageReference, checks, controller);
