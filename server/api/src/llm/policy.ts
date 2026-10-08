@@ -2,10 +2,13 @@ import { createHash } from 'node:crypto';
 
 export const CEILINGS = Object.freeze({ timeoutMs: 30_000, requestBytes: 262_144, responseBytes: 65_536,
   findings: 1000, outputTokens: 2048, budgetUsd: 1, pricePerMillion: 1000 });
+// Public endpoint catalog verified 2026-10-07: Liquid supports JSON and reasoning.
+export const FREE_MODEL = 'liquid/lfm-2.5-2.6b:free';
 export type LlmPolicy = Readonly<{
   version: string; model: string; providers: readonly string[]; region: 'global'; retention: 'no-training' | 'no-storage';
   timeoutMs: number; requestBytes: number; responseBytes: number; findings: number; outputTokens: number;
   budgetUsd: number; inputPricePerMillion: number; outputPricePerMillion: number;
+  freeOnly: boolean; requestPriceUsd: number | null;
 }>;
 const positive = (value: string | undefined, max: number, integer = false): number => {
   if (!value || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) throw new Error();
@@ -18,10 +21,18 @@ const positive = (value: string | undefined, max: number, integer = false): numb
 export function policyFromEnvironment(env: NodeJS.ProcessEnv = process.env): LlmPolicy | null {
   if (env.LLM_ENABLED !== 'true') return null;
   try {
+    const freeOnly = env.LLM_FREE_ONLY === 'true';
+    if (env.LLM_FREE_ONLY !== undefined && !['true', 'false'].includes(env.LLM_FREE_ONLY)) return null;
+    const price = (name: string, max: number) => {
+      if (!freeOnly) return positive(env[name], max);
+      if (env[name] !== '0') throw new Error();
+      return 0;
+    };
     const model = env.LLM_MODEL;
     const providers = env.LLM_PROVIDER_ALLOWLIST?.split(',');
     const revision = env.LLM_POLICY_REVISION;
-    if (!model || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(model) || model === 'openrouter/auto' || model.length > 160 ||
+    if (!model || (freeOnly ? model !== FREE_MODEL || env.LLM_PROVIDER_ALLOWLIST !== 'liquid' :
+        !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(model) || ['openrouter/auto', 'openrouter/free'].includes(model)) || model.length > 160 ||
         !providers?.length || providers.length > 8 || new Set(providers).size !== providers.length ||
         providers.some(p => !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(p)) ||
         !revision || !/^[A-Za-z0-9._-]{1,80}$/.test(revision) || env.LLM_ROUTING_APPROVED !== 'true' ||
@@ -35,9 +46,10 @@ export function policyFromEnvironment(env: NodeJS.ProcessEnv = process.env): Llm
       responseBytes: positive(env.LLM_RESPONSE_BYTES, CEILINGS.responseBytes, true),
       findings: positive(env.LLM_MAX_FINDINGS, CEILINGS.findings, true),
       outputTokens: positive(env.LLM_OUTPUT_TOKENS, CEILINGS.outputTokens, true),
-      budgetUsd: positive(env.LLM_REQUEST_BUDGET_USD, CEILINGS.budgetUsd),
-      inputPricePerMillion: positive(env.LLM_INPUT_PRICE_PER_MILLION_USD, CEILINGS.pricePerMillion),
-      outputPricePerMillion: positive(env.LLM_OUTPUT_PRICE_PER_MILLION_USD, CEILINGS.pricePerMillion),
+      freeOnly, requestPriceUsd: freeOnly ? price('LLM_REQUEST_PRICE_USD', 0) : null,
+      budgetUsd: price('LLM_REQUEST_BUDGET_USD', CEILINGS.budgetUsd),
+      inputPricePerMillion: price('LLM_INPUT_PRICE_PER_MILLION_USD', CEILINGS.pricePerMillion),
+      outputPricePerMillion: price('LLM_OUTPUT_PRICE_PER_MILLION_USD', CEILINGS.pricePerMillion),
     };
     const version = createHash('sha256').update(JSON.stringify({ revision, ...settings })).digest('hex');
     return Object.freeze({ version, ...settings });
@@ -47,5 +59,7 @@ export function policyFromEnvironment(env: NodeJS.ProcessEnv = process.env): Llm
 export function disclosure(policy: LlmPolicy) {
   return { provider: 'OpenRouter', model: policy.model, providers: [...policy.providers], region: policy.region,
     retention: policy.retention, operatorApprovedRouting: true, providerComplianceNotProvenByDeclaration: true,
-    requestBudgetUsd: policy.budgetUsd, data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.' };
+    requestBudgetUsd: policy.budgetUsd, freeOnly: policy.freeOnly,
+    maxPrice: { prompt: policy.inputPricePerMillion, completion: policy.outputPricePerMillion, request: policy.requestPriceUsd },
+    data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.' };
 }

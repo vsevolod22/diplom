@@ -9,9 +9,16 @@ import { ScansController } from '../scans/scans.controller.js';
 import { BrowserScansController } from '../scans/browser-scans.controller.js';
 import { ScansService } from '../scans/scans.service.js';
 import { NginxLocalScansService } from './nginx-local-profile.js';
+import { LlmController } from '../llm/llm.controller.js';
+import { BrowserIdentity } from '../llm/browser-identity.js';
+import { ReportReader } from '../llm/report-context.js';
+import { LlmRuntime, LlmService } from '../llm/llm.service.js';
+import { llmExceptionProvider } from '../llm/llm-exception.filter.js';
 
 @Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule],
-  controllers: [ScansController, BrowserScansController],
-  providers: [{ provide: ScansService, inject: [LedgerStore, OciResolver],
+  controllers: [ScansController, BrowserScansController, LlmController],
+  // LlmModule imports the default ScansModule; compose here to retain one LOCAL service.
+  providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, llmExceptionProvider,
+    { provide: ScansService, inject: [LedgerStore, OciResolver],
     useFactory: (ledger: LedgerStore, resolver: OciResolver) => new NginxLocalScansService(ledger, resolver) }] })
 export class NginxLocalModule {}

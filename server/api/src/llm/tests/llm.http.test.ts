@@ -393,6 +393,23 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
         await denied(post({ reportVersion: 'unknown', consent: { accepted: true, policyVersion: fixturePolicy.version } }, owner.cookie, clean), 409);
       } finally { service.results = original; }
     });
+    await t.test('free policy keeps owner/consent/current-policy/citation publication fences (synthetic provider)', async () => {
+      const oldConsent = await consent();
+      policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'liquid/lfm-2.5-2.6b:free',
+        LLM_PROVIDER_ALLOWLIST: 'liquid', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
+        LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0' });
+      assert.ok(policy);
+      await denied(post(oldConsent), 409);
+      const body = await consent();
+      await denied(post(body, other.cookie), 403);
+      await denied(post({ ...body, consent: { accepted: false, policyVersion: body.consent.policyVersion } }), 403);
+      assert.equal((await post(body)).status, 200);
+      generate = async r => ({ ...reply(r), hypotheses: [{ text: 'Unverified claim', citations: ['foreign-finding'] }] });
+      assert.equal((await post(await consent())).status, 502);
+      generate = async r => { policy = null; return reply(r); };
+      assert.equal((await post(await consent())).status, 409);
+      generate = async r => reply(r); policy = fixturePolicy;
+    });
   } finally {
     await app.close();
     names.forEach((name, i) => { if (prior[i] === undefined) delete process.env[name]; else process.env[name] = prior[i]; });

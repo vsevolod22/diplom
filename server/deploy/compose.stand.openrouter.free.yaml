@@ -1,0 +1,45 @@
+# Fixed opt-in only, after BOTH bases + nginx LOCAL; selector preserves this during refresh.
+# Secret file goes to API environment ONLY; never use it as --env-file or print compose config.
+services:
+  llm-egress:
+    build:
+      context: ../..
+      dockerfile: server/deploy/gateway/openrouter.Dockerfile
+    networks: [llm_internal, llm_uplink]
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 128m
+    cpus: 1
+  api:
+    env_file:
+      - path: ../.env.local
+        required: true
+    environment:
+      # Human approvals remain mandatory/default-off. The key has no interpolation here.
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_ROUTING_APPROVED: ${LLM_ROUTING_APPROVED:-false}
+      LLM_REGION: ${LLM_REGION:-undecided}
+      LLM_RETENTION: ${LLM_RETENTION:-undecided}
+      LLM_POLICY_REVISION: openrouter-free-liquid-v1
+      LLM_FREE_ONLY: "true"
+      LLM_MODEL: liquid/lfm-2.5-2.6b:free
+      LLM_PROVIDER_ALLOWLIST: liquid
+      LLM_REQUEST_BUDGET_USD: "0"
+      LLM_INPUT_PRICE_PER_MILLION_USD: "0"
+      LLM_OUTPUT_PRICE_PER_MILLION_USD: "0"
+      LLM_REQUEST_PRICE_USD: "0"
+      LLM_TIMEOUT_MS: "30000"
+      LLM_REQUEST_BYTES: "262144"
+      LLM_RESPONSE_BYTES: "65536"
+      LLM_MAX_FINDINGS: "1000"
+      LLM_OUTPUT_TOKENS: "2048"
+    networks: [llm_internal]
+    depends_on:
+      llm-egress: { condition: service_started }
+networks:
+  llm_internal:
+    internal: true
+  llm_uplink: {}

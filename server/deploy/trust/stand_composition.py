@@ -8,6 +8,7 @@ import stat
 import tempfile
 
 OVERLAY = 'server/deploy/compose.stand.nginx.local.yaml'
+LLM_OVERLAY = 'server/deploy/compose.stand.openrouter.free.yaml'
 BASES = ('server/deploy/compose.stand.yaml', 'server/deploy/compose.stand.vuln.local.yaml')
 
 
@@ -19,6 +20,27 @@ def require(ok):
 def private_root(root):
     st = root.lstat()
     require(stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and not st.st_mode & 0o022)
+
+
+def api_secret_metadata(repo):
+    secret = Path(repo) / 'server/.env.local'
+    st = secret.lstat()  # Metadata only; Compose injects contents into API only.
+    require(stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and
+            stat.S_IMODE(st.st_mode) == 0o600 and 0 < st.st_size <= 8192 and
+            not (Path(repo) / 'server').is_symlink())
+
+
+def composition_files(repo, local, llm):
+    files = BASES + ((OVERLAY,) if local else ()) + ((LLM_OVERLAY,) if llm else ())
+    for relative in files:
+        path = repo / relative
+        require(path.resolve(strict=True) == path and path.is_file())
+        for ancestor in (path, *path.parents):
+            require(not ancestor.is_symlink())
+            if ancestor == repo:
+                break
+        require(not path.stat().st_mode & 0o022)
+    return files
 
 
 def unique_object(pairs):
@@ -34,6 +56,7 @@ class Composition:
     profile: str
     files: tuple
     command: tuple
+    llm: str | None = None
 
 
 def select(repo, root=None, env=None):
@@ -60,23 +83,19 @@ def select(repo, root=None, env=None):
             descriptor = json.loads(data, object_pairs_hook=unique_object)
         finally:
             os.close(fd)
-    require(type(descriptor) is dict and set(descriptor) <= {'profile', 'overlay'} and
+    require(type(descriptor) is dict and set(descriptor) <= {'profile', 'overlay', 'llm'} and
             descriptor.get('profile') in ('default', 'nginx-local'))
     local = descriptor['profile'] == 'nginx-local'
     require(descriptor.get('overlay', OVERLAY if local else None) == (OVERLAY if local else None))
-    files = BASES + ((OVERLAY,) if local else ())
-    for relative in files:
-        path = repo / relative
-        require(path.resolve(strict=True) == path and path.is_file())
-        for ancestor in (path, *path.parents):
-            require(not ancestor.is_symlink())
-            if ancestor == repo:
-                break
-        require(not path.stat().st_mode & 0o022)
+    llm = descriptor.get('llm')
+    require('llm' not in descriptor or llm == 'openrouter-free' and local)
+    if llm:
+        api_secret_metadata(repo)
+    files = composition_files(repo, local, llm)
     command = ['docker', 'compose', '--env-file', str(env)]
     for relative in files:
         command.extend(('-f', str(repo / relative)))
-    return Composition(descriptor['profile'], files, tuple(command))
+    return Composition(descriptor['profile'], files, tuple(command), llm)
 
 
 _held_locks = {}
@@ -100,7 +119,7 @@ def refresh_lock(root):
         lock.rmdir()
 
 
-def write_descriptor_locked(repo, profile, capability, root=None):
+def write_descriptor_locked(repo, profile, capability, root=None, llm='preserve'):
     """Integrator calls under refresh_lock only, after reviews/config validation.
 
     Returns previous bytes for rollback. Does not deploy, sign or change env pins.
@@ -112,13 +131,20 @@ def write_descriptor_locked(repo, profile, capability, root=None):
     lock = (root / '.trivy-refresh.lock').lstat()
     require((lock.st_dev, lock.st_ino) == held[1:3])
     require(stat.S_ISDIR(lock.st_mode) and lock.st_uid == os.geteuid() and not lock.st_mode & 0o077)
-    select(repo, root)  # Reject malformed existing state instead of overwriting it.
+    current = select(repo, root)  # Reject malformed state instead of overwriting it.
+    llm = current.llm if llm == 'preserve' else llm
     require(profile in ('default', 'nginx-local'))
+    require(llm is None or llm == 'openrouter-free' and profile == 'nginx-local')
+    if llm:
+        api_secret_metadata(repo)
+    composition_files(Path(repo).resolve(strict=True), profile == 'nginx-local', llm)
     path = root / 'stand-composition.json'
     previous = path.read_bytes() if path.exists() else None
     descriptor = {'profile': profile}
     if profile == 'nginx-local':
         descriptor['overlay'] = OVERLAY
+    if llm is not None:
+        descriptor['llm'] = llm
     fd, name = tempfile.mkstemp(prefix='.composition-', dir=root)
     try:
         with os.fdopen(fd, 'w') as stream:

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from stand_composition import BASES, OVERLAY, refresh_lock, select, write_descriptor_locked
+from stand_composition import BASES, OVERLAY, LLM_OVERLAY, refresh_lock, select, write_descriptor_locked
 spec = importlib.util.spec_from_file_location('composition_refresh', Path(__file__).with_name('refresh-local-stand.py'))
 refresh = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(refresh)
@@ -25,11 +25,14 @@ class CompositionTests(unittest.TestCase):
         self.env = self.root / 'stand.env'
         self.env.write_text('SCAN_JWT_SECRET=unchanged\nSCAN_VULN_RELEASE_HOST_DIR=/old\nSCAN_VULN_MANIFEST_DIGEST=sha256:' + 'a'*64 + '\nSCAN_VULN_ARTIFACT_SHA256=' + 'b'*64 + '\n')
         self.env.chmod(0o600)
-        for relative in (*BASES, OVERLAY):
+        for relative in (*BASES, OVERLAY, LLM_OVERLAY):
             path = self.repo / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('services: {}\n')
             path.chmod(0o600)
+        secret = self.repo / 'server/.env.local'
+        secret.write_text('SYNTHETIC_TEST_ONLY=true\n')
+        secret.chmod(0o600)
 
     def test_default_fixed_local_and_atomic_capability(self):
         before = self.env.read_bytes()
@@ -47,6 +50,43 @@ class CompositionTests(unittest.TestCase):
             write_descriptor_locked(self.repo, 'nginx-local', capability)
         self.assertEqual(self.env.read_bytes(), before)
 
+    def test_free_overlay_explicit_fixed_local_only_and_preserved_by_writer(self):
+        before = self.env.read_bytes()
+        with refresh_lock(self.root) as capability:
+            with self.assertRaises(ValueError):
+                write_descriptor_locked(self.repo, 'default', capability, llm='openrouter-free')
+            write_descriptor_locked(self.repo, 'nginx-local', capability, llm='openrouter-free')
+            selected = select(self.repo)
+            self.assertEqual(selected.files, (*BASES, OVERLAY, LLM_OVERLAY))
+            self.assertEqual(selected.llm, 'openrouter-free')
+            write_descriptor_locked(self.repo, 'nginx-local', capability)  # Preserve, no silent egress reset.
+            self.assertEqual(select(self.repo), selected)
+            write_descriptor_locked(self.repo, 'nginx-local', capability, llm=None)
+            self.assertEqual(select(self.repo).files, (*BASES, OVERLAY))
+        self.assertEqual(self.env.read_bytes(), before)
+
+    def test_free_refresh_freezes_four_files_through_failed_switch(self):
+        with refresh_lock(self.root) as capability:
+            write_descriptor_locked(self.repo, 'nginx-local', capability, llm='openrouter-free')
+        original = self.env.read_text() + 'LLM_ENABLED=true\nLLM_RETENTION=no-training\n'
+        self.env.write_text(original)
+        updated = refresh.replace_pins(original, self.repo / 'new', 'sha256:' + 'c'*64, 'd'*64)
+        calls = []
+        def selected_refresh():
+            self.assertEqual(refresh.COMPOSE.count('-f'), 4)
+            self.path.write_text('{"profile":"default"}')
+            refresh.switch(original, updated, 'sha256:' + 'c'*64, 'd'*64)
+        with patch.object(refresh, 'REPO', self.repo), patch.object(refresh, 'ROOT', self.root), patch.object(refresh, 'ENV', self.env), \
+             patch.object(refresh, 'refresh_selected', side_effect=selected_refresh), \
+             patch.object(refresh, 'run', side_effect=lambda *a, **k: calls.append(a) or ''), \
+             patch.object(refresh, 'healthy', return_value=True), patch.object(refresh, 'container_preflight', side_effect=ValueError('candidate invalid')):
+            with self.assertRaises(ValueError): refresh.refresh()
+        recreate = [args for args in calls if 'up' in args]
+        self.assertEqual(len(recreate), 2)
+        self.assertTrue(all(str(self.repo / LLM_OVERLAY) in args and str(self.repo / OVERLAY) in args and args.count('-f') == 4 for args in recreate))
+        self.assertEqual(self.env.read_text(), original)
+        self.assertFalse((self.root / '.trivy-refresh.lock').exists())
+
     def test_foreign_lock_and_forged_capability_cannot_write(self):
         with refresh_lock(self.root):
             with self.assertRaises(FileExistsError):
@@ -60,7 +100,9 @@ class CompositionTests(unittest.TestCase):
     def test_malformed_unknown_duplicate_writable_symlink_fail_closed(self):
         for text in ('null', '[]', '{}', '{"profile":"evil"}', '{"profile":"default","command":"x"}',
                      '{"profile":"nginx-local","overlay":"/tmp/evil"}', '{"profile":"default","overlay":"x"}',
-                     '{"profile":"default","profile":"nginx-local"}', 'x'*1025):
+                     '{"profile":"default","profile":"nginx-local"}', '{"profile":"nginx-local","llm":"evil"}',
+                                          '{"profile":"default","llm":"openrouter-free"}', '{"profile":"nginx-local","llm":null}',
+                                          '{"profile":"nginx-local","llm":"openrouter-free","llmOverlay":"/tmp/x"}', 'x'*1025):
             self.path.write_text(text)
             self.path.chmod(0o600)
             with self.subTest(text=text[:70]), self.assertRaises(ValueError):
