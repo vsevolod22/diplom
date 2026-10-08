@@ -56,6 +56,22 @@ class FreeDeploymentTests(unittest.TestCase):
 
 
 class SourceFenceTests(unittest.TestCase):
+    def test_fixed_apodex_profile_revision_and_default_off_approvals(self):
+        root = Path(__file__).resolve().parents[1]
+        overlay = (root / 'compose.stand.openrouter.free.yaml').read_text()
+        for line in ('LLM_MODEL: apodex/apodex-1.1-mini:free',
+                     'LLM_PROVIDER_ALLOWLIST: novita/bf16',
+                     'LLM_POLICY_REVISION: openrouter-free-apodex-v2',
+                     'LLM_RETENTION: ${LLM_RETENTION:-undecided}',
+                     'LLM_ENABLED: ${LLM_ENABLED:-false}',
+                     'LLM_ROUTING_APPROVED: ${LLM_ROUTING_APPROVED:-false}',
+                     'LLM_FREE_ONLY: "true"'):
+            self.assertIn(line, overlay)
+        for field in ('LLM_REQUEST_BUDGET_USD', 'LLM_INPUT_PRICE_PER_MILLION_USD',
+                      'LLM_OUTPUT_PRICE_PER_MILLION_USD', 'LLM_REQUEST_PRICE_USD'):
+            self.assertIn(f'{field}: "0"', overlay)
+        self.assertNotIn('liquid', overlay)
+
     def test_key_only_api_and_isolated_llm_egress_and_exact_ingress(self):
         root = Path(__file__).resolve().parents[1]
         overlay = (root / 'compose.stand.openrouter.free.yaml').read_text()

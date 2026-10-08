@@ -22,11 +22,12 @@ services:
       LLM_ENABLED: ${LLM_ENABLED:-false}
       LLM_ROUTING_APPROVED: ${LLM_ROUTING_APPROVED:-false}
       LLM_REGION: ${LLM_REGION:-undecided}
+      # Free policy requires explicitly approved no-storage; no-training fails closed.
       LLM_RETENTION: ${LLM_RETENTION:-undecided}
-      LLM_POLICY_REVISION: openrouter-free-liquid-v1
+      LLM_POLICY_REVISION: openrouter-free-apodex-v2
       LLM_FREE_ONLY: "true"
-      LLM_MODEL: liquid/lfm-2.5-2.6b:free
-      LLM_PROVIDER_ALLOWLIST: liquid
+      LLM_MODEL: apodex/apodex-1.1-mini:free
+      LLM_PROVIDER_ALLOWLIST: novita/bf16
       LLM_REQUEST_BUDGET_USD: "0"
       LLM_INPUT_PRICE_PER_MILLION_USD: "0"
       LLM_OUTPUT_PRICE_PER_MILLION_USD: "0"

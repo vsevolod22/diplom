@@ -395,8 +395,8 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
     });
     await t.test('free policy keeps owner/consent/current-policy/citation publication fences (synthetic provider)', async () => {
       const oldConsent = await consent();
-      policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'liquid/lfm-2.5-2.6b:free',
-        LLM_PROVIDER_ALLOWLIST: 'liquid', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
+      policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'apodex/apodex-1.1-mini:free',
+        LLM_PROVIDER_ALLOWLIST: 'novita/bf16', LLM_POLICY_REVISION: 'openrouter-free-apodex-v2', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
         LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0' });
       assert.ok(policy);
       await denied(post(oldConsent), 409);

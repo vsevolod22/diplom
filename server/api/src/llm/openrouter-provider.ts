@@ -1,5 +1,5 @@
 import { BadGatewayException, ServiceUnavailableException } from '@nestjs/common';
-import { FREE_MODEL, type LlmPolicy } from './policy.js';
+import { FREE_MODEL, FREE_PROVIDER, type LlmPolicy } from './policy.js';
 import { openRouterTransport } from './openrouter-transport.js';
 import type { ReportContext } from './report-context.js';
 import { object, invalidReply } from './response.js';
@@ -16,11 +16,11 @@ export class OpenRouterProvider implements LlmProvider {
     if (signal.aborted) throw failed();
     // Defend the wire boundary too, even if an injected runtime bypasses env parsing.
     if (['openrouter/auto', 'openrouter/free'].includes(policy.model) || !policy.freeOnly && policy.model.includes(':')) throw configError();
-    if (policy.freeOnly && (policy.model !== FREE_MODEL || policy.providers.length !== 1 || policy.providers[0] !== 'liquid' ||
+    if (policy.freeOnly && (policy.model !== FREE_MODEL || policy.providers.length !== 1 || policy.providers[0] !== FREE_PROVIDER || policy.retention !== 'no-storage' ||
         policy.budgetUsd !== 0 || policy.inputPricePerMillion !== 0 || policy.outputPricePerMillion !== 0 || policy.requestPriceUsd !== 0)) throw configError();
     const body = JSON.stringify({ model: policy.model, max_tokens: policy.outputTokens, temperature: 0,
       stream: false, response_format: { type: 'json_object' },
-      ...(policy.freeOnly ? { reasoning: { exclude: true } } : {}),
+      ...(policy.freeOnly ? { reasoning: { enabled: false, exclude: true } } : {}),
       provider: { only: policy.providers, allow_fallbacks: false, require_parameters: true,
         data_collection: 'deny', ...(policy.retention === 'no-storage' ? { zdr: true } : {}),
         max_price: { prompt: policy.inputPricePerMillion, completion: policy.outputPricePerMillion,
@@ -67,10 +67,7 @@ export class OpenRouterProvider implements LlmProvider {
         let envelope: unknown;
         try { envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
         catch { return invalidReply(); }
-        // OpenRouter may return the canonical base ID for this exact :free route.
-        // This is not a general suffix-strip rule and does not change request routing.
-        const matchingModel = object(envelope) && (envelope.model === policy.model ||
-          policy.freeOnly && policy.model === FREE_MODEL && envelope.model === 'liquid/lfm-2.5-2.6b');
+        const matchingModel = object(envelope) && envelope.model === policy.model;
         if (!object(envelope) || !matchingModel || !Array.isArray(envelope.choices) ||
             envelope.choices.length !== 1 || !object(envelope.choices[0])) return invalidReply();
         const choice = envelope.choices[0];

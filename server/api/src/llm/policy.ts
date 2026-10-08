@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 
 export const CEILINGS = Object.freeze({ timeoutMs: 30_000, requestBytes: 262_144, responseBytes: 65_536,
   findings: 1000, outputTokens: 2048, budgetUsd: 1, pricePerMillion: 1000 });
-// Public endpoint catalog verified 2026-10-07: Liquid supports JSON and reasoning.
-export const FREE_MODEL = 'liquid/lfm-2.5-2.6b:free';
+// Fixed profile from the parent-reported 2026-10-08 synthetic compatibility probe.
+export const FREE_MODEL = 'apodex/apodex-1.1-mini:free';
+export const FREE_PROVIDER = 'novita/bf16';
 export type LlmPolicy = Readonly<{
   version: string; model: string; providers: readonly string[]; region: 'global'; retention: 'no-training' | 'no-storage';
   timeoutMs: number; requestBytes: number; responseBytes: number; findings: number; outputTokens: number;
@@ -31,10 +32,10 @@ export function policyFromEnvironment(env: NodeJS.ProcessEnv = process.env): Llm
     const model = env.LLM_MODEL;
     const providers = env.LLM_PROVIDER_ALLOWLIST?.split(',');
     const revision = env.LLM_POLICY_REVISION;
-    if (!model || (freeOnly ? model !== FREE_MODEL || env.LLM_PROVIDER_ALLOWLIST !== 'liquid' :
+    if (!model || (freeOnly ? model !== FREE_MODEL || env.LLM_PROVIDER_ALLOWLIST !== FREE_PROVIDER || env.LLM_RETENTION !== 'no-storage' :
         !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(model) || ['openrouter/auto', 'openrouter/free'].includes(model)) || model.length > 160 ||
         !providers?.length || providers.length > 8 || new Set(providers).size !== providers.length ||
-        providers.some(p => !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(p)) ||
+        !freeOnly && providers.some(p => !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(p)) ||
         !revision || !/^[A-Za-z0-9._-]{1,80}$/.test(revision) || env.LLM_ROUTING_APPROVED !== 'true' ||
         env.LLM_REGION !== 'global' || !['no-training', 'no-storage'].includes(env.LLM_RETENTION ?? '')) return null;
     // The fixed API has no enforceable regional routing selector; EU/US fail closed.
