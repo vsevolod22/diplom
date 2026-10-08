@@ -30,7 +30,12 @@ export function MagicCard({
     mouseY.set(-gradientSize);
   };
   const move = (event: PointerEvent<HTMLDivElement>) => {
-    if (reducedMotion) return;
+    if (
+      event.pointerType !== 'mouse' ||
+      reducedMotion ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    )
+      return;
     const rect = event.currentTarget.getBoundingClientRect();
     mouseX.set(event.clientX - rect.left);
     mouseY.set(event.clientY - rect.top);
@@ -38,9 +43,10 @@ export function MagicCard({
 
   return (
     <motion.div
-      className={`scan-a1__magic group relative isolate overflow-hidden border border-transparent ${className}`}
+      className={`scan-a1__magic relative isolate border border-transparent ${className}`}
       onPointerMove={move}
       onPointerLeave={reset}
+      onPointerCancel={reset}
       style={{ background: border }}
     >
       <div
@@ -49,7 +55,7 @@ export function MagicCard({
       />
       <motion.div
         aria-hidden="true"
-        className="scan-a1__spotlight pointer-events-none absolute inset-px z-30 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+        className="scan-a1__spotlight pointer-events-none absolute inset-px z-30 opacity-0 transition-opacity duration-200"
         style={{ background: spotlight }}
       />
       <div className="relative z-40">{children}</div>

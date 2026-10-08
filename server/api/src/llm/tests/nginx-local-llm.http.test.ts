@@ -15,6 +15,9 @@ import { LedgerStore } from '../../ledger/ledger-store.js';
 import { LlmController } from '../llm.controller.js';
 import { LlmRuntime } from '../llm.service.js';
 import { archiveFixture } from './fixtures.js';
+import { LlmQuotaRuntime } from '../quota-runtime.js';
+import { FixtureQuotaLedger as QuotaLedger } from './quota-fixtures.js';
+import { quotaPolicy } from './quota-fixtures.js';
 
 const origin = 'http://127.0.0.1:8080';
 
@@ -100,6 +103,25 @@ test('LOCAL composition registers default-off LLM routes without importing defau
       await refusal(await fetch(`${path}/summary`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' },
         body: '{"CANARY-private": BROKEN}' }), 400, 'LLM_INVALID_REQUEST');
       assert.equal(providerLookups, 0);
+    });
+
+    await t.test('LOCAL usage is independent owner-only GET with quotas and one existing service graph', async () => {
+      const quota = new QuotaLedger(join(directory, 'llm-usage.sqlite'), quotaPolicy);
+      const quotas = app.get(LlmQuotaRuntime);
+      const original = quotas.ledger.bind(quotas);
+      quotas.ledger = () => quota;
+      try {
+        await refusal(await fetch(`${path}/usage`), 401, 'UNAUTHORIZED');
+        const before = await (await fetch(`${path}/context`, { headers: { cookie } })).json();
+        for (const endpoint of ['usage', 'USAGE/']) {
+          const response = await fetch(`${path}/${endpoint}`, { headers: { cookie } });
+          assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+          const snapshot = await response.json() as { available: boolean; integrationEnabled: boolean; scanId: string };
+          assert.equal(snapshot.available, true); assert.equal(snapshot.integrationEnabled, false); assert.equal(snapshot.scanId, scanId);
+        }
+        assert.deepEqual(await (await fetch(`${path}/context`, { headers: { cookie } })).json(), before);
+        assert.equal(providerLookups, 0);
+      } finally { quotas.ledger = original; quota.close(); }
     });
 
     await t.test('LOCAL unsupported targets/check sets reject before readiness/resolution and enqueue, even known replay key', async () => {

@@ -77,9 +77,11 @@ describe('scan UI fixture versus unavailable production', () => {
       await screen.findByText(/Нет подтверждённых находок: область не проверена полностью/),
     ).toBeTruthy();
   });
-  it('limits confirmed zero to the checked area and keeps the rest unsupported', async () => {
+  it('keeps an empty checked demo unknown without an explicit count and the rest unsupported', async () => {
     page('/demo/scans/empty-demo', <ScanDetailPage demo />);
-    expect(await screen.findByText(/0 находок в выполненной проверенной области/)).toBeTruthy();
+    expect(await screen.findByText('Итог Secrets неизвестен')).toBeTruthy();
+    expect(screen.getByText(/это не подтверждает нулевой итог/)).toBeTruthy();
+    expect(screen.queryByText(/0 находок в выполненной проверенной области/)).toBeNull();
     expect(screen.getByText(/Не запускалась/)).toBeTruthy();
     expect(screen.queryByText(/0 CVE/)).toBeNull();
   });

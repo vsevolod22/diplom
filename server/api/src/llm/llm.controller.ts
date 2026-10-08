@@ -11,6 +11,11 @@ export class LlmController {
   context(@Req() req: BrowserRequest, @Param('scanId') scanId: string) {
     return this.safe(() => this.llm.context(this.identity.resolve(req), scanId));
   }
+  @Get('usage')
+  @Header('Cache-Control', 'no-store')
+  usage(@Req() req: BrowserRequest, @Param('scanId') scanId: string) {
+    return this.safe(() => this.llm.usage(this.identity.resolve(req), scanId));
+  }
   @Post('summary')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')

@@ -6,6 +6,7 @@ import { LlmController } from './llm.controller.js';
 import { LlmRuntime, LlmService } from './llm.service.js';
 import { ReportReader } from './report-context.js';
 import { llmExceptionProvider } from './llm-exception.filter.js';
+import { LlmQuotaRuntime } from './quota-runtime.js';
 
-@Module({ imports: [AuthModule, ScansModule], controllers: [LlmController], providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, llmExceptionProvider] })
+@Module({ imports: [AuthModule, ScansModule], controllers: [LlmController], providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, LlmQuotaRuntime, llmExceptionProvider] })
 export class LlmModule {}

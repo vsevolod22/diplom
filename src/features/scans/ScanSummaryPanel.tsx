@@ -15,6 +15,7 @@ import {
 } from '@/shared/api/scans/llmSummaryClient';
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
+import { LlmUsagePanel } from './LlmUsagePanel';
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: SummaryClient };
 export function ScanSummaryPanel({ status, transport, client: providedClient }: Props) {
@@ -23,6 +24,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
   const [consent, setConsent] = useState(false);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
+  const [usageRefreshVersion, setUsageRefreshVersion] = useState(0);
   const [result, setResult] = useState<{ reply: SummaryReply; sources: SummarySource[] } | null>(null);
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
@@ -153,6 +155,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
       if (generation.current === version) {
         request.current = null;
         setPending(false);
+        setUsageRefreshVersion((value) => value + 1);
       }
     }
   }
@@ -263,8 +266,8 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
           </Button>
         )}
         <small>
-          Согласие сбрасывается после каждого запроса, отмены или изменения условий. Чат, история, кэш и учёт
-          продуктовых квот здесь не реализованы.
+          Согласие сбрасывается после каждого запроса, отмены или изменения условий. Чат, история и кэш здесь
+          не реализованы. Остаток продуктовых квот читается отдельно и не меняет согласие.
         </small>
         {message ? (
           <Alert role="alert" tone="warning">
@@ -272,6 +275,19 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
           </Alert>
         ) : null}
       </div>
+      <LlmUsagePanel
+        binding={
+          context && client.current()
+            ? {
+                scanId: context.scanId,
+                digest: context.digest,
+                platform: context.platform,
+                reportVersion: context.reportVersion,
+              }
+            : null
+        }
+        refreshVersion={usageRefreshVersion}
+      />
       {result ? (
         <div aria-label="ИИ-гипотезы">
           {result.reply.hypotheses.map((hypothesis, index) => (

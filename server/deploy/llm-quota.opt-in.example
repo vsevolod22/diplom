@@ -1,0 +1,36 @@
+# NON-SECRET example, NOT active configuration. No keys, cookies, account data.
+# Parent MUST choose/approve caps before deploy and independently review/backup.
+# Do not load the private API key file as a Compose interpolation --env-file.
+LLM_ENABLED=false
+LLM_ROUTING_APPROVED=false
+LLM_REGION=undecided
+LLM_RETENTION=undecided
+# Bootstrap is a SEPARATE isolated reviewed-image process, cwd /app/server/api,
+# UID/GID65532 and canonical API-only /auth; no Nest, key or unnecessary network.
+# ONLY for that process, after parent cap/backup approval: quota=true, while
+# LLM_ENABLED=false and LLM_ROUTING_APPROVED=false remain OFF. This file is not
+# auto-loaded; unchanged quota=false cannot initialize. See llm/TASK15.md staging.
+# Runtime activation is a later separate decision; never reset an existing ledger.
+LLM_QUOTA_ENABLED=false
+LLM_QUOTA_REVISION=summary-quota-utc-v1
+# Proposed judge baseline; explicit operator choices, not permissive runtime defaults.
+LLM_QUOTA_USER_INPUT=262144
+LLM_QUOTA_USER_OUTPUT=16384
+LLM_QUOTA_USER_COST_USD=0
+LLM_QUOTA_SCAN_INPUT=65536
+LLM_QUOTA_SCAN_OUTPUT=8192
+LLM_QUOTA_SCAN_COST_USD=0
+# The fixed four-file LOCAL selection supplies the remaining safe quota bounds.
+# Outside it, explicitly supply all of these as well; missing settings fail closed.
+LLM_QUOTA_WINDOW=utc-day
+LLM_QUOTA_WARNING_PERCENT=80
+LLM_QUOTA_REQUEST_INPUT=65536
+LLM_QUOTA_OBSERVATION_TOKENS=1048576
+LLM_QUOTA_OBSERVATION_COST_USD=1
+LLM_QUOTA_RECEIPT_MS=300000
+LLM_QUOTA_REPLAY_DAYS=7
+LLM_QUOTA_MAX_ROWS=100000
+LLM_QUOTA_DB_BYTES=67108864
+LLM_QUOTA_DISK_HEADROOM_BYTES=134217728
+LLM_QUOTA_BUSY_MS=1000
+LLM_QUOTA_CLEANUP_BATCH=256

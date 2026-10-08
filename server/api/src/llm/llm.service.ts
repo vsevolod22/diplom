@@ -4,6 +4,10 @@ import { ReportReader, type ReportContext } from './report-context.js';
 import { policyFromEnvironment, disclosure, type LlmPolicy } from './policy.js';
 import { productionProvider, configError, type LlmProvider } from './openrouter-provider.js';
 import { exact, validateReply } from './response.js';
+import { LlmQuotaRuntime } from './quota-runtime.js';
+import { quotaUnavailable, type Vector } from './quota-policy.js';
+import { prepareSummary } from './prepared-request.js';
+import type { QuotaLedger } from './quota-ledger.js';
 
 @Injectable()
 export class LlmRuntime {
@@ -13,12 +17,33 @@ export class LlmRuntime {
 @Injectable()
 export class LlmService {
   private readonly active = new Set<string>();
-  constructor(@Inject(ReportReader) private readonly reports: ReportReader, @Inject(LlmRuntime) private readonly runtime: LlmRuntime) {}
+  constructor(@Inject(ReportReader) private readonly reports: ReportReader, @Inject(LlmRuntime) private readonly runtime: LlmRuntime,
+      @Inject(LlmQuotaRuntime) private readonly quotas: LlmQuotaRuntime) {}
   context(identity: Identity, scanId: string) {
     const report = this.reports.read(identity, scanId);
     const policy = this.runtime.policy();
     return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,
       policyVersion: policy?.version ?? null, disclosure: policy ? disclosure(policy) : null, enabled: policy !== null };
+  }
+  usage(identity: Identity, scanId: string) {
+    const report = this.reports.read(identity, scanId);
+    const binding = { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion };
+    const policy = this.runtime.policy();
+        const flags = { integrationEnabled: policy !== null, quotaEnabled: process.env.LLM_QUOTA_ENABLED === 'true' };
+    try {
+      const ledger = this.quotas.ledger();
+      let reserve: Vector | undefined;
+            // The exact current free producer is shared with generation. This read never
+            // constructs a provider, inspects its key, grants consent or reserves tokens.
+            if (policy?.freeOnly && report.findings.length > 0 && report.findings.length <= policy.findings &&
+                Buffer.byteLength(JSON.stringify(report)) <= policy.requestBytes) {
+              try {
+                const candidate = prepareSummary(report, policy).reserve;
+                if (candidate.input <= ledger.policy.requestInput) reserve = candidate;
+              } catch { /* Candidate cannot be established safely; counters are still useful. */ }
+            }
+            return { ...binding, ...flags, quotaEnabled: true, available: true, ...ledger.snapshot(identity.subject, scanId, reserve) };
+    } catch { return { ...binding, ...flags, available: false, reason: flags.quotaEnabled ? 'unavailable' : 'disabled' }; }
   }
   async summary(authorize: () => Identity, scanId: string, body: unknown, signal: AbortSignal) {
     // Owner and explicit opt-in precede even provider/key configuration inspection.
@@ -40,6 +65,8 @@ export class LlmService {
     const abort = () => controller.abort();
     signal.addEventListener('abort', abort, { once: true });
     const deadline = setTimeout(abort, policy.timeoutMs);
+    let ledger: QuotaLedger | undefined;
+    let reservation: string | undefined;
     try {
       this.current(authorize, identity, report, policy, signal);
       // Every published hypothesis requires a real finding citation. An empty set
@@ -49,7 +76,32 @@ export class LlmService {
       if (signal.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
       const stopped = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () =>
         reject(new ServiceUnavailableException({ errorCode: 'LLM_REQUEST_ABORTED' })), { once: true }));
-      const reply = await Promise.race([provider.summarize(report, policy, controller.signal), stopped]);
+      // Admission can throw before Promise.race attaches its rejection handler.
+      void stopped.catch(() => {});
+      let operation: Promise<unknown>;
+      // Only the actual free-only production adapter opts into this narrow seam.
+      // Three-argument fake providers and the separately configured legacy path
+      // retain their existing contract; neither is evidence of quota acceptance.
+      if (policy.freeOnly && provider.prepare && provider.summarizePrepared) {
+        const prepared = provider.prepare(report, policy);
+        ledger = this.quotas.ledger();
+        reservation = ledger.reserve({ subject: identity.subject, scanId, reportVersion: report.reportVersion,
+          policyVersion: policy.version, requestHash: prepared.hash }, prepared.reserve);
+        this.current(authorize, identity, report, policy, controller.signal);
+        if (!ledger.dispatch(reservation)) throw quotaUnavailable();
+        const boundLedger = ledger, boundReservation = reservation;
+        let observed = false;
+        operation = provider.summarizePrepared(prepared, policy, controller.signal, {
+          policy: ledger.policy,
+          observe: observation => {
+            // Deliberately independent of current auth/publication and AbortSignal:
+            // a late bound receipt may account once, never publish or resend.
+            if (!boundLedger.observe(boundReservation, observation)) throw quotaUnavailable();
+            observed = true;
+          },
+        }).then(value => { if (!observed) throw quotaUnavailable(); return value; });
+      } else operation = provider.summarize(report, policy, controller.signal);
+      const reply = await Promise.race([operation, stopped]);
       this.current(authorize, identity, report, policy, signal);
       const result = validateReply(reply, report);
       if (Buffer.byteLength(JSON.stringify(result)) > policy.responseBytes)
@@ -60,6 +112,8 @@ export class LlmService {
       // Do not log/echo provider bodies, raw SQLite diagnostics, cookies or the key.
       throw new ServiceUnavailableException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
     } finally {
+      // A dispatched/settled/fault attempt cannot be refunded by this release CAS.
+      if (ledger && reservation) { try { ledger.release(reservation); } catch { /* Durable liability remains; never fabricate a refund. */ } }
       clearTimeout(deadline); signal.removeEventListener('abort', abort); controller.abort(); this.active.delete(identity.subject);
     }
   }
