@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Sparkles } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
 import {
@@ -11,6 +11,7 @@ import {
   ReportAccordionTrigger,
 } from '@/features/scans/ReportAccordion';
 import { ScanFilterSheet } from '@/features/scans/ScanFilterSheet';
+import { ScanSummaryPanel } from '@/features/scans/ScanSummaryPanel';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { ScanScene } from '@/features/scans/ScanScene';
@@ -461,26 +462,14 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 {sbom.data.nextCursor !== null ? <Button variant="secondary" type="button" onClick={() => setSbomCursor(sbom.data.nextCursor ?? undefined)}>Следующая страница SBOM</Button> : null}
               </> : <p>{sbom.isError ? 'SBOM недоступен; число пакетов неизвестно.' : 'Ожидаем результат SBOM.'}</p>}
             </section> : null}
-            <section className="scan-a1__ai" aria-labelledby="scan-a1-ai">
-              <div>
-                <p className="scan-a1__eyebrow">04 / КОНТЕКСТНЫЙ ПОМОЩНИК · КОНЦЕПТ</p>
-                <h3 id="scan-a1-ai">
-                  <Sparkles size={24} aria-hidden="true" /> Спросить об отчёте
-                </h3>
-                <p>
-                  Будущий чат должен учитывать finding_id и границы coverage. Здесь нет модели, истории или
-                  авторизованной отправки.
-                </p>
-              </div>
-              <div className="scan-a1__compose">
-                <label htmlFor="scan-a1-prompt">Ваш вопрос</label>
-                <textarea id="scan-a1-prompt" disabled placeholder="Почему проверка не выполнена?" />
-                <Button type="button" disabled>
-                  Чат недоступен
-                </Button>
-                <small>Сообщения не сохраняются и не отправляются.</small>
-              </div>
-            </section>
+            {!demo && live && !active ? <ScanSummaryPanel
+              key={JSON.stringify([scope, scan.data])}
+              status={scan.data}
+              transport={transport}
+            /> : <section className="scan-a1__ai" aria-labelledby="scan-a1-ai">
+              <h3 id="scan-a1-ai">Сводка отчёта</h3>
+              <p>{demo ? 'Демо не отправляет данные модели и не имитирует ИИ-сводку.' : 'ИИ-сводка доступна только для завершённого авторизованного отчёта.'} Чат пока не реализован.</p>
+            </section>}
           </>
         ) : null}
       </section>

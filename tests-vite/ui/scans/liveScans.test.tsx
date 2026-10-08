@@ -654,9 +654,15 @@ describe('cookie-session live scans', () => {
     let reads = 0;
     let finish!: (value: ReturnType<typeof json>) => void;
     const snapshot = (state = 'running') => ({ scanId: id, state, checks: ['secret', 'sbom'], perCheck: { secret: null, sbom: null }, result: null });
-    const fetchMock = vi.fn(async (path: string) => {
+    const statusUrl = `/api/v1/browser/scans/${id}`;
+    const contextUrl = `${statusUrl}/llm/context`;
+    const fetchMock = vi.fn(async (path: string, _init?: RequestInit) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.endsWith('/results?limit=50')) return json({ findings: [], nextCursor: null, coverage: null });
+      if (path === `${statusUrl}/results?limit=50`) return json({ findings: [], nextCursor: null, coverage: null });
+      if (path === contextUrl) return new Response(JSON.stringify({ errorCode: 'LLM_REPORT_UNAVAILABLE' }), {
+        status: 409, headers: { 'Content-Type': 'application/json' },
+      });
+      if (path !== statusUrl) throw new Error(`Unexpected request: ${path}`);
       if (++reads === 2) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
       return json(snapshot(reads >= 3 ? 'completed' : 'running'));
     });
@@ -681,6 +687,9 @@ describe('cookie-session live scans', () => {
     await act(async () => finish(json(snapshot())));
     await waitFor(() => expect(close).toHaveBeenCalled(), { timeout: 2000 });
     expect(reads).toBe(3);
+    expect(fetchMock.mock.calls.filter(([path]) => path === statusUrl)).toHaveLength(3);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([path, init]) => path === contextUrl && init?.method === 'GET')).toHaveLength(1));
+    expect(fetchMock.mock.calls.filter(([path, init]) => path === `${statusUrl}/llm/summary` && init?.method === 'POST')).toHaveLength(0);
     expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('realtime остановлен');
     expect(fetchMock.mock.calls.some(([path]) => path.includes('eligibility'))).toBe(false);
   });
