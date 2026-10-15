@@ -1,6 +1,21 @@
 # Итоговая проверка проекта — 2026-10-15
 
-## Вердикт
+## Последний результат продолжения
+
+После коммита `636b834` по повторному запросу пользователя выполнены дополнительные проверки несколькими независимыми агентами:
+
+- **Docker build blocker снят:** API и worker успешно собраны с лимитом 600s/image; web/gateway также собраны. Production typecheck, native SQLite, non-root/read-only smoke и Trivy version PASS. [Сборки и immutable IDs](deployment/build-validation-20261015.md).
+- **Настоящий default image-only scanner PASS:** новый изолированный стенд, реальные HTTP → worker/outbox → Trivy → owner report/browser reload за **39.301s**. Secrets checked **0**, SBOM checked **15**, attempts=1/delivered=1, SSE/replay, ownership denial, eligibility 429, cancel PASS. Независимая scoped приёмка и cleanup 13 ресурсов PASS. [Actual receipt](deployment/image-stand-actual-20261015.json), [полный протокол](deployment/image-stand-validation-20261015.md), [независимая приёмка](deployment/image-stand-independent-acceptance-20261015.md).
+- **Accessibility automation PASS:** настоящие demo routes, keyboard/modal focus/AX, terminal announcement, 101 percentage renders без лишних объявлений. Но никто не прослушал настоящий screen reader. [Матрица и пятиминутный manual checklist](acceptance-final-20261015.md).
+- **Flownix всё ещё недоступен:** свежие `get_project_policy` и `get_node(DIP-TASK-41)` вновь вернули `server shut down`; сетевые обходы MCP не применялись. [Очередь из 13 pending/non-auto действий](flownix-reconciliation-20261015.json) сохраняет review drafts и полное source41 candidate body; remote записи/закрытия не заявлены.
+- **Старый HOLD не снят.** Изолированный scan не является восстановлением пользовательских данных. [Recovery assessment](deployment/recovery-assessment-20261015-final.md) и [план безопасного observer](deployment/recovery-observer-plan-20261015.md). Observer native не запускался: Docker inspect внутри локального CLI получает полный record, даже если агенту выводятся только закрытые metadata flags. Нужны отдельное информированное согласие на этот filtering boundary и independent re-review; не запускать holder/старый worker, не удалять locks/volumes и не создавать пустую базу взамен originals.
+- **Обнаружено явное cancellation contract расхождение:** ТЗ требует сохранности неполных результатов, реализация публикует только атомарные terminal results. Без решения владельца контракта и корректной spec reconciliation это не объявлено выполненным; текущий actual cancel PASS подтверждает terminal/fencing, не partial-findings preservation.
+
+Полные suites предыдущего baseline остаются исторически зелёными; в продолжении runtime-код приложения не менялся. Новые source-only suites: scanner harness **48/48**, recovery observer **48/48**, source closure **5/5**; source lint/syntax PASS. Временный actual стенд удалён, готовый сервис не оставлен работающим. **Проверен локальный image-only срез; старый deployment/public/runtime/host/LLM/manual-SR не принимаются этим PASS.**
+
+Ниже сохранена подробная исходная матрица `636b834`; её строки про TIMEOUT и отсутствие actual scan описывают предыдущий проход и заменены новыми результатами выше, а не выданы за текущие blockers.
+
+## Вердикт baseline 636b834
 
 **Проверенный baseline исходников; НЕ завершённый deployment и НЕ полная приёмка всех задач.** Пользователь запросил завершить тестирование и закоммитить накопленные изменения. Независимые агенты проверили backend, frontend, Docker/deploy, состав коммита и финальные исправления. Все перечисленные ниже проверки различают synthetic/real HTTP, actual scanner и production evidence.
 

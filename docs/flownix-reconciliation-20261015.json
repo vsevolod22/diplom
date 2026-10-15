@@ -1,0 +1,667 @@
+{
+  "format": "flownix-offline-reconciliation-queue",
+  "format_version": 1,
+  "date": "2026-10-15",
+  "language": "ru",
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "project_key": "DIP",
+  "baseline": "636b834",
+  "baseline_commit": "636b834fa7d3c4d8114ecb4cf4fcc9357ca075e7",
+  "status": "pending",
+  "executed": false,
+  "auto_execute": false,
+  "purpose": "Локальная очередь сверки и проектов review comments, не журнал исполненных tracker действий и не разрешение на них. Локальные queue_key не являются новыми Flownix IDs.",
+  "tracker": {
+    "availability": "down",
+    "basis": "Ранее MCP вернул server shut down; пользователь отдельно подтвердил down через get_node TASK41 и policy и запретил retry.",
+    "retried_in_this_continuation": false,
+    "network_workaround_used": false,
+    "current_task_states_known": false,
+    "current_policy_known": false,
+    "resume_requires_explicit_user_instruction": true
+  },
+  "last_known_policy": {
+    "source": ".flownix",
+    "freshness": "local_config_only_not_current_server_policy",
+    "spec_mode": "strict",
+    "require_proposal_approval": false,
+    "spec_first": false,
+    "execution_order": "parallel",
+    "completion_flow": "direct"
+  },
+  "execution_guards": {
+    "all_actions_pending_not_executed": true,
+    "automatic_done": false,
+    "automatic_parent_cascade": false,
+    "automatic_progress_100": false,
+    "new_remote_ids_allocated": false,
+    "approval_granted": false,
+    "spec_applied_by_this_queue": false,
+    "no_spec_impact_declared": false,
+    "no_spec_impact_is_not_a_substitute_for_source41_or_cancellation_delta": true,
+    "no_frozen_proof_reexecution_or_repin": true,
+    "no_scanner_engine_host_provider_deploy_or_old_data_operations": true,
+    "no_network_api_bypass": true,
+    "no_staging_or_commit": true,
+    "remote_tools_are_future_review_hints_not_invocations": true,
+    "before_any_future_write": [
+      "Дождаться отдельного user resume; MCP down не обходить HTTP/CLI/curl/чужим API.",
+      "Прочитать актуальные policy, task, parent, references/components, comments и relevant docs/deltas через восстановленный MCP.",
+      "Не принимать локальные last_known states за current; наличие run.completed не означает task.done.",
+      "Сверить baseline/source scope и переформулировать comments, если исходники/AC/метаданные изменились.",
+      "Проверить existing comments/reviews/draft/rejected/pending/applied deltas, чтобы не дублировать ранее возможные записи.",
+      "Для поведенческого spec change использовать полный документ с rebase на актуальную версию; не overwrite через update_doc_content.",
+      "Если действующая policy требует approval, submit pending draft и ждать решения человека; агент не approve/reject.",
+      "Task/plan closure и любой parent cascade не входят в очередь. Даже all-PASS narrow review требует отдельного решения после всех gates."
+    ]
+  },
+  "sources": [
+    {
+      "path": ".flownix",
+      "kind": "local_project_config",
+      "limitation": "Не серверная policy на момент исполнения очереди.",
+      "sha256_at_queue_preparation": "82338c636b137c121b13e96a158883042dae67abbbb248cabbb8e38af33ea89f"
+    },
+    {
+      "path": "docs/release-readiness-20261015.md",
+      "kind": "baseline_validation_record",
+      "limitation": "Ранее выполненные проверки; не свежий tracker read и не deployment qualification.",
+      "sha256_at_queue_preparation": "e2bc1a8921dd0a20c638aef9f6061b96bee8ec65d1cc3c0cece765f55f2b276d"
+    },
+    {
+      "path": "docs/acceptance-final-20261015.md",
+      "kind": "bounded_inert_review",
+      "limitation": "AX/keyboard и synthetic tests не являются audible SR/real scanner/runtime qualification."
+    },
+    {
+      "path": "docs/report-view-task-41.spec.md",
+      "kind": "full_local_doc10_successor_draft",
+      "limitation": "Source41 delta локально не зарегистрирована/не применена; current server state неизвестен.",
+      "sha256_at_queue_preparation": "5f183975f6868248add2571f98d44a62ba5f27f55b0f620fda2a862b7ea8ec8a"
+    },
+    {
+      "path": "docs/report-paging-task-39.spec.md",
+      "kind": "local_doc10_source39_snapshot",
+      "limitation": "Reported applied v3 подтверждена предыдущим чтением, а не этой очередью.",
+      "sha256_at_queue_preparation": "1e1011c67dbad0868bd4af8e6a148d03c3b586a0698d7eea87357d9ce96c5a5b"
+    },
+    {
+      "path": "docs/report-task-39-laptop.md",
+      "kind": "historical_author_handoff",
+      "limitation": "Pending/unapplied c8b710c1 в этом старом документе superseded более поздней записью applied v3 в release-readiness; не переписывать историю.",
+      "sha256_at_queue_preparation": "03ce2638680d8b1ecb86032f28f8127c1a70575b168c1f3db35fb7dbc83511f6"
+    },
+    {
+      "path": "docs/deployment/rollout-evidence-update-20261010.md",
+      "kind": "historical_evidence_register",
+      "limitation": "331/330/332 и source seals атрибутированы; payload/reviews здесь заново не получены и не декодированы.",
+      "sha256_at_queue_preparation": "e5843f89ba8e61402dd666c39a468bfef8cc467ee5d8eb3ef6fadb0f5b9ca020"
+    },
+    {
+      "path": "docs/ui-redesign-decision-task-19.md",
+      "kind": "historical_ui_design_decision",
+      "limitation": "Состояния TASK9/10 относятся к 2026-09-28, не к текущему tracker.",
+      "sha256_at_queue_preparation": "f48f914de529d819551f066d67c0da2332c10d458eab1231ccd73ffb58abca8c"
+    },
+    {
+      "path": "docs/ui-concepts/task-27-review.md",
+      "kind": "historical_abc_review",
+      "limitation": "Старая рекомендация B не заменяет более поздний пользовательский выбор A1.",
+      "sha256_at_queue_preparation": "355ba0225e41646c8b5658567edb03441f8c756bdf057b79d3e9c259abcc53b0"
+    },
+    {
+      "path": "docs/ui-concepts/task-27-react/README.md",
+      "kind": "later_a1_selection_record",
+      "limitation": "Выбор A1 не означает принятие каждого эффекта, touch/FPS/SR и всего production UI.",
+      "sha256_at_queue_preparation": "f30d5f1ea1f77edaf53b5cec3de663656833691df0397264925511dd3fe401e1"
+    },
+    {
+      "path": "docs/TZ.md",
+      "kind": "local_requirements",
+      "limitation": "Cancellation partial-results requirement остаётся несогласованным с bounded implementation docs.",
+      "sha256_at_queue_preparation": "ec9efa1a578d14b45ba34d626ae3eeb387c346aff6883eafdc6456a16bd9ba6b"
+    },
+    {
+      "path": "server/api/src/ledger/README.md",
+      "kind": "implementation_documentation",
+      "limitation": "Не applied spec; содержит также устаревшее описание SSE, поэтому не переносить весь README как current acceptance.",
+      "sha256_at_queue_preparation": "ea727f6370fb593171882712bf5c2e6f4f2edd3cd8c1a320a040d71f45821593"
+    },
+    {
+      "path": "server/api/README.md",
+      "kind": "implementation_documentation",
+      "limitation": "Late-result fencing/redaction документированы; отдельные scaffold/CVE тексты исторически устарели.",
+      "sha256_at_queue_preparation": "039ce397ee5ec5078246058fa0edac1367937d1c91efff6fff7c2b85aafab91a"
+    },
+    {
+      "path": "docs/task16-chat-ui.md",
+      "kind": "llm_publication_security_handoff",
+      "limitation": "LLM partial frames не являются scanner partial check results.",
+      "sha256_at_queue_preparation": "02dec37f6eb938536cad013e571d460eea027df5a87cc9013be5a27782d16588"
+    },
+    {
+      "path": "server/api/src/llm/TASK14.md",
+      "kind": "llm_history_publication_handoff",
+      "limitation": "Сходный принцип done/EOF/current authority, не разрешение менять scanner AC.",
+      "sha256_at_queue_preparation": "ebfbad343924272f7b60597c448cc412ab9e19f55d4164cc0b1c733ddbd9299a"
+    }
+  ],
+  "task_states_last_known_not_current": [
+    {
+      "task": "DIP-TASK-39",
+      "last_known_state": "testing",
+      "observed_at": null,
+      "source": "docs/report-task-39-laptop.md:66",
+      "basis": "Последний явно сформулированный author handoff returns to testing; не свежий MCP snapshot.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-41",
+      "last_known_state": null,
+      "observed_at": null,
+      "source": "docs/release-readiness-20261015.md:63",
+      "basis": "Локально известны implementation/draft gates, но конкретный lifecycle state не записан.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-40",
+      "last_known_state": "testing",
+      "observed_at": null,
+      "source": "docs/release-readiness-20261015.md:64",
+      "basis": "Документированное удержание testing до evidence comparison, не новый get_node.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-9",
+      "last_known_state": "regression",
+      "observed_at": "2026-09-28",
+      "source": "docs/ui-redesign-decision-task-19.md:3",
+      "basis": "Датированная историческая запись; новые UI PASS не являются сменой статуса.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-10",
+      "last_known_state": "in_progress",
+      "observed_at": "2026-09-28",
+      "source": "docs/ui-redesign-decision-task-19.md:3",
+      "basis": "Датированная историческая запись; не current tracker state.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-21",
+      "last_known_state": null,
+      "observed_at": null,
+      "source": "docs/release-readiness-20261015.md:69",
+      "basis": "Точный lifecycle state в прочитанных локальных документах не установлен.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-22",
+      "last_known_state": null,
+      "observed_at": null,
+      "source": "docs/release-readiness-20261015.md:68",
+      "basis": "Критерии известны локально, lifecycle state не установлен.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-23",
+      "last_known_state": null,
+      "observed_at": null,
+      "source": "docs/release-readiness-20261015.md:69",
+      "basis": "Критерии известны локально, lifecycle state не установлен.",
+      "current_state": null
+    },
+    {
+      "task": "DIP-TASK-27",
+      "last_known_state": null,
+      "observed_at": null,
+      "source": "docs/ui-concepts/task-27-react/README.md:13",
+      "basis": "Выбор A1 задокументирован; lifecycle state из этого не выводится.",
+      "current_state": null
+    }
+  ],
+  "evidence_interpretation": {
+    "no_new_tests_in_this_continuation": true,
+    "baseline_results_from_release_readiness": {
+      "ui_tests": 553,
+      "api_tests": 626,
+      "broker_tests": 62,
+      "chromium_tests": 44,
+      "http_browser_report_pages": 111
+    },
+    "prior_inert_results_from_acceptance_doc": {
+      "browser_groups": 5,
+      "host_default_deny_tests": 2,
+      "runtime_guard_tests": 1,
+      "worker_policy_cancel_tests": 3
+    },
+    "limits": [
+      "Не суммировать overlapping targeted tests с full-suite totals.",
+      "111 report pages — real Nest/HTTP/SQLite/browser с synthetic saved rows, не scanner-created evidence.",
+      "Inert final-accessibility API полностью mocked; AX text/DOM mutations не равны услышанной речи.",
+      "UI PASS не переносится на TASK2/5/6/8/32/36, provider/history ingress или rollout."
+    ]
+  },
+  "source41_full_document": {
+    "source_task": "DIP-TASK-41",
+    "target_document": "DIP-DOC-10",
+    "source_path": "docs/report-view-task-41.spec.md",
+    "body_mode": "full_document_not_patch_or_excerpt",
+    "full_body": "# DIP-TASK-41 / DIP-TASK-39 — Сохранённые отчёты и server-global report-v1\n\n## Purpose\nПолный локальный draft следующего тела DIP-DOC-10: server-global фильтры, сортировка и query-bound страницы сохранённых CVE/SBOM/Secrets. База — applied версия 3: c8b710c1-28a4-499b-8135-cdb667476be3 применена пользователем 2026-10-15 поверх версии 2; её laptop/v2-wire требования сохранены. На момент финализации Flownix недоступен: source41 delta для этого тела не создана и не применена. Локальная реализация проверена unit, настоящим HTTP/SQLite и browser integration на синтетическом сохранённом отчёте (docs/release-readiness-20261015.md); это не scanner/production deployment acceptance. Перед закрытием TASK41 требуется validate/propose/apply полного тела через MCP и фиксация narrow приёмки.\n\n## Requirements\n\n### Requirement: Фактическая граница отчёта\nИнтерфейс SHALL не трактовать наличие этой спецификации или synthetic fixture как доказательство выполненного сканирования, доступности scanner/API или безопасности образа.\n\n#### Scenario: Проверка по synthetic fixture\n- GIVEN интерфейс испытывается только с вымышленными локальными ответами\n- WHEN оценивается готовность отчёта\n- THEN fixture подтверждает только проверенные свойства UI, а серверные capabilities и покрытие требуют отдельных доказательств.\n\n### Requirement: Независимые последовательные страницы\nИнтерфейс SHALL предоставлять самостоятельные действия «Назад» и «Далее» для CVE, Secrets и SBOM, используя только выданное API продолжение и ранее посещённые cursors своей категории.\n\n#### Scenario: Переключение страницы CVE\n- GIVEN загружены первые страницы трёх категорий и API выдал nextCursor CVE\n- WHEN пользователь открывает следующую страницу CVE и затем возвращается назад\n- THEN запрашиваются только соответствующие cursors CVE, а страницы Secrets и SBOM не меняются; смена видимости категории сохраняет независимое состояние.\n\n### Requirement: Подтверждённый номер и диапазон\nИнтерфейс SHALL изменять номер и диапазон показанных строк только после подтверждения запрошенной страницы.\n\n#### Scenario: Запрос ещё выполняется\n- GIVEN показана первая подтверждённая страница\n- WHEN пользователь открывает следующую страницу и ответ ещё не получен\n- THEN прежние строки, номер и диапазон сохранены, загрузка явно указана, а действия этого pager отключены без дублирования запроса.\n\n### Requirement: Ошибка перехода с сохранением данных\nИнтерфейс SHALL сохранять предыдущие подтверждённые строки при обычной ошибке перехода и предлагать повтор именно неудавшегося запроса.\n\n#### Scenario: Следующая страница недоступна\n- GIVEN первая страница подтверждена для текущего отчёта\n- WHEN GET следующей страницы завершается ошибкой сети или безопасным временным отказом\n- THEN ошибка явно отличена от успешного перехода, показан прежний подтверждённый диапазон, а retry не пропускает cursor и не объявляет пустой результат.\n\n### Requirement: Сброс идентичности и доступа\nИнтерфейс SHALL очищать все видимые и сохранённые строки, активное подтверждение и cursor history при утрате доступа либо смене субъекта, поколения сессии, scan, закреплённой цели или доступной идентичности/метаданных отчёта, включая предоставленные checkedAt/count/scannerVersion. Это строгое очищение распространяется и на ранее сохранённый исторический снимок; fallback к его строкам в новом или утратившем доступ контексте недопустим.\n\nТолько при повторе ранее посещённого cursor в том же авторизованном контексте, с неизменными целью, доступными метаданными отчёта, ordered finding IDs, cursor и continuation, когда меняется лишь нормализованное содержимое строк, интерфейс SHALL отвергать входящий payload и сохранять ровно последний ранее подтверждённый снимок как явно исторический/устаревший, с неподтверждённой актуальностью повторного ответа. Его прежние строки, номер, диапазон и count относятся только к этому снимку, не подтверждают ответ отклонённого cursor и не смешиваются с ним; активное подтверждение и все cursor stacks сбрасываются, «Назад»/«Далее» отключены, а retry начинается с первого cursor. Эта узкая content-only граница не разрешает сохранение строк при смене доступа, контекста, цели или предоставленных метаданных отчёта.\n\n#### Scenario: Смена субъекта во время GET\n- GIVEN Alice открыла следующую страницу и ответ задержан\n- WHEN интерфейс переходит к Bob или другому scan\n- THEN все видимые и сохранённые строки Alice очищены, история начинается с первой страницы нового контекста, прежний запрос отменён, поздний ответ Alice не отображается и её строки не берутся из общего кэша страниц.\n\n#### Scenario: Другая цель или версия ответа\n- GIVEN статус подтверждает digest, platform и доступные checkedAt/count/scannerVersion\n- WHEN ответ страницы не совпадает с этими данными либо меняет подтверждённую identity/итог между страницами\n- THEN входящий payload не отображается, все прежние видимые и сохранённые строки, включая исторический снимок, активное подтверждение и cursor history очищены; восстановление начинается с первой страницы, без смешения отчётов.\n\n#### Scenario: Потеря доступа\n- GIVEN имеются подтверждённые строки текущего пользователя, в том числе ранее сохранённый исторический снимок\n- WHEN GET сообщает об утрате сессии, разрешения или доступности scan\n- THEN все видимые и сохранённые строки и cursor history очищены, pager отключён и требуется восстановление доступа, а не fallback к прежним данным.\n\n#### Scenario: Content-only drift посещённой страницы в том же контексте\n- GIVEN имеется последняя подтверждённая страница того же авторизованного субъекта, поколения сессии, scan и цели, а доступные метаданные отчёта, ordered finding IDs, cursor и continuation посещённой страницы неизменны\n- WHEN «Назад» или повторный «Далее» получает для этого посещённого cursor ответ с изменением только нормализованного содержимого строк, например severity, fix или описания источника\n- THEN отклонённый payload никогда не отображается; сохранён ровно последний ранее подтверждённый снимок с прежними строками, номером, диапазоном и count, явно относящимися к историческому/устаревшему снимку с неподтверждённой актуальностью ответа; активное подтверждение и все cursor stacks сброшены, навигация отключена, retry направлен к первому cursor.\n\n#### Scenario: Обычная ошибка retry после content-only reset\n- GIVEN после content-only drift показан явно исторический/устаревший последний подтверждённый снимок, cursor stacks сброшены и retry направлен к первому cursor\n- WHEN retry завершается обычной сетевой или временной ошибкой без смены доступа, контекста, цели или метаданных отчёта\n- THEN сохранены тот же исторический снимок и явное предупреждение о неподтверждённой актуальности, навигация остаётся отключённой, а следующий retry снова направлен к первому cursor.\n\n#### Scenario: Успешная первая страница после content-only reset\n- GIVEN показан исторический/устаревший снимок после content-only drift и retry направлен к первому cursor\n- WHEN первая страница текущего авторизованного контекста успешно подтверждена\n- THEN она заменяет исторический снимок как новая первая подтверждённая страница с новым baseline/history; прежняя stale-пометка снята, а навигация разрешена только по новым подтверждённым cursors.\n\n### Requirement: Непротиворечивая последовательность\nИнтерфейс SHALL отвергать циклическое продолжение, повторяющиеся идентификаторы строк и несовместимый повтор посещённой страницы.\n\n#### Scenario: API повторяет cursor или строки\n- GIVEN первая страница подтверждена\n- WHEN ответ следующей страницы повторяет её finding IDs либо даёт циклический cursor или пустую страницу с продолжением\n- THEN переход не подтверждается, прежний диапазон не увеличивается и показана ошибка без бесконечной автозагрузки.\n\n### Requirement: Отдельные достоверные итоги\nИнтерфейс SHALL подтверждать count категории только для выполненной проверки и различать checked zero, unknown, failed, unsupported, ожидание результата и отсутствие совпадений на текущей fixture-странице.\n\n#### Scenario: CVE failed при успешном SBOM\n- GIVEN CVE не выполнены, а SBOM успешно выдаёт инвентарь\n- WHEN пользователь читает отчёт\n- THEN число CVE неизвестно, число пакетов SBOM относится только к инвентарю и не объявляется количеством уязвимостей или доказательством безопасности.\n\n#### Scenario: Checked zero и локальный фильтр\n- GIVEN выполненная категория подтверждает count=0 либо fixture-фильтр скрывает имеющиеся строки текущей страницы\n- WHEN показывается результат\n- THEN только первое состояние называется нулём в проверенной области; второе называется отсутствием совпадений текущей страницы с доступным сбросом фильтра.\n\n### Requirement: Компактные факты CVE\nИнтерфейс SHALL показывать CVE ID, severity, пакет, установленную и исправленную версии, известные расхождения и неизвестную согласованность источников без hover или обязательного раскрытия подробностей.\n\n#### Scenario: Совместимое LOW при CRITICAL источника\n- GIVEN headline содержит совместимое LOW, а отдельная оценка источника содержит CRITICAL\n- WHEN строка CVE закрыта\n- THEN виден текст о CRITICAL отдельного источника и расхождениях, а LOW не выдаётся за единственную авторитетную оценку.\n\n### Requirement: Отдельные оценки и ограничения\nИнтерфейс SHALL раскрывать описание, источник и provenance, язык, исходные severity/fix/CVSS каждой оценки и ограничения предоставленных данных без выдуманного объединённого CVSS или пересчёта score.\n\n#### Scenario: Две конфликтующие оценки\n- GIVEN источники предоставили разные severity, fix и CVSS score\n- WHEN пользователь раскрывает строку CVE\n- THEN обе оценки читаются отдельно, вектор и score/state относятся к своему источнику, а missing/invalid/redacted/truncated/omitted сведения не подменяются выдуманными фактами.\n\n### Requirement: Безопасные тексты и ссылки\nИнтерфейс SHALL сохранять существующие redaction/plaintext и canonical URL fences для advisory, не исполняя HTML/Markdown/URL источника и не отображая значения секретов.\n\n#### Scenario: Просмотр advisory и калькулятора\n- GIVEN нормализованный advisory содержит безопасный текст и допустимый CVE ID с валидным CVSS 3.1\n- WHEN пользователь раскрывает подробности\n- THEN текст экранирован, ссылки строятся только на канонические CVE.org/NVD и фиксированный FIRST без автозаполнения; внешние переходы не получают opener/referrer, а существование записи не объявляется проверенным.\n\n### Requirement: Доступное чтение без вымышленного доступа\nИнтерфейс SHALL сохранять клавиатурное раскрытие, видимый фокус и читаемые данные на 320/375px и desktop, не предлагая totalPages, произвольную страницу, автозагрузку всего отчёта или глобальную сортировку/фильтрацию по одной загруженной странице. В legacy/no-view режиме глобальные controls не предлагаются; в opt-in report-v1 они допустимы только как серверные операции над полным сохранённым bounded отчётом, а не как локальная имитация.\n\n#### Scenario: Мобильная клавиатура\n- GIVEN открыт мобильный отчёт и включён reduced-motion\n- WHEN пользователь раскрывает CVE, использует pager и закрывает мобильный выбор категории\n- THEN данные доступны в HTML без горизонтального скрытия, фокус управления видим и после закрытия выбора возвращается к trigger; номер описывает посещённую страницу, а не выдуманное общее число страниц.\n\n### Requirement: Независимость ИИ-источников\nИнтерфейс SHALL сохранять существующие проверяемые ссылки ИИ-сводки на findings других страниц и скрытых категорий независимо от текущего pager.\n\n#### Scenario: Цитата последующей страницы Secrets\n- GIVEN существующий механизм сводки подтвердил source citation другой страницы текущего авторизованного отчёта\n- WHEN пользователь читает сводку при скрытой категории Secrets\n- THEN доступна проверенная исходная находка; pager не подменяет report context и не вызывает генерацию модели автоматически.\n\n### Requirement: Навигация только по доступным страницам\nИнтерфейс SHALL показывать компактные явно подписанные действия cursor-навигации сверху и снизу подтверждённого непустого набора с доступным продолжением либо ранее посещённой страницей, не отображая бессмысленные кнопки для unsupported, failed, отсутствующего результата, ожидания или checked zero без страниц. Оба набора действий используют одно подтверждение и один запрос; статус объявляется один раз.\n\n#### Scenario: Реальные страницы CVE\n- GIVEN проверенная непустая страница CVE предоставляет nextCursor\n- WHEN пользователь читает начало или конец списка\n- THEN доступен подписанный pager CVE с обеих сторон, фактический номер и диапазон не дублируются в live announcements; нет выдуманного totalPages, а global controls доступны только через report-v1, не через legacy/no-view.\n\n#### Scenario: Нет доступной пагинации\n- GIVEN CVE unsupported, failed, ещё выполняются, отсутствуют либо подтверждают ноль строк без continuation\n- WHEN показан исход проверки\n- THEN причина или ожидание остаётся видимой, но не отображается форма disabled Назад/Далее; неподдерживаемая проверка не называется checked zero.\n\n### Requirement: Полноширинные находки на ноутбуке\nИнтерфейс SHALL размещать компактное покрытие перед полноширинными результатами с читаемыми шрифтами, видимым фокусом и управляющими элементами высотой не менее 44px на 320/1024/1280/1440px, сохраняя видимые исходы и причины проверок.\n\n#### Scenario: Компоновка отчёта\n- GIVEN открыт отчёт на мобильном устройстве или ноутбуке\n- WHEN пользователь читает покрытие и CVE\n- THEN находки занимают полную доступную ширину ниже покрытия, а текст и кнопки не скрываются горизонтальным переполнением; декоративная scene не выдаётся за ход проверки.\n\n### Requirement: Закрытые метаданные CVE v2\nИнтерфейс SHALL принимать явный resultContractVersion 2 только с полным закрытым evidence: неизменённой db identity envelopeVersion 1, точным dbPolicy receipt ровно из пяти полей версии 2 для cve-db-updated-at-14d-v2, числовыми workerCheckedAt/evaluatedAt, исходным ISO checkedAt и точно производным usableUntil. Проверка согласованности использует сохранённые clocks, точные UTC наносекунды, календарь, порядок времён, допуск будущего 300 секунд, интервал публикации до 7 дней, включительный предел UpdatedAt + 14 дней и фиксированные упорядоченные warnings; это не криптографическая проверка подписи браузером.\n\n#### Scenario: Исторический reload успешного или unsupported v2\n- GIVEN сохранены согласованные successful или unsupported CVE v2 и их исходные timestamps\n- WHEN владелец повторно открывает отчёт через год\n- THEN envelope/timestamps/receipt не переписываются, допустимость проверяется на сохранённые worker/evaluated clocks, а не на текущую дату; unsupported не получает вымышленный count.\n\n#### Scenario: Неполный либо несовместимый receipt\n- GIVEN ответ содержит v2-marker или часть новых metadata fields\n- WHEN версия неизвестна, поле снято, добавлено лишнее поле receipt, нарушен календарь/границы либо timestamps/status/warnings/expiry не согласованы\n- THEN ответ отвергается без stripping или legacy fallback; failed outcome не получает вымышленные usable evidence, а прежняя legacy wire shape остаётся неизменной.\n\n#### Scenario: Несогласованные status и страницы\n- GIVEN status/perCheck подтверждают versioned CVE evidence\n- WHEN redundant result или полученная страница предоставляют другие или отсутствующие metadata\n- THEN ответ не публикуется; page metadata drift очищает прежние и исторические строки с first-cursor recovery, не попадая в content-only retention exception.\n\n### Requirement: Правдивые сохранённые предупреждения базы\nИнтерфейс SHALL показывать возраст базы и policy warnings на сохранённый момент оценки без обязательного раскрытия, отдельно отличая UpdatedAt, DownloadedAt, NextUpdate как ожидаемую публикацию и usableUntil как включительный предел политики; историческая допустимость не объявляется текущей готовностью или гарантией безопасности.\n\n#### Scenario: База старше суток и публикация просрочена\n- GIVEN receipt v2 содержит DB_DATA_OLDER_THAN_24H и DB_PUBLICATION_OVERDUE\n- WHEN показан checked либо unsupported CVE результат\n- THEN оба предупреждения и сохранённый evaluatedAt доступны сразу, подробности сохраняют исходные DB timestamps и worker checkedAt; NextUpdate не назван сроком допустимости.\n\n#### Scenario: Legacy без v2 evidence\n- GIVEN получен принятый legacy отчёт без нового receipt\n- WHEN показана информация базы\n- THEN политика 14 дней не выдумывается и актуальная допустимость остаётся неподтверждённой.\n\n### Requirement: Явный opt-in и совместимость legacy\nAPI SHALL предоставлять view=report-v1 на существующих GET /api/v1/scans/:scanId/{vuln|sbom|results} и /api/v1/browser/scans/:scanId/{vuln|sbom|results}, сохраняя обе существующие owner-auth границы и legacy/no-view numeric cursor, limit 1–100 с default 50, порядок и envelopes. results обозначает Secrets; новые filter/sort параметры без view отвергаются 400 INVALID_REPORT_QUERY, а не молча игнорируются.\n\n#### Scenario: Два режима чтения\n- GIVEN владелец читает существующий сохранённый отчёт\n- WHEN он отправляет legacy запрос без новых параметров либо явно выбирает view=report-v1\n- THEN legacy остаётся совместимым; только opt-in получает новый page contract и opaque continuation, без нового сканирования или изменения сохранённых rows/evidence.\n\n### Requirement: Глобальная операция до страницы\nAPI SHALL валидировать полный сохранённый набор категории размером не более 1000 строк и выполнять filter → deterministic sort → slice над этим набором, не сортируя и не фильтруя только загруженную страницу и не скрывая повреждение/превышение bound как checked zero.\n\n#### Scenario: Совпадение за прежней первой страницей\n- GIVEN checked отчёт содержит 1000 строк и нужные строки находятся вне прежней первой страницы\n- WHEN владелец задаёт report-v1 фильтр и сортировку\n- THEN первая выбранная страница включает подходящие строки из полного набора в заданном порядке; исходный отчёт и его evidence не переписываются.\n\n### Requirement: Размер страницы report-v1\nAPI и интерфейс SHALL поддерживать только limit 5, 10, 25 или 50 с default 25 в report-v1, показывая выбор размера рядом с отчётом и используя его одинаково в запросе и подтверждённом page echo.\n\n#### Scenario: Изменение размера\n- GIVEN подтверждена страница CVE с limit=25\n- WHEN пользователь выбирает 5, 10 или 50\n- THEN старые строки и cursor history CVE сбрасываются, новый запрос начинается без cursor и диапазон подтверждается только после ответа нового размера; другие категории не меняются.\n\n### Requirement: Полный итог и выбранные совпадения\nAPI и интерфейс SHALL различать page.totalCount полного checked отчёта, page.matchedCount выбранного набора и page.returnedCount текущей страницы; существующие findingCount/componentCount/coverage totals остаются полными, а диапазон pager относится к matchedCount. page содержит ровно version=1, limit, offset, returnedCount, totalCount, matchedCount, sort и filters; offset/returnedCount — неотрицательные safe integers, returnedCount равен длине rows и не превышает limit, checked counts согласованы и matchedCount ≤ totalCount ≤ 1000.\n\n#### Scenario: Проверено, но фильтр ничего не нашёл\n- GIVEN checked категория содержит totalCount=72\n- WHEN серверный фильтр подтверждает matchedCount=0\n- THEN rows пусты, offset=0, returnedCount=0 и nextCursor=null, видны «нет совпадений» и сброс фильтра; полный итог 72 не заменён нулём и это не заявление об отсутствии риска.\n\n#### Scenario: Проверка не выполнена\n- GIVEN категория failed, unsupported, ожидается, отсутствует либо доступен только count без checked row dataset\n- WHEN читается report-v1\n- THEN исходные outcome/reason/coverage/evidence сохраняются, rows пусты, page.totalCount и page.matchedCount равны null, offset/returnedCount равны 0 и continuation отсутствует; unknown не подменяется checked zero. Отсутствующий owner report по-прежнему может дать 404, а не фиктивный пустой checked отчёт.\n\n### Requirement: CVE severity как сохранённый факт\nAPI SHALL фильтровать CVE только по сохранённой top-level finding.severity через optional duplicate-free CSV subset UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL и сортировать severity:desc (default) или severity:asc; UNKNOWN остаётся последним в обоих направлениях, ties разрешаются findingId ASCII ascending. Пропущенный либо полный набор нормализуется в filters={severity:null}, subset — в каноническом enum порядке; advisory maximum, vendor consensus или новый CVSS не вычисляются.\n\n#### Scenario: LOW с конфликтующим CRITICAL источника\n- GIVEN сохранённая severity=LOW, а отдельная source assessment=CRITICAL\n- WHEN выбрана HIGH/CRITICAL subset или severity сортировка\n- THEN принадлежность и порядок определяются сохранённым LOW, но при отображении этой строки конфликт и CRITICAL источника остаются видимы без hover; фильтр не выдаётся за сводный риск всех источников.\n\n#### Scenario: UNKNOWN и полный набор\n- GIVEN имеются LOW, HIGH и UNKNOWN findings\n- WHEN сортировка меняется с desc на asc либо явно выбраны все пять severity\n- THEN UNKNOWN остаётся последним, ties стабильны, а полный набор эквивалентен omitted filter и подтверждается null echo.\n\n### Requirement: SBOM инвентарь без вымышленного риска\nAPI SHALL применять к SBOM optional ecosystem=apk|npm и name длиной 1–128 ASCII по [A-Za-z0-9@._+/-]+ как AND-фильтры; name нормализуется lowercase и ищется literal ASCII case-insensitive substring без regex/wildcards. filters={ecosystem:apk|npm|null,name:string|null}; сортировки name:asc (default), name:desc, ecosystem:asc, ecosystem:desc детерминированы: name ties → ecosystem → version ascending, ecosystem ties → name → version ascending, version lexical, не semver.\n\n#### Scenario: Смешанный регистр имени\n- GIVEN сохранён SBOM пакет с подходящим именем\n- WHEN пользователь отправляет name=PACKAGE-2 вместе с ecosystem=npm\n- THEN применяется global literal поиск package-2 только среди npm, канонический lowercase echo принимается, а число пакетов не называется severity, числом CVE или доказательством безопасности.\n\n### Requirement: Secrets rule и наличие строки без severity\nAPI SHALL применять к Secrets только optional exact case-sensitive ruleId по [A-Za-z0-9._-]{1,80} и linePresence=known|unknown, со sorts ruleId:asc (default), ruleId:desc, line:asc, line:desc; filters={ruleId:string|null,linePresence:known|unknown|null}. known означает line!==null, включая 0; line numeric/null-last в обоих направлениях, ties → ruleId → findingId ascending; ruleId ties → findingId ascending. Rule ID остаётся opaque/hashed идентификатором, а line относится к результату, не к глобальной позиции файла.\n\n#### Scenario: Нулевая и неизвестная строка\n- GIVEN Secrets rows имеют line=0 и line=null\n- WHEN выбран known либо сортировка line:desc\n- THEN 0 считается известной строкой, null остаётся последним при сортировке; severity/category/raw secret/path фильтры не предлагаются и новые факты о них не выдумываются.\n\n#### Scenario: Неверный ruleId в форме\n- GIVEN пользователь ввёл whitespace, неподдерживаемую пунктуацию или более 80 символов\n- WHEN он применяет Secrets фильтр\n- THEN локальная проверка сообщает фиксированную понятную ошибку без echo введённого значения; не отправляется заведомо неверный query. Пустое поле означает отсутствие фильтра, валидный регистр не меняется.\n\n### Requirement: Закрытый query contract\nAPI SHALL принимать в report-v1 только single scalar nonempty occurrences разрешённых ключей view, limit, cursor, sort и фильтров выбранной категории, отвергая unknown, repeated, array/object, неверные enum/grammar/limit/severity subset значения фиксированным 400 INVALID_REPORT_QUERY; malformed/noncanonical/out-of-range cursor получает 400 INVALID_PAGINATION после owner read.\n\n#### Scenario: Повторённые либо чужие ключи\n- GIVEN запрос report-v1 содержит два limit, repeated severity, SBOM severity, Secrets name либо неизвестный ключ\n- WHEN выполняется разбор запроса доступного owner report\n- THEN запрос отвергается, а не выбирает одно значение, не игнорирует ключ и не запускает локальную подмену global фильтра.\n\n### Requirement: Owner-first opaque continuation\nAPI SHALL на каждом opt-in GET сначала авторизовать субъекта и прочитать owner-scoped существующий report, затем диагностировать query/cursor; cursor — canonical base64url UTF-8 JSON ровно {v:1,q,r,o}, не более 512 ASCII, q/r — 64 lowercase hex, o — safe integer 0..1000. q привязан SHA-256 к версии 1, subject, scanId, kind, нормализованным filters, sort и limit; r — к полному валидированному выбранному сохранённому snapshot, включая scan/report metadata и source-order rows, без текущих clocks. Это consistency token, не подпись, capability или авторизация; raw subject, report, secret и key в token не помещаются.\n\n#### Scenario: Чужой report и валидный cursor\n- GIVEN субъект не владеет scan, report отсутствует либо pruned\n- WHEN он передаёт даже синтаксически корректный cursor\n- THEN существующая owner/auth граница сохраняется, missing/foreign report даёт 404 до cursor diagnostics и чужие rows/counts/query сведения не выдаются; missing ledger остаётся 503 SCANNER_UNAVAILABLE.\n\n#### Scenario: Query и snapshot несовместимы\n- GIVEN owner report доступен и continuation синтаксически корректен\n- WHEN изменены subject/scan/kind/filter/sort/limit либо сохранённый snapshot\n- THEN query mismatch даёт 400 REPORT_CURSOR_QUERY_MISMATCH, snapshot mismatch — 409 REPORT_CURSOR_STALE; malformed token и offset больше matchedCount дают 400 INVALID_PAGINATION. Offset ровно matchedCount допустим как пустая terminal page без continuation; numeric legacy token в report-v1 не принимается.\n\n### Requirement: Каноническое подтверждение страницы\nИнтерфейс SHALL принимать report-v1 только с закрытым корректным page echo, соответствующим effective query и запрошенному offset/limit, корректными rows/metadata/continuation и согласованными checked totals; membership duplication/overlap, cursor cycle, пустое continuation или несовместимый terminal/total отвергаются до публикации. nextCursor — выданный сервером opaque string либо null, не numeric offset; offset не становится частью постоянной query identity между страницами.\n\n#### Scenario: Повреждённая следующая страница\n- GIVEN подтверждена первая report-v1 страница\n- WHEN приходит duplicate ID, overlap с прежней страницей, несовместимый matchedCount, cyclic cursor либо неверный filters echo\n- THEN incoming rows не публикуются, visible и retained historical rows, confirmation, baselines, fingerprints, history, navigation и attempted cursor очищаются; восстановление начинается без cursor, не как ordinary transient retry.\n\n### Requirement: Сброс выбранного report context\nИнтерфейс SHALL при применении фильтра, sort, limit, сброса выбора либо повторном применении того же выбора после ошибки очищать состояние выбранной категории и начинать с omitted cursor; effective normalized query входит в context вместе с subject/session generation/scan/kind/target/доступными report metadata. Поздний ответ старого контекста не подтверждает новую страницу; continuation следует только с тем же effective query, а смена видимости категории сама по себе его не сбрасывает.\n\n#### Scenario: Фильтр меняется во время GET\n- GIVEN следующая CVE страница ещё загружается либо показан C4 historical snapshot\n- WHEN пользователь меняет HIGH на LOW или повторно применяет выбранный фильтр после ошибки\n- THEN прежние visible/retained rows и cursor stacks CVE очищены, старый GET отменён/не публикуется, retry использует первый cursor нового контекста; Secrets/SBOM не смешиваются с CVE.\n\n### Requirement: Строгий reset контракта отдельно от 503 и C4\nИнтерфейс SHALL классифицировать malformed JSON/wire/page/receipt/metadata и точные opt-in 400 INVALID_REPORT_QUERY, INVALID_PAGINATION, REPORT_CURSOR_QUERY_MISMATCH и 409 REPORT_CURSOR_STALE как payload-free strict-clear failures, включая восстановление из C4 historical snapshot. Удаляются visible и retained rows, count/range confirmation, baseline/fingerprints/history/navigation/attempted cursor; recovery начинает first cursor, invalid query требует исправления выбора с фиксированным actionable сообщением без raw payload/query/token echo. Legacy error compatibility не расширяется молча.\n\n#### Scenario: Malformed v2 после исторического снимка\n- GIVEN после C4 drift остался явно historical last-confirmed snapshot\n- WHEN recovery получает неизвестную v2 version, missing dbPolicy, invalid warnings/usableUntil, malformed page либо один из точных opt-in query/cursor errors\n- THEN даже historical rows очищены, navigation отключена, rejected payload не показан, дальнейшее восстановление начинает first cursor; metadata/query/membership failures не объявляются content-only C4.\n\n#### Scenario: Обычная 503 не становится reset\n- GIVEN report-v1 страница подтверждена либо показан допустимый same-context C4 historical snapshot\n- WHEN GET получает ordinary network failure или 503 без смены доступа/контекста/metadata\n- THEN обычный переход сохраняет last-confirmed rows/range и retry того же attempted cursor; C4 recovery сохраняет только прежний явно historical snapshot с disabled navigation и retry first cursor. Новая версия не превращает эти случаи в checked zero или успешное подтверждение.\n\n### Requirement: Предоставленные Secrets timestamps\nИнтерфейс SHALL сохранять supplied validated Secrets checkedAt в opt-in report identity и сравнивать page/status stamps, когда оба предоставлены; отсутствие timestamp остаётся неизвестным, не создаёт выдуманную идентичность и не меняет legacy/no-view normalization.\n\n#### Scenario: Timestamp изменён при неизменных строках\n- GIVEN подтверждён Secrets report-v1 с предоставленным checkedAt\n- WHEN следующий или повторный ответ меняет checkedAt при тех же row IDs/content либо противоречит предоставленному status stamp\n- THEN это metadata drift со строгим очищением и first-cursor recovery, не C4 content-only exception; отсутствие stamp само по себе не подменяется текущим временем.\n\n### Requirement: Fixture без имитации global controls\nИнтерфейс SHALL явно объявлять global report-v1 controls unsupported для fixture transport, не игнорируя переданные options и не фильтруя/сортируя локальную страницу под видом полного отчёта.\n\n#### Scenario: Просмотр synthetic fixture\n- GIVEN отчёт читается через fixture transport без server-global capability\n- WHEN пользователь видит toolbar или transport получает report-v1 options\n- THEN глобальные controls недоступны с объяснением unsupported, options не принимаются молча; legacy чтение fixture и честное page-local no-match остаются отдельными от проверенного server-global результата.\n\n## Non-goals\n- Не менять scanner/worker, image contract, DB schema, auth/session transport, admission, quota, consent, source-citation verification или backend ИИ. Новое API-владение ограничено opt-in read-only report-v1 saved-report query/page contract; no-view и browser CVE v2 closed reading сохраняются.\n- Не заменять DOC1/2/6/9, их неприменённые дельты и future areas; не объявлять полный P0 или весь UI-план принятым.\n- Не выдумывать отсутствующий report ID или Secrets timestamp: используются только предоставленные status/target/check timestamps/counts/scanner/page identities и новый opt-in consistency token; owner authorization обязательна на каждом GET.\n- Не добавлять cursor signing keys, provider calls, повторное сканирование, bulk autoload, totalPages/random access или локальную имитацию global sort/filter.\n- Не обещать распознавание полного удаления всех v2 markers во всех копиях checked archive wire: legacy-equivalent all-copy stripping может быть неотличимым; сохраняется явная unconfirmed legacy-policy label, без выдуманного protocol/signature gate.\n- Browser fixtures и author synthetic tests не подтверждают live readiness, native snapshot/HTTP integration, ручную screen-reader проверку, Safari/Firefox, mobile browser, production deploy или безопасность всех произвольных строк.\n- Наличие локального draft не означает применённую source41 delta или закрытую задачу. Spec application и narrow closure остаются отдельными действиями после восстановления MCP; история applied c8b710c1 не переписывается.\n",
+    "sha256_utf8": "5f183975f6868248add2571f98d44a62ba5f27f55b0f620fda2a862b7ea8ec8a",
+    "byte_length_utf8": 48710,
+    "reported_base": {
+      "version": 3,
+      "existing_source39_revision": "c8b710c1-28a4-499b-8135-cdb667476be3",
+      "reported_applied_date": "2026-10-15",
+      "attribution": "docs/report-view-task-41.spec.md:4 и docs/release-readiness-20261015.md:62; не новое чтение MCP"
+    },
+    "remote_source41_revision_id": null,
+    "remote_source41_revision_state": "unknown_current_locally_not_created_or_applied",
+    "rebase_against_live_doc_before_proposal": true,
+    "embedded_body_is_a_candidate_not_an_approved_spec": true
+  },
+  "historical_task40_evidence": {
+    "existing_packet": "DIP-ARTF-331",
+    "existing_review_refs": ["DIP-ARTF-330", "DIP-ARTF-332"],
+    "local_review_labels": ["ACCEPT330", "ACCEPT332"],
+    "fresh_read_or_decode_performed": false,
+    "source": "docs/deployment/rollout-evidence-update-20261010.md:5-12,22",
+    "reported_result": {
+      "cve_findings": 210,
+      "sbom_components": 72,
+      "secret_findings": 0,
+      "whole_acceptance": false,
+      "live_touched": false
+    },
+    "reported_scope": "Actual isolated LOCAL R10 scanner + owner cookie/native OWN nginx HTTP/SQL/page agreement + same-ledger API recreation; не current DOM/production UI.",
+    "historical_seals_not_recomputed": {
+      "proofscript_sha256": "945404d04957c86523de0490b5a65f17787010f6733a9a7ead1f76dfcfb4adc0",
+      "curated_source_sha256": "e4efad5ff9ef56040e1d341311599d8bb19da874af94b5bf1eaffa97b7ed6334",
+      "packet_gzip_sha256": "3134e1232557a6bda68a3bce3c8348533dfb487c22f6d8c8d0de029acce4b044",
+      "packet_expanded_sha256": "c120ea5e89559c8edf56f4aa8800de7df9e62b2552ef76b7fc0141eb1cf9ed49",
+      "payload_seal": "b30a57b3a2e0c38aa9c8f4840c782e9e7fb742048b3f7a75388f176e1b69519c"
+    },
+    "current_baseline_equivalence": "pending_not_established",
+    "one_run_authority": "329_spent_no_repeat_or_repin",
+    "zero_secrets_is_not_positive_detection": true,
+    "reported_cleanup_is_not_current_global_inventory": true
+  },
+  "cancellation_contract": {
+    "classification": "unresolved_contract_drift_likely_intentional_integrity_security_narrowing_not_proven_applied",
+    "current_gate_verdict": "FAIL",
+    "normative_local_requirement": {
+      "source": "docs/TZ.md:105-110",
+      "statement": "Отмена с сохранением неполных результатов; terminal cancelled либо partial обоснован."
+    },
+    "documented_narrowing": [
+      {
+        "source": "server/api/src/ledger/README.md:9",
+        "statement": "Sibling results/config/outbox ack/terminal state/event commit или rollback вместе; cancellation publishes no in-memory intermediate results."
+      },
+      {
+        "source": "server/api/src/ledger/README.md:11",
+        "statement": "CVE child failure может сохранить независимые Secrets/SBOM в final partial transaction; whole-worker kill не сохраняет промежуточные checks. Это не тот же случай, что user cancel."
+      },
+      {
+        "source": "server/api/README.md:9,31",
+        "statement": "Raw scanner findings/stderr не persist/expose; cancel terminal в ledger и fences late results, OS stop best-effort."
+      },
+      {
+        "source": "docs/task16-chat-ui.md:83-87; server/api/src/llm/TASK14.md:148-152",
+        "statement": "LLM partial frames unpublished до полного done/EOF/current durable equality; scanner findings вне chat и сохраняются при chat failures. Отдельная модель угроз, не waiver scanner AC."
+      }
+    ],
+    "inference": "At-most-terminal validated publication и attempt fencing объясняют отказ публиковать uncommitted/unvalidated fragments; это документированный intentional boundary, но его принятие владельцем scanner contract через applied delta не подтверждено.",
+    "applied_cancellation_delta_found_locally": false,
+    "remote_applied_cancellation_delta_status": "unknown",
+    "doc10_v3_or_source41_does_not_waive_global_cancel_ac": true,
+    "resolution_options_not_selected": [
+      {
+        "option": "retain_current_narrow_slice",
+        "description": "Явно принять cancel без публикации in-memory intermediate checks только для согласованного scanner slice. Сверить текущие DOC1/DOC2/task AC и причину, подготовить task-sourced full spec delta + локальное ТЗ alignment после решения владельца. Не менять поведение ради визуального PASS.",
+        "requires_owner_decision": true
+      },
+      {
+        "option": "implement_validated_per_check_checkpoints",
+        "description": "Если partial preservation обязательно, отдельно спроектировать durable independently completed/sanitized check checkpoints и atomic cancel snapshot, owner/attempt/revoke/lease fences, immutable evidence/count/coverage, restart/redaction tests. Никогда не публиковать raw/incomplete stdout. Это новая поведенческая работа, не review-only fix.",
+        "requires_owner_decision": true
+      },
+      {
+        "option": "explicit_scope_split",
+        "description": "Принять только явно согласованную narrowed image slice, а full partial-cancel AC оставить открытым отдельным scope после spec-first/policy checks. Здесь новые задачи/ID не создаются и full TASK9/22/P0 не закрываются.",
+        "requires_owner_decision": true
+      }
+    ],
+    "selected_option": null,
+    "behavior_changed": false,
+    "spec_changed": false,
+    "no_spec_impact_shortcut_allowed": false
+  },
+  "actions": [
+    {
+      "queue_key": "refresh-live-context-after-user-resume",
+      "kind": "read_only_reconciliation",
+      "targets": [
+        "DIP-TASK-39",
+        "DIP-TASK-41",
+        "DIP-TASK-40",
+        "DIP-TASK-9",
+        "DIP-TASK-10",
+        "DIP-TASK-21",
+        "DIP-TASK-22",
+        "DIP-TASK-23",
+        "DIP-TASK-27"
+      ],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": [],
+      "intended_work": "После отдельного resume прочитать current policy/tasks/parents/components/references, comments/reviews и relevant full docs/deltas; вернуть фактические состояния без mutations.",
+      "remote_write": false,
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "source41-doc10-full-spec-reconciliation",
+      "kind": "conditional_spec_workflow_preparation",
+      "targets": ["DIP-TASK-41", "DIP-DOC-10"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "full_document_payload_ref": "source41_full_document",
+      "intended_work": [
+        "Подтвердить current DOC10 version/body и applied source39 history; старые handoff pending descriptions не считать current.",
+        "Прочитать list_doc_deltas по DOC10 и source41. Если covered change уже есть, сначала inspect; draft/rejected rework только по правилам, pending не редактировать/не дублировать, approved не переписывать.",
+        "Сравнить полный встроенный body с source path/hash и current doc; при drift rebase всего документа, сохранить существующие requirements/scenarios, C4 и closed-v2/laptop boundaries.",
+        "После отдельного разрешения на spec workflow validate полный body и подготовить task-sourced source41 delta. Вернувшиеся новые IDs записывать только из действительного ответа, не из этой очереди.",
+        "Если требуется человеческое approval, submit и STOP до решения человека; применение только отдельным согласованным шагом после policy/version проверки."
+      ],
+      "remote_write": "requires_separate_resume_and_live_policy_checks",
+      "auto_apply": false,
+      "no_spec_impact_declaration": false,
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "review-task39-saved-report",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-39"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume", "source41-doc10-full-spec-reconciliation"],
+      "criteria": [
+        {
+          "criterion": "Независимые pagers, truthful counts, error retention, access/identity reset, C4/strict metadata reset, laptop/mobile reading",
+          "verdict": "PASS",
+          "evidence": [
+            "docs/release-readiness-20261015.md:23-25,39-43,62",
+            "docs/report-view-task-41.spec.md"
+          ]
+        },
+        {
+          "criterion": "Global report-v1 spec synchronized as source41 full DOC10 successor",
+          "verdict": "FAIL",
+          "reason": "Local draft не applied source41; current remote state неизвестен."
+        },
+        {
+          "criterion": "Actual scanner/deploy/manual VoiceOver acceptance inferred from saved synthetic rows",
+          "verdict": "FAIL",
+          "reason": "Не входит в narrow report PASS и не доказано."
+        }
+      ],
+      "comment_draft_markdown": "[review] Baseline636b834, narrow saved-report scope. PASS: независимые CVE/SBOM/Secrets страницы, sizes5/10/25/50, global server controls, counts, error retention, access/session/identity/C4/strict reset и laptop/mobile проверки; baseline actual Nest/HTTP/SQLite/browser integration:17 groups/111 pages, synthetic saved rows, без scanner/LLM. FAIL gate: полное source41 тело DOC10 ещё требует live reconciliation/spec workflow; local draft не applied delta. Applied source39 v3/c8b710c1 — ранее записанный факт, здесь не свежий MCP read. Не объявлять scanner/deployment/audible SR готовыми. Статус не менять, done/parent cascade не запрошены.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "review-task41-server-global-report",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-41"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume", "source41-doc10-full-spec-reconciliation"],
+      "criteria": [
+        {
+          "criterion": "Opt-in report-v1 full-dataset filter/sort/slice, limits, echo, opaque query/snapshot binding, owner-first auth, legacy preservation",
+          "verdict": "PASS",
+          "evidence": [
+            "docs/release-readiness-20261015.md:39-43,63",
+            "docs/report-view-task-41.spec.md:188-323"
+          ]
+        },
+        {
+          "criterion": "Current full source41 spec delta applied and task closure gates fulfilled",
+          "verdict": "FAIL",
+          "reason": "Не выполнено этой очередью; нужны live doc/delta checks и отдельный workflow, no-spec-impact неприменим к report-v1 behavior."
+        }
+      ],
+      "comment_draft_markdown": "[review] Baseline636b834. PASS narrow saved-report behavior: оба auth ingress, owner-first reads, duplicate/unknown query rejection, full bounded dataset global filter→sort→slice, sizes5/10/25/50, canonical page echo, query/snapshot-bound opaque continuation, legacy/no-view compatibility; actual HTTP/SQLite/browser111pages из release-readiness использует synthetic ledger rows. FAIL gate: требуется source41 full DOC10 spec (полное тело docs/report-view-task-41.spec.md, не fragment), rebase/deduplication/validate и разрешённый policy workflow. Новая migration/scanner/paid LLM для read-only report acceptance не нужны. No-spec-impact не заменяет эту поведенческую delta; не done автоматически.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "task40-331-330-332-current-baseline-evidence-review",
+      "kind": "read_only_evidence_comparison_then_conditional_comment",
+      "targets": ["DIP-TASK-40"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "existing_evidence_ref": "historical_task40_evidence",
+      "intended_work": [
+        "Через восстановленный штатный MCP прочитать FULL existing packet331 и reviews330/332, source40 delta/history и approved source closure, сохранив атрибуцию даты/scope.",
+        "Сопоставить proof-time source manifest/semantic closure с baseline636b834 и актуальными изменениями; инвентаризировать matching/drifted/excluded paths без repin и без proof execution.",
+        "Отдельно проверить current policy/tests против reviewed frozen behavior; совпадение только числа тестов или HEAD не является production equivalence.",
+        "Записать narrow comparison result только после evidence review; если drift/неполнота — оставить gate открытым, не объявлять исторический proof текущим."
+      ],
+      "criteria": [
+        {
+          "criterion": "Historical actual LOCAL R10 packet and independent ACCEPT330/332 exist in local evidence register",
+          "verdict": "PASS",
+          "qualification": "Локально атрибутированный historical result210CVE/72SBOM/0secrets, не повторное чтение artifacts."
+        },
+        {
+          "criterion": "Historical accepted source equivalent to current636b834 production closure",
+          "verdict": "FAIL",
+          "reason": "Comparison не завершён; release-readiness явно отмечает source hash drift."
+        }
+      ],
+      "comment_draft_markdown": "[review] TASK40: локально сохранён historical actual LOCAL R10 packet331 + independent ACCEPT330/332 (210CVE/72SBOM/0secrets; native owner-cookie nginx HTTP/SQL agreement и same-ledger API recreation). Это narrow historical PASS, не positive-secret/current UI/LIVE/provider/history/runtime/rollout acceptance. FAIL gate: proof-time→baseline636b834 current source/semantic closure comparison пока не выполнен. Source40 applied delta известна из предыдущей записи, требует live reread. Не rerun/repin:329 authority spent. Статус last-known testing не менять по этому черновику; source equivalence нельзя заменить сегодняшним unit PASS.",
+      "remote_write": "comment_only_after_full_evidence_read_comparison_and_deduplication",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "ui9-review-comment",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-9"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume", "cancellation-contract-owner-decision"],
+      "criteria": [
+        {
+          "criterion": "Current list/create/detail, demo honesty, saved report/access/reset",
+          "verdict": "PASS",
+          "evidence": ["docs/release-readiness-20261015.md:68", "docs/acceptance-final-20261015.md"]
+        },
+        {
+          "criterion": "Real authorized scanner/reconnect/replay/cancel E2E",
+          "verdict": "FAIL",
+          "reason": "Fresh accessibility HTTP/SSE mocked; scanner proof не повторять."
+        },
+        {
+          "criterion": "Cancellation partial-results AC reconciled",
+          "verdict": "FAIL",
+          "reason": "Likely intentional integrity narrowing, но applied contract exception не подтверждён."
+        }
+      ],
+      "comment_draft_markdown": "[review] PASS bounded UI: current list/create/detail, demo/live honesty, report/access/reset; baseline44browser/111saved-report pages и fresh inert AX/keyboard checks документированы. FAIL acceptance: настоящий scanner→reconnect/replay→cancel не проверен; partial-results contract unresolved. Ledger docs явно no in-memory intermediate publication/atomic terminal fencing, вероятно intentional security/integrity narrowing; TASK14/16 no partial LLM preview не waiver scanner AC. Нужна сверка original AC/applied docs и решение владельца, не silent spec/behavior change. Last-known regression2026-09-28 не выдавать за current. No state change.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "ui10-review-comment",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-10"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "criteria": [
+        {
+          "criterion": "Responsive/textual status/contrast/focus/keyboard bounded coverage",
+          "verdict": "PASS",
+          "evidence": ["docs/release-readiness-20261015.md:69", "docs/acceptance-final-20261015.md"]
+        },
+        {
+          "criterion": "Actual audible SR/native option/frequent production SSE",
+          "verdict": "FAIL",
+          "reason": "Не прослушано; native option selection headless not verified, component burst не wire."
+        }
+      ],
+      "comment_draft_markdown": "[review] PASS checked subset: baseline320/375/1280 keyboard/contrast/focus/reduced motion и текущие375 AX dialog/name/description, Tab trap/Escape restore, tabs/disabled launch. FAIL gate: пользователь ещё должен реально услышать VoiceOver/NVDA; native select options keyboard не подтверждены (selectOption только setup), настоящий частый SSE не квалифицирован. CDP/DOM не speech proof. Last-known in_progress2026-09-28 не current. No done/status mutation.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "ui21-review-comment",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-21"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "criteria": [
+        {
+          "criterion": "Primitive semantic role/name/description/selected/disabled/focus contract",
+          "verdict": "PASS",
+          "evidence": ["docs/acceptance-final-20261015.md"]
+        },
+        {
+          "criterion": "Full pinned upstream/notices/native/SR acceptance",
+          "verdict": "FAIL",
+          "reason": "Pins/notices не переаудированы здесь; actual SR и native option остаются manual gates."
+        }
+      ],
+      "comment_draft_markdown": "[review] PASS bounded current primitive semantics: Chromium AX dialog title/description+combobox name, real Tab/Enter/Escape trap/restore, tabs selected и disabled CTA; baseline build/contrast PASS. FAIL full acceptance: exact upstream pin/notices/license/transitive material нужно сверить с original AC/current sources, здесь заново не переаудировано; native options и audible VoiceOver не приняты. Не делать blanket WCAG/full primitive/task PASS и не менять неизвестный current lifecycle.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "ui22-review-comment",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-22"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume", "cancellation-contract-owner-decision"],
+      "criteria": [
+        {
+          "criterion": "Current tabs/create/detail, demo honesty and safe HTML fallback",
+          "verdict": "PASS",
+          "evidence": ["docs/release-readiness-20261015.md:68", "docs/acceptance-final-20261015.md"]
+        },
+        {
+          "criterion": "Real workflow + actual SR + reconciled cancellation semantics",
+          "verdict": "FAIL",
+          "reason": "Не заменяются fixture/UI suite; contract decision pending."
+        }
+      ],
+      "comment_draft_markdown": "[review] PASS scoped current UI: tabs/create/detail, readable status/coverage, demo honesty и HTML/reduced-motion baseline; saved-report HTTP integration не scanner proof. FAIL full live/SR acceptance: actual scanner reconnect/cancel и услышанный SR не выполнены. Cancellation no-intermediate-results документирован в ledger как integrity narrowing, но с ТЗ/original AC ещё не согласован; до решения владельца gate не закрывать. Без новых behavior/spec claims и без state transition.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "ui23-review-comment",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-23"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "criteria": [
+        {
+          "criterion": "DOM live-region dosing and exposed terminal text",
+          "verdict": "PASS",
+          "evidence": ["docs/acceptance-final-20261015.md:28-36"]
+        },
+        {
+          "criterion": "Actual SR + frequent real SSE + agreed performance baseline/independent QA trio",
+          "verdict": "FAIL",
+          "reason": "Нет audible evidence, production load/thresholds и полного review packet."
+        }
+      ],
+      "comment_draft_markdown": "[review] PASS DOM/component subset:101 committed percent renders→0live-text updates, stage и terminal по одному, repeated terminal без дублей, identity reset; actual route synthetic cancel даёт atomic polite terminal text в Chromium AX tree. FAIL audible/performance gate: ни одного VoiceOver/NVDA listening result, нет frequent production SSE/согласованных device/FPS/latency thresholds/полной независимой QA-тройки. Текущий production status decoder не заявляет stage/percent capability по component fixture. Не выдавать AX за SR или число tests за performance qualification.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "ui27-review-comment",
+      "kind": "conditional_review_comment",
+      "targets": ["DIP-TASK-27"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "criteria": [
+        {
+          "criterion": "User selected A1 Сигнал, distinguished from historical author recommendation B",
+          "verdict": "PASS",
+          "qualification": "Documented user choice; confirm original comments when MCP resumes.",
+          "evidence": ["docs/ui-concepts/task-27-react/README.md:13", "docs/release-readiness-20261015.md:70"]
+        },
+        {
+          "criterion": "All A/B/C candidates/effects/pins/touch/SR/FPS fully accepted",
+          "verdict": "FAIL",
+          "reason": "Historical previews не current production qualification; choice A1 не blanket approval."
+        }
+      ],
+      "comment_draft_markdown": "[review] PASS documented decision only: пользователь выбрал A1 «Сигнал» как основу25/26; поздняя запись task-27-react README/release-readiness приоритетнее старой рекомендации автора B из ABC overview. Сверить исходный user decision/comment без создания нового approval. FAIL blanket acceptance: старые ABC/previews, upstream pin/licenses/touch/swipe/SR/FPS заново не квалифицированы; current UI tests не принимают каждый эффект или TASK27 целиком. Current state неизвестен; no done.",
+      "remote_write": "comment_only_after_deduplication_and_revalidation",
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "cancellation-contract-owner-decision",
+      "kind": "read_only_contract_reconciliation_and_owner_question",
+      "targets": ["DIP-TASK-9", "DIP-TASK-22"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": ["refresh-live-context-after-user-resume"],
+      "analysis_ref": "cancellation_contract",
+      "intended_work": "Прочитать original scanner/UI cancellation AC и полные актуальные DOC1/DOC2/relevant applied delta history; выяснить, было ли security narrowing принято и для какого slice. Показать владельцу три варианта из cancellation_contract без silent выбора. TASK14/16 и DOC10 saved-report scope не подменяют scanner authorization.",
+      "owner_decision_recorded": false,
+      "remote_write": false,
+      "requested_state_transition": null
+    },
+    {
+      "queue_key": "operator-voiceover-listening",
+      "kind": "human_manual_gate",
+      "targets": ["DIP-TASK-10", "DIP-TASK-21", "DIP-TASK-22", "DIP-TASK-23"],
+      "status": "pending",
+      "executed": false,
+      "auto_execute": false,
+      "depends_on": [],
+      "instructions_source": "docs/acceptance-final-20261015.md#ручной-screen-reader-gate-точный-5-minute-checklist",
+      "operator_fixture_command": "node tests-e2e/final-accessibility.mjs --manual",
+      "command_executed_in_this_continuation": false,
+      "automatic_voiceover_control_or_audio_capture_allowed": false,
+      "why_not_automated": "Доступные CDP/DOM tools не подтверждают услышанную речь. Глобальные VoiceOver/System Events/audio действия могут читать другие окна; безопасного bounded read-only speech verifier нет.",
+      "required_operator_record": [
+        "operator/date",
+        "macOS/browser/SR versions and input mode",
+        "per-step PASS/FAIL",
+        "exact heard phrases and duplicates",
+        "native option selection",
+        "focus after modal and terminal",
+        "cleanup"
+      ],
+      "actual_audible_result": null,
+      "synthetic_sr_pass_would_not_close_real_sse_scanner_gates": true,
+      "remote_write": false,
+      "requested_state_transition": null
+    }
+  ]
+}

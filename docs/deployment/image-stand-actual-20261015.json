@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "source_result": {
+    "path": "test-results/dip-image-stand-08faa29110d44d0f9a8b6ac610020fad/result.json",
+    "sha256": "99d278876b7c8be5afd343e69b0159bbe119a74ca2b9e15ef58c967edfe67d6a"
+  },
+  "status": "PASS",
+  "project": "dip-image-stand-08faa29110d44d0f9a8b6ac610020fad",
+  "base": "636b834fa7d3c4d8114ecb4cf4fcc9357ca075e7",
+  "reviewed_source_sha256": "72af124c0a5e1d9821211f0bdd71a7f7583bb4cbb35ed6911bf754839ef9cd46",
+  "prebuilt_metadata_sha256": "307e41943229878004438a6660ce23edc2fb255daeb6ca19b01756fe1a195889",
+  "image_mode": "PREBUILT_ONLY_NO_BUILD_PULL_HISTORY",
+  "actual_scan": "SECRETS_SBOM_CHECKED",
+  "scan_id": "a4629fe1-41bc-4eb8-9689-b19b09dec047",
+  "elapsed_seconds": 39.301,
+  "results_count": 0,
+  "sbom_count": 15,
+  "outbox": {
+    "state": "completed",
+    "digest": "sha256:1c4eef651f65e2f7daee7ee785882ac164b02b78fb74503052a26dc061c90474",
+    "platform": "linux/amd64",
+    "checks": "[\"secret\",\"sbom\"]",
+    "attempts": 1,
+    "delivered": 1
+  },
+  "sse": {
+    "status": "PASS",
+    "event_ids": [1, 2, 3],
+    "states": ["queued", "running", "completed"],
+    "terminal_replay_only": true
+  },
+  "browser": {
+    "status": "PASS",
+    "reload": true,
+    "llmContextDisabled": true,
+    "blockedRequests": 0,
+    "browserErrors": 0
+  },
+  "rate_limit": {
+    "status": "PASS",
+    "scope": "eligibility_only",
+    "retry_after": 60
+  },
+  "cancel": {
+    "status": "PASS",
+    "termination": "best_effort_not_proven"
+  },
+  "cve": "UNSUPPORTED_NOT_ENABLED_NO_DB_RELEASE",
+  "cleanup": {
+    "status": "PASS",
+    "errors": [],
+    "recorded_resources": 13
+  },
+  "deployment": "NOT_PRODUCTION"
+}
