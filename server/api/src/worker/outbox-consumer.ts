@@ -4,6 +4,7 @@ import { scanSbomPinned, type SbomScanResult } from './sbom-worker.js';
 import { scanVulnPinned, type VulnScanOptions, type VulnScanResult } from './vuln-worker.js';
 import { scannerFailure } from './scanner-errors.js';
 import { assertArchiveDbFreshness } from './archive-result-contract.js';
+import { LEGACY_DB_POLICY, CURRENT_DB_POLICY, DbPolicyContractError, DbUsabilityError } from './cve-db-policy.mjs';
 import { scanNginxArchive } from './archive-scan-worker.js';
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 import { runImageConfig } from './image-config-runner.js';
@@ -87,23 +88,30 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
       // reaches this path; the default API and worker remain closed.
       try {
         const report = await Promise.race([archiveRunner(requested, { signal: controller.signal, target,
-          vuln: options.vuln ? { ...options.vuln, timeoutMs: 120_000, signal: controller.signal } : undefined }), aborted]);
+          vuln: options.vuln ? { ...options.vuln, policy: job.cvePolicy ?? LEGACY_DB_POLICY, timeoutMs: 120_000, signal: controller.signal } : undefined }), aborted]);
         if (report === null) return true;
         poll();
         if (!controller.signal.aborted) {
-          try { assertArchiveDbFreshness(report); }
-          catch { report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' }; }
+          try { assertArchiveDbFreshness(report, Date.now(), job.cvePolicy ?? LEGACY_DB_POLICY); }
+          catch (error) {
+            if (!(error instanceof DbUsabilityError)) throw error;
+            report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
+          }
           try { ledger.finishArchive(job.scanId, job.attempts, report, config); }
           catch (error) {
             // A NextUpdate crossing inside BEGIN IMMEDIATE must not erase independent checks.
-            try { assertArchiveDbFreshness(report); } catch {
+            if (error instanceof TypeError) throw error;
+            try { assertArchiveDbFreshness(report, Date.now(), job.cvePolicy ?? LEGACY_DB_POLICY); }
+            catch (expiry) {
+              if (!(expiry instanceof DbUsabilityError)) throw expiry;
               report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
               ledger.finishArchive(job.scanId, job.attempts, report, config); return true;
             }
             throw error;
           }
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof DbPolicyContractError || error instanceof TypeError) throw error;
         poll();
         if (!controller.signal.aborted) ledger.finishCombined(job.scanId, job.attempts,
           requested.map(check => ({ check, outcome: 'failed', errorCode: 'SCAN_FAILED' })), config);
@@ -139,7 +147,8 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
             .catch((): VulnScanResult => ({ ok: false, errorCode: 'SCAN_FAILED' })), aborted,
         ]);
         if (result === null || controller.signal.aborted) return true;
-        outcomes.push(result.ok ? { check, outcome: 'checked', image, findings: result.findings, scannerVersion: result.scannerVersion } :
+        outcomes.push(result.ok ? { check, outcome: 'checked', image, findings: result.findings, scannerVersion: result.scannerVersion,
+                  ...(job.cvePolicy === CURRENT_DB_POLICY ? { dbEvidence: result.dbEvidence } : {}) } :
           { check, outcome: 'failed', errorCode: result.errorCode });
       }
     }

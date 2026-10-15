@@ -1,5 +1,14 @@
 import { expect, test } from '@playwright/test';
 
+test.beforeEach(async ({ page, baseURL }) => {
+  await page.route('**/*', route => {
+    const url = new URL(route.request().url());
+    if (url.origin !== baseURL) return route.abort();
+    if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 503, contentType: 'application/json', body: '{"errorCode":"TEST_BACKEND_OFFLINE"}' });
+    return route.continue();
+  });
+});
+
 function contrast(foreground: number[], background: number[]) {
   const channel = (value: number) => {
     const normalized = value / 255;
@@ -61,16 +70,16 @@ for (const width of [320, 375, 1280]) {
     await expect(page.getByText('Вымышленные данные · не результат реальной проверки').first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     if (width === 375 || width === 1280)
-      await page.screenshot({ path: `test-results/scan-list-${width}.png`, fullPage: true });
+      await page.screenshot({ path: `tests-e2e/test-results/frontend-review/scan-list-${width}.png`, fullPage: true });
     await page.goto('/demo/scans/new');
     await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
-    await expect(page.getByText('Область доверия')).toBeVisible();
+    await expect(page.getByText('Область доверия', { exact: true })).toBeVisible();
     await expect(page.getByText('Secrets · проверка образа', { exact: false }).first()).toBeVisible();
     await expect(page.locator('fieldset input:checked')).toHaveCount(1);
     await expect(page.getByText('host и running container не поддерживаются', { exact: false }).first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     if (width === 375 || width === 1280)
-      await page.screenshot({ path: `test-results/scan-create-${width}.png`, fullPage: true });
+      await page.screenshot({ path: `tests-e2e/test-results/frontend-review/scan-create-${width}.png`, fullPage: true });
   });
   test(`landing at ${width}px: clear demo boundary and no horizontal overflow`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
@@ -93,7 +102,7 @@ for (const width of [320, 375, 1280]) {
     }
     for (let i = 1; i < titleLines.length; i++)
       expect(titleLines[i].top).toBeGreaterThanOrEqual(titleLines[i - 1].bottom);
-    await page.screenshot({ path: `test-results/landing-${width}.png`, fullPage: true });
+    await page.screenshot({ path: `tests-e2e/test-results/frontend-review/landing-${width}.png`, fullPage: true });
   });
   test(`fixture scan at ${width}px: keyboard, text status, no horizontal overflow or canvas dependency`, async ({
     page,
@@ -109,14 +118,15 @@ for (const width of [320, 375, 1280]) {
     ).toBeVisible();
     await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
     await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Отмена недоступна' })).toBeDisabled();
+    await expect(page.getByText('Демо не отправляет серверную отмену.')).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Отменить скан' })).toHaveCount(0);
     if (width === 375 || width === 1280)
-      await page.screenshot({ path: `test-results/scan-detail-${width}.png`, fullPage: true });
+      await page.screenshot({ path: `tests-e2e/test-results/frontend-review/scan-detail-${width}.png`, fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     const columns = await page
       .locator('.scan-a1__grid')
       .evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length);
-    expect(columns).toBe(width <= 800 ? 1 : 2);
+    expect(columns).toBe(1);
     expect(await page.locator('canvas').count()).toBe(0);
     if (width < 640) {
       const trigger = page.getByRole('button', { name: 'Фильтры' });
@@ -160,7 +170,7 @@ for (const width of [320, 375, 1280]) {
       await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       if (reducedMotion === 'reduce')
-        await page.screenshot({ path: `test-results/21st-create-${width}.png`, fullPage: true });
+        await page.screenshot({ path: `tests-e2e/test-results/frontend-review/21st-create-${width}.png`, fullPage: true });
       await page.goto('/demo/scans/partial-demo');
       await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
       await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
@@ -172,7 +182,7 @@ for (const width of [320, 375, 1280]) {
       await expect(page.getByText('Сбой проверки не означает', { exact: false })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       if (reducedMotion === 'reduce')
-        await page.screenshot({ path: `test-results/21st-detail-${width}.png`, fullPage: true });
+        await page.screenshot({ path: `tests-e2e/test-results/frontend-review/21st-detail-${width}.png`, fullPage: true });
     });
   }
 }
@@ -231,8 +241,10 @@ test('21st.dev navigation card keeps real destinations, keyboard focus and reduc
   await page.goto('/demo/scans/partial-demo');
   const nav = page.getByRole('navigation', { name: 'Разделы сканирования' });
   await expect(nav.locator('.scan-nav-card__items > li')).toHaveCount(3);
+    // Tap animations must not introduce a second Tab stop inside a link.
+    await expect(nav.locator('a [tabindex="0"]')).toHaveCount(0);
   await expect(nav.locator('[aria-current="page"]')).toHaveCount(0);
-  await expect(nav.getByRole('link', { name: 'О реальном режиме' })).toHaveAttribute('href', '/scans');
+  await expect(nav.getByRole('link', { name: 'Реальные сканы' })).toHaveAttribute('href', '/scans');
   await expect(nav.getByRole('link', { name: 'Новый скан' })).toHaveAttribute('href', '/demo/scans/new');
   const demo = nav.getByRole('link', { name: 'Демо' });
   for (let i = 0; i < 6; i++) {
@@ -249,18 +261,14 @@ test('21st.dev navigation card keeps real destinations, keyboard focus and reduc
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/demo\/scans$/);
   await expect(nav.getByRole('link', { name: 'Демо' })).toHaveAttribute('aria-current', 'page');
-  const liveLink = nav.getByRole('link', { name: 'О реальном режиме' });
+  const liveLink = nav.getByRole('link', { name: 'Реальные сканы' });
   const description = await liveLink.getAttribute('aria-describedby');
   expect(description).toBeTruthy();
-  await expect(page.locator(`[id="${description}"]`)).toHaveText('Доступ пока закрыт');
+  await expect(page.locator(`[id="${description}"]`)).toHaveText('По защищённой сессии');
   await liveLink.click();
-  await expect(page).toHaveURL(/\/scans$/);
-  await expect(page.getByText(/Список недоступен: GET/)).toBeVisible();
-  await expect(nav.getByRole('link', { name: 'Новый скан' })).toHaveAttribute('href', '/scans/new');
-  await nav.getByRole('link', { name: 'Новый скан' }).click();
-  await expect(page).toHaveURL(/\/scans\/new$/);
-  await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
-  await nav.getByRole('link', { name: 'Демо' }).click();
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByText(/Доступ закрыт/)).toBeVisible();
+  await page.goto('/demo/scans');
   await nav.getByRole('link', { name: 'Новый скан' }).click();
   await expect(page).toHaveURL(/\/demo\/scans\/new$/);
   await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
@@ -268,7 +276,12 @@ test('21st.dev navigation card keeps real destinations, keyboard focus and reduc
 
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.reload();
-  const moving = nav.getByRole('link', { name: 'Демо' }).locator('.scan-nav-card__item');
+  await expect(nav.locator('a [tabindex="0"]')).toHaveCount(0);
+    const first = nav.getByRole('link', { name: 'Реальные сканы' });
+    await first.focus();
+    await page.keyboard.press('Tab');
+    await expect(nav.getByRole('link', { name: 'Демо', exact: true })).toBeFocused();
+    const moving = nav.getByRole('link', { name: 'Демо' }).locator('.scan-nav-card__item');
   await moving.hover();
   await expect.poll(() => moving.evaluate((element) => getComputedStyle(element).transform)).not.toBe('none');
 });
@@ -371,8 +384,8 @@ for (const width of [320, 375, 1280]) {
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
 
       await page.goto('/demo/scans/new');
-      await expect(page.getByText('Область доверия')).toBeVisible();
-      await expect(page.getByLabel(/Образ в registry/)).toBeVisible();
+      await expect(page.getByText('Область доверия', { exact: true })).toBeVisible();
+      await expect(page.getByRole('searchbox', { name: 'Поиск по доступным образам' })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
 
@@ -380,11 +393,15 @@ for (const width of [320, 375, 1280]) {
       await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
       await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
       await expect(page.getByText(/Порядок чтения/)).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Чат недоступен' })).toBeDisabled();
+      await expect(page.getByText(/Демо не отправляет данные модели/)).toBeVisible();
+            await expect(page.getByText(/Чат доступен только для авторизованного отчёта при разрешении сервера/)).toBeVisible();
+            await expect(page.getByText('Чат пока не реализован.', { exact: false })).toHaveCount(0);
+            await expect(page.getByRole('textbox', { name: 'Вопрос чату', exact: true })).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
 
       await page.goto('/scans');
-      await expect(page.getByText(/Список недоступен: GET/)).toBeVisible();
+      await expect(page).toHaveURL(/\/login$/);
+      await expect(page.getByText(/Доступ закрыт/)).toBeVisible();
       await expect(page.locator('.scan-a1__records > li')).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     });
@@ -434,34 +451,16 @@ for (const width of [320, 375, 1280]) {
         const scene = page.locator('.scan-a1__scene:visible').first();
         await expect(scene).toHaveAttribute('aria-hidden', 'true');
         await scene.scrollIntoViewIfNeeded();
-        await expect(scene.locator('[data-scan-glow]')).toHaveAttribute(
-          'data-scan-glow',
-          motion === 'reduce' ? 'static' : path.includes('/new') ? 'pulse' : 'rotate',
-        );
+        await expect(scene.locator('[data-scan-glow]')).toHaveCount(0);
+        expect(await scene.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
         await expect(scene.locator('[data-scan-scene-art]')).toBeAttached();
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       }
       await page.goto('/demo/scans/new');
-      const glow = page.locator('.scan-a1__create-hero [data-scan-glow]');
-      await page.locator('.scan-a1__create-hero > .scan-a1__scene').scrollIntoViewIfNeeded();
-      const before = await glow.evaluate((element) => getComputedStyle(element).backgroundImage);
-      if (motion === 'no-preference') {
-        await expect
-          .poll(() => glow.evaluate((element) => getComputedStyle(element).backgroundImage), {
-            timeout: 5000,
-          })
-          .not.toBe(before);
-      } else {
-        await page.waitForTimeout(350);
-        expect(await glow.evaluate((element) => getComputedStyle(element).backgroundImage)).toBe(before);
-      }
+      await page.addStyleTag({ content: '.scan-a1__scene { display: none !important; }' });
       await expect(page.getByRole('button', { name: 'Запуск недоступен' })).toBeDisabled();
       await page.goto('/demo/scans/partial-demo');
-      const divider = page.locator('.scan-a1__detail-divider');
-      await expect(divider.locator('[data-scan-glow]')).toHaveAttribute('data-scan-glow', 'static');
-      await divider.scrollIntoViewIfNeeded();
-      if (motion === 'no-preference')
-        await expect(divider.locator('[data-scan-glow]')).toHaveAttribute('data-scan-glow', 'rotate');
+      await page.addStyleTag({ content: '.scan-a1__scene { display: none !important; }' });
       await page
         .getByRole('navigation', { name: 'Разделы отчёта' })
         .getByRole('link', { name: /Покрытие/ })

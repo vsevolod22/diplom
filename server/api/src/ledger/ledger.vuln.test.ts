@@ -37,7 +37,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   const legacy = ledger.enqueue({ ...target, checks: '["secret"]', idempotencyKey: 'legacy' }).scanId;
   ledger.close();
   const raw = new Database(file);
-  raw.exec('DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7;');
+  raw.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7;');
   raw.close();
   ledger = new ScanLedger(file);
   assert.equal(ledger.state(legacy, 'alice'), 'queued');
@@ -68,7 +68,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'completed']);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 13);
+  assert.equal(db.pragma('user_version', { simple: true }), 14);
   assert.equal(count(db, 'scan_vuln_results'), 1);
   assert.equal(count(db, 'scan_vuln_findings'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
@@ -203,14 +203,14 @@ test('v12 to v13 is nullable, preserves legacy rows/config tables, and rolls bac
   ledger.finishWithVuln(id, job.attempts, image, findings, '0.69.3');
   ledger.close();
   let raw = new Database(file);
-  raw.exec('ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=12');
+  raw.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=12');
   const before = raw.prepare('SELECT * FROM scan_vuln_findings').all();
   const configSchema = raw.prepare("SELECT sql FROM sqlite_master WHERE name IN ('scan_check_results','scan_execution_profiles') ORDER BY name").all();
   raw.close();
   ledger = new ScanLedger(file);
   assert.deepEqual(ledger.vuln(id, 'alice')?.findings, findings); ledger.close();
   raw = new Database(file);
-  assert.equal(raw.pragma('user_version', { simple: true }), 13);
+  assert.equal(raw.pragma('user_version', { simple: true }), 14);
   assert.deepEqual(raw.prepare('SELECT * FROM scan_vuln_findings').all(), before.map(row => ({ ...row as object, advisory: null })));
   assert.deepEqual(raw.prepare("SELECT sql FROM sqlite_master WHERE name IN ('scan_check_results','scan_execution_profiles') ORDER BY name").all(), configSchema);
   assert.throws(() => raw.prepare('UPDATE scan_vuln_findings SET advisory=?').run('界'.repeat(5462)), /CHECK/);

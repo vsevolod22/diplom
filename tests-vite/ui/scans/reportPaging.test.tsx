@@ -11,6 +11,7 @@ import { LiveScanContext } from '@/features/scans/liveScanContext';
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
 import { unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import { parseCurrentVuln } from '@/shared/api/scans/scanTransport';
+import type { ReportKind, ReportPages } from '@/shared/api/scans/reportView';
 import type {
   ScanResults,
   ScanSbom,
@@ -220,6 +221,25 @@ it('aborts pending work on subject/session/scan/report key change and ignores a 
 const digest = `sha256:${'a'.repeat(64)}`;
 const image = `registry-1.docker.io/library/alpine@${digest}`;
 const stamp = '2026-10-08T00:00:00.000Z';
+const reportTotal = 26;
+function reportPage<K extends ReportKind>(
+  kind: K,
+  offset = 0,
+  returnedCount = offset ? 1 : 25,
+  totalCount: number | null = reportTotal,
+): ReportPages[K] {
+  const common = { version: 1 as const, limit: 25 as const, offset, returnedCount, totalCount, matchedCount: totalCount };
+  const pages: ReportPages = {
+    vuln: { ...common, sort: 'severity:desc', filters: { severity: null } },
+    sbom: { ...common, sort: 'name:asc', filters: { ecosystem: null, name: null } },
+    secret: { ...common, sort: 'ruleId:asc', filters: { ruleId: null, linePresence: null } },
+  };
+  return pages[kind];
+}
+// Live report-v1 continuations require a full default-limit page before the terminal row.
+function firstPageRows<T>(first: T, filler: (index: number) => T): T[] {
+  return [first, ...Array.from({ length: 24 }, (_, index) => filler(index + 1))];
+}
 const status: ScanStatus = {
   scanId: '00000000-0000-4000-8000-000000000039',
   state: 'completed',
@@ -228,9 +248,9 @@ const status: ScanStatus = {
   platform: 'linux/amd64',
   checks: ['secret', 'sbom', 'vuln'],
   perCheck: {
-    secret: { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 2 },
-    sbom: { check: 'sbom', coverage: 'image', outcome: 'checked', componentCount: 2, checkedAt: stamp },
-    vuln: { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 2, checkedAt: stamp },
+    secret: { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: reportTotal },
+    sbom: { check: 'sbom', coverage: 'image', outcome: 'checked', componentCount: reportTotal, checkedAt: stamp },
+    vuln: { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: reportTotal, checkedAt: stamp },
   },
 };
 function fixtureTransport(): ScanTransport {
@@ -245,10 +265,11 @@ function fixtureTransport(): ScanTransport {
         coverage: 'image',
         image,
         platform: 'linux/amd64',
-        findingCount: 2,
+        findingCount: reportTotal,
         checkedAt: stamp,
         scannerVersion: '0.69.3',
-        nextCursor: cursor ? null : '1',
+        nextCursor: cursor ? null : 'paging:25/+==',
+        page: reportPage('vuln', cursor ? 25 : 0),
         findings: [
           {
             findingId: cursor ? 'vuln-second' : 'vuln-first',
@@ -259,6 +280,10 @@ function fixtureTransport(): ScanTransport {
             installedVersion: '1.0',
             fixedVersion: null,
           },
+          ...(!cursor ? Array.from({ length: 24 }, (_, index): VulnFinding => ({
+            findingId: `vuln-filler-${index}`, cveId: `CVE-2026-${2000 + index}`, severity: 'HIGH',
+            ecosystem: 'apk', packageName: `filler-package-${index}`, installedVersion: '1.0', fixedVersion: null,
+          })) : []),
         ],
       }),
     ),
@@ -268,12 +293,16 @@ function fixtureTransport(): ScanTransport {
         coverage: 'image',
         image,
         platform: 'linux/amd64',
-        componentCount: 2,
+        componentCount: reportTotal,
         checkedAt: stamp,
         scannerVersion: '0.69.3',
         os: { name: 'alpine', version: '3.21' },
-        nextCursor: cursor ? null : '1',
-        components: [{ name: cursor ? 'sbom-second' : 'sbom-first', ecosystem: 'apk', version: '1.0' }],
+        nextCursor: cursor ? null : 'paging:25/+==',
+        page: reportPage('sbom', cursor ? 25 : 0),
+        components: cursor ? [{ name: 'sbom-second', ecosystem: 'apk', version: '1.0' }] : firstPageRows(
+          { name: 'sbom-first', ecosystem: 'apk' as const, version: '1.0' },
+          index => ({ name: `sbom-first-${String(index).padStart(2, '0')}`, ecosystem: 'apk', version: '1.0' }),
+        ),
       }),
     ),
     results: vi.fn(
@@ -284,10 +313,15 @@ function fixtureTransport(): ScanTransport {
             category: 'secret',
             ruleId: 'redacted-rule',
             severity: 'unknown',
+            line: null,
           },
+          ...(!cursor ? Array.from({ length: 24 }, (_, index) => ({
+            findingId: `secret-filler-${index}`, category: 'secret', ruleId: 'redacted-rule', severity: 'unknown', line: null,
+          })) : []),
         ],
-        coverage: [{ check: 'Secrets', status: 'checked', findingCount: 2 }],
-        nextCursor: cursor ? null : '1',
+        coverage: [{ check: 'Secrets', status: 'checked', findingCount: reportTotal }],
+        nextCursor: cursor ? null : 'paging:25/+==',
+        page: reportPage('secret', cursor ? 25 : 0),
       }),
     ),
   };
@@ -330,9 +364,14 @@ it('CVE/Secrets/SBOM paginate independently and category visibility preserves ea
   view.rerender(sections(transport));
   expect(screen.getByText('CVE-2026-1235')).toBeTruthy();
   expect(transport.vuln).toHaveBeenCalledTimes(2);
-  expect(screen.getByText('Подтверждённый итог CVE: 2')).toBeTruthy();
-  expect(screen.getByText('Подтверждённый итог Secrets: 2')).toBeTruthy();
-  expect(screen.getByText('Подтверждённый итог SBOM: 2')).toBeTruthy();
+  for (const label of ['CVE', 'Secrets', 'SBOM']) {
+    expect(screen.getByText(`Совпадений во всём отчёте ${label}: ${reportTotal}`)).toBeTruthy();
+    expect(screen.getByText(`Полный итог ${label}: ${reportTotal}`)).toBeTruthy();
+  }
+  for (const method of [transport.vuln, transport.results, transport.sbom]) {
+    expect(vi.mocked(method).mock.calls.map(call => call[1])).toEqual([undefined, 'paging:25/+==']);
+    expect(vi.mocked(method).mock.calls[0][3]).toMatchObject({ view: 'report-v1', limit: 25 });
+  }
 });
 it.each(['digest', 'platform', 'checkedAt', 'scope', 'scanId', 'count'])(
   'actual report sections reset paging immediately on %s change',
@@ -384,9 +423,11 @@ it.each(['image', 'platform', 'checkedAt', 'findingCount'])(
       return { ...page, [field]: field === 'findingCount' ? 99 : 'wrong' } as ScanVuln;
     };
     render(sections(transport));
-    await screen.findByText(/Идентичность или версия отчёта изменилась/);
-    expect(screen.queryByText('CVE-2026-1234')).toBeNull();
-    expect(screen.queryByText('Подтверждённый итог CVE: 2')).toBeNull();
+    const cve = within(screen.getByRole('region', { name: 'Результаты CVE' }));
+    await cve.findByText(/Идентичность или версия отчёта изменилась/);
+    expect(cve.queryByText('CVE-2026-1234')).toBeNull();
+    expect(cve.queryByText(`Полный итог CVE: ${reportTotal}`)).toBeNull();
+    expect(cve.queryByRole('navigation')).toBeNull();
   },
 );
 it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', async () => {
@@ -397,6 +438,7 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
     reason: 'OS_UNKNOWN',
     findings: [],
     nextCursor: null,
+    page: reportPage('vuln', 0, 0, null),
   });
   transport.sbom = async () => ({
     outcome: 'failed',
@@ -404,12 +446,14 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
     errorCode: 'SCAN_FAILED',
     components: [],
     nextCursor: null,
+    page: reportPage('sbom', 0, 0, null),
   });
   render(sections(transport));
   await screen.findByText(/CVE не поддерживаются/);
   await screen.findByText(/SBOM не проверен/);
-  expect(screen.queryByText(/Подтверждённый итог CVE: 0/)).toBeNull();
-  expect(screen.queryByText(/Подтверждённый итог SBOM: 0/)).toBeNull();
+  expect(screen.queryByText(/(Совпадений во всём отчёте|Полный итог) (CVE|SBOM): 0/)).toBeNull();
+  expect(screen.getByText('Число CVE неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
+  expect(screen.getByText('Число SBOM неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
   cleanup();
   const zero = fixtureTransport();
   zero.vuln = async () => ({
@@ -422,6 +466,7 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
     nextCursor: null,
     scannerVersion: '0.69.3',
     checkedAt: stamp,
+    page: reportPage('vuln', 0, 0, 0),
   });
   render(
     sections(zero, {
@@ -429,7 +474,8 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
       perCheck: { ...status.perCheck, vuln: { ...status.perCheck!.vuln!, findingCount: 0 } },
     }),
   );
-  await screen.findByText('Подтверждённый итог CVE: 0');
+  await screen.findByText('Совпадений во всём отчёте CVE: 0');
+  expect(screen.getByText('Полный итог CVE: 0')).toBeTruthy();
   expect(screen.getByText(/0 CVE в выполненной проверенной области/)).toBeTruthy();
 });
 it('ScanDetail scope remount aborts a late private page and never stores report rows in QueryCache', async () => {
@@ -612,10 +658,12 @@ function secretPage(scannerVersion: string): ScanResults {
         ruleId: 'redacted-rule',
         category: 'secret',
         severity: 'unknown',
+        line: null,
       },
     ],
     coverage: [{ check: 'Secrets', status: 'checked', findingCount: 1, scannerVersion }],
     nextCursor: null,
+    page: reportPage('secret', 0, 1, 1),
   };
 }
 function secretStatus(scannerVersion?: string): ScanStatus {
@@ -634,7 +682,7 @@ it('rejects initial Secrets scanner mismatch against confirmed status, retry sta
   render(sections(transport, secretStatus('0.69.3')));
   await screen.findByText(/Прежние данные и cursors сброшены/);
   expect(screen.queryByText('ID: scanner-0.69.2')).toBeNull();
-  expect(screen.queryByText('Подтверждённый итог Secrets: 1')).toBeNull();
+  expect(screen.queryByText('Полный итог Secrets: 1')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Secrets' }));
   await screen.findByText('ID: scanner-0.69.3');
   expect(vi.mocked(transport.results).mock.calls.map((call) => call[1])).toEqual([undefined, undefined]);
@@ -652,7 +700,7 @@ it('rejects stale Secrets scanner after status-key reset and never republishes o
   expect(screen.queryByText('ID: scanner-0.69.2')).toBeNull();
   await screen.findByText(/Прежние данные и cursors сброшены/);
   expect(screen.queryByText('ID: scanner-0.69.2')).toBeNull();
-  expect(screen.queryByText('Подтверждённый итог Secrets: 1')).toBeNull();
+  expect(screen.queryByText('Полный итог Secrets: 1')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Secrets' }));
   await screen.findByText('ID: scanner-0.69.3');
   expect(vi.mocked(transport.results).mock.calls.map((call) => call[1])).toEqual([
@@ -705,15 +753,16 @@ it.each([undefined, null, 0])(
   },
 );
 function c4Page(index: number): Extract<ScanVuln, { outcome: 'checked' }> {
-  const page = parseCurrentVuln({
+  const wire: { findings: VulnFinding[] } & Record<string, unknown> = {
     outcome: 'checked',
     coverage: 'image',
     image,
     platform: 'linux/amd64',
-    findingCount: 2,
+    findingCount: reportTotal,
     checkedAt: stamp,
     scannerVersion: '0.69.3',
-    nextCursor: index === 0 ? 1 : null,
+    nextCursor: index === 0 ? 'paging:25/+==' : null,
+    page: reportPage('vuln', index === 0 ? 0 : 25),
     findings: [
       {
         findingId: `stable-${index}`,
@@ -755,7 +804,12 @@ function c4Page(index: number): Extract<ScanVuln, { outcome: 'checked' }> {
         },
       },
     ],
-  });
+  };
+  if (index === 0) wire.findings.push(...Array.from({ length: 24 }, (_, fillerIndex): VulnFinding => ({
+    ...wire.findings[0], findingId: `c4-filler-${fillerIndex}`, cveId: `CVE-2026-${2000 + fillerIndex}`,
+    packageName: `filler-package-${fillerIndex}`, severity: 'HIGH', fixedVersion: null, advisory: null,
+  })));
+  const page = parseCurrentVuln(wire, { view: 'report-v1', limit: 25 }, index === 0 ? undefined : 'paging:25/+==');
   if (page.outcome !== 'checked') throw new Error('Invalid test page');
   return page;
 }
@@ -854,7 +908,7 @@ it.each(['Back', 'forward'] as const)(
       await screen.findByText(/Содержимое посещённой страницы изменилось/);
       expect(screen.getByRole('list', { name: 'Находки CVE' }).textContent, field).toBe(before);
       expect(screen.getByText(retainedRow.packageName), field).toBeTruthy();
-      expect(screen.getByText(`Строки ${retainedIndex + 1}–${retainedIndex + 1}`), field).toBeTruthy();
+      expect(screen.getByText(retainedIndex === 0 ? 'Строки 1–25' : 'Строки 26–26'), field).toBeTruthy();
       expect(screen.getByText(`Страница ${retainedIndex + 1}`), field).toBeTruthy();
       expect(screen.getByText(/История cursors сброшена/), field).toBeTruthy();
       expect(screen.queryByText('LOW', { exact: true }), field).toBeNull();
@@ -883,9 +937,9 @@ it('C4 accepts benign stable normalized content on Back and forward replay with 
   const first = c4Page(0);
   const second = c4Page(1);
   const { advisory: firstAdvisory, ...firstRow } = first.findings[0];
-  const reorderedFirst = { ...first, findings: [{ advisory: firstAdvisory, ...firstRow }] };
+  const reorderedFirst = { ...first, findings: [{ advisory: firstAdvisory, ...firstRow }, ...first.findings.slice(1)] };
   const { advisory, provenanceRef, ...secondRow } = second.findings[0];
-  const reorderedSecond = { ...second, findings: [{ advisory, provenanceRef, ...secondRow }] };
+  const reorderedSecond = { ...second, findings: [{ advisory, provenanceRef, ...secondRow }, ...second.findings.slice(1)] };
   const transport = fixtureTransport();
   transport.vuln = vi
     .fn()
@@ -898,17 +952,17 @@ it('C4 accepts benign stable normalized content on Back and forward replay with 
   fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
   await screen.findByText('c4-package-1');
   fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
-  await screen.findByText('Строки 1–1');
+  await screen.findByText('Строки 1–25');
   fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
-  await screen.findByText('Строки 2–2');
+  await screen.findByText('Строки 26–26');
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.getByText('CRITICAL', { exact: true })).toBeTruthy();
   expect(screen.getByText('9.0', { exact: true })).toBeTruthy();
   expect(vi.mocked(transport.vuln).mock.calls.map((call) => call[1])).toEqual([
     undefined,
-    '1',
+    'paging:25/+==',
     undefined,
-    '1',
+    'paging:25/+==',
   ]);
 });
 it('C4 canonical fingerprints ignore nested object-key ordering/undefined optionals, not values or array order', () => {
@@ -943,21 +997,25 @@ it('C4 fingerprint size is bounded and oversized content is rejected rather than
 it.each(['Back', 'forward'] as const)(
   'C4 Secrets same-ID %s replay rejects changed normalized finding content',
   async (direction) => {
-    for (const field of ['ruleId', 'severity', 'category'] as const) {
+    for (const field of ['ruleId', 'severity', 'category', 'line'] as const) {
       const first: ScanResults = {
-        findings: [
-          { findingId: 'same-first', ruleId: 'original-rule', severity: 'unknown', category: 'secret' },
-        ],
-        coverage: [{ check: 'Secrets', status: 'checked', findingCount: 2 }],
-        nextCursor: '1',
+        findings: firstPageRows(
+          { findingId: 'same-first', ruleId: 'original-rule', severity: 'unknown', category: 'secret', line: null as number | null },
+          index => ({ findingId: `same-first-${index}`, ruleId: 'original-rule', severity: 'unknown', category: 'secret', line: null }),
+        ),
+        coverage: [{ check: 'Secrets', status: 'checked', findingCount: reportTotal }],
+        nextCursor: 'paging:25/+==',
+        page: reportPage('secret'),
       };
       const second: ScanResults = {
         ...first,
         findings: [{ ...first.findings[0], findingId: 'same-second' }],
         nextCursor: null,
+        page: reportPage('secret', 25),
       };
       const altered = structuredClone(direction === 'Back' ? first : second);
-      altered.findings[0][field] = 'changed-content';
+      if (field === 'line') altered.findings[0].line = 123;
+      else altered.findings[0][field] = 'changed-content';
       const transport = fixtureTransport();
       const sequence = direction === 'Back' ? [first, second, altered] : [first, second, first, altered];
       transport.results = vi.fn();
@@ -976,6 +1034,7 @@ it.each(['Back', 'forward'] as const)(
       );
       await screen.findByText(/Содержимое посещённой страницы изменилось/);
       expect(screen.queryByText(/changed-content/), field).toBeNull();
+      expect(screen.queryByText('Строка 123'), field).toBeNull();
       expect(
         screen.getByText(direction === 'Back' ? 'ID: same-second' : 'ID: same-first'),
         field,
@@ -1037,13 +1096,13 @@ it.each(['sbom', 'results'] as const)(
     const region = screen.getByRole('region', {
       name: kind === 'sbom' ? 'Пакеты SBOM' : 'Результаты Secrets',
     });
-    await within(region).findByText('Строки 1–1');
+    await within(region).findByText('Строки 1–25');
     fireEvent.click(within(region).getByRole('button', { name: 'Далее · ' + label }));
     await within(region).findByRole('alert');
-    expect(within(region).getByText('Строки 1–1')).toBeTruthy();
+    expect(within(region).getByText('Строки 1–25')).toBeTruthy();
     expect(within(region).getByText(kind === 'sbom' ? 'sbom-first' : 'ID: secret-first')).toBeTruthy();
     fireEvent.click(within(region).getByRole('button', { name: 'Повторить загрузку ' + label }));
-    await within(region).findByText('Строки 2–2');
-    expect(vi.mocked(transport[kind]).mock.calls.map((call) => call[1])).toEqual([undefined, '1', '1']);
+    await within(region).findByText('Строки 26–26');
+    expect(vi.mocked(transport[kind]).mock.calls.map((call) => call[1])).toEqual([undefined, 'paging:25/+==', 'paging:25/+==']);
   },
 );

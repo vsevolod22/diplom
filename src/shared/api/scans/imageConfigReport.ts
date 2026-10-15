@@ -32,7 +32,8 @@ export const imageConfigReport = z.strictObject({ checksVersion, resourcePolicyV
   history: z.strictObject({ outcome: z.literal('unsupported'), reason: z.literal('RULE_NOT_IMPLEMENTED') }),
   dockerfile: source, iac: source, findings: z.array(configFinding).max(1),
 }).superRefine((report, context) => {
-  const { ruleId: _ruleId, ...coverage } = report.rules[0];
+  const coverage: Partial<z.infer<typeof ruleCoverage>> = { ...report.rules[0] };
+    delete coverage.ruleId;
   if (JSON.stringify(coverage) !== JSON.stringify(report.config) ||
       (report.completedRuleIds.length === 1) !== (report.config.outcome === 'checked') ||
       report.config.outcome !== 'checked' && report.findings.length > 0 ||

@@ -1,6 +1,7 @@
 // Manual verifier for a locally attested DB release. This is not a CVE admission decision.
 import { readFile } from 'node:fs/promises';
 import { preflightVulnDbBundle } from './vuln-db-bundle.js';
+import { CURRENT_DB_POLICY, evaluateDbPolicy, operatorUsableUntil } from './cve-db-policy.mjs';
 
 const [directory, manifestDigest, artifactSha256] = process.argv.slice(2);
 if (!directory || !/^sha256:[a-f0-9]{64}$/.test(manifestDigest ?? '') ||
@@ -10,14 +11,17 @@ if (!directory || !/^sha256:[a-f0-9]{64}$/.test(manifestDigest ?? '') ||
 } else {
   const trustedPublicKeyPem = await readFile(new URL('../../../deploy/trust/db-signing-key.pub.pem', import.meta.url), 'utf8');
   try {
-    await preflightVulnDbBundle({
+    const verified = await preflightVulnDbBundle({
       directory,
       trustedPublicKeyPem, expectedSigner: 'local-db-operator-v1',
       expectedSource: `ghcr.io/aquasecurity/trivy-db@${manifestDigest}`,
       expectedSchemaVersion: 2, expectedArtifactSha256: artifactSha256,
-      expectedManifestDigest: manifestDigest,
+      expectedManifestDigest: manifestDigest, policy: CURRENT_DB_POLICY,
     });
-    console.log('PASS: local operator signature, pinned hashes, DB metadata and freshness; scanner/admission not checked');
+    const receipt = evaluateDbPolicy(verified.identity, CURRENT_DB_POLICY);
+    console.log(JSON.stringify({ kind: 'authenticated-release-usability-only', resultContractVersion: 2,
+      db: verified.identity, dbPolicy: receipt, usableUntil: operatorUsableUntil(verified.identity),
+      scannerChecked: false, admissionChecked: false }));
   } catch {
     console.error('DB release verification failed');
     process.exitCode = 1;

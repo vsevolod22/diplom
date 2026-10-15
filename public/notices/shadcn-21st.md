@@ -1,0 +1,12 @@
+# 21st.dev shadcn/ui components — third-party notice
+
+Retrieved 2026-09-30. The two _additional_ 21st.dev community cards below are adapted from the publicly readable upstream shadcn/ui registry (the 21st.dev install endpoint requires an API key; it was not used). SHA-256 hashes refer to the **entire downloaded registry JSON**, not just the TSX entry:
+
+| Card on 21st.dev                                           | Primary source                                            | SHA-256 (registry JSON)                                            | Local implementation                                            |
+| ---------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------- |
+| [Tabs](https://21st.dev/@shadcn/components/tabs)           | https://ui.shadcn.com/r/styles/new-york-v4/tabs.json      | `49320e6dcf56570753bb14ed3f5d66acf07d12e183c0e9024466995b25be5b1d` | `src/features/scans/GuideTabs.tsx` → `ScanCreatePage.tsx`       |
+| [Accordion](https://21st.dev/@shadcn/components/accordion) | https://ui.shadcn.com/r/styles/new-york-v4/accordion.json | `93254d43d27259998b10c7bb5261f85bdc44509d46309a5c10a1e5d126a8d279` | `src/features/scans/ReportAccordion.tsx` → `ScanDetailPage.tsx` |
+
+Both cards list MIT. Upstream project license: https://github.com/shadcn-ui/ui/blob/main/LICENSE.md; retrieved text SHA-256 `1564074e13439397221ffd522e2e504d56561994a23d371aa5e3ad43e4f5423f`. Full terms in `shadcn-21st-LICENSE.txt`. Keep notice and license in source and built distributions (also copied to `public/notices/`).
+
+Adaptations retain the upstream composition of Radix Root/List/Trigger/Content with `data-slot` for Tabs and Header/Trigger/Content with rotating ChevronDown for Accordion. Changed: imports use existing `@radix-ui/react-tabs`, `@radix-ui/react-accordion` and `lucide-react` rather than registry's `radix-ui` barrel; token-driven Tailwind utility strings/cva/cn replaced by scoped CSS in scan styles to avoid global theme dependencies. No new packages or global reset. Tabs show _optional guidance_ for the disabled scan form, while scope and unavailable launch stay in ordinary HTML. Accordion replaces the existing single disclosure with a larger two-question reading guide **after** always-visible coverage and reason text. These adaptations are not endorsed by upstream.

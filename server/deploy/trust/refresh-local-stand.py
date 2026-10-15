@@ -156,67 +156,98 @@ def refresh():
             COMPOSE = previous_compose
 
 
+def verify_active(values):
+    """Usability/readiness of the active release is independent of update discovery."""
+    active = Path(values['SCAN_VULN_RELEASE_HOST_DIR'])
+    manifest, bundle = values['SCAN_VULN_MANIFEST_DIGEST'], values['SCAN_VULN_ARTIFACT_SHA256']
+    check(active.is_absolute() and active.is_dir() and not active.is_symlink() and
+          SHA.fullmatch(manifest) and HEX.fullmatch(bundle))
+    receipt = run('pnpm', '--filter', '@diplom/scan-api', 'exec', 'tsx', 'src/worker/verify-vuln-db-release.ts',
+                  str(active), manifest, bundle, timeout=180)
+    container_preflight(manifest, bundle)
+    scan_chain_ready()
+    print(receipt.strip())  # public verified identity, true dates and usability warnings
+
+
+def report_update_failure(values, phase):
+    """Report independent active usability without masking the original update error."""
+    print(f'DB update {phase} failed; checking unchanged active release', file=sys.stderr)
+    try:
+        verify_active(values)
+    except Exception:
+        # No raw registry, key or Docker diagnostics. Failed verification is not readiness.
+        print('Active release usability/readiness not verified; update still failed', file=sys.stderr)
+    else:
+        print(f'Active release remains usable; update {phase} still failed', file=sys.stderr)
+
+
+def prepare_candidate(candidates, releases, manifest):
+    """All candidate work precedes any active pin/service mutation."""
+    key = ROOT / 'trust/db-signing-key.pem'
+    check(regular(key, 8192).st_mode & 0o077 == 0)
+    candidate = candidates / manifest
+    if candidate.exists():
+        check(candidate.is_dir() and not candidate.is_symlink())
+    else:
+        run('node', str(TRUST / 'fetch-db-layer.mjs'), manifest, str(candidate), timeout=600)
+    regular(candidate / 'manifest.json', 65536)
+    manifest_bytes = (candidate / 'manifest.json').read_bytes()
+    check(len(manifest_bytes) <= 65536 and 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest() == manifest)
+    descriptor = json.loads(manifest_bytes)
+    layer = descriptor['layers'][0]
+    check(isinstance(descriptor['layers'], list) and len(descriptor['layers']) == 1 and
+          layer['mediaType'] == 'application/vnd.aquasec.trivy.db.layer.v1.tar+gzip' and
+          SHA.fullmatch(layer['digest']) and type(layer['size']) is int and
+          layer['size'] == regular(candidate / 'layer.tar.gz', 512 * 1024 ** 2).st_size and
+          'sha256:' + digest(candidate / 'layer.tar.gz', 512 * 1024 ** 2) == layer['digest'])
+    release = releases / manifest[7:]
+    check(not release.exists())  # a failed partial release is investigated, never reused
+    output = run('python3', str(TRUST / 'prepare-db-release.py'), str(candidate), str(release),
+                 manifest, layer['digest'], timeout=900)
+    hashes = json.loads(output.splitlines()[0])
+    check(hashes['manifest'] == manifest and hashes['layer'] == layer['digest'] and
+          HEX.fullmatch(hashes['bundle']) and HEX.fullmatch(hashes['db']))
+    run('node', str(TRUST / 'sign-offline-db.mjs'), str(release), str(key),
+        str(TRUST / 'db-signing-key.pub.pem'), manifest, hashes['bundle'], hashes['db'], timeout=180)
+    run('pnpm', '--filter', '@diplom/scan-api', 'exec', 'tsx', 'src/worker/verify-vuln-db-release.ts',
+        str(release), manifest, hashes['bundle'], timeout=180)
+    run('python3', str(REPO / 'server/deploy/proof/offline_vuln_db_proof.py'),
+        str(release), hashes['db'], hashes['bundle'], timeout=300)
+    for folder in (release / 'db', release):
+        folder.chmod(0o555)
+    for name in ('bundle.bin', 'descriptor.json', 'descriptor.sig', 'db/trivy.db', 'db/metadata.json'):
+        (release / name).chmod(0o444)
+    return release, hashes['bundle']
+
+
 def refresh_selected():
     # The composition selection is immutable for candidate/switch/verify/rollback.
+    current = ENV.read_text()
+    values = env_values(current)
+    candidates = ROOT / 'trivy-db-candidates'
+    releases = ROOT / 'trivy-db-releases'
     try:
-        current = ENV.read_text()
-        values = env_values(current)
-        key = ROOT / 'trust/db-signing-key.pem'
-        check(regular(key, 8192).st_mode & 0o077 == 0)
-        candidates = ROOT / 'trivy-db-candidates'
-        releases = ROOT / 'trivy-db-releases'
         check(all(p.is_dir() and not p.is_symlink() for p in (candidates, releases)))
         discovery = run('node', str(TRUST / 'fetch-db-layer.mjs'), 'discover', timeout=90)
         match = re.fullmatch(r'Review upstream tag :2, then download by digest: (sha256:[a-f0-9]{64})\n', discovery)
         check(match is not None)
-        manifest = match[1]
-        if values['SCAN_VULN_MANIFEST_DIGEST'] == manifest:
-            # An unchanged upstream tag does not imply a still-fresh local DB.
-            active = Path(values['SCAN_VULN_RELEASE_HOST_DIR'])
-            check(active.is_absolute() and active.is_dir() and not active.is_symlink() and
-                  SHA.fullmatch(values['SCAN_VULN_MANIFEST_DIGEST']) and
-                  HEX.fullmatch(values['SCAN_VULN_ARTIFACT_SHA256']))
-            run('pnpm', '--filter', '@diplom/scan-api', 'exec', 'tsx', 'src/worker/verify-vuln-db-release.ts',
-                str(active), manifest, values['SCAN_VULN_ARTIFACT_SHA256'], timeout=180)
-            container_preflight(manifest, values['SCAN_VULN_ARTIFACT_SHA256'])
-            scan_chain_ready()
-            print('DB still fresh and current; no change')
-            return
-        candidate = candidates / manifest
-        if candidate.exists():
-            check(candidate.is_dir() and not candidate.is_symlink())
-        else:
-            run('node', str(TRUST / 'fetch-db-layer.mjs'), manifest, str(candidate), timeout=600)
-        manifest_bytes = (candidate / 'manifest.json').read_bytes()
-        check(len(manifest_bytes) <= 65536 and 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest() == manifest)
-        descriptor = json.loads(manifest_bytes)
-        layer = descriptor['layers'][0]
-        check(isinstance(descriptor['layers'], list) and len(descriptor['layers']) == 1 and
-              layer['mediaType'] == 'application/vnd.aquasec.trivy.db.layer.v1.tar+gzip' and
-              SHA.fullmatch(layer['digest']) and type(layer['size']) is int and
-              layer['size'] == regular(candidate / 'layer.tar.gz', 512 * 1024 ** 2).st_size and
-              'sha256:' + digest(candidate / 'layer.tar.gz', 512 * 1024 ** 2) == layer['digest'])
-        release = releases / manifest[7:]
-        check(not release.exists())  # a failed partial release is investigated, never reused
-        output = run('python3', str(TRUST / 'prepare-db-release.py'), str(candidate), str(release),
-                     manifest, layer['digest'], timeout=900)
-        hashes = json.loads(output.splitlines()[0])
-        check(hashes['manifest'] == manifest and hashes['layer'] == layer['digest'] and
-              HEX.fullmatch(hashes['bundle']) and HEX.fullmatch(hashes['db']))
-        run('node', str(TRUST / 'sign-offline-db.mjs'), str(release), str(key),
-            str(TRUST / 'db-signing-key.pub.pem'), manifest, hashes['bundle'], hashes['db'], timeout=180)
-        run('pnpm', '--filter', '@diplom/scan-api', 'exec', 'tsx', 'src/worker/verify-vuln-db-release.ts',
-            str(release), manifest, hashes['bundle'], timeout=180)
-        run('python3', str(REPO / 'server/deploy/proof/offline_vuln_db_proof.py'),
-            str(release), hashes['db'], hashes['bundle'], timeout=300)
-        for folder in (release / 'db', release):
-            folder.chmod(0o555)
-        for name in ('bundle.bin', 'descriptor.json', 'descriptor.sig', 'db/trivy.db', 'db/metadata.json'):
-            (release / name).chmod(0o444)
-        switch(current, replace_pins(current, release, manifest, hashes['bundle']), manifest, hashes['bundle'])
-        print('DB release activated; TLS/OCI/local signature verified (NOT publisher identity)')
-    finally:
-        pass
+    except Exception:
+        report_update_failure(values, 'discovery')
+        raise  # Preserve the original nonzero update/alert error, even if active is invalid.
+    manifest = match[1]
+    if values['SCAN_VULN_MANIFEST_DIGEST'] == manifest:
+        verify_active(values)
+        print('DB usable under operator v2; upstream unchanged; no release/pin change')
+        return
+    try:
+        release, bundle = prepare_candidate(candidates, releases, manifest)
+        updated = replace_pins(current, release, manifest, bundle)
+    except Exception:
+        report_update_failure(values, 'candidate')
+        raise
+    # A switch/rollback failure cannot be described as unchanged-active readiness.
+    switch(current, updated, manifest, bundle)
+    print('DB release activated; TLS/OCI/local signature verified (NOT publisher identity)')
 
 
 if __name__ == '__main__':

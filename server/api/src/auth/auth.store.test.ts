@@ -7,6 +7,34 @@ import test from 'node:test';
 import Database from 'better-sqlite3';
 import { AuthStore } from './auth.store.js';
 
+test('trusted session guard persists, rotates only the presented session, and rejects stale authority', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'auth-guard-'));
+  const prior = process.env.AUTH_DB_PATH; process.env.AUTH_DB_PATH = join(dir, 'auth.sqlite');
+  let store = new AuthStore();
+  try {
+    const user = (await store.register('guard@example.com', 'temporary-password-1234'))!;
+    const s1 = store.createSession(user.id), s3 = store.createSession(user.id);
+    const original = store.sessionForToken(s1)!;
+    assert.ok(original.sessionId); assert.equal(original.subject, user.id);
+    assert.equal(store.guardSession(original, () => 'ok'), 'ok');
+    store.onModuleDestroy(); store = new AuthStore();
+    assert.equal(store.sessionForToken(s1)!.sessionId, original.sessionId);
+    const fresh = store.sessionForToken(s1)!;
+    const s2 = store.createSession(user.id, s1);
+    assert.equal(store.sessionForToken(s1), null);
+    assert.throws(() => store.guardSession(fresh, () => assert.fail('stale action')));
+    assert.equal(store.userForToken(s2)?.id, user.id);
+    assert.equal(store.userForToken(s3)?.id, user.id, 'no global device revoke');
+    const current = store.sessionForToken(s2)!;
+    assert.throws(() => store.guardSession({ ...current }, () => assert.fail('forged snapshot')));
+    store.revoke(s2);
+    assert.throws(() => store.guardSession(current, () => assert.fail('revoked action')));
+  } finally {
+    store.onModuleDestroy(); if (prior === undefined) delete process.env.AUTH_DB_PATH; else process.env.AUTH_DB_PATH = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('rate limits by email and socket IP; stores only hashes and bounds live sessions', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'auth-store-'));
   const path = join(dir, 'auth.sqlite');

@@ -1,0 +1,60 @@
+# Current HOLD handoff — 2026-10-15
+
+## Latest known observation, not a fresh daemon inventory
+
+Supersedes the running-stand implication in `continuation-handoff-20261015.md`.
+Production R2 shell SHA256 `2904862c344cfa3cbe520ff4dc5a7e84e362549a5fd6631c84eb778cc0b0ba4f` returned:
+`{"manualReconciliationRequired":true,"ok":false,"phase":"holder","uncertain":true}`.
+Historical execution approvals are SPENT. HOLD remains. Further stopped-state reconciliation attempts and diagnostics below supersede the earlier no-recovery statement; none completed deployment.
+
+Latest reviewed discovery: original API/worker/web EXITED; both original egress containers RUNNING. Candidate `d9433f7ed0fc504a3521574668f15b7b3a0e8d283d61b9aa33d1e97187708a4f` CREATED, clean zero-exit/non-running flags. Identity/security/resources/network groups matched, mount host-declaration/materialization groups did not. Private directory metadata REFUSED, Env NOT_OBSERVED. DISCOVERED_NOT_ADOPTED, full qualification NOT_CLAIMED. No ownership/adoption/cleanup authority inferred.
+
+Source failure order precedes capture/export/plan/apply SQL/candidate replacement. This is not actual DB version/integrity or preservation proof. No provider call or OpenRouter activation is established.
+
+## Preserved bindings
+
+Original API `5cbe0936a5f09d663a77960749e687fbd41fbef52c8990b063362b9363d3e9ec`, image `sha256:487c3909d3eeee08d60840a81c1adeb61c292aee0a31df17b2a8cf92f6dbb58c`.
+Original worker `016c41e7b3eabcbb08903bbc3c54d657ed92c22813e47fa37d444cb448602b44`, image `sha256:8748cbebba753603d79f320c2fb476c46ab676ce12e0aa08bee0021a3e14e57a`.
+Original web `b84245ef672d172d5513971a57ea91469800846cdf6c59bedceb006b06caa4f4`, image `sha256:1659b39c98d5183c91feae78a8d9eb1d4c6ee527d541c1e1d74dfe842adee8c0`.
+Original egress `2850e2d03d0681482727f7b5d658961ef9ef2aa829b63473f36d8ed3c63f3d35`, image `sha256:2b9eff3b381979c82bf42c310fcd7941805d42adeda67c8814143d6503490655`.
+Original llm-egress `f64639115f21233277ac52db2bd5ceda495203511da87896ff996e8c1ce3a68a`, image `sha256:3ccbd5a6c3348b7b1c99e23b29d9bdca485dfd48f690a408a119e06163a59a8d`.
+Candidates API `sha256:4b3a3d4b3c2658ec9a36209afcac69eda2b64cef6e055a5e2716e2602e5338d1`, worker `sha256:891b5adccbe469345cea585e75dc71c6d3bf93405c5a18386795af1b012b314d`, web `sha256:3d14f3d9e7347a9609fe3ae53b46efd70293aacae64da48c001ed6e826155817`. Not deployed.
+
+## Constraints / next boundary
+
+Existing user consent covers exclusive maintenance, additive migration after verified durable backups, deployment and exact obsolete cleanup. Latest user explicitly approved deletion of paused helper4dc55f…d1769 after the informed tmpfs-loss question, and asked for further unused image/container cleanup with parallel agents. This permits the separately reviewed exact retirement plan, NOT a blind prune or other retained-resource deletion. No reset/init, provider call, native history retry, scanner-proof repeat, blind restore/rollback or Git staging/commit/branch.
+
+Never read staged `server/.env.openrouter.local`, private Env/keys/DB/recovery material via agent tools. No broad Docker inspect/log output. No spent command rerun. No HOLD/lock removal or old worker startup as a schema probe. OLD worker rejects ledger14 and opens RW/WAL before version check. See `old-worker-startup-binding-20261015.md`: six public sources verified, full startup closure/current ledger version unresolved.
+
+Conditionally accepted recovery design is NOT execution approval: exact CREATED-holder retirement, exact originals qualification, bounded all-container writer fence, reviewed startup effects, staged readiness and no retries/compensating mutation. Recovery pair not yet implemented at handoff. Alternatively diagnose exact holder mount discrepancy with a separately reviewed bounded metadata-only operation; do not guess or weaken guards.
+
+## Continuation observations
+
+ONE exact metadata diagnostic (source81663101/test09b32e69) passed: named-volume sources/names/access matched; helper source in BOTH declaration and actual views was exact `/host_mnt` + literal host path, RO true/RW false. This observation is not full qualification or sole-cause proof. Diagnostic authority SPENT.
+
+New stopped-reconciliation source3cce4713/test01ad06b3 and literal `stopped-reconciliation-20261015.sh` SHA256 `04f35cdb27b4efd622578222ee28a04452995db5b745777b340e80fd490fc419` independently reviewed then executed ONCE. Exit1 receipt `{"manualReconciliationRequired":true,"mode":"stopped-stand-preservation-v1","ok":false,"phase":"preflight","uncertain":false}`. Authority SPENT. No subsequent runtime query. This does NOT prove absence of private lock/scratch writes. New reconciliation lock/HOLD may be present. Actual DB versions remain unknown, no capture/apply observed; services remain last observed stopped, not freshly rechecked. Do not rerun, remove or adopt locks. Next: separately reviewed no-write host-metadata + authoritative capture-prefix diagnosis, plus sticky stage reporting before any future mutation.
+
+## Most recent observations and source (supersedes preceding next-step paragraphs)
+
+- No-write held-prefix shelld773c166 passed all five coordination metadata paths safe plus CAPTURE_PREFIX_PASS. SPENT.
+- Full NOT-readonly held-preparation shell278759e0 passed COMPLETE, actual real full preflight+first release recheck; actor intent/ID journaled; no retained actor; old lock pairs unchanged; no migration/apps/provider. SPENT. Not DB preservation evidence.
+- NEW stopped reconciliation R2 shell59fe08a7f8471770de56670b27bbdee1ef10539967deba2431a50f95227877b7 executed once and FAILED: `{"category":"PREDICATE_REFUSED","checkpoint":"MIGRATION","manualReconciliationRequired":true,"mode":"stopped-stand-preservation-v1","ok":false,"phase":"holder","uncertain":true}`. SPENT. Three historical coordination lock/HOLD pairs may now exist; do not adopt/remove them. Source-order capture/plan/apply not reached, not independent integrity proof.
+- Full holder diagnostic shell088458ea480023c0e8a211adb7618e5ea53d53c86e6d7f0c2ad0ae0370fecdea executed once PASS. SPENT. Candidate `4dc55f9708f1537fa369ea165aadd050c1f44a6570f0adccb93043d1467d1769` observed PAUSED, running true; all37 observable profile predicates matched except expected lifecycle flags. Initiald943…08a4f still CREATED. Exact private Env list equality true, no keys/values exported. Volume baseline complete. Private intent/journal bindings NOT_OBSERVED; no adoption/full qualification. See holder-writer-mount-order-review-20261015.md.
+- Fixed concrete source bug: writer fence compared complete mount LISTS from separate Docker inspect calls in order. New full_mount_entries compares sorted canonical complete records, retaining duplicates/every field/type/literal source/nested-list order. Outer list order only is ignored. Five focused inert tests PASS author-attributed; independent correctness+security source ACCEPT. Historical failure cause remains UNPROVED.
+- Current controller SHA256 `8ed5b4994997437afc5ff6d1bdcaecc19fc593f92940f2a7d7f6aed309ffa86c`; test `f8872067b4003d17e84a8dbb1bc25e4a7a74cc332b0f720cdae213b72f584d17`. Includes sticky holder-stage receipts and R2 fixed coordination mode. All old literals bind historical versions and MUST NOT be repinned/reexecuted.
+- New exact retirement draft `retire_failed_holder.py` SHAba03e8fdc1cb1526d73c5a8325adacf2e244a58dfaa72c5da20d50f1dfa21710 /test667560a5fc87a8f232dea917782a8917f05cb8b012d812dc870b449195749f1b. Source-only17 inert tests PASS author-attributed. Requires independent source/literal review and genuine custody internally from ONLY label-derived exact holder-intent.json/holder-id.json. One exact rm --force4dc… without-v, no unpause/exec/SQL, no automatic continuation. Not yet executed. User consent now received above.
+
+## Latest user-authorized cleanup and R4 failure — authoritative current boundary
+
+- Exactpausedholderretirement wrapperf46dfa1599c6224501981e6901d11387fb4b827c4847f92d41fa78a9f5d76c1d executed once: REMOVAL_ACKNOWLEDGED,oktrue,uncertainfalse,no named-volume deletion/hostwrites/migration. SPENT. This was ONLY4dc…d1769.
+- Inventory8c53cfcc5b46ef9732a28117b86ed2378057a07fd689de1e985a4dea4271c822 passed18containers/24images at that snapshot, now stale after cleanup. SPENT.
+- Imagebatch wrapper3bd321bbec12a60e8db528580537ad63c53dc84909925d09241abccbfe2ee3ba executed once: all7 selected images acknowledged removed,notAttempted[],uncertainImagenull,oktrue,no postInventory. See unused-docker-cleanup-result-20261015.md for exact7IDs. No GB-freed claim. Source8ffe4d3a/test5a4bdf17/plan3f46f8ec. SPENT. No container/volume removal by batch. Original/candidate8images andc09historybase preserved.
+- R3shell0b2a25ace12faf50e9c078243630d96aedf40a36c6a15a7e1cb16c575fa08edb executed once FAILED HOLDER_WRITERS_PRE/PREDICATE_REFUSED phaseholder uncertaintrue. SPENT. No newhelper/capture through R3controlledpath. Retainedcache comparison also had actualMounts outer-order weakness, subsequently fixed without changing othermetadata/declarations.
+- Writerdiagnostic source637211f9/test82a08593 executed once aftercleanup: CLASSIFIED/currentMatchtrue/all28currentgroups true,18census18batch2activeegress,noactive storetouches. Historicalcached/HOLD/defaultlabels NOTOBSERVED. SPENT, not runtimeacceptance.
+- R4shellba3d7c011af7c608e634ea57baccd059d32cd9ff263612c4417ebb30144e4d90 executed once FAILED: `{"category":"PREDICATE_REFUSED","checkpoint":"MIGRATION","manualReconciliationRequired":true,"mode":"stopped-stand-preservation-v1","ok":false,"phase":"export_pre","uncertain":true}`. SPENT. Capture returned before export_pre; plan/apply/replacements later not reached by this controlledpath. This is NOT independentDBintegrityproof. Fifth historical lock/HOLDpair R4 mayexist. DO NOT addR5/retry/removeexistingmaterial.
+- CRITICAL NEW RETAINED HOLDER: `207709f0f2992532af3331e0e2b38878c08a8d157ad074956f78c895aa5380e4` observed PAUSED by diagnostic below. It MAY hold SOLE PRE tmpfs. Prior4dcdiscardconsent DOES NOT APPLY. No delete/stop/unpause/exec/cp/SQL/recapture/repair/reuse without separate reviewed rescue strategy. HostPRE presence/complete/durable not established.
+- RetainedPRE diagnostic shell8996b5201f4678d6f8d9e632fe2e40a3fc9267fbf6ea6b8e092581ad6eeaa2ec executed once FAILED PRE_MANIFEST_SEAL/PREDICATE_REFUSED,mutationfalse,hostPreNOTOBSERVED,ownershipNOTADOPTED,statePAUSED,target207709…. SPENT. Genuinejournals+readonlyinventorystagepassed beforefail; neitherhostPREcertification nor inholderinventory observed. Bucket includes manifestrecordmissing/type/zero/>4MiB/metadata/readseal/bytehash agreement. No cause guessed; GID checked already byinventory, not a uniquelynewdiagnosticrestriction.
+- CURRENT controllerSHA76153d2cd7d0452c14149a367cde4bb934d973380a7e10e22ebb798f95893857/test15b0460d1faefa31112f67cbfa86cd1d0db90046ecb2f74b110ba6e90629ac60. Includes fixedexportstages and backup_inventory(*,durable=True,byte_limit=EXPORT_BYTES,deadline=None); readonlyFalse mode skipsfsynconly,256MiBprehashbound/deadlineavailable. No newrolloutauthority. Parent actuallyran20focused inert tests earlierR4source: exit0 0.679s OK; later15readonlyinventorytests authorPASS, no nativeacceptance.
+- New UNEXECUTED narrow metadata diagnostic mode --diagnose-retained-pre-metadata-once source44b2b7fc61c63df2fd7e9a7fb2331b7c905be88b6a307924b4d5d2a7b970ea91/testda42b17f35c50649d1e94e75fe2c94089d9b68f04bfbcc9d63ca9b2fccf2c446. Fixed207709oneprojection/noEnv+fixedHOSTPREmanifestmetadata flags only/no leafcontent/hash/fsync/SQL or lifecycle; requires freshsource/literalreview. Fullprofile NOTREVALIDATED, noauthorityadoption. Next action only this observation, notR5.
+
+Flownix policy/artifact364/harness-list reads in this continuation returned `server shut down`. No new artifact/run IDs or tracker changes claimed. Synchronize DIP-TASK-41 when backend returns. All historical history362/363 STOP and scanner331 non-repeat constraints persist. Refresh service stays paused. Four foreign notice files untouched. HOLD/lock/backups retained.

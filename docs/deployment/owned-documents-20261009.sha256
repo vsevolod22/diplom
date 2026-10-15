@@ -1,0 +1,6 @@
+# FINAL USER STOP documentation hashes only — NOT rollout or new execution approval.
+# Paths relative to startup/diplom; excludes itself. DIP-ARTF-245 version4.
+72c1c24ef3ca3a33ed581b8d6f659327e5276bb4b5c704126997f75a97045fe5  docs/deployment/rollout-preparation-20261009.md
+4534ef03efb2cb1bbbeb8a5b6e101c73ad72bf034ae2a0ff8ca7cf6887725b79  docs/deployment/evidence-register-20261009.md
+6469aad7c5c595ad00ee42ffd62423fc53783699438d1df9f97b05216c403d50  docs/deployment/public-source-observation-20261009.json
+fa76aa82a31a7173b6379a8c8dd02f97b751f37abad24e7df468dbc36f2446c6  docs/deployment/artifact-reference-20261009.md

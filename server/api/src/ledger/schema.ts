@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { check, integer, sqliteTable, text, unique } from 'drizzle-orm/sqlite-core';
 
-// Runtime migrations in ledger.ts exclusively own schema v11, including partial state
+// Runtime migrations in ledger.ts exclusively own schema v14, including CVE policy binding and partial state
 // and keyed scan_check_results. This is the query model, not an auto-push migration.
 export const scans = sqliteTable('scans', {
   id: text('id').primaryKey(),
@@ -21,6 +21,18 @@ export const scans = sqliteTable('scans', {
   unique().on(table.subject, table.idempotencyKey),
   check('scans_state_check', sql`${table.state} IN ('queued','running','completed','failed','cancelled','partial')`),
 ]);
+
+export const scanCvePolicy = sqliteTable('scan_cve_policy', {
+  scanId: text('scan_id').primaryKey().references(() => scans.id),
+  policy: text('policy').notNull(),
+  resultContractVersion: integer('result_contract_version').notNull(),
+});
+
+export const scanCveEvidence = sqliteTable('scan_cve_evidence', {
+  scanId: text('scan_id').primaryKey().references(() => scans.id),
+  attempt: integer('attempt').notNull(),
+  evidence: text('evidence').notNull(),
+});
 
 export const outbox = sqliteTable('outbox', {
   scanId: text('scan_id').primaryKey().references(() => scans.id),

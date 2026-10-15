@@ -16,6 +16,7 @@ import {
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { LlmUsagePanel } from './LlmUsagePanel';
+import { ScanChatPanel } from './ScanChatPanel';
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: SummaryClient };
 export function ScanSummaryPanel({ status, transport, client: providedClient }: Props) {
@@ -266,8 +267,8 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
           </Button>
         )}
         <small>
-          Согласие сбрасывается после каждого запроса, отмены или изменения условий. Чат, история и кэш здесь
-          не реализованы. Остаток продуктовых квот читается отдельно и не меняет согласие.
+          Согласие сбрасывается после каждого запроса, отмены или изменения условий. Чат и история открываются
+          отдельно ниже и требуют собственного согласия. Остаток квот не меняет согласие сводки.
         </small>
         {message ? (
           <Alert role="alert" tone="warning">
@@ -320,6 +321,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
           </ul>
         </div>
       ) : null}
+      <ScanChatPanel status={status} transport={transport} />
     </section>
   );
 }

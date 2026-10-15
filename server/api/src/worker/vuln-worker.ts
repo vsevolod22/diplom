@@ -3,11 +3,13 @@ import { lstat, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { TextDecoder } from 'node:util';
 import type { Job } from '../ledger/ledger.js';
-import { preflightVulnDbBundle, type BundlePreflightOptions } from './vuln-db-bundle.js';
+import { preflightVulnDbBundle, type BundlePreflightOptions, type VerifiedDbIdentity } from './vuln-db-bundle.js';
+import { CURRENT_DB_POLICY, LEGACY_DB_POLICY, evaluateDbPolicy, type CveDbPolicy } from './cve-db-policy.mjs';
+import type { CveDbEvidence } from './cve-db-evidence.js';
 import { parseVulnFindings, type VulnFinding } from './vuln-findings.js';
 
 const MAX_REPORT_BYTES = 8_000_000;
-export type VulnScanResult = { ok: true; findings: VulnFinding[]; scannerVersion: '0.69.3' } |
+export type VulnScanResult = { ok: true; findings: VulnFinding[]; scannerVersion: '0.69.3'; dbEvidence?: CveDbEvidence } |
   { ok: false; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' };
 export type VulnScanOptions = {
   timeoutMs: number;
@@ -15,6 +17,7 @@ export type VulnScanOptions = {
   releaseDir: string;
   trust: Omit<BundlePreflightOptions, 'directory' | 'now'>;
   signal?: AbortSignal;
+  policy?: CveDbPolicy;
 };
 type Lifecycle = { spawn: typeof spawn; stopWorker: () => void; preflight: typeof preflightVulnDbBundle };
 const lifecycleDefault: Lifecycle = { spawn, stopWorker: () => process.exit(1), preflight: preflightVulnDbBundle };
@@ -46,9 +49,12 @@ export async function scanVulnPinned(job: Job, options: VulnScanOptions,
             options.releaseDir === options.cacheDir ||
       !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1000 || options.timeoutMs > 600_000 ||
       !options.trust || options.signal?.aborted) return fail();
+  const policy = job.cvePolicy ?? LEGACY_DB_POLICY;
+  let identity: Readonly<VerifiedDbIdentity>;
   try {
-    await lifecycle.preflight({ ...options.trust, directory: options.releaseDir, now: new Date() });
+    identity = (await lifecycle.preflight({ ...options.trust, directory: options.releaseDir, policy })).identity;
     if (options.signal?.aborted || !(await sameMountedDb(options.releaseDir, options.cacheDir))) return fail();
+        evaluateDbPolicy(identity, policy, Date.now());
   } catch { return fail(); }
   if (options.signal?.aborted) return fail();
 
@@ -96,12 +102,18 @@ export async function scanVulnPinned(job: Job, options: VulnScanOptions,
       else chunks.push(chunk);
     });
     child.on('error', () => { if (!closed) kill(); });
-    child.on('close', code => {
+    child.on('close', async code => {
+      clearTimeout(timer); clearTimeout(fallback);
       if (cancelled || timedOut || killed || code !== 0 || !child.stdout) return finish(fail(timedOut));
       try {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, bytes));
         const findings = parseVulnFindings(JSON.parse(text) as unknown, image, job.platform);
-        finish({ ok: true, findings, scannerVersion: '0.69.3' });
+        const after = (await lifecycle.preflight({ ...options.trust, directory: options.releaseDir, policy })).identity;
+        if (JSON.stringify(after) !== JSON.stringify(identity) || !(await sameMountedDb(options.releaseDir, options.cacheDir)) || options.signal?.aborted) return finish(fail());
+        const checkedAt = Date.now();
+        const dbPolicy = evaluateDbPolicy(after, policy, checkedAt);
+        finish({ ok: true, findings, scannerVersion: '0.69.3',
+          ...(policy === CURRENT_DB_POLICY ? { dbEvidence: { db: after, checkedAt, dbPolicy: dbPolicy! } } : {}) });
       } catch { finish(fail()); }
     });
     if (options.signal?.aborted) abort();

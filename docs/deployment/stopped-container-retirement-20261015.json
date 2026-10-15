@@ -1,0 +1,25 @@
+{
+  "format": "exact-stopped-container-retirement-v1",
+  "scope": "Dispose only these 17 exited containers, their writable layers and Docker-managed logs. Do not read their logs/rootfs. Preserve all volumes, networks, images, host evidence and recovery material. No retry, force, volume removal, start, stop or exec. Prior failures and HOLDs remain unresolved.",
+  "excluded": "Four history containers have inherited stand project/service labels and are not admitted by this plan. Eight qualification/source actors lack independently rebound full OWN labels and remain retained. All five running stand services are protected.",
+  "expectedState": "exited",
+  "entries": [
+    ["1c476ba0df3219d3689131011fb70a7ce67874ec876841095926ba8406f72f6c", "/dip-cve14-proof-0a0c92726b8cd4e1-api-1", "sha256:918fb7c6c651c8ab2f94bdf1648a0f99edf1ec2fd70c37d6179e932ede8816ea", "dip-cve14-proof-0a0c92726b8cd4e1", "api"],
+    ["51f473ca8c8fea67028d7782a8b3fda2116f7e144bf69eb8e45c8ef708200517", "/dip-cve14-proof-0a0c92726b8cd4e1-worker-1", "sha256:918fb7c6c651c8ab2f94bdf1648a0f99edf1ec2fd70c37d6179e932ede8816ea", "dip-cve14-proof-0a0c92726b8cd4e1", "worker"],
+    ["e636634504b2f262199b1a182409472710345beac94d454a89231bf9321304ad", "/dip-cve14-proof-0a0c92726b8cd4e1-egress-1", "sha256:2b9eff3b381979c82bf42c310fcd7941805d42adeda67c8814143d6503490655", "dip-cve14-proof-0a0c92726b8cd4e1", "egress"],
+    ["c4f25634bd59f967b6bbfc5aba63c603ca41508c1acc0af8942e994c157dc2cf", "/dip-cve14-proof-0a0c92726b8cd4e1-scan-volume-init-1", "sha256:918fb7c6c651c8ab2f94bdf1648a0f99edf1ec2fd70c37d6179e932ede8816ea", "dip-cve14-proof-0a0c92726b8cd4e1", "scan-volume-init"],
+    ["508b70b9e111b1a3c0bfa2d1e167d27edce03066d3e387d21ab3bca9d2427b19", "/dip-cve14-proof-0a0c92726b8cd4e1-auth-volume-init-1", "sha256:918fb7c6c651c8ab2f94bdf1648a0f99edf1ec2fd70c37d6179e932ede8816ea", "dip-cve14-proof-0a0c92726b8cd4e1", "auth-volume-init"],
+    ["97f2e8674e5618b79bafedfee50ae0a4e53051551d590b24e2d0e79b613dfe6d", "/dip-cve14-proof-9bef4d56d7aad6d7-api-1", "sha256:9c1f3e686fd0f49646a336cde7e0259b63e882bbbb7fbd7ccccc874f49038fcf", "dip-cve14-proof-9bef4d56d7aad6d7", "api"],
+    ["a4c9c4e3b3ca44aef37fb807d20a9cffe03db5a0f3c6bb0ba87b5d0984162bc2", "/dip-cve14-proof-9bef4d56d7aad6d7-worker-1", "sha256:9c1f3e686fd0f49646a336cde7e0259b63e882bbbb7fbd7ccccc874f49038fcf", "dip-cve14-proof-9bef4d56d7aad6d7", "worker"],
+    ["129f263fe6d90a4d5c85a48007784ccb6801a69f0bf7a3cb08b292ccef2b64c8", "/dip-cve14-proof-9bef4d56d7aad6d7-egress-1", "sha256:2b9eff3b381979c82bf42c310fcd7941805d42adeda67c8814143d6503490655", "dip-cve14-proof-9bef4d56d7aad6d7", "egress"],
+    ["7bde33ac5b5af8c9c627e51d983fe64000c90be5eef1b3c93fd4886262f35563", "/dip-cve14-proof-9bef4d56d7aad6d7-scan-volume-init-1", "sha256:9c1f3e686fd0f49646a336cde7e0259b63e882bbbb7fbd7ccccc874f49038fcf", "dip-cve14-proof-9bef4d56d7aad6d7", "scan-volume-init"],
+    ["fee96bea861918735898806495ec96737795d244780e33a6ae63af565daed7a1", "/dip-cve14-proof-9bef4d56d7aad6d7-auth-volume-init-1", "sha256:9c1f3e686fd0f49646a336cde7e0259b63e882bbbb7fbd7ccccc874f49038fcf", "dip-cve14-proof-9bef4d56d7aad6d7", "auth-volume-init"],
+    ["91b3438764d42a5ffa35451572bc8d1cbbe8c5861ee8aaf8fc829c534f58eb68", "/dip-cve14-proof-832cb6115c24c136-api-1", "sha256:7e25e7ad63be12517bd8fb88d88339b90a4bcd8344e2280f0146f7a7819020b1", "dip-cve14-proof-832cb6115c24c136", "api"],
+    ["a2e493a0dbd25567254685cc0415f84e541fedddb89c6fff42cdbf416fc4285e", "/dip-cve14-proof-832cb6115c24c136-worker-1", "sha256:7e25e7ad63be12517bd8fb88d88339b90a4bcd8344e2280f0146f7a7819020b1", "dip-cve14-proof-832cb6115c24c136", "worker"],
+    ["6480f1d3265ce98fa5f5084c6d7c99d32d38bf844a2f86e989790f776fe60111", "/dip-cve14-proof-832cb6115c24c136-egress-1", "sha256:2b9eff3b381979c82bf42c310fcd7941805d42adeda67c8814143d6503490655", "dip-cve14-proof-832cb6115c24c136", "egress"],
+    ["0c92a1bb649eb443f76c7df79629149de23bcbf4ff1ee7140a3f19e5e55041ad", "/dip-cve14-proof-832cb6115c24c136-auth-volume-init-1", "sha256:7e25e7ad63be12517bd8fb88d88339b90a4bcd8344e2280f0146f7a7819020b1", "dip-cve14-proof-832cb6115c24c136", "auth-volume-init"],
+    ["8279843b82c6031d6eaee025a5cc81e07bbd3f7b12f02a17bdfaaf2a2359aebc", "/dip-cve14-proof-832cb6115c24c136-scan-volume-init-1", "sha256:7e25e7ad63be12517bd8fb88d88339b90a4bcd8344e2280f0146f7a7819020b1", "dip-cve14-proof-832cb6115c24c136", "scan-volume-init"],
+    ["05b901a6c17cd87cf3731450775f2d641c90041524f0ac686b125538de3af1ef", "/dip-auth-stand-auth-volume-init-1", "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e", "dip-auth-stand", "auth-volume-init"],
+    ["d3ca725217659e61a6453c3176735be005f2a7f0221d974de9226a240b9b8b6f", "/dip-auth-stand-scan-volume-init-1", "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e", "dip-auth-stand", "scan-volume-init"]
+  ]
+}

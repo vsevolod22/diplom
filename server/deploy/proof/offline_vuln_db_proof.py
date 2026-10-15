@@ -11,7 +11,8 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'trust'))
+from cve_db_policy import evaluate_metadata
 
 TRIVY = 'aquasec/trivy:0.69.3'
 MAX_DB = 2 * 1024 ** 3
@@ -47,18 +48,7 @@ def run(*args, timeout=120):
 
 
 def assert_fresh(metadata):
-    assert metadata['Version'] == 2, 'incompatible DB schema'
-    def stamp(name):
-        text = metadata[name]
-        assert isinstance(text, str) and text.endswith('Z')
-        return datetime.fromisoformat(text.replace('Z', '+00:00'))
-    now = datetime.now(timezone.utc)
-    updated, downloaded, next_update = (stamp(k) for k in ('UpdatedAt', 'DownloadedAt', 'NextUpdate'))
-    assert updated <= downloaded <= now + timedelta(minutes=5)
-    assert updated <= now + timedelta(minutes=5)
-    assert now - updated < timedelta(hours=48)
-    assert now - downloaded < timedelta(hours=24)
-    assert now < next_update <= updated + timedelta(days=7), 'DB stale or invalid NextUpdate'
+    return evaluate_metadata(metadata)
 
 
 def scanner(db, image, cache, *, with_db=True):
@@ -82,7 +72,8 @@ def main():
     root = pathlib.Path(sys.argv[1]).resolve(strict=True)
     db = root / 'db'
     metadata = json.loads((db / 'metadata.json').read_text())
-    assert_fresh(metadata)
+    policy = assert_fresh(metadata)
+    print('Operator usability: ' + json.dumps(policy))
     for broken in ({**metadata, 'NextUpdate': '2020-01-01T00:00:00Z'},
                    {**metadata, 'UpdatedAt': '2020-01-01T00:00:00Z'},
                    {**metadata, 'Version': 3}):
@@ -135,7 +126,7 @@ def main():
             assert found('lang-pkgs', 'node-pkg', 'lodash', '4.17.20', 'CVE-2021-23337'), 'Node CVE missing'
             missing = scanner(db, image, '/tmp/empty-cache', with_db=False)
             assert missing.returncode != 0 and not missing.stdout.strip(), 'missing DB falsely reported success'
-            print('PASS: pinned archive matches DB; fresh metadata; offline image has OS+Node CVEs; missing DB and stale metadata rejected')
+            print('PASS: pinned archive matches DB; operator metadata usable; offline image has OS+Node CVEs; missing DB and invalid metadata rejected; NOT combined admission proof')
         finally:
             run('docker', 'image', 'rm', '-f', name, timeout=30)
 

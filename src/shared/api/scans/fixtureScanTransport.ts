@@ -26,12 +26,13 @@ export const fixtureScanTransport: ScanTransport = {
     if (!item) throw new Error('Скан недоступен');
     return item;
   },
-  async results(id, cursor) {
+  async results(id, cursor, _signal, query) {
+    if (query) throw new Error('Глобальные report-v1 controls не поддерживаются в демо');
     if (!reports[id] || cursor) throw new Error('Результаты недоступны');
     return reports[id];
   },
-  async sbom() { return { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', components: [], nextCursor: null }; },
-  async vuln() { return { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_UNAVAILABLE', findings: [], nextCursor: null }; },
+  async sbom(_id, _cursor, _signal, query) { if (query) throw new Error('Глобальные report-v1 controls не поддерживаются в демо'); return { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', components: [], nextCursor: null }; },
+  async vuln(_id, _cursor, _signal, query) { if (query) throw new Error('Глобальные report-v1 controls не поддерживаются в демо'); return { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_UNAVAILABLE', findings: [], nextCursor: null }; },
   async create() { throw new Error('Запуск доступен только после настройки защищённого браузерного доступа'); },
   async cancel() { throw new Error('Отмена недоступна: серверный маршрут не реализован'); },
 };

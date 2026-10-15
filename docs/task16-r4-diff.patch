@@ -1,0 +1,677 @@
+--- a/server/api/src/llm/llm.controller.ts
++++ b/server/api/src/llm/llm.controller.ts
+@@ -52,7 +52,7 @@
+     req.on('aborted', abort); res.on('close', abort);
+     let result: HistoryResult | undefined;
+     try {
+-      result = await this.safe(() => this.llm.history().generate(req, scanId, body, controller.signal));
++      result = await this.safe(() => this.llm.history().generate(req, scanId, body, controller.signal, representation));
+       if (representation === 'ndjson') {
+         if (!result.delivery) throw new ServiceUnavailableException({ errorCode: 'LLM_UNAVAILABLE' });
+         await this.safe(() => writeDelivery({ delivery: result!.delivery!, write: result!.write, release: () => result?.release?.() }, res, controller.signal));
+--- a/server/api/src/llm/history.service.ts
++++ b/server/api/src/llm/history.service.ts
+@@ -126,7 +126,7 @@
+       return this.result(access, report, head, historyProjection(head, reportBinding(report)));
+     });
+   }
+-  async generate(request: BrowserRequest, scanId: string, body: unknown, signal: AbortSignal): Promise<HistoryResult> {
++  async generate(request: BrowserRequest, scanId: string, body: unknown, signal: AbortSignal, representation: 'json' | 'ndjson' = 'json'): Promise<HistoryResult> {
+     const access = this.access(request, true);
+     if (!exact(body, ['epoch', 'revision', 'mutationId', 'reportVersion', 'question', 'consent'])) return invalidHistoryRequest();
+     const expected = this.expected(body), question = cleanText(body.question);
+@@ -156,6 +156,8 @@
+     if (signal.aborted) controller.abort();
+     const deadline = setTimeout(abort, policy.timeoutMs);
+     let ledger: QuotaLedger | undefined, reservation: string | undefined, turnId: string | undefined;
++        let observation: Vector | undefined;
++        let admitted: { epoch: string; revision: number; requestHash: string; reservation: string } | undefined;
+     try {
+       if (!report.findings.length) throw new ConflictException({ errorCode: 'LLM_NO_EVIDENCE' });
+       ledger = this.quotas.ledger();
+@@ -190,7 +192,7 @@
+       }, ledger.policy.busyMs);
+       store.associate(access.identity.subject, scanId, pending.epoch, pending.revision, id, reservation);
+       const boundReservation = reservation;
+-      let observation: Vector | undefined;
++      admitted = { epoch: pending.epoch, revision: pending.revision, requestHash: prepared.hash, reservation: boundReservation };
+       const raw = await provider.generateGuarded(prepared, policy, controller.signal, {
+         policy: ledger.policy, observe: usage => {
+           // Accounting is bound to original attempt, not current publication authority.
+@@ -223,6 +225,33 @@
+       transferred = true;
+       return { ...result, delivery, release };
+     } catch (error) {
++      // Only this invocation's successful durable observe can establish a receipt; never inspect exception metadata/counters.
++      if (representation === 'ndjson' && observation && admitted && turnId && !controller.signal.aborted) {
++        try {
++          const id = turnId, attempt = admitted;
++          const failed = this.guard(access, () => {
++            this.current(access, report, policy, controller.signal);
++            return store.guardPending(access.identity.subject, scanId, attempt.epoch, attempt.revision, id, current => {
++              const p = current.pending!;
++              if (p.sessionId !== access.session.sessionId || p.generation !== access.session.generation ||
++                p.accessIncarnation !== access.session.accessIncarnation || p.requestHash !== attempt.requestHash ||
++                p.reservation !== attempt.reservation || p.policyVersion !== chatPolicy(policy)) return historyConflict();
++              if (!store.fail(access.identity.subject, scanId, attempt.epoch, id, 'failed')) return historyConflict();
++              const failed = store.snapshot(access.identity.subject, scanId), turn = failed.turns.find(t => t.id === id);
++              if (failed.epoch !== attempt.epoch || failed.revision !== attempt.revision + 1 || failed.pending ||
++                !turn || turn.state !== 'failed' || turn.reply || turn.mutationId !== expected.mutationId ||
++                turn.inputHash !== inputHash || turn.requestHash !== attempt.requestHash) return historyConflict();
++              return failed;
++            });
++          });
++          const usage = Object.freeze({ ...observation, source: 'server-validated-provider-reported-not-invoice' as const });
++          const delivery: ChatDelivery = Object.freeze({ ...reportBinding(report), epoch: failed.epoch, revision: failed.revision,
++            mutationId: expected.mutationId, turnId: id, outcome: 'failed' as const, usage });
++          const result = this.result(access, report, failed, { errorCode: 'LLM_UNAVAILABLE' }, policy, signal);
++          transferred = true;
++          return { ...result, delivery, release };
++        } catch { /* No proven current failed head: retain the safe exception path, never synthesize a delivery. */ }
++      }
+       if (turnId) { try { store.fail(access.identity.subject, scanId, expected.epoch, turnId, controller.signal.aborted ? 'cancelled' : 'failed'); } catch { /* Saved state unavailable, never fake success. */ } }
+       if (error instanceof HttpException) throw error;
+       throw new ServiceUnavailableException({ errorCode: 'LLM_UNAVAILABLE' });
+--- a/server/api/src/llm/history-delivery.ts
++++ b/server/api/src/llm/history-delivery.ts
+@@ -31,6 +31,7 @@
+ export type ChatDelivery = Binding &
+   (
+     | { outcome: 'completed'; reply: ChatReply; usage: ChatReceipt }
++    | { outcome: 'failed'; usage: Readonly<ChatReceipt> }
+     | { outcome: 'duplicate'; state: Turn['state'] }
+   );
+ export type DeliveryResult = { delivery: ChatDelivery; write(action: () => void): void; release(): void };
+@@ -83,61 +84,85 @@
+       throw unavailable();
+     add('done', { outcome: 'duplicate', state: value.state });
+   } else {
+-    const { reply, usage } = value;
++    const { usage } = value;
+     if (
+       !exact(usage, ['input', 'output', 'costMicros', 'source']) ||
+       !count(usage.input) ||
+       !count(usage.output) ||
+       usage.output > 2048 ||
+       usage.costMicros !== 0 ||
+-      usage.source !== 'server-validated-provider-reported-not-invoice' ||
+-      !exact(reply, ['scanId', 'digest', 'platform', 'reportVersion', 'kind', 'text', 'sources']) ||
+-      reply.kind !== 'hypothesis' ||
+-      !same(reply, value) ||
+-      !Array.isArray(reply.sources) ||
+-      !reply.sources.length ||
+-      reply.sources.length > HISTORY.citations ||
+-      new Set(reply.sources.map((s) => s.finding.findingId)).size !== reply.sources.length ||
+-      reply.sources.some(
+-        (s) =>
+-          !exact(s, ['scanId', 'digest', 'platform', 'reportVersion', 'finding']) ||
+-          !same(s, value) ||
+-          bytes(s) > HISTORY.citationBytes ||
+-          !safeHistoryFinding(s.finding),
+-      ) ||
+-      bytes({ ...reply, usage }) > HISTORY.completionReserve
++      usage.source !== 'server-validated-provider-reported-not-invoice'
+     )
+       throw unavailable();
+-    cleanText(reply.text, HISTORY.replyBytes);
+-    add('usage', { usage });
+-    reply.sources.forEach((source: Source, index: number) => add('citation', { index, source }));
+-    let chunk = '',
+-      size = 0,
+-      index = 0;
+-    for (const char of reply.text) {
+-      const n = Buffer.byteLength(char);
+-      if (size + n > DELIVERY.deltaBytes) {
+-        add('delta', { index: index++, text: chunk });
+-        chunk = '';
+-        size = 0;
++    if (value.outcome === 'failed') {
++      if (
++        !exact(value, [
++          'scanId',
++          'digest',
++          'platform',
++          'reportVersion',
++          'epoch',
++          'revision',
++          'mutationId',
++          'turnId',
++          'outcome',
++          'usage',
++        ])
++      )
++        throw unavailable();
++      add('usage', { usage });
++      add('error', { errorCode: 'LLM_UNAVAILABLE', receipt: 'accepted' });
++    } else {
++      const { reply } = value;
++      if (
++        !exact(reply, ['scanId', 'digest', 'platform', 'reportVersion', 'kind', 'text', 'sources']) ||
++        reply.kind !== 'hypothesis' ||
++        !same(reply, value) ||
++        !Array.isArray(reply.sources) ||
++        !reply.sources.length ||
++        reply.sources.length > HISTORY.citations ||
++        new Set(reply.sources.map((s) => s.finding.findingId)).size !== reply.sources.length ||
++        reply.sources.some(
++          (s) =>
++            !exact(s, ['scanId', 'digest', 'platform', 'reportVersion', 'finding']) ||
++            !same(s, value) ||
++            bytes(s) > HISTORY.citationBytes ||
++            !safeHistoryFinding(s.finding),
++        ) ||
++        bytes({ ...reply, usage }) > HISTORY.completionReserve
++      )
++        throw unavailable();
++      cleanText(reply.text, HISTORY.replyBytes);
++      add('usage', { usage });
++      reply.sources.forEach((source: Source, index: number) => add('citation', { index, source }));
++      let chunk = '',
++        size = 0,
++        index = 0;
++      for (const char of reply.text) {
++        const n = Buffer.byteLength(char);
++        if (size + n > DELIVERY.deltaBytes) {
++          add('delta', { index: index++, text: chunk });
++          chunk = '';
++          size = 0;
++        }
++        chunk += char;
++        size += n;
+       }
+-      chunk += char;
+-      size += n;
+-    }
+-    if (chunk) add('delta', { index: index++, text: chunk });
+-    add('done', {
+-      outcome: 'completed',
+-      kind: 'hypothesis',
+-      textBytes: Buffer.byteLength(reply.text),
+-      citationCount: reply.sources.length,
+-      deltaCount: index,
+-    });
++      if (chunk) add('delta', { index: index++, text: chunk });
++      add('done', {
++        outcome: 'completed',
++        kind: 'hypothesis',
++        textBytes: Buffer.byteLength(reply.text),
++        citationCount: reply.sources.length,
++        deltaCount: index,
++      });
++    }
+   }
+   // Reserve room for a bounded terminal error if a pre-terminal write fails.
+   const error = (seq: number) =>
+     line(seq, 'error', {
+       errorCode: 'LLM_UNAVAILABLE',
+-      receipt: value.outcome === 'completed' ? 'accepted' : 'unavailable',
++      receipt: value.outcome === 'duplicate' ? 'unavailable' : 'accepted',
+     });
+   const size = lines.reduce((n, s) => n + Buffer.byteLength(s), 0);
+   if (
+--- a/server/api/src/llm/tests/history-delivery.test.ts
++++ b/server/api/src/llm/tests/history-delivery.test.ts
+@@ -313,3 +313,119 @@
+   assert.equal(socket.lines.length, 0);
+   assert.equal(releases, 1);
+ });
++
++const failed: ChatDelivery = Object.freeze({
++  ...binding,
++  epoch: outcome.epoch,
++  revision: outcome.revision,
++  mutationId: outcome.mutationId,
++  turnId: outcome.turnId,
++  outcome: 'failed',
++  usage: Object.freeze({ ...outcome.usage }),
++});
++test('TASK16 R4 failed codec emits exact usage/error only; rejects content and untrusted receipt shapes', () => {
++  const plan = encodeDelivery(failed),
++    frames = plan.lines.map(frame);
++  assert.deepEqual(
++    frames.map((f) => [f.type, f.seq]),
++    [
++      ['usage', 0],
++      ['error', 1],
++    ],
++  );
++  assert.deepEqual(frames[0].usage, outcome.usage);
++  assert.equal(frames[1].receipt, 'accepted');
++  assert.equal(frames[1].errorCode, 'LLM_UNAVAILABLE');
++  assert.ok(
++    frames.every(
++      (f) =>
++        f.turnId === failed.turnId && f.mutationId === failed.mutationId && f.revision === failed.revision,
++    ),
++  );
++  assert.ok(plan.lines.every((line) => line.endsWith('\n') && Buffer.byteLength(line) <= DELIVERY.lineBytes));
++  assert.doesNotMatch(plan.lines.join(''), /"reply"|"source"\s*:\s*\{|"citation"|"delta"|"done"|unfinished/);
++  for (const value of [
++    { ...failed, reply: outcome.reply },
++    { ...failed, diagnostic: 'PRIVATE' },
++    { ...failed, usage: undefined },
++    { ...failed, usage: { ...failed.usage, output: 2049 } },
++    { ...failed, usage: { ...failed.usage, input: NaN } },
++    { ...failed, usage: { ...failed.usage, costMicros: 1 } },
++    { ...failed, usage: { ...failed.usage, source: 'cumulative-counters' } },
++  ])
++    assert.throws(() => encodeDelivery(value as ChatDelivery));
++});
++test('TASK16 R4 failed writer guards header/usage/error/end, holds lease through drain and finish', async () => {
++  const socket = new Socket();
++  let guards = 0,
++    releases = 0;
++  socket.onWrite = (n) => {
++    if (n === 1) {
++      queueMicrotask(() => {
++        assert.equal(releases, 0);
++        socket.emit('drain');
++      });
++      return false;
++    }
++    return true;
++  };
++  await writeDelivery(
++    {
++      delivery: failed,
++      write: (action) => {
++        guards++;
++        assert.equal(releases, 0);
++        action();
++      },
++      release: () => releases++,
++    },
++    socket.response,
++    new AbortController().signal,
++  );
++  assert.equal(guards, 4);
++  assert.equal(releases, 1);
++  assert.equal(socket.destroyed, false);
++  assert.deepEqual(
++    socket.lines.map(frame).map((f) => f.type),
++    ['usage', 'error'],
++  );
++  assert.equal(socket.writableFinished, true);
++});
++test('TASK16 R4 failed writer authority/abort/deadline loss after usage suppresses stale error and releases', async (t) => {
++  for (const mode of ['authority', 'abort', 'deadline']) {
++    const socket = new Socket(),
++      controller = new AbortController();
++    let authorized = true,
++      releases = 0;
++    socket.onWrite = () => false;
++    if (mode === 'deadline') t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
++    const writing = writeDelivery(
++      {
++        delivery: failed,
++        write: (action) => {
++          if (!authorized) throw new Error('PRIVATE-head');
++          action();
++        },
++        release: () => releases++,
++      },
++      socket.response,
++      controller.signal,
++    );
++    if (mode === 'authority') {
++      authorized = false;
++      socket.emit('drain');
++    } else if (mode === 'abort') controller.abort();
++    else t.mock.timers.tick(DELIVERY.timeoutMs + 1);
++    await writing;
++    assert.equal(socket.destroyed, true);
++    assert.equal(releases, 1);
++    assert.deepEqual(
++      socket.lines.map(frame).map((f) => f.type),
++      ['usage'],
++    );
++    assert.doesNotMatch(socket.lines.join(''), /PRIVATE|"error"|"done"/);
++    assert.equal(socket.listenerCount('drain'), 0);
++    assert.equal(socket.listenerCount('finish'), 0);
++    t.mock.timers.reset();
++  }
++});
+--- a/server/api/src/llm/tests/history.http.test.ts
++++ b/server/api/src/llm/tests/history.http.test.ts
+@@ -470,7 +470,7 @@
+   }
+ });
+ 
+-test('TASK16 real cookie/service/controller completed-reply frames preserve JSON, durable receipt, lease and per-write authority', { timeout: 30000 }, async () => {
++test('TASK16 R4 real cookie/service/controller admitted failure frames preserve JSON, durable receipt, lease and per-write authority', { timeout: 30000 }, async () => {
+   const dir = mkdtempSync(join(tmpdir(), 'task16-framing-'));
+   const names = ['AUTH_DB_PATH', 'SCAN_LEDGER_PATH', 'AUTH_ORIGIN', 'AUTH_ALLOW_INSECURE_LOCAL_HTTP', 'SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS'];
+   const previous = names.map(n => process.env[n]), origin = 'http://127.0.0.1:8080';
+@@ -481,7 +481,7 @@
+   const quota = new FixtureQuotaLedger(quotaPath, quotaPolicy), receiptDb = new Database(quotaPath, { readonly: true });
+   const runtime = app.get(LlmRuntime), llm = app.get(LlmService), service = llm.history();
+   runtime.policy = () => freePolicy; app.get(LlmQuotaRuntime).ledger = () => quota; service.runtime.store = () => history;
+-  let sends = 0, invalid = false, owner = '', scanId = '', afterWrite: ((n: number) => void) | undefined;
++  let sends = 0, invalid: false | 'script' | 'malformed' | 'missing-usage' = false, owner = '', scanId = '', afterWrite: ((n: number) => void) | undefined;
+   let afterResult: (() => Promise<void>) | undefined;
+   const synthetic = Object.assign((async () => assert.fail('no unguarded/provider network')) as typeof fetch, {
+     sendGuarded: async (_url: string, init: RequestInit, guard: BodySendGuard) => {
+@@ -490,8 +490,8 @@
+         sends++; const wire = JSON.parse(String(init.body)), report = JSON.parse(wire.messages[1].content).report;
+         assert.equal(wire.stream, false); assert.ok(wire.max_tokens <= 2048); assert.deepEqual(wire.provider.only, ['novita/bf16']);
+         assert.deepEqual(wire.provider.max_price, { prompt: 0, completion: 0, request: 0 });
+-        response = new Response(JSON.stringify({ model: freePolicy.model, usage: { prompt_tokens: 500, completion_tokens: 32, cost: 0 }, choices: [{ finish_reason: 'stop',
+-          message: { role: 'assistant', content: JSON.stringify({ ...reportBinding(report), text: invalid ? '<script>attacker</script>' : '- ```js\n  Unfinished safe hypothesis', citations: [report.findings[0].findingId] }) } }] }), { headers: { 'content-type': 'application/json' } });
++        response = new Response(JSON.stringify({ model: freePolicy.model, usage: invalid === 'missing-usage' ? {} : { prompt_tokens: 500, completion_tokens: 32, cost: 0 }, choices: [{ finish_reason: 'stop',
++          message: { role: 'assistant', content: invalid === 'malformed' ? '{PRIVATE-attacker' : JSON.stringify({ ...reportBinding(report), text: invalid === 'script' ? '<script>attacker</script>' : '- ```js\n  Unfinished safe hypothesis', citations: [report.findings[0].findingId] }) } }] }), { headers: { 'content-type': 'application/json' } });
+       }); return response;
+     },
+   }) as GuardedTransport;
+@@ -499,14 +499,22 @@
+   const acquire = (llm as unknown as { acquire(owner: string): () => void }).acquire.bind(llm);
+   const generate = service.generate.bind(service);
+   service.generate = async (...args) => {
++    const previousIds = new Set((receiptDb.prepare('SELECT id FROM quota_attempt').all() as { id: string }[]).map(row => row.id));
+     const result = await generate(...args);
+-    if (result.delivery?.outcome === 'completed') {
+-      assert.throws(() => acquire(owner), 'same shared owner lease still held after commit');
+-      assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'completed');
++    if (result.delivery && result.delivery.outcome !== 'duplicate') {
++      const delivery = result.delivery;
++      assert.throws(() => acquire(owner), 'same shared owner lease still held after durable terminalization');
++      const saved = history.snapshot(owner, scanId).turns.find(turn => turn.id === delivery.turnId)!;
++      assert.equal(saved.state, delivery.outcome);
++      const attempts = (receiptDb.prepare('SELECT id FROM quota_attempt').all() as { id: string }[]).filter(row => !previousIds.has(row.id));
++      assert.equal(attempts.length, 1, 'receipt provenance is THIS attempt, not any earlier settled row');
+       const write = result.write; let n = 0;
+       result.write = action => {
+         write(() => {
+-          assert.ok((receiptDb.prepare("SELECT count(*) AS n FROM quota_attempt WHERE state='settled' AND receipt IS NOT NULL").get() as { n: number }).n > 0, 'receipt persisted BEFORE each actual write');
++          const receipt = receiptDb.prepare('SELECT state,input,output,cost,receipt,request_hash FROM quota_attempt WHERE id=?').get(attempts[0].id) as { state: string; input: number; output: number; cost: number; receipt: string; request_hash: string };
++          assert.equal(receipt.state, 'settled'); assert.ok(receipt.receipt);
++          assert.equal(receipt.request_hash, saved.requestHash);
++          assert.deepEqual([receipt.input, receipt.output, receipt.cost], [delivery.usage.input, delivery.usage.output, delivery.usage.costMicros], 'exact same-attempt receipt persisted BEFORE each actual write');
+           action();
+         }); afterWrite?.(++n);
+       };
+@@ -545,9 +553,39 @@
+     assert.equal((await post(await input(), 'text/event-stream')).status, 406); assert.equal(sends, 2);
+     const summary = await post({}, 'application/x-ndjson', undefined, 'summary');
+     assert.equal(summary.status, 400); assert.match(summary.headers.get('content-type')!, /^application\/json/); assert.equal(sends, 2);
+-    invalid = true; const bad = await post(await input()); assert.equal(bad.status, 502); assert.match(bad.headers.get('content-type')!, /^application\/json/);
+-    assert.doesNotMatch(await bad.text(), /attacker|script|synthetic/); invalid = false;
++    invalid = 'script'; const failedInput = await input(), bad = await post(failedInput);
++    assert.equal(bad.status, 200); assert.equal(bad.headers.get('content-type'), 'application/x-ndjson; charset=utf-8');
++    const failedRaw = await bad.text(), failedFrames = failedRaw.trimEnd().split('\n').map(line => JSON.parse(line));
++    assert.ok(failedRaw.endsWith('\n')); assert.deepEqual(failedFrames.map(frame => frame.type), ['usage', 'error']);
++    assert.deepEqual(failedFrames.map(frame => frame.seq), [0, 1]);
++    assert.deepEqual(failedFrames[0].usage, { input: 500, output: 32, costMicros: 0, source: 'server-validated-provider-reported-not-invoice' });
++    assert.equal(failedFrames[1].errorCode, 'LLM_UNAVAILABLE'); assert.equal(failedFrames[1].receipt, 'accepted');
++    const failedHead = history.snapshot(owner, scanId), failedTurn = failedHead.turns.at(-1)!;
++    assert.equal(failedTurn.state, 'failed'); assert.equal(failedTurn.reply, undefined); assert.equal(failedHead.pending, null);
++    assert.ok(failedFrames.every(frame => frame.turnId === failedTurn.id && frame.mutationId === failedInput.mutationId && frame.epoch === failedHead.epoch && frame.revision === failedHead.revision && frame.revision === failedInput.revision + 2));
++    assert.doesNotMatch(failedRaw, /attacker|script|synthetic|PRIVATE|"citation"|"delta"|"done"|inputHash|requestHash|reservation/);
+     assert.equal(quota.snapshot(owner, scanId).scan.used.input, 1500, 'invalid reply keeps accepted receipt'); acquire(owner)();
++    const dispatches = sends, replay = await post(failedInput);
++    const replayFrames = (await replay.text()).trimEnd().split('\n').map(line => JSON.parse(line));
++    assert.equal(replayFrames.length, 1); assert.equal(replayFrames[0].outcome, 'duplicate'); assert.equal(replayFrames[0].state, 'failed');
++    assert.equal('usage' in replayFrames[0], false); assert.equal(sends, dispatches, 'failed replay never resends or borrows receipt');
++    const legacyBad = await post(await input(), 'application/json'); assert.equal(legacyBad.status, 502);
++    assert.match(legacyBad.headers.get('content-type')!, /^application\/json/);
++    assert.deepEqual(await legacyBad.json(), { errorCode: 'LLM_INVALID_RESPONSE' });
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 2000, 'legacy failure also cannot refund'); acquire(owner)();
++    invalid = 'malformed'; const malformed = await post(await input());
++    assert.equal(malformed.status, 200); const malformedRaw = await malformed.text();
++    assert.deepEqual(malformedRaw.trimEnd().split('\n').map(line => JSON.parse(line).type), ['usage', 'error']);
++    assert.doesNotMatch(malformedRaw, /PRIVATE|attacker|"citation"|"delta"|"done"/);
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 2500); acquire(owner)();
++    invalid = 'script'; let failedWrites = 0;
++    afterWrite = n => { failedWrites = n; if (n === 2) {
++      const head = history.snapshot(owner, scanId), report = app.get(ReportReader).read({ subject: owner, scope: ['scan:read'] }, scanId);
++      history.decision(owner, scanId, head.epoch, head.revision, { id: randomUUID(), mutationId: randomUUID(), kind: 'user-decision', text: 'Decision after failed usage.', report: reportBinding(report), sources: [] });
++    } };
++    await post(await input()).then(response => response.text().catch(() => ''), () => ''); afterWrite = undefined;
++    assert.equal(failedWrites, 2, 'failed head invalidation after usage forbids stale error/end');
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 3000); acquire(owner)(); invalid = false;
+     // Actual durable revision invalidation after usage write: next write must fail, no stale error frame.
+     let written = 0;
+     const race = await input(); afterWrite = n => { written = n; if (n === 2) {
+@@ -556,18 +594,18 @@
+     } };
+     await post(race).then(r => r.text().catch(() => ''), () => ''); afterWrite = undefined;
+     assert.equal(written, 2, 'head invalidation forbids citation/delta/done/error writes');
+-    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 2000); assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'completed'); acquire(owner)();
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 3500); assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'completed'); acquire(owner)();
+     // Report and cookie rotation independently use the same production write guard, never a boolean permission.
+     const reader = app.get(ReportReader), read = reader.read.bind(reader); let stale = false;
+     reader.read = (...args) => { const report = read(...args); return stale ? { ...report, reportVersion: 'e'.repeat(64) } : report; };
+     written = 0; afterWrite = n => { written = n; if (n === 2) stale = true; };
+     await post(await input()).then(r => r.text().catch(() => ''), () => ''); stale = false; afterWrite = undefined; reader.read = read;
+     assert.equal(written, 2, 'changed report forbids further writes');
+-    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 2500); acquire(owner)();
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 4000); acquire(owner)();
+     written = 0; const sessionInput = await input(); afterWrite = n => { written = n; if (n === 2) app.get(AuthStore).revoke(cookie.slice('demo_session='.length)); };
+     await post(sessionInput).then(r => r.text().catch(() => ''), () => ''); afterWrite = undefined;
+     assert.equal(written, 2, 'revoked cookie forbids further writes');
+-    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 3000); acquire(owner)();
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 4500); acquire(owner)();
+     const login = await fetch(`${base}/auth/login`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ email: 'task16@example.com', password: 'synthetic-task16-password-1234' }) });
+     cookie = login.headers.get('set-cookie')!.split(';')[0];
+     const committed = deferred(), resume = deferred(), controller = new AbortController(); let deliverySignal: AbortSignal | undefined;
+@@ -579,7 +617,13 @@
+     assert.equal(deliverySignal?.aborted, true); resume.resolve(); afterResult = undefined;
+     for (let n = 0; n < 100; n++) { try { acquire(owner)(); break; } catch { await new Promise(r => setTimeout(r, 5)); } }
+     assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'completed');
+-    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 3500, 'disconnect cannot retract accepted receipt or committed reply'); acquire(owner)();
++    assert.equal(quota.snapshot(owner, scanId).scan.used.input, 5000, 'disconnect cannot retract accepted receipt or committed reply'); acquire(owner)();
++        service.generate = generate; invalid = 'missing-usage';
++        const unknownReceipt = await post(await input()); assert.equal(unknownReceipt.status, 502);
++        assert.match(unknownReceipt.headers.get('content-type')!, /^application\/json/);
++        assert.deepEqual(await unknownReceipt.json(), { errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
++        assert.equal(quota.snapshot(owner, scanId).scan.used.input, 5000, 'earlier settled attempts do NOT establish the current receipt');
++        assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'failed'); acquire(owner)();
+   } finally {
+     receiptDb.close(); history.close(); quota.close(); await app.close(); rmSync(dir, { recursive: true, force: true });
+     names.forEach((n, i) => { if (previous[i] === undefined) delete process.env[n]; else process.env[n] = previous[i]; });
+--- a/server/api/src/llm/TASK14.md
++++ b/server/api/src/llm/TASK14.md
+@@ -64,7 +64,7 @@
+ refusals. Reply text is bounded independently and citations are copied from server-owned
+ safe projections, never model-supplied facts or URLs.
+ 
+-Default responses remain JSON and `Cache-Control:no-store`. Chat alone supports the exact opt-in NDJSON representation described below; pre-header failures still use the existing safe JSON exception filter. POST route aliases, query strings,
++Default responses remain JSON and `Cache-Control:no-store`. Chat alone supports the exact opt-in NDJSON representation described below; ingress/pre-admission and failures without a sealed valid receipt/head still use the existing safe JSON exception filter. POST route aliases, query strings,
+ compressed/chunked bodies and non-UTF8/JSON mutations are refused before default parsing.
+ Both mutation routes have an **8192 actual-byte body limit**, exact declared/actual length,
+ and a 2-second body-ingress deadline. Rejection closes the upload connection after the
+@@ -92,8 +92,17 @@
+ CAS and context JSON remain unchanged. Summary controller and its existing1024-byte/35s
+ parent ingress requirement are untouched; nginx/main/runtime activation is not part of this rework.
+ 
+-`HistoryService.generate()` produces a typed delivery outcome only from the existing
+-attempt-bound durable quota observation plus validated committed reply. Its existing
++`HistoryService.generate()` produces a completed delivery outcome only from the existing
++attempt-bound durable quota observation plus validated committed reply. Parent-authorized
++R4 (C16-SEC-R3-01, review253) also returns a frozen failed outcome for opt-in NDJSON when
++this invocation's successful durable observe and exact live pending identity can be bound
++to a durable failed head. The failure shape contains only report/head/mutation/turn bindings
++and the frozen valid receipt: no invalid reply, source, diagnostic or exception properties.
++The existing pending guard checks reservation/request hash/session generation/incarnation/
++policy, terminalizes the exact turn and verifies failed revision=pending revision+1; inability
++to establish this provenance retains the safe exception path. JSON callers keep original502
++behavior (generate defaults to JSON; the controller passes its negotiated representation).
++Its existing
+ trusted-session/report/policy/head `write(action)` closure remains the publication guard,
+ not a returned authorization boolean. Capacity release is transferred to the controller,
+ idempotent, and retained through framed socket finish/abort/absolute delivery deadline.
+@@ -116,14 +125,17 @@
+ - `citation`: `index,source` (the original server-owned safe finding projection, never a model source object).
+ - `delta`: `index,text` (a contiguous slice of the already validated saved hypothesis, not a provider token).
+ - `done`: `outcome:'completed',kind:'hypothesis',textBytes,citationCount,deltaCount`.
+-- Later `error`: `errorCode:'LLM_UNAVAILABLE',receipt:'accepted'`, terminal, no done afterward.
++- `error`: `errorCode:'LLM_UNAVAILABLE',receipt:'accepted'`, terminal, no done afterward.
++- R4 sealed admitted failure: usage seq0→error seq1 only, bound to the exact durable failed head; no citation/delta/done or failed content.
+ 
+ Normal sequence is usage→citation1..32→delta1..17→done. If usage itself cannot be written,
+ or authority/socket/deadline is lost, close without inventing a receipt/error or successful
+ terminal. After delivered usage, a recoverable write fault may emit a bounded guarded error
+-and finish within the same deadline. Pre-header failures pass to existing safe JSON filter;
+-there is no admitted-failure engine/schema redesign or fabricated per-attempt receipt from
+-cumulative counters. No internal fingerprints/session/owner fields are framed.
++and finish within the same deadline. Sealed admitted failure uses the same writer, guards,
++bounds and shared lease as success, while legacy JSON invalid-reply responses remain502.
++Ingress/pre-admission or unsealed/no-valid-receipt failures retain the existing safe JSON
++filter; prior settled attempts never establish the current receipt. No engine/schema redesign
++or fabricated receipt from counters/exceptions. No internal fingerprints/session/owner fields are framed.
+ 
+ Identical mutation replay is done-only with `outcome:'duplicate',state:<public turn state>`
+ and durable turnId/current head; no answer, counts or usage. The chat client rejects duplicate
+@@ -134,9 +146,14 @@
+ and final revision after current-context/history reread. Partial frames never enter Markdown
+ or citation navigation. Cancellation/session/scan fences remain; no refund claim.
+ 
+-Focused synthetic evidence (not actual provider or deployed/main proof): backend TASK16 codec+
+-real cookie/service/controller subset11PASS; frontend changed client/panel subset46PASS,
+-27 intentionally deselected; separate API/frontend typechecks and scoped frontend ESLint PASS.
++R4 focused synthetic evidence (not actual provider or deployed/main proof): R4-only backend
++subset4PASS (3 codec/writer tests+updated cookie/service/controller fixture), API typecheck PASS;
++unchanged client terminal-error test1PASS/42 intentionally deselected. The HTTP fixture now
++matches the CURRENT reservation row/request hash/receipt at each write, verifies script and
++malformed-message failure framing, legacy JSON502, failed duplicate/no resend, post-usage
++failed-head invalidation and missing current receipt refusing any borrowed usage.
++Historical R3 evidence only: backend subset11PASS; frontend subset46PASS/27 intentionally
++deselected, both typechecks/scoped frontend ESLint PASS. Those suites were not repeated for R4.
+ Exact commands, corrected fixture/import failures and raw report hashes are in
+ `docs/task16-chat-ui.md` and the TASK16 manifest/report. Old TASK14 heavy tests were excluded
+ by name filter, not rerun. Independent framing/security/correctness and real browser/operator
+--- a/docs/task16-chat-ui.md
++++ b/docs/task16-chat-ui.md
+@@ -1,8 +1,10 @@
+-# TASK16 R3 — bounded validated-completed-reply NDJSON handoff
++# TASK16 R4 — bounded validated-completed-reply NDJSON handoff
+ 
+ Direct parent-assigned source implementation in `startup/diplom`, project `520a0059-d0f2-4f86-8d93-fc15035a5715`; existing context run `6ad60d60-18c5-4a6c-860f-9d8bece7232d`, no new run/work claim. Parent agreed proposal **DIP-ARTF-234** and authorized exact controller/service/delivery/tests/TASK14 documentation plus original owned UI paths after the diagnostic freeze ended.
+ 
+-**Framing is now source-implemented and focused-tested, not independently accepted or deployed.** Provider remains `stream:false`. No task done, spec application/declaration or commit. Original JSON/R2 evidence remains in artifacts222/223/232/233/234 and independent reviews227/229/237; those historical hashes do not identify this R3 source.
++**R4 fixes review253 C16-SEC-R3-01: a sealed admitted invalid-reply failure with this attempt's valid persisted receipt now emits guarded usage→error for opt-in NDJSON. Legacy JSON502 remains unchanged.** Exact pending identity and failed-head transition must be proven; no failed content, exception-derived receipt, refund or replay. R4 changes only controller/service/delivery/two backend tests/TASK14 docs and this handoff; no frontend source change. Independent R4 security recheck remains pending. Later parent authorization permits packaging frozen backend bytes and ONLY a LOW copy-feedback spacing change in safeMarkdown.tsx plus one focused regression; that change does not affect the curated backend proof.
++
++**Framing is source-implemented and focused-tested, not independently accepted or deployed.** Provider remains `stream:false`. No task done, spec application/declaration or commit. Original JSON/R2 evidence remains in artifacts222/223/232/233/234 and independent reviews227/229/237; those historical hashes do not identify this R3 source.
+ 
+ ## Owned files and exclusions
+ 
+@@ -15,7 +17,7 @@
+ - NEW `server/api/src/llm/tests/history-delivery.test.ts`
+ - `server/api/src/llm/TASK14.md`
+ 
+-This increment changes original `ScanChatPanel.tsx`, `llmChatClient.ts`, `llmChatContract.ts`, fixtures/client/panel tests and existing handoff/report/manifest. R2 safeMarkdown policy/test and original safe wrapper/renderer/Summary hook remain unchanged. `ScanSummaryPanel.tsx` retains the previously reviewed narrow AI-only mount; no further hook changes.
++The historical R3 increment changed original `ScanChatPanel.tsx`, `llmChatClient.ts`, `llmChatContract.ts`, fixtures/client/panel tests and existing handoff/report/manifest. R2 safeMarkdown policy/test and original safe wrapper/renderer/Summary hook remain unchanged. `ScanSummaryPanel.tsx` retains the previously reviewed narrow AI-only mount; no further hook changes.
+ 
+ **No store/schema/auth/quota/provider/prepared-wire/main/nginx/runtime/API-flag/lockfile/dependency/pages/scans/styles/report39/notices edits.** No actual provider call, LIVE/Docker, secret/private file inspection, deployment, actual-main/curated-graph startup proof, spec apply/declaration, branch or commit. Focused API tests use disposable synthetic storage/cookies and loopback ephemeral Nest listeners, not operator activation or deployed proof. Concurrent parent/peer source is excluded from the manifest and not certified.
+ 
+@@ -43,13 +45,13 @@
+ X-Content-Type-Options: nosniff
+ ```
+ 
+-Pre-header failures use the existing bounded safe JSON exception filter/status; no unvalidated provider exception text or raw diagnostic is returned. The new writer owns failures after headers and never appends HTTP JSON to NDJSON.
++Ingress/pre-admission and failures without a sealed valid receipt/head use the existing bounded safe JSON exception filter/status; no unvalidated provider exception text or raw diagnostic is returned. R4 seals admitted failure only after this invocation's successful durable observe and guarded durable failed-turn transition, then uses the same NDJSON writer for usage→error. JSON callers retain their original invalid-reply502. The writer owns failures after headers and never appends HTTP JSON to NDJSON.
+ 
+ ## Receipt, commit, authority and lease ordering
+ 
+ Existing exact free profile remains `apodex/apodex-1.1-mini:free / novita/bf16 / no-storage / deny+ZDR / zero caps / no paid fallback or retry / immutable guarded full wire / output<=2048 or configured stricter ceiling`. Provider wire remains `stream:false`. Reported zero usage is not invoice verification; declarations do not prove provider privacy/compliance.
+ 
+-`HistoryService.generate()` keeps existing dispatch/admission/accounting/reply validation/store commit logic. The accepted receipt is persisted by the existing bound `QuotaLedger.observe` before content validation; typed delivery outcome is returned only after full validated reply/source projections and durable completion. Receipt provenance comes from that invocation, **not cumulative counters or exception properties**. No boolean authorization permission is returned: existing `HistoryResult.write(action)` freshly checks trusted session/access, report/policy and durable epoch/revision at every actual write.
++`HistoryService.generate()` keeps existing dispatch/admission/accounting/reply validation/store commit logic. The accepted receipt is persisted by the existing bound `QuotaLedger.observe` before content validation; completed delivery outcome is returned only after full validated reply/source projections and durable completion. For opt-in NDJSON, R4 can instead return a frozen failed outcome containing ONLY this invocation's normal accepted receipt and exact report/head/mutation/turn binding after fresh pending session/request/reservation/policy proof, durable failed transition and exact final failed revision. No invalid reply/source/diagnostic enters that outcome. Receipt provenance comes from that invocation, **not cumulative counters or exception properties**. No boolean authorization permission is returned: existing `HistoryResult.write(action)` freshly checks trusted session/access, report/policy and durable epoch/revision at every actual write.
+ 
+ The service transfers its existing shared one-owner/eight-global capacity release to the controller on successful completion; idempotent release covers preflight failure, JSON write, framed finish, abort/deadline/socket failure. The framed writer holds it through socket finish; it never holds auth/history transactions over drain/socket awaits. Existing ledger cleanup remains unchanged; delivery failure cannot retract settled receipt or downgrade committed history. Direct service consumers must dispose the returned optional `release`; production controller always does so.
+ 
+@@ -70,7 +72,7 @@
+ 
+ Normal order: usage→citation1..32→delta1..17→done. Common version/mode/nativeProviderStream/report/epoch/revision/mutationId/turnId tuple is fixed; seq/index are monotonic and exact. Source objects are original validated server projections, not arbitrary model facts/URLs. Done has exact reconstructed byte/source/delta counts and hypothesis kind.
+ 
+-A recoverable failure after delivered usage may replace the remaining sequence with one guarded bounded terminal `error`, common tuple plus `{type:'error',seq:<next>,errorCode:'LLM_UNAVAILABLE',receipt:'accepted'}`; no done follows. If usage itself failed to write, socket/authority/deadline is gone, or terminal was already queued, close without fabricating a receipt/terminal. Failed-generation/pre-header exceptions remain safe HTTP JSON. The strict parser also recognizes unavailable-receipt terminal errors but current service does not invent them from failed attempts.
++A recoverable failure after delivered usage may replace the remaining sequence with one guarded bounded terminal `error`, common tuple plus `{type:'error',seq:<next>,errorCode:'LLM_UNAVAILABLE',receipt:'accepted'}`; no done follows. If usage itself failed to write, socket/authority/deadline is gone, or terminal was already queued, close without fabricating a receipt/terminal. R4 admitted invalid-reply failure with a sealed valid current receipt/head uses exactly usage seq0→error seq1 (accepted receipt), never citation/delta/done/invalid content. Unsealed/no-valid-receipt and ingress/pre-admission exceptions remain safe HTTP JSON. The strict parser also recognizes unavailable-receipt terminal errors but current service does not invent them from failed attempts.
+ 
+ Replay is exact done-only `{...common,type:'done',seq:0,outcome:'duplicate',state:<public state>}`, no reply/citations/counts/usage. Client rejects duplicate as generated success and requires manual history reread; no automatic resend or fabricated historical/zero receipt.
+ 
+@@ -82,9 +84,9 @@
+ 
+ Consent is separately manual/current-question/report/policy/history-bound; generation is never a mount/focus effect. Cancel/error/timeout/scan A→B→A/same-owner reauth/generation changes abort waiting, hide stale snapshot/receipt/consent and require manual history recovery. Accepted accounting remains backend truth even when local receipt is hidden. Existing scanner coverage/findings remain outside the panel and survive failures.
+ 
+-R2 exact unfinished list/blockquote/nested-fence fallback/copy remains unchanged and independently approved in237. Real lazy Streamdown still disables rawHTML/default plugins/incomplete repair/images/mermaid/highlighter/executable code, allows only explicit safe HTTPS, copies text/plain, and falls back to exact escaped text on incomplete/HTML-like input or lazy failure. New framed panel test verifies partial nested fence is unpublished and final unfinished text is exact inert pre content.
++R2 exact unfinished list/blockquote/nested-fence policy remains unchanged and independently approved in237. The wrapper now has a separately authorized explicit space between copy label and status feedback; the existing test file adds one regression, so its old whole-file hash is historical. Real lazy Streamdown still disables rawHTML/default plugins/incomplete repair/images/mermaid/highlighter/executable code, allows only explicit safe HTTPS, copies text/plain, and falls back to exact escaped text on incomplete/HTML-like input or lazy failure. New framed panel test verifies partial nested fence is unpublished and final unfinished text is exact inert pre content.
+ 
+-## Verification actually run — current R3
++## Historical verification — R3, not repeated for R4
+ 
+ Frontend final changed-scope command:
+ 
+@@ -107,6 +109,23 @@
+ 
+ Disclosed corrections: first new HTTP fixture used a noncanonical temporary history filename and refused before assertions; fixed to `llm-history.sqlite`/`llm-usage.sqlite`. One new escaping fixture accidentally had20000 text bytes, correctly refused; fixed to16384 and passed final11. A direct test import crossed backend decorator source into the frontend compiler; switched this production seam to runtime-only cross-project import, removed an unused import, and both project compilers/lint passed. No peer server files were changed to silence diagnostics. An earlier backend9PASS/1fixtureFAIL command also ran a succeeding typecheck after `;`; it is NOT claimed all-green. Final backend command uses `&&` and passed11.
+ 
++## R4 verification and independent security recheck
++
++Parent authorized the finding253 fix, not a redesign or contract exception. RED: the new HTTP regression reproduced502 JSON where admitted failure now requires200 NDJSON. GREEN final R4-only backend command (cwd `server/api`):
++
++```sh
++pnpm exec tsx --test --test-reporter=tap --test-name-pattern R4 src/llm/tests/history-delivery.test.ts src/llm/tests/history.http.test.ts
++pnpm exec tsc --noEmit
++```
++
++**4PASS/0FAIL**:3 new codec/writer tests + the updated focused cookie/service/controller test. Raw final runner output: `docs/task16-r4-backend-tests.tap`. Current-attempt reservation row/request hash/settled receipt matched at each actual write; script and malformed JSON-message failures emit usage/error only; durable failed head/CAS and absent reply verified; failed replay is status-only/no resend; legacy script failure remains502 JSON; failed-head invalidation after usage suppresses stale error/end; no current valid usage cannot borrow previous settled receipts. Unit tests verify exact failure shape/bounds/no content, guard at header/usage/error/end, drain/finish lease retention, and authority/abort/deadline cleanup. No actual provider invoked.
++
++Unchanged client compatibility: `pnpm exec vitest run tests-vite/ui/scans/llmChatClient.test.ts -t '^framed terminal error after accepted usage' --reporter=verbose`: **1PASS/42 intentionally deselected**. No frontend source edits or raw R3 report overwrite. API typecheck PASS; no R4 full frontend typecheck/build/heavy/R3/old Markdown/Summary suite repeats.
++
++Disclosed test corrections: two intermediate runs passed3 unit tests and stopped only on my new missing-usage fixture expectations: initially503 (actual502), then LLM_INVALID_RESPONSE (actual LLM_PROVIDER_UNAVAILABLE). Read the existing provider catch to confirm the bounded502 mapping and corrected only the assertions. Provider/exception-filter code was not changed. Final4PASS and typecheck are separate from those failed intermediate commands.
++
++`docs/task16-r4-diff.patch` is the exact R3→R4 delta for the seven changed owned paths, generated from pre-edit content whose hashes matched249; it is NOT a HEAD→dirty diff or a peer/runtime/nginx diff. New evidence/raw TAP and current manifest also identify the frozen review baseline. Request security recheck of253 C16-SEC-R3-01 against the R4 hashes; prior253/255 approvals describe R3 only. Only the later explicitly authorized frontend copy-feedback spacing fix was applied: one JSX space, one focused regression1PASS/35 intentionally deselected and two-file ESLint PASS. No backend source was rewritten or backend/typecheck suite rerun during packaging. Current manifest keeps the19 original payloads current and pins additional raw evidence/diff/five-file snapshot separately. Parent-reported curated hash ac2d1be63aa4dcb4346df347dc9469cf3ee40d2f7a814675de20209cade2cf34 is NOT proof execution approval; independent257 confirms exactly five backend drift entries. No further source edits without explicit authorization.
++
+ ## Historical evidence and independent review still needed
+ 
+ - Initial41 client/panel/Markdown pass and separate historical Summary24:223, not current R3 runs.
+@@ -115,4 +134,4 @@
+ 
+ Request independent security and correctness/spec reviews against the new exact manifest: receipt/commit provenance, per-write and post-drain authority, deadline/lease cleanup, JSON/summary compatibility, source projection/nonce/ordering/EOF validation, partial/error/duplicate/cancel/scan/session publication and complete durable equality. Actual authorized main/backend/client integration, real320/375 keyboard/screen-reader/visual acceptance, nginx buffering/ingress activation and operator topology/init remain parent gates. No provider invoice/privacy/live acceptance claim.
+ 
+-Task remains **testing85**, not done/100 or independently accepted. Spec deltas remain unapplied. Current manifest contains19 owned payloads, excludes itself and peer/source-graph/nginx work; source hashes, not HEAD alone, identify this uncommitted delivery.
++Task remains **testing85**, not done/100 or independently accepted. Spec deltas remain unapplied. Current R4 manifest files[] retains19 original owned payloads and supplemental[] pins the raw evidence/diff/five-file snapshot, excluding itself and peer/source-graph/nginx work; source hashes, not HEAD alone, identify this uncommitted delivery.
+--- a/src/features/scans/safeMarkdown.tsx
++++ b/src/features/scans/safeMarkdown.tsx
+@@ -22,7 +22,7 @@
+         }}
+       >
+         {label}
+-      </button>
++      </button>{' '}
+       <span role="status">{message}</span>
+     </>
+   );
+--- a/tests-vite/ui/scans/safeMarkdown.test.tsx
++++ b/tests-vite/ui/scans/safeMarkdown.test.tsx
+@@ -1,6 +1,6 @@
+ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+ import { afterEach, expect, it, vi } from 'vitest';
+-import { SafeMarkdown } from '@/features/scans/safeMarkdown';
++import { CopyText, SafeMarkdown } from '@/features/scans/safeMarkdown';
+ import SafeMarkdownRenderer from '@/features/scans/SafeMarkdownRenderer';
+ import { safeMarkdownUrl, unfinishedFence } from '@/features/scans/safeMarkdownPolicy';
+ 
+@@ -8,6 +8,23 @@
+   cleanup();
+   vi.unstubAllGlobals();
+   vi.restoreAllMocks();
++});
++it('R4 copy feedback is separated from the button label without changing copied text', async () => {
++  const text = '- ```js\n  Exact unfinished text',
++    writeText = vi.fn(async () => {});
++  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
++  const { container } = render(<CopyText text={text} />);
++  fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
++  await act(async () => {});
++  expect(screen.getByRole('status').textContent).toBe('Скопировано');
++  expect(container.textContent).toBe('Скопировать текст Скопировано');
++  expect(writeText).toHaveBeenCalledWith(text);
++  writeText.mockRejectedValueOnce(new Error('denied'));
++  fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
++  await act(async () => {});
++  expect(container.textContent).toBe('Скопировать текст Копирование недоступно; выделите текст вручную.');
++  expect(writeText).toHaveBeenNthCalledWith(2, text);
++  expect(container.querySelector('script,a,img,pre,code')).toBeNull();
+ });
+ it('unfinished fences (length/type/nested markers) stay plain, exactly copyable and inert', async () => {
+   const text = '```js\n<script>alert(1)</script>\n[jump](javascript:alert)';

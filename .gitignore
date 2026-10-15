@@ -15,3 +15,7 @@ test-results/
 !.env.example
 .DS_Store
 .zed/settings.json
+
+# Temporary patch-generation inputs; published historical evidence stays versioned.
+/docs/task16-r4-baseline.json
+/docs/task16-r5-baseline.json

@@ -11,6 +11,27 @@ import { LedgerStore } from '../ledger/ledger-store.js';
 import { OciResolver } from '../oci/oci-resolver.js';
 import { ScansService } from './scans.service.js';
 import { normalizeAdvisory } from '../worker/vuln-advisory.js';
+import { CURRENT_DB_POLICY, evaluateDbPolicy } from '../worker/cve-db-policy.mjs';
+
+type DbPolicyResponse = { evaluatedAt: number; warnings: string[] };
+interface StatusResponse {
+  state: string;
+  perCheck: {
+    secret: { outcome: string };
+    sbom: { componentCount: number };
+    vuln: { findingCount: number; dbPolicy: DbPolicyResponse };
+  };
+}
+interface VulnResponse {
+  findings: unknown[];
+  nextCursor: number | null;
+  outcome: string;
+  resultContractVersion: number;
+  db: { envelopeVersion: number };
+  checkedAt: string;
+  workerCheckedAt: number;
+  dbPolicy: DbPolicyResponse;
+}
 
 const origin = 'http://127.0.0.1:8080';
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -71,7 +92,11 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
 
     // Simulates a verified operator release for the success path only; the real
     // missing-DB rejection above exercises the production preflight unchanged.
-    Object.defineProperty(service, 'vulnDbReady', { value: async () => true });
+    Object.defineProperty(service, 'vulnDbReady', { value: async () => {
+          const at = Date.now();
+          return { updatedAt: new Date(at - 3 * 86400_000).toISOString(),
+            downloadedAt: new Date(at - 3 * 86400_000 + 1000).toISOString(), nextUpdate: new Date(at - 2 * 86400_000).toISOString() };
+        } });
     const created = await post('alice', request(['secret', 'sbom', 'vuln'], 'combined-vuln-key'));
     assert.equal(created.status, 202);
     const { scanId } = await created.json() as { scanId: string };
@@ -96,23 +121,43 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
       severitySources: ['alpine', 'nvd'], provenanceRef,
       advisory: normalizeAdvisory({ Title: 'Busybox issue', Description: 'Safe text CANARY-secret', DataSource: { ID: 'alpine' },
         Severity: 'HIGH', SeveritySource: 'alpine', CVSS: { nvd: { V3Score: 0, V3Vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H' } } }, provenanceRef, cveId) };
+    assert.equal(job.cvePolicy, CURRENT_DB_POLICY);
+    // Synthetic identity/evidence for HTTP contract only, not release/scanner proof.
+    const checkedAt = Date.now();
+    const db = { envelopeVersion: 1, signer: 'local-db-operator-v1', schemaVersion: 2,
+      source: `ghcr.io/aquasecurity/trivy-db@sha256:${'d'.repeat(64)}`, manifestDigest: `sha256:${'d'.repeat(64)}`,
+      artifactSha256: 'a'.repeat(64), metadataSha256: 'b'.repeat(64), dbSha256: 'c'.repeat(64),
+      updatedAt: new Date(checkedAt - 3 * 86400_000).toISOString(),
+      downloadedAt: new Date(checkedAt - 3 * 86400_000 + 1000).toISOString(),
+      nextUpdate: new Date(checkedAt - 2 * 86400_000).toISOString() };
+    const dbEvidence = { db, checkedAt, dbPolicy: evaluateDbPolicy(db, CURRENT_DB_POLICY, checkedAt)! };
     assert.equal(ledger.finishCombined(scanId, job.attempts, [
       { check: 'secret', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' },
       { check: 'sbom', outcome: 'checked', scannerVersion: '0.69.3', sbom: { image,
         platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' },
         components: [{ ecosystem: 'apk', name: 'busybox', version: '1.2-r0' }] } },
-      { check: 'vuln', outcome: 'checked', image, scannerVersion: '0.69.3', findings: [finding] },
+      { check: 'vuln', outcome: 'checked', image, scannerVersion: '0.69.3', findings: [finding], dbEvidence },
     ]), true);
-    const status = await (await fetch(`${path}/${scanId}`, { headers: auth('alice') })).json() as Record<string, any>;
+    const status = await (await fetch(`${path}/${scanId}`, { headers: auth('alice') })).json() as StatusResponse;
     assert.equal(status.state, 'partial');
     assert.equal(status.perCheck.secret.outcome, 'failed');
     assert.equal(status.perCheck.sbom.componentCount, 1);
     assert.equal(status.perCheck.vuln.findingCount, 1);
     assert.equal((await fetch(`${path}/${scanId}`, { headers: auth('bob') })).status, 404);
-    const page = await (await fetch(`${path}/${scanId}/vuln?limit=1`, { headers: auth('alice') })).json() as Record<string, any>;
+    const page = await (await fetch(`${path}/${scanId}/vuln?limit=1`, { headers: auth('alice') })).json() as VulnResponse;
     assert.deepEqual(page.findings, [finding]);
     assert.equal(page.nextCursor, null);
     assert.equal(page.outcome, 'checked');
+    assert.equal(page.resultContractVersion, 2);
+    assert.equal(page.db.envelopeVersion, 1);
+    assert.equal(page.checkedAt, new Date(checkedAt).toISOString());
+    assert.equal(page.workerCheckedAt, checkedAt);
+    assert.ok(page.dbPolicy.evaluatedAt >= checkedAt);
+    assert.deepEqual(page.dbPolicy.warnings, ['DB_DATA_OLDER_THAN_24H', 'DB_PUBLICATION_OVERDUE']);
+    assert.deepEqual(status.perCheck.vuln.dbPolicy, page.dbPolicy);
+    assert.equal(Object.hasOwn(page, 'dbEvidence'), false);
+    // Browser owner180 now supplies the closed v2 branch; retain the server receipt intact.
+    assert.deepEqual(parseCurrentVuln(page).dbPolicy, page.dbPolicy);
     for (const query of ['?cursor=-1', '?cursor=1.5', '?cursor=2', '?limit=0', '?limit=101'])
       assert.equal((await fetch(`${path}/${scanId}/vuln${query}`, { headers: auth('alice') })).status, 400);
     assert.equal((await fetch(`${path}/${scanId}/vuln`, { headers: auth('bob') })).status, 404);

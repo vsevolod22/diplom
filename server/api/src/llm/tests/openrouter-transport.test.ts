@@ -70,7 +70,7 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
   try {
     await new Promise<void>(resolve => tls.listen(0, '127.0.0.1', resolve));
     await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
-    const run = async (trusted: boolean, success: boolean) => {
+    const run = async (trusted: boolean, success: boolean, guarded?: 'allow' | 'deny') => {
       const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.NODE_TLS_REJECT_UNAUTHORIZED; delete env.NODE_EXTRA_CA_CERTS;
       if (trusted) env.NODE_EXTRA_CA_CERTS = cert;
       // Host-only synthetic test CA, never a production TLS disable or secret file.
@@ -78,22 +78,47 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
         import {makeOpenRouterTransport} from ${JSON.stringify(new URL('../openrouter-transport.ts', import.meta.url).href)};
         const t=makeOpenRouterTransport({host:'127.0.0.1',port:${(proxy.address() as { port: number }).port}});
         const init=${JSON.stringify(options())};init.signal=AbortSignal.timeout(400);
-        ${success ? `assert.equal(await (await t(${JSON.stringify(OPENROUTER_ENDPOINT)},init)).text(),'{}');` : `await assert.rejects(t(${JSON.stringify(OPENROUTER_ENDPOINT)},init),/OpenRouter transport unavailable/);`}`;
+        process.stdout.write('synthetic-transport-started\\n');
+        let guards=0;
+                const call=()=>${guarded ? `t.sendGuarded(${JSON.stringify(OPENROUTER_ENDPOINT)},init,send=>{guards++;${guarded === 'deny' ? 'throw Error("synthetic stale authority");' : 'send();'}})` : `t(${JSON.stringify(OPENROUTER_ENDPOINT)},init)`};
+                ${success ? `assert.equal(await (await call()).text(),'{}');` : `await assert.rejects(call(),/OpenRouter transport unavailable/);`}
+                assert.equal(guards,${guarded && trusted ? 1 : 0});
+        process.stdout.write('synthetic-transport-settled\\n');`;
       await new Promise<void>((resolve, reject) => {
         const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-        let output = ''; child.stdout.on('data', c => { output += String(c); }); child.stderr.on('data', c => { output += String(c); });
-        const deadline = setTimeout(() => { child.kill('SIGKILL'); reject(Error('synthetic TLS child timeout')); }, 5000);
-        child.once('error', error => { clearTimeout(deadline); reject(error); });
-        child.once('close', code => { clearTimeout(deadline); code === 0 ? resolve() : reject(Error(output)); });
+        let output = '', exitCode: number | null | undefined;
+        child.once('exit', code => { exitCode = code; });
+        child.stdout.on('data', c => { output += String(c); }); child.stderr.on('data', c => { output += String(c); });
+        let failure: Error | undefined;
+        const deadline = setTimeout(() => {
+          const phase = output.includes('synthetic-transport-settled') ? 'settled' : output.includes('synthetic-transport-started') ? 'started' : 'loading';
+          failure = Error(`synthetic TLS child timeout (${mode}, trusted=${trusted}, guard=${guarded ?? 'none'}, phase=${phase}, exit=${exitCode})`);
+          child.kill('SIGKILL');
+        }, 5000);
+        child.once('error', error => { failure ??= error; });
+        // Reap the owned child and its stdio before tearing down its TLS fixture.
+        child.once('close', code => {
+          clearTimeout(deadline);
+          if (failure) reject(failure);
+          else if (code === 0) resolve();
+          else reject(Error(output));
+        });
       });
       for (let i = 0; sockets.size && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 10));
       assert.equal(sockets.size, 0, 'all tunnel/HTTP sockets closed');
     };
-    await run(true, true); assert.equal(requests, 1);
+    // Reject from secureConnect repeatedly: each fresh child must exit naturally
+    // and close every socket, not only settle the rejected transport promise.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await run(true, false, 'deny');
+      assert.equal(requests, 0, 'fresh TLS guard refusal sends zero credential HTTP/body');
+    }
+    await run(false, false, 'allow'); assert.equal(requests, 0, 'guard never runs before authenticated TLS');
+    await run(true, true, 'allow'); assert.equal(requests, 1, 'fresh guard initiates exactly one credential HTTP/body');
     await run(false, false); assert.equal(requests, 1, 'untrusted TLS sends no credential HTTP');
     mode = 'denied'; await run(true, false); assert.equal(requests, 1, 'CONNECT denied, no fallback');
     for (const value of ['redirect', 'oversize', 'headers', 'body']) { mode = value; await run(true, false); }
-    assert.equal(requests, 5); assert.equal(connects, 7, 'one CONNECT per call, no retry');
+    assert.equal(requests, 5); assert.equal(connects, 13, 'one CONNECT per call, no retry');
   } finally {
     for (const socket of sockets) socket.destroy();
     await Promise.all([new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => tls.close(() => resolve()))]);

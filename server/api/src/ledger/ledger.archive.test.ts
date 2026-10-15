@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import { ScanLedger } from './ledger.js';
 import { NGINX_ARCHIVE_TARGET } from '../oci/bounded-image-archive.js';
 import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
+import { CURRENT_DB_POLICY, evaluateDbPolicy } from '../worker/cve-db-policy.mjs';
 const target = { ...NGINX_ARCHIVE_TARGET, digest: NGINX_ARCHIVE_TARGET.digest as `sha256:${string}`, subject: 'alice',
   idempotencyKey: 'archive-qualification', checks: '["secret","sbom","vuln"]', scope: 'image', fingerprint: 'a'.repeat(64) };
 function report(): ArchiveScanReport {
@@ -126,6 +127,26 @@ test('archive report budget omits metadata before commit and preserves core N/ID
   const reopened = new ScanLedger(file);
   try { assert.deepEqual(reopened.archiveResult(id, 'alice'), saved); } finally { reopened.close(); }
 }));
+test('v2 mandatory final receipt is reserved in the UTF8 archive budget without dropping core findings', () => fixture((ledger, file) => {
+  const value = advisoryReport(1000);
+  value.secret = { outcome: 'checked', findings: Array.from({ length: 1000 }, (_, i) => ({ findingId: `secret-${i}-0`, ruleId: 'r'.repeat(80), line: i, evidenceRef: `result-${i}-secret-0` })) };
+  if (value.sbom?.outcome !== 'checked' || value.vuln?.outcome !== 'checked') throw Error('fixture');
+  value.sbom.sbom.components = Array.from({ length: 1000 }, (_, i) => ({ ecosystem: 'apk', name: `p${i}`.padEnd(128, 'x'), version: '1'.repeat(80) }));
+  value.vuln.dbPolicy = evaluateDbPolicy(value.vuln.db, CURRENT_DB_POLICY, value.checkedAt)!;
+  const ids = value.vuln.findings.map(f => f.findingId);
+  assert.ok(jsonBytes(value) > 2_000_000);
+  const id = ledger.enqueue({ ...target, cvePolicy: CURRENT_DB_POLICY }).scanId, job = ledger.claim()!;
+  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  const saved = ledger.archiveResult(id, 'alice');
+  if (saved?.vuln?.outcome !== 'checked') throw Error('checked expected');
+  assert.deepEqual(saved.vuln.findings.map(f => f.findingId), ids);
+  assert.equal(saved.checkedAt, value.checkedAt);
+  assert.ok(saved.vuln.dbPolicy!.evaluatedAt >= value.checkedAt);
+  assert.ok(jsonBytes(saved) <= 2_000_000);
+  const reopened = new ScanLedger(file);
+  try { assert.deepEqual(reopened.archiveResult(id, 'alice'), saved); } finally { reopened.close(); }
+}));
+
 test('embedded aggregate metadata limit is enforced both before write and on stored read', () => fixture((ledger, file) => {
   const value = advisoryReport(300), excessive = structuredClone(value);
   if (value.vuln?.outcome !== 'checked' || excessive.vuln?.outcome !== 'checked') throw new Error('fixture');

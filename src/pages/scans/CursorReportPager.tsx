@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
+import { ReportCursorResetError, ReportQueryError, ReportViewContractError } from '@/shared/api/scans/reportView';
+import { CveReportContractError } from '@/shared/api/scans/cveDbMetadata';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 
 export type PageDescription = {
@@ -9,6 +11,8 @@ export type PageDescription = {
   rowIds: string[];
   rowFingerprint: string;
   total: number | null;
+  wholeTotal?: number | null;
+  offset?: number;
   nextCursor: string | null;
 };
 export class ReportIdentityError extends Error {}
@@ -30,6 +34,7 @@ type Props<T> = {
   waiting: string;
   load: (cursor: string | undefined, signal: AbortSignal) => Promise<T>;
   describe: (data: T) => PageDescription;
+  controls?: (pending: boolean) => ReactNode;
   children: (data: T) => ReactNode;
 };
 
@@ -38,7 +43,7 @@ export function CursorReportPager<T>(props: Props<T>) {
   return <PagerSession key={props.reportKey} {...props} />;
 }
 
-function PagerSession<T>({ label, enabled, waiting, load, describe, children }: Props<T>) {
+function PagerSession<T>({ label, enabled, waiting, load, describe, controls, children }: Props<T>) {
   const [snapshot, setSnapshot] = useState<Snapshot<T> | null>(null);
   const confirmed = useRef<Snapshot<T> | null>(null);
   const displayed = useRef<Snapshot<T> | null>(null);
@@ -62,6 +67,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
         if (controller.signal.aborted) return;
         const description = describe(data);
         const previous = confirmed.current;
+        if (description.offset !== undefined && description.offset !== target.start) throw new ReportViewContractError();
         if (
           previous &&
           (description.identity !== previous.description.identity ||
@@ -99,6 +105,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
               earlierEntries.some((entry) => entry.cursor === description.nextCursor))) ||
           inconsistentTotal
         ) {
+          if (description.offset !== undefined) throw new ReportViewContractError();
           throw new Error('Invalid pagination');
         }
         entries[target.index] = {
@@ -131,7 +138,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
           setError(
             'Содержимое посещённой страницы изменилось при прежней идентичности отчёта. История cursors сброшена. Показана последняя подтверждённая страница, а не несовместимый ответ; повтор начинается с первой страницы.',
           );
-        } else if (accessLost || failure instanceof ReportIdentityError) {
+        } else if (accessLost || failure instanceof ReportIdentityError || failure instanceof CveReportContractError || failure instanceof ReportViewContractError || failure instanceof ReportCursorResetError) {
           confirmed.current = null;
           displayed.current = null;
           setHistoryInvalid(false);
@@ -141,7 +148,9 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
           setError(
             accessLost
               ? 'Доступ к отчёту утрачен. Подтвердите сессию заново.'
-              : 'Идентичность или версия отчёта изменилась. Прежние данные и cursors сброшены.',
+              : failure instanceof ReportQueryError
+                ? 'Исправьте фильтры отчёта. Прежние данные и cursors сброшены; повтор начинается с первой страницы.'
+                : 'Идентичность или версия отчёта изменилась. Прежние данные и cursors сброшены.',
           );
         } else {
           setError(
@@ -173,8 +182,23 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
   const page = snapshot?.description.checked ? snapshot : null;
   const previous = page && !historyInvalid && page.index > 0 ? page.entries[page.index - 1] : null;
   const nextCursor = page?.description.nextCursor ?? null;
+  const navigable = !!page && page.description.rowIds.length > 0 && (page.index > 0 || nextCursor !== null);
+  const navigation = (position: 'top' | 'bottom') => navigable ? (
+    <nav className="scan-report-pages__controls" aria-label={`Пагинация ${label} · ${position === 'top' ? 'сверху' : 'снизу'}`}>
+      <strong>Страницы {label}</strong>
+      <Button type="button" variant="secondary" disabled={pending || historyInvalid || !previous || denied}
+        onClick={() => previous && void fetchPage({ ...previous, index: (page?.index ?? 0) - 1 })}>
+        Назад · {label}{position === 'top' ? ' · сверху' : ''}
+      </Button>
+      <Button type="button" variant="secondary" disabled={pending || historyInvalid || nextCursor === null || denied}
+        onClick={() => page && nextCursor !== null && void fetchPage({ cursor: nextCursor, index: page.index + 1, start: page.start + page.description.rowIds.length })}>
+        Далее · {label}{position === 'top' ? ' · сверху' : ''}
+      </Button>
+    </nav>
+  ) : null;
   return (
     <div className="scan-report-pages" aria-busy={pending}>
+      {controls?.(pending)}
       {!enabled ? (
         <p>{waiting}</p>
       ) : (
@@ -190,9 +214,10 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
                 </span>
                 <span>
                   {page.description.total !== null
-                    ? `Подтверждённый итог ${label}: ${page.description.total}`
+                    ? `${page.description.wholeTotal !== undefined ? 'Совпадений во всём отчёте' : 'Подтверждённый итог'} ${label}: ${page.description.total}`
                     : `Итог ${label} неизвестен`}
                 </span>
+                {page.description.wholeTotal !== undefined ? <span>{page.description.wholeTotal === null ? `Полный итог ${label} неизвестен` : `Полный итог ${label}: ${page.description.wholeTotal}`}</span> : null}
               </>
             ) : (
               <span>Число {label} неизвестно до подтверждения выполненной проверки.</span>
@@ -219,36 +244,12 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, children }: 
               ) : null}
             </Alert>
           ) : null}
+          {navigation('top')}
           {snapshot && !denied ? children(snapshot.data) : null}
-          <nav className="scan-report-pages__controls" aria-label={`Пагинация ${label}`}>
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={pending || !previous || denied}
-              onClick={() => previous && void fetchPage({ ...previous, index: (page?.index ?? 0) - 1 })}
-            >
-              Назад · {label}
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={pending || historyInvalid || nextCursor === null || denied}
-              onClick={() =>
-                page &&
-                nextCursor !== null &&
-                void fetchPage({
-                  cursor: nextCursor,
-                  index: page.index + 1,
-                  start: page.start + page.description.rowIds.length,
-                })
-              }
-            >
-              Далее · {label}
-            </Button>
-          </nav>
-          <p className="scan-a1__muted scan-report-pages__note">
-            Только последовательные страницы API. Общего числа страниц и глобальной сортировки нет.
-          </p>
+          {navigation('bottom')}
+          {navigable ? <p className="scan-a1__muted scan-report-pages__note">
+            Только последовательные страницы API. Общего числа страниц и перехода к произвольной странице нет.
+          </p> : null}
         </>
       )}
     </div>

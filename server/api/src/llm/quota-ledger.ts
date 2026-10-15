@@ -62,6 +62,18 @@ export class QuotaLedger {
     } catch { this.db.close(); throw quotaUnavailable(); }
   }
   close() { this.db.close(); }
+    // New synchronous send guards use a tighter contention bound without changing
+    // the accepted quota policy, accounting or ordinary summary connection default.
+    withBusyTimeout<T>(busyMs: number, action: () => T): T {
+      if (!Number.isInteger(busyMs) || busyMs < 0 || busyMs > this.policy.busyMs) throw quotaUnavailable();
+      const previous = this.db.pragma('busy_timeout', { simple: true }) as number;
+      try {
+        this.db.pragma(`busy_timeout = ${busyMs}`);
+        const result = action();
+        if (result && typeof result === 'object' && 'then' in result) throw quotaUnavailable();
+        return result;
+      } finally { this.db.pragma(`busy_timeout = ${previous}`); }
+    }
   private fileSafety() {
     const stat = lstatSync(this.path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||

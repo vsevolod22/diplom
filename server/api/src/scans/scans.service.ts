@@ -5,18 +5,37 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 
 import { LedgerStore } from '../ledger/ledger-store.js';
-import { AdmissionLimited, IdempotencyConflict } from '../ledger/ledger.js';
+import { AdmissionLimited, IdempotencyConflict, type ScanLedger } from '../ledger/ledger.js';
 import { OciResolver } from '../oci/oci-resolver.js';
 import { parseScanRequest } from './scan-request.js';
-import { preflightVulnDbBundle } from '../worker/vuln-db-bundle.js';
+import { assertDbFreshness, preflightVulnDbBundle, type VerifiedDbIdentity } from '../worker/vuln-db-bundle.js';
+import { CURRENT_DB_POLICY } from '../worker/cve-db-policy.mjs';
+import { dbEvidenceMetadata, type CveDbEvidence } from '../worker/cve-db-evidence.js';
+import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
 import { chainReady } from './scan-readiness.js';
 import type { Identity } from '../security/identity.js';
 import type { ImageReference } from './image-reference.js';
 import type { ImageSuggestion } from './image-search.js';
 import { localReceiptMatches, type LocalExecutionBinding } from '../oci/nginx-local-policy.js';
+import { hasReportView, parseReportQuery, ReportViewError, type ReportKind } from './report-query.js';
+import { pageVuln, pageSbom, pageSecrets } from './report-page.js';
 
 const allowed = new Set(['registry-1.docker.io']);
 const unavailable = () => new ServiceUnavailableException({ errorCode: 'SCANNER_UNAVAILABLE' });
+function dbStillUsable(identity: Readonly<VerifiedDbIdentity> | boolean | undefined): boolean {
+  if (!identity || typeof identity !== 'object') return false;
+  try { assertDbFreshness(identity, Date.now(), CURRENT_DB_POLICY); return true; }
+  catch { return false; }
+}
+function archivePolicyMetadata(report: ArchiveScanReport) {
+  const vuln = report.vuln;
+  if (!vuln || vuln.outcome === 'failed' || !vuln.db || !vuln.dbPolicy) return {};
+  return policyMetadata({ db: vuln.db, checkedAt: report.checkedAt, dbPolicy: vuln.dbPolicy });
+}
+function policyMetadata(evidence: CveDbEvidence) {
+  const { checkedAt, ...metadata } = dbEvidenceMetadata(evidence);
+  return { ...metadata, workerCheckedAt: checkedAt };
+}
 type Receipt = { scanId: string; statusUrl: string; eventsUrl: string };
 const receipt = (scanId: string): Receipt => ({ scanId, statusUrl: `/api/v1/scans/${scanId}`,
   eventsUrl: `/api/v1/scans/${scanId}/events` });
@@ -35,8 +54,11 @@ export class ScansService {
   protected acceptsReference(reference: ImageReference): boolean {
     return reference.registry === 'registry-1.docker.io' && reference.repository === 'library/alpine';
   }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Keep the proof subclass hook signature; production accepts any parsed check set.
   protected acceptsChecks(_reference: ImageReference, _checks: readonly string[]): boolean { return true; }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Proof subclasses bind the reference; production has no archive binding.
   protected executionBinding(_reference: ImageReference): LocalExecutionBinding | undefined { return undefined; }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Preserve the reference-aware proof subclass hook signature.
   protected allowedCheckSets(_reference: ImageReference): readonly (readonly string[])[] {
     return Array.from({ length: 15 }, (_, mask) => ['secret', 'sbom', 'vuln', 'config'].filter((_, bit) => (mask + 1) & (1 << bit)));
   }
@@ -46,7 +68,8 @@ export class ScansService {
   }
   imageSuggestion(suggestion: ImageSuggestion): ImageSuggestion { return suggestion; }
 
-  protected async vulnDbReady(): Promise<boolean> {
+  // Historical subclasses may still return boolean; true is NOT authenticated v2 authority.
+  protected async vulnDbReady(): Promise<Readonly<VerifiedDbIdentity> | boolean> {
     const directory = process.env.SCAN_VULN_RELEASE_DIR;
     const manifest = process.env.SCAN_VULN_MANIFEST_DIGEST;
     const artifact = process.env.SCAN_VULN_ARTIFACT_SHA256;
@@ -58,10 +81,10 @@ export class ScansService {
       const publicKey = createPublicKey(key);
       if (createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex') !==
           'd75c6f6b2384de68978090fc837387ab4f3e878ee004bccf27ea98a84fbee078') return false;
-      await preflightVulnDbBundle({ directory, trustedPublicKeyPem: key.toString('utf8'),
+      const verified = await preflightVulnDbBundle({ directory, trustedPublicKeyPem: key.toString('utf8'),
         expectedSigner: 'local-db-operator-v1', expectedSource: `ghcr.io/aquasecurity/trivy-db@${manifest}`,
-        expectedSchemaVersion: 2, expectedManifestDigest: manifest!, expectedArtifactSha256: artifact!, now: new Date() });
-      return true;
+        expectedSchemaVersion: 2, expectedManifestDigest: manifest!, expectedArtifactSha256: artifact!, policy: CURRENT_DB_POLICY });
+      return verified.identity;
     } catch { return false; }
   }
 
@@ -98,16 +121,20 @@ export class ScansService {
       ledger.checkAdmission(identity.subject);
       ledger.reserveAttempt(identity.subject);
       // Charge admission before hashing the operator's DB release (up to 2 GiB).
-      if (request.checks.includes('vuln') && !(await this.vulnDbReady())) { reject('UNSUPPORTED'); throw unavailable(); }
+      const db = request.checks.includes('vuln') ? await this.vulnDbReady() : undefined;
+            if (request.checks.includes('vuln') && (!db || typeof db !== 'object')) { reject('UNSUPPORTED'); throw unavailable(); }
       if (!(await this.readiness())) { reject('EGRESS'); throw unavailable(); }
       const pinned = await this.resolveTarget(request.reference);
       if (!this.acceptsPinned(pinned)) { reject('UNSUPPORTED'); throw unavailable(); }
       // A worker/gateway outage during resolution must not enqueue a new task.
       if (!(await this.readiness())) { reject('EGRESS'); throw unavailable(); }
-      const { scanId } = ledger.enqueue({ subject: identity.subject, idempotencyKey: request.idempotencyKey,
+      // Hashing/readiness/resolution may cross the deadline: use only this request's authenticated identity.
+            if (request.checks.includes('vuln') && !dbStillUsable(db)) { reject('UNSUPPORTED'); throw unavailable(); }
+            const { scanId } = ledger.enqueue({ subject: identity.subject, idempotencyKey: request.idempotencyKey,
         registry: pinned.registry, repository: pinned.repository, digest: pinned.digest, platform: pinned.platform,
         fingerprint: request.fingerprint, checks: JSON.stringify(request.checks), scope: request.scope,
-        executionProfile: this.executionBinding(request.reference) });
+        executionProfile: this.executionBinding(request.reference),
+                ...(request.checks.includes('vuln') ? { cvePolicy: CURRENT_DB_POLICY } : {}) });
       return receipt(scanId);
     } catch (error) {
       if (error instanceof IdempotencyConflict || error instanceof AdmissionLimited) {
@@ -166,9 +193,13 @@ export class ScansService {
     rate.active++; this.eligibilityActive++;
     try {
       if (!this.ledgerStore.ledger || !(await this.readiness())) return result(false, 'SCANNER_UNAVAILABLE');
-      if (request.checks.includes('vuln') && (process.env.SCAN_VULN_ENABLED !== 'true' || !(await this.vulnDbReady()))) return result(false, 'DB_UNAVAILABLE');
+      if (request.checks.includes('vuln') && process.env.SCAN_VULN_ENABLED !== 'true') return result(false, 'DB_UNAVAILABLE');
+      const db = request.checks.includes('vuln') ? await this.vulnDbReady() : undefined;
+      if (request.checks.includes('vuln') && (!db || typeof db !== 'object')) return result(false, 'DB_UNAVAILABLE');
       const pinned = await this.resolveTarget(request.reference);
-      return this.acceptsPinned(pinned) && await this.readiness() ? result(true, 'READY') : result(false, 'SCANNER_UNAVAILABLE');
+      if (!this.acceptsPinned(pinned) || !(await this.readiness())) return result(false, 'SCANNER_UNAVAILABLE');
+      if (request.checks.includes('vuln') && !dbStillUsable(db)) return result(false, 'DB_UNAVAILABLE');
+      return result(true, 'READY');
     } catch { return result(false, 'SCANNER_UNAVAILABLE'); }
     finally { rate.active--; this.eligibilityActive--; }
   }
@@ -223,7 +254,7 @@ export class ScansService {
           ...(check === 'sbom' && archive.sbom?.outcome === 'checked' ? { componentCount: archive.sbom.sbom.components.length } : {}),
           ...(check === 'vuln' && archive.vuln?.outcome === 'checked' ? { findingCount: archive.vuln.findings.length } : {}),
           ...(check === 'vuln' && archive.vuln && archive.vuln.outcome !== 'failed' ?
-            { os: archive.vuln.os, node: archive.vuln.node, db: archive.vuln.db } : {}),
+            { os: archive.vuln.os, node: archive.vuln.node, db: archive.vuln.db, ...archivePolicyMetadata(archive) } : {}),
           scannerVersion: archive.scannerVersion, checksVersion: archive.receipt.checksVersion, checkedAt: new Date(archive.checkedAt).toISOString() } : null];
       }));
       const executionProfile = ledger!.executionProfile(scanId);
@@ -247,7 +278,8 @@ export class ScansService {
     const vuln = checks.includes('vuln') ? ledger?.vuln(scanId, identity.subject, 0, 1) : undefined;
     const vulnCoverage = vuln?.outcome === 'checked'
       ? { check: 'vuln', coverage: vuln.coverage, outcome: vuln.outcome, findingCount: vuln.findingCount,
-          scannerVersion: vuln.scannerVersion, checkedAt: vuln.checkedAt }
+          scannerVersion: vuln.scannerVersion, checkedAt: vuln.checkedAt,
+          ...(vuln.dbEvidence ? policyMetadata(vuln.dbEvidence) : {}) }
       : vuln?.outcome === 'failed'
         ? { check: 'vuln', coverage: vuln.coverage, outcome: vuln.outcome, errorCode: vuln.errorCode }
         : null;
@@ -256,6 +288,102 @@ export class ScansService {
     const check = checks.length === 1 ? checks[0] : undefined;
     return { scanId, ...snapshot, ...(config ? { config } : {}), ...(checks.length ? { checks, perCheck } : {}), ...(check ? { check } : {}),
       result: checks.length === 1 ? perCheck[checks[0]] : null };
+  }
+
+  report(identity: Identity, scanId: string, kind: ReportKind, rawQuery: unknown) {
+    try {
+      if (!hasReportView(rawQuery)) {
+        parseReportQuery(kind, rawQuery);
+        const { cursor, limit } = rawQuery as { cursor?: string; limit?: string };
+        return kind === 'vuln' ? this.vuln(identity, scanId, cursor, limit) :
+          kind === 'sbom' ? this.sbom(identity, scanId, cursor, limit) : this.results(identity, scanId, cursor, limit);
+      }
+      if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException();
+      const ledger = this.ledgerStore.ledger;
+      if (!ledger) throw unavailable();
+      // Keep ownership, metadata and all rows in one read snapshot. Hash/sort only
+      // after releasing it; a cursor is consistency metadata, never authorization.
+      const source = ledger.readReportSnapshot(() => {
+        const scan = ledger.snapshot(scanId, identity.subject);
+        if (!scan) throw new NotFoundException();
+        const report = this.loadReportView(ledger, identity, scanId, kind);
+        return { ...report, snapshot: { scan, report: report.snapshot } };
+      });
+      const context = { subject: identity.subject, scanId };
+      if (source.kind === 'vuln') {
+        const query = parseReportQuery('vuln', rawQuery);
+        if (!query || query.kind !== 'vuln') throw new ReportViewError('INVALID_REPORT_QUERY');
+        const { items, ...paging } = pageVuln(source.report.findings, query, context, source.snapshot, source.report.outcome === 'checked');
+        return { ...source.report, findings: items, ...paging };
+      }
+      if (source.kind === 'sbom') {
+        const query = parseReportQuery('sbom', rawQuery);
+        if (!query || query.kind !== 'sbom') throw new ReportViewError('INVALID_REPORT_QUERY');
+        const { items, ...paging } = pageSbom(source.report.components, query, context, source.snapshot, source.report.outcome === 'checked');
+        return { ...source.report, components: items, ...paging };
+      }
+      const query = parseReportQuery('secret', rawQuery);
+      if (!query || query.kind !== 'secret') throw new ReportViewError('INVALID_REPORT_QUERY');
+      const { items, ...paging } = pageSecrets(source.report.findings, query, context, source.snapshot, source.report.coverage.outcome === 'checked');
+      return { ...source.report, findings: items, ...paging };
+    } catch (error) {
+      if (!(error instanceof ReportViewError)) throw error;
+      if (error.errorCode === 'REPORT_CURSOR_STALE') throw new ConflictException({ errorCode: error.errorCode });
+      throw new BadRequestException({ errorCode: error.errorCode });
+    }
+  }
+
+  private loadReportView(ledger: ScanLedger, identity: Identity, scanId: string, kind: ReportKind) {
+    const archive = ledger.archiveResult(scanId, identity.subject);
+    const archiveSnapshot = archive && { receipt: archive.receipt, scannerVersion: archive.scannerVersion,
+      checkedAt: archive.checkedAt, [kind]: archive[kind] };
+    if (kind === 'vuln') {
+      const result = archive?.vuln;
+      if (result && archive) {
+        const report = result.outcome === 'checked'
+          ? { outcome: result.outcome, coverage: 'image', image: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
+              platform: archive.receipt.platform, findings: result.findings, findingCount: result.findings.length,
+              db: result.db, os: result.os, node: result.node, scannerVersion: archive.scannerVersion,
+              checkedAt: new Date(archive.checkedAt).toISOString(), ...archivePolicyMetadata(archive) }
+          : { outcome: result.outcome, reason: result.reason, coverage: 'image', findings: [],
+              ...(result.outcome === 'failed' ? { errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED' } : {}),
+              ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db,
+                ...(result.dbPolicy ? { ...archivePolicyMetadata(archive), checkedAt: new Date(archive.checkedAt).toISOString() } : {}) } : {}) };
+        return { kind, report, snapshot: archiveSnapshot };
+      }
+      const dataset = ledger.vulnDataset(scanId, identity.subject);
+      if (!dataset) throw new NotFoundException();
+      const { dbEvidence, ...report } = dataset.outcome === 'checked' ? dataset : { ...dataset, dbEvidence: undefined };
+      return { kind, report: { ...report, ...(dbEvidence ? policyMetadata(dbEvidence) : {}) }, snapshot: dataset };
+    }
+    if (kind === 'sbom') {
+      const result = archive?.sbom;
+      if (result && archive) {
+        const report = result.outcome === 'checked'
+          ? { outcome: result.outcome, coverage: 'image', image: result.sbom.image, platform: result.sbom.platform,
+              os: result.sbom.os, components: result.sbom.components, componentCount: result.sbom.components.length,
+              scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString() }
+          : { outcome: result.outcome, reason: result.reason, errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED',
+              coverage: 'image', components: [] };
+        return { kind, report, snapshot: archiveSnapshot };
+      }
+      const report = ledger.sbomDataset(scanId, identity.subject);
+      if (!report) throw new NotFoundException();
+      return { kind, report, snapshot: report };
+    }
+    const result = archive?.secret;
+    if (result && archive) {
+      const report = result.outcome === 'checked'
+        ? { findings: result.findings, coverage: { check: 'secret', outcome: result.outcome, coverage: 'image',
+            findingCount: result.findings.length, errorCode: null, scannerVersion: archive.scannerVersion,
+            checkedAt: new Date(archive.checkedAt).toISOString() } }
+        : { findings: [], coverage: { check: 'secret', outcome: result.outcome, coverage: 'image', reason: result.reason,
+            findingCount: null, errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', scannerVersion: archive.scannerVersion } };
+      return { kind, report, snapshot: archiveSnapshot };
+    }
+    const report = ledger.secretDataset(scanId, identity.subject);
+    if (!report) throw new NotFoundException();
+    return { kind, report, snapshot: report };
   }
 
   results(identity: Identity, scanId: string, cursor: string | undefined, limit: string | undefined) {
@@ -318,18 +446,22 @@ export class ScansService {
           if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason,
             ...(result.outcome === 'failed' ? { errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED' } : {}),
             coverage: 'image', findings: [], nextCursor: null,
-            ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db } : {}) };
+            ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db, ...(result.dbPolicy ? { ...archivePolicyMetadata(archive), checkedAt: new Date(archive.checkedAt).toISOString() } : {}) } : {}) };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
           if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
           return { outcome: 'checked', coverage: 'image', image: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
             platform: archive.receipt.platform, findings: result.findings.slice(start, end), findingCount: result.findings.length,
             nextCursor: end < result.findings.length ? end : null, db: result.db, os: result.os, node: result.node,
-            scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString() };
+            scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString(), ...archivePolicyMetadata(archive) };
         }
         const report = ledger.vuln(scanId, identity.subject, Number(cursor ?? 0), Number(limit ?? 50));
     if (!report) throw new NotFoundException();
     if (report.outcome === 'checked' && Number(cursor ?? 0) > report.findingCount)
       throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
+    if (report.outcome === 'checked' && report.dbEvidence) {
+      const { dbEvidence, ...result } = report;
+      return { ...result, ...policyMetadata(dbEvidence) };
+    }
     return report;
   }
 

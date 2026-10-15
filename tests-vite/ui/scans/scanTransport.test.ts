@@ -248,7 +248,9 @@ describe('scan transport boundary', () => {
   });
   it('rejects cancel errors and session changes without trusting an error response', async () => {
     const id = 'abc';
-    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false, status: 409 }).mockResolvedValueOnce({ ok: false, status: 404 });
+    const fetchMock = vi.fn()
+          .mockResolvedValueOnce(new Response(JSON.stringify({ errorCode: 'SCAN_TERMINAL' }), { status: 409 }))
+          .mockResolvedValueOnce(new Response(JSON.stringify({ errorCode: 'SCAN_UNAVAILABLE' }), { status: 404 }));
     vi.stubGlobal('fetch', fetchMock);
     const transport = createAuthorizedScanTransport({ subject: 'alice', currentSubject: () => 'alice' });
     await expect(transport.cancel(id)).rejects.toThrow('Отмена невозможна');

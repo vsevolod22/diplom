@@ -12,6 +12,7 @@ import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTrans
 import { scanChecks } from '@/shared/api/scans/scanTransport';
 import { scanSession } from '@/shared/api/auth/scanSession';
 import { EligibilityClient, type ScanWait } from '@/shared/api/scans/eligibilityClient';
+import { RuntimeScanPanel } from '@/features/scans/RuntimeScanPanel';
 
 const alpineTargets = [
   { label: 'Alpine · latest', reference: 'registry-1.docker.io/library/alpine:latest' },
@@ -474,7 +475,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               </>}
               <label>
                 <input type="checkbox" disabled />
-                Host / running container · не поддерживаются (только registry IMAGE)
+                Host · отдельный opt-in не подключён; runtime evidence — в отдельной панели ниже
               </label>
               {errors.checks ? <p role="alert">{errors.checks.message}</p> : null}
             </fieldset>
@@ -519,6 +520,9 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               </Link>
             ) : null}
           </form>
+          {!demo && subject ? (
+            <RuntimeScanPanel key={sessionIdentity} subject={subject} generation={epoch} />
+          ) : null}
           <aside className="scan-a1__trust-note">
             <span className="scan-a1__folio">ГРАНИЦА / 01—03</span>
             <strong>Область доверия</strong>

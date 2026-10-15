@@ -81,14 +81,14 @@ test('populated v10 forward migration preserves all legacy tables/states/keys/pr
     }
     original.close();
     const raw = new Database(file);
-    raw.exec("UPDATE scans SET state='partial', terminal_at=CURRENT_TIMESTAMP WHERE subject='owner-5'; DROP TABLE scan_check_results; DROP TABLE scan_execution_profiles; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=10;");
+    raw.exec("UPDATE scans SET state='partial', terminal_at=CURRENT_TIMESTAMP WHERE subject='owner-5'; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_check_results; DROP TABLE scan_execution_profiles; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=10;");
     const tables = raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[];
     const before = Object.fromEntries(tables.map(({ name }) => [name, raw.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all()]));
     raw.close();
     const upgraded = new ScanLedger(file), second = new ScanLedger(file);
     const reader = new Database(file);
     try {
-      assert.equal(reader.pragma('user_version', { simple: true }), 13);
+      assert.equal(reader.pragma('user_version', { simple: true }), 14);
       for (const { name } of tables) assert.deepEqual(reader.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all(), before[name]);
       assert.deepEqual(reader.prepare('SELECT * FROM scan_check_results').all(), []);
       assert.deepEqual(reader.pragma('foreign_key_check'), []); assert.equal(reader.pragma('integrity_check', { simple: true }), 'ok');

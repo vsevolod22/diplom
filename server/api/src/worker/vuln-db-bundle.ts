@@ -1,17 +1,15 @@
 import { createHash, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
+import { evaluateDbPolicy, LEGACY_DB_POLICY, type CveDbPolicy } from './cve-db-policy.mjs';
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { isAbsolute, join, parse, sep } from 'node:path';
 
-// Envelope preflight only. This does not parse Trivy 0.69.3 metadata, prove DB usability,
-// check CVEs, or authorize admission. Never hand the result to an admission decision.
+// Authenticates release bytes/metadata and evaluates operator time policy only.
+// This does not prove Trivy compatibility, CVE coverage or chain readiness.
 const MAX_DESCRIPTOR_BYTES = 4096;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const MAX_DB_BYTES = 2 * 1024 * 1024 * 1024;
-const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
-const MAX_DOWNLOAD_AGE_MS = 24 * 60 * 60 * 1000;
-const MAX_UPDATE_AGE_MS = 48 * 60 * 60 * 1000;
-const MAX_UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
 const failure = () => new Error('Vulnerability DB bundle preflight failed');
 
 export type BundlePreflightOptions = {
@@ -22,7 +20,9 @@ export type BundlePreflightOptions = {
   expectedSchemaVersion: number;
   expectedArtifactSha256: string;
   expectedManifestDigest: string;
-  now?: Date;
+  /** Fixed evaluation clock for isolated tests only; production callers must omit it. */
+    now?: Date;
+  policy?: CveDbPolicy;
 };
 
 export type VerifiedDbIdentity = {
@@ -39,20 +39,11 @@ export type VerifiedDbIdentity = {
   nextUpdate: string;
 };
 
-function timestamp(value: unknown): number {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/.test(value)) throw failure();
-  const millis = value.replace(/\.(\d{1,9})Z$/, (_, fraction: string) => `.${fraction.padEnd(3, '0').slice(0, 3)}Z`);
-  const time = Date.parse(millis);
-  if (!Number.isFinite(time) || new Date(time).toISOString() !== millis) throw failure();
-  return time;
-}
 
 // Shared at-use/write-boundary policy; identity alone is not cryptographic verification.
-export function assertDbFreshness(descriptor: Pick<VerifiedDbIdentity, 'updatedAt' | 'downloadedAt' | 'nextUpdate'>, now = Date.now()): void {
-  const updated = timestamp(descriptor.updatedAt), downloaded = timestamp(descriptor.downloadedAt), next = timestamp(descriptor.nextUpdate);
-  if (!Number.isFinite(now) || updated > now + MAX_CLOCK_SKEW_MS || downloaded > now + MAX_CLOCK_SKEW_MS ||
-      downloaded < updated || now - updated > MAX_UPDATE_AGE_MS || now - downloaded > MAX_DOWNLOAD_AGE_MS ||
-      next <= updated || next - updated > MAX_UPDATE_INTERVAL_MS || now >= next) throw failure();
+export function assertDbFreshness(descriptor: Pick<VerifiedDbIdentity, 'updatedAt' | 'downloadedAt' | 'nextUpdate'>,
+  now = Date.now(), policy: CveDbPolicy = LEGACY_DB_POLICY): void {
+  evaluateDbPolicy(descriptor, policy, now);
 }
 
 async function rejectSymlinkAncestors(directory: string): Promise<void> {
@@ -111,7 +102,7 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
         typeof expectedArtifactSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedArtifactSha256) ||
                 typeof expectedManifestDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(expectedManifestDigest) ||
                 !expectedSource.endsWith(`@${expectedManifestDigest}`)) throw failure();
-    const now = (options.now ?? new Date()).getTime();
+    const now = options.now?.getTime() ?? Date.now();
     if (!Number.isFinite(now)) throw failure();
     const key = createPublicKey(options.trustedPublicKeyPem);
     if (key.asymmetricKeyType !== 'ed25519') throw failure();
@@ -152,7 +143,7 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     const db = metadata as Record<string, unknown>;
     if (db.Version !== descriptor.schemaVersion || db.UpdatedAt !== descriptor.updatedAt ||
         db.DownloadedAt !== descriptor.downloadedAt || db.NextUpdate !== descriptor.nextUpdate) throw failure();
-    assertDbFreshness(descriptor, now);
+    assertDbFreshness(descriptor, now, options.policy);
     const pinnedHash = Buffer.from(expectedArtifactSha256, 'hex');
     if (!timingSafeEqual(Buffer.from(descriptor.artifactSha256, 'hex'), pinnedHash)) throw failure();
     const artifactHash = await readBounded(join(directory, 'bundle.bin'), MAX_ARTIFACT_BYTES, true);
@@ -160,8 +151,8 @@ export async function preflightVulnDbBundle(options: BundlePreflightOptions): Pr
     // Bind the actual read-only cache bytes too; gzip integrity alone says nothing about extracted DB.
     const dbHash = await readBounded(join(directory, 'db', 'trivy.db'), MAX_DB_BYTES, true);
     if (!timingSafeEqual(dbHash, Buffer.from(descriptor.dbSha256, 'hex'))) throw failure();
-    // Hashing the real DB can cross NextUpdate; initial preflight time is not sufficient.
-    assertDbFreshness(descriptor, options.now?.getTime() ?? Date.now());
+    // Hashing can cross the policy deadline; the initial clock is not sufficient.
+    assertDbFreshness(descriptor, options.now?.getTime() ?? Date.now(), options.policy);
     return { kind: 'envelope-preflight-only', artifactSha256: expectedArtifactSha256, schemaVersion: expectedSchemaVersion, identity: Object.freeze(descriptor) };
   } catch {
     // Never leak raw paths, descriptor contents, signature verification or filesystem errors.

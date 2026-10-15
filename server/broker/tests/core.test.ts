@@ -66,7 +66,7 @@ test('HTTP local grant denial matrix: notBefore/expiry, scope, audience, consent
       (s) => (s.consents[0].caller = 'foreign'),
       (s) => (s.consents[0].subject = 'foreign'),
       (s) => (s.callers[0].digest = 'd'.repeat(64)),
-      (s) => (s.contexts[0].apiVersion = '1.48' as any),
+      (s) => { Object.assign(s.contexts[0], { apiVersion: '1.48' }); },
     ];
     for (const change of changes) {
       const state = fixtureState(h.endpoint);
@@ -183,13 +183,13 @@ test('bounded fixed audit schema, no overwrite, fake raw fields rejected', () =>
 test('policy bounds and invalid refresh: no stale-positive grants or caller-controlled fields', () => {
   const p = new PolicyStore();
   for (const change of [
-    (s: any) => s.callers.push(s.callers[0]),
-    (s: any) => (s.grants[0].expiresAt = 500_000),
-    (s: any) => (s.grants[0].extra = true),
-    (s: any) => (s.contexts[0].endpoint = '/private/../run/socket'),
-    (s: any) => (s.contexts[0].endpoint = 'http://localhost'),
-    (s: any) => (s.callers[0].subject = 'raw\nsecret'),
-    (s: any) => (s.grants = Array.from({ length: 65 }, (_, i) => ({ ...s.grants[0], id: 'g-' + i }))),
+    (s: ReturnType<typeof fixtureState>) => s.callers.push(s.callers[0]),
+    (s: ReturnType<typeof fixtureState>) => (s.grants[0].expiresAt = 500_000),
+    (s: ReturnType<typeof fixtureState>) => Object.assign(s.grants[0], { extra: true }),
+    (s: ReturnType<typeof fixtureState>) => (s.contexts[0].endpoint = '/private/../run/socket'),
+    (s: ReturnType<typeof fixtureState>) => (s.contexts[0].endpoint = 'http://localhost'),
+    (s: ReturnType<typeof fixtureState>) => (s.callers[0].subject = 'raw\nsecret'),
+    (s: ReturnType<typeof fixtureState>) => (s.grants = Array.from({ length: 65 }, (_, i) => ({ ...s.grants[0], id: 'g-' + i }))),
   ]) {
     p.replace(fixtureState('/private/e'));
     const s = fixtureState('/private/e');

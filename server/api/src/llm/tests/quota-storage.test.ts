@@ -26,12 +26,11 @@ test('production opens only an initialized existing ledger; missing/empty/schema
 
 test('clock is sampled under real write lock; bounded busy failures cannot admit or partially mutate', () => {
   const dir = mkdtempSync(join(tmpdir(), 'quota-lock-')), path = join(dir, 'llm-usage.sqlite');
-  let blocker: Database.Database | undefined;
   const ledger = new QuotaLedger(path, { ...quotaPolicy, busyMs: 5 }, () => {
-    assert.throws(() => blocker!.exec('BEGIN IMMEDIATE'), /locked/);
+    assert.throws(() => blocker.exec('BEGIN IMMEDIATE'), /locked/);
     return Date.UTC(2026, 9, 8);
   });
-  blocker = new Database(path); blocker.pragma('busy_timeout=1');
+  const blocker = new Database(path); blocker.pragma('busy_timeout=1');
   try {
     const id = ledger.reserve(binding, reserve); assert.ok(id);
     blocker.exec('BEGIN IMMEDIATE');

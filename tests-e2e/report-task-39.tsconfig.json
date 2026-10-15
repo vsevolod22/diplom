@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["../src/pages/scans/ScanDetailPage.tsx", "../src/pages/scans/ScanReportSections.tsx", "../src/pages/scans/CursorReportPager.tsx", "../src/shared/api/scans/scanTransport.ts", "../src/shared/api/scans/cveDbMetadata.ts", "../tests-vite/ui/scans/task39*.test.*", "../src/**/*.d.ts"]
+}

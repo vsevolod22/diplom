@@ -101,11 +101,15 @@ test('default/prequeued/missing-binding worker rejects BEFORE config/archive/sca
         raw.close();
       }
       let calls = 0;
-      await consumeOne(f.ledger, { timeoutMs: 1000, dbDir: '/unused', ...(mode !== 'default' ? { archivePolicy: 'local' as const } : {}),
+      const consumed = consumeOne(f.ledger, { timeoutMs: 1000, dbDir: '/unused', ...(mode !== 'default' ? { archivePolicy: 'local' as const } : {}),
         configLoader: async () => { assert.fail('no config selected'); } }, async () => { assert.fail('remote runner'); }, Date.now(), undefined, undefined,
         async () => { calls++; const value = report(); if (mode === 'wrong-receipt') value.receipt.profileVersion = 'nginx-alpine-amd64-v1'; return value; });
+      // Invalid result identity is a contract fault: no report or terminal write,
+      // and the worker stops rather than disguising it as scanner coverage.
+      if (mode === 'wrong-receipt') await assert.rejects(consumed, { name: 'TypeError', message: 'Invalid archive result' });
+      else assert.equal(await consumed, true);
       assert.equal(calls, mode === 'local' || mode === 'wrong-receipt' ? 1 : 0);
-      assert.equal(f.ledger.state(id, 'owner'), mode === 'local' ? 'completed' : 'failed');
+      assert.equal(f.ledger.state(id, 'owner'), mode === 'local' ? 'completed' : mode === 'wrong-receipt' ? 'running' : 'failed');
       assert.equal(!!f.ledger.archiveResult(id, 'owner'), mode === 'local');
       if (mode === 'local') assert.equal((f.service.status(owner, id) as { imageProfile: { qualified: boolean } }).imageProfile.qualified, true);
     } finally { f.close(); }
@@ -141,7 +145,9 @@ test('v11 forward upgrade never promotes legacy rows and conflicting v12 DDL rol
     try {
       const id = f.ledger.enqueue({ ...p, subject: 'owner', scope: 'image', idempotencyKey: 'legacy-v11', checks: '["secret"]' }).scanId;
       const raw = new Database(f.file);
-      raw.exec('DROP TABLE scan_execution_profiles; PRAGMA user_version=11;');
+      raw.exec(`DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy;
+        ALTER TABLE scan_vuln_findings DROP COLUMN advisory;
+        DROP TABLE scan_execution_profiles; PRAGMA user_version=11;`);
       if (corrupt) raw.exec('CREATE TABLE scan_execution_profiles(sentinel TEXT);');
       const before = raw.prepare('SELECT * FROM scans').all();
       if (corrupt) {
@@ -150,7 +156,7 @@ test('v11 forward upgrade never promotes legacy rows and conflicting v12 DDL rol
       } else {
         const upgraded = new ScanLedger(f.file);
         assert.equal(upgraded.executionProfile(id), undefined);
-        assert.equal(raw.pragma('user_version', { simple: true }), 12);
+        assert.equal(raw.pragma('user_version', { simple: true }), 14);
         upgraded.close();
       }
       assert.deepEqual(raw.prepare('SELECT * FROM scans').all(), before);

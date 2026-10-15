@@ -139,11 +139,11 @@ export function project(raw: unknown, pin: Pin, observedAt: number, bound: Limit
   else if (/^[0-9]+(?::[^:]*)?$/.test(user ?? '') && Number.isSafeInteger(Number(user!.split(':')[0])))
     configuredUser = 'non-root';
   const envelope = {
-    schemaVersion: 'inspect-snapshot-v1',
+    schemaVersion: 'inspect-snapshot-v1' as const,
     containerId: pin.id,
     context: { id: pin.context.id, version: pin.context.version },
     observedAt: new Date(observedAt).toISOString(),
-    coverage: 'runtime-config-inspect',
+    coverage: 'runtime-config-inspect' as const,
     facts: {
       configuredUser,
       privileged: bool(host.Privileged),

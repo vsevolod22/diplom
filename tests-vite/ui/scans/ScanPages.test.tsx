@@ -59,7 +59,8 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(screen.getByText(/ДЕМО · вымышленные данные/)).toBeTruthy();
     expect(screen.getByText(/Прогресс: неизвестен/)).toBeTruthy();
     expect(screen.getByText(/ожидаем подтверждения digest\/platform/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Отмена недоступна' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
+    expect(screen.getByText('Демо не отправляет серверную отмену.')).toBeTruthy();
     expect(screen.queryByText(/0 CVE/)).toBeNull();
     expect(screen.queryByText(/100%/)).toBeNull();
     expect(document.body.textContent).not.toContain('secretValue');
@@ -232,21 +233,20 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText(/Сбой проверки не означает/)).toBeTruthy();
   });
-  it('confirms live cancellation, keeps the GET state until refetch and refreshes status and results', async () => {
-    const id = 'abc';
+  it('confirms live cancellation, waits for authoritative GET and never publishes intermediate results', async () => {
+    const id = '00000000-0000-4000-8000-000000000001';
     const user = userEvent.setup();
     let resolveCancel!: (value: unknown) => void;
     const pendingCancel = new Promise<unknown>((resolve) => { resolveCancel = resolve; });
     let statusReads = 0;
-    let resultReads = 0;
+    let resolveSnapshot!: (value: Response) => void;
+    const pendingSnapshot = new Promise<Response>(resolve => { resolveSnapshot = resolve; });
+    const snapshot = (state: string) => new Response(JSON.stringify({ scanId: id, state, checks: ['secret'], perCheck: { secret: null }, result: null }));
     const fetchMock = vi.fn((path: string) => {
-      if (path.endsWith('/cancel')) return pendingCancel;
-      if (path.endsWith('/results?limit=50')) {
-        resultReads++;
-        return Promise.resolve({ ok: true, json: async () => ({ findings: [], nextCursor: null, coverage: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'unsupported', errorCode: null, scannerVersion: null } }) });
-      }
+      if (path === `/api/v1/browser/scans/${id}/cancel`) return pendingCancel;
+      if (path !== `/api/v1/browser/scans/${id}`) throw new Error(`Unexpected request: ${path}`);
       statusReads++;
-      return Promise.resolve({ ok: true, json: async () => ({ scanId: id, state: statusReads > 1 ? 'cancelled' : 'running', result: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'unsupported', errorCode: null, scannerVersion: null } }) });
+      return statusReads === 1 ? Promise.resolve(snapshot('running')) : pendingSnapshot;
     });
     vi.stubGlobal('fetch', fetchMock);
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
@@ -259,7 +259,8 @@ describe('scan UI fixture versus unavailable production', () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByText('Статус')).toBeTruthy();
-    await waitFor(() => expect(resultReads).toBe(1));
+    expect(statusReads).toBe(1);
+        expect(fetchMock.mock.calls.some(([path]) => path.includes('/results'))).toBe(false);
     await user.click(screen.getByRole('button', { name: 'Отменить скан' }));
     expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/cancel'))).toBe(false);
     confirm.mockReturnValue(true);
@@ -267,9 +268,15 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(screen.getByRole('button', { name: 'Отменяем…' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByText('Статус').parentElement?.textContent).toContain('Выполняется');
     await act(async () => { resolveCancel({ ok: true, json: async () => ({ scanId: id, state: 'cancelled' }) }); });
-    await waitFor(() => expect(statusReads).toBeGreaterThan(1));
-    await waitFor(() => expect(resultReads).toBeGreaterThan(1));
-    expect(screen.getByRole('button', { name: 'Отмена недоступна' }).hasAttribute('disabled')).toBe(true);
+    await waitFor(() => expect(statusReads).toBe(2));
+    expect(screen.getByText('Статус').parentElement?.textContent).toContain('Выполняется');
+    await act(async () => { resolveSnapshot(snapshot('cancelled')); });
+    await waitFor(() => expect(screen.getByText('Статус').parentElement?.textContent).toContain('Отменён'));
+    expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
+    expect(screen.getByText('Отмена недоступна в текущем состоянии.')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([path]) => /\/(results|sbom|vuln)\?/.test(path))).toBe(false);
+    expect(screen.queryByText(/0 находок|100%/)).toBeNull();
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith('/cancel'))).toHaveLength(1);
     confirm.mockRestore();
   });
   it.each([409, 404])('shows a safe message on live cancel HTTP %i without optimistic state', async (status) => {
@@ -304,6 +311,6 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('checkbox', { name: /CVE · доступно/ })).toBeTruthy();
     expect(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ })).toBeTruthy();
-    expect(screen.getByText(/Host \/ running container/)).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: /Host · отдельный opt-in не подключён/ }).hasAttribute('disabled')).toBe(true);
   });
 });

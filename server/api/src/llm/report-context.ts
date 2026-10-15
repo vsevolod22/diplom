@@ -114,14 +114,15 @@ function finding(v: unknown, check: 'secret' | 'vuln'): SafeFinding {
 @Injectable()
 export class ReportReader {
   constructor(@Inject(ScansService) private readonly scans: ScansService) {}
-  read(identity: Identity, scanId: string): ReportContext {
+  read(identity: Identity, scanId: string, busyMs = 1000): ReportContext {
     if (!identity.scope.includes('scan:read')) throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });
     if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
     let db: Database.Database | undefined;
     try {
       const path = process.env.SCAN_LEDGER_PATH;
       if (!path || path === ':memory:') return invalid();
-      db = new Database(path, { readonly: true, fileMustExist: true, timeout: 1000 });
+      if (!Number.isInteger(busyMs) || busyMs < 0 || busyMs > 1000) return invalid();
+            db = new Database(path, { readonly: true, fileMustExist: true, timeout: busyMs });
       const before = db.pragma('data_version', { simple: true });
       const report = this.collect(identity, scanId, db);
       // Projections use the existing ledger connection. Reject any intervening commit,

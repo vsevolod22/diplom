@@ -1,3 +1,4 @@
+import { ReportCursorResetError, ReportQueryError, ReportViewContractError, reportViewSearch } from './reportView';
 import { BROWSER_SCANS_PATH, parseCurrentList, parseCurrentResults, parseCurrentSbom, parseCurrentVuln, parseCurrentStatus, parseScanReceipt, parseScanEventHint, sameOriginScanUrl, type ScanTransport } from './scanTransport';
 
 export class ScanAccessError extends Error {
@@ -61,6 +62,20 @@ export function createAuthorizedScanTransport(session: { subject: string; curren
     if (session.currentSubject() !== session.subject) throw new Error('Сессия изменилась: ответ отклонён');
     return value;
   }
+  async function reportRequest<T>(path: string, signal: AbortSignal | undefined, decode: (value: unknown) => T): Promise<T> {
+    try { return decode(await request(path, signal)); }
+    catch (error) {
+      if (error instanceof ScanHttpError && error.status === 400) {
+        if (error.code === 'INVALID_REPORT_QUERY') throw new ReportQueryError();
+        if (error.code === 'INVALID_PAGINATION') throw new ReportViewContractError();
+      }
+      if (error instanceof ScanHttpError &&
+          ((error.status === 400 && error.code === 'REPORT_CURSOR_QUERY_MISMATCH') ||
+           (error.status === 409 && error.code === 'REPORT_CURSOR_STALE'))) throw new ReportCursorResetError();
+      if (error instanceof SyntaxError) throw new ReportViewContractError();
+      throw error;
+    }
+  }
   return {
     kind: 'live', capabilities: { list: true, create: true, cancel: true, events: true },
     async list(signal) {
@@ -81,18 +96,21 @@ export function createAuthorizedScanTransport(session: { subject: string; curren
       throw new Error('Список слишком велик для текущего интерфейса');
     },
     async get(id, signal) { return parseCurrentStatus(await request(sameOriginScanUrl(`${BROWSER_SCANS_PATH}/${encodeURIComponent(id)}`, id), signal)); },
-    async results(id, cursor, signal) {
+    async results(id, cursor, signal, query) {
       const path = sameOriginScanUrl(`${BROWSER_SCANS_PATH}/${encodeURIComponent(id)}/results`, id, '/results');
+      if (query) return reportRequest(`${path}?${reportViewSearch('secret', query, cursor)}`, signal, value => parseCurrentResults(value, query, cursor));
       if (cursor && !/^(0|[1-9]\d{0,5})$/.test(cursor)) throw new Error('Недопустимая страница');
       return parseCurrentResults(await request(`${path}?limit=50${cursor ? `&cursor=${cursor}` : ''}`, signal));
     },
-    async sbom(id, cursor, signal) {
+    async sbom(id, cursor, signal, query) {
       const path = sameOriginScanUrl(`${BROWSER_SCANS_PATH}/${encodeURIComponent(id)}/sbom`, id, '/sbom');
+      if (query) return reportRequest(`${path}?${reportViewSearch('sbom', query, cursor)}`, signal, value => parseCurrentSbom(value, query, cursor));
       if (cursor !== undefined && !/^(0|[1-9]\d{0,5})$/.test(cursor)) throw new Error('Недопустимая страница');
       return parseCurrentSbom(await request(`${path}?limit=50${cursor === undefined ? '' : `&cursor=${cursor}`}`, signal));
     },
-    async vuln(id, cursor, signal) {
+    async vuln(id, cursor, signal, query) {
       const path = sameOriginScanUrl(`${BROWSER_SCANS_PATH}/${encodeURIComponent(id)}/vuln`, id, '/vuln');
+      if (query) return reportRequest(`${path}?${reportViewSearch('vuln', query, cursor)}`, signal, value => parseCurrentVuln(value, query, cursor));
       if (cursor !== undefined && !/^(0|[1-9]\d{0,5})$/.test(cursor)) throw new Error('Недопустимая страница');
       return parseCurrentVuln(await request(`${path}?limit=50${cursor === undefined ? '' : `&cursor=${cursor}`}`, signal));
     },

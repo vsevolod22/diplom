@@ -14,9 +14,12 @@ import type { EngineTransport } from './engine.js';
 import { PolicyStore, type Pin } from './policy.js';
 import { project, canonical } from './projection.js';
 import { strictJson } from './strict-json.js';
+import { projectRuntime, RuntimeProjectionFailure, type RuntimeBinding } from './runtime-projection.js';
 export interface Reply {
   status: Status;
   snapshot?: ReturnType<typeof project>;
+  capture?: ReturnType<typeof projectRuntime>;
+  runtimeReason?: 'INVALID_RUNTIME_INPUT';
 }
 export interface Barriers {
   beforeDispatch?: () => Promise<void>;
@@ -71,10 +74,14 @@ export class Broker {
     target: Target,
     disconnect: AbortSignal,
     publish: (reply: Reply, preparedBody: string) => void = () => {},
+    runtime?: { binding: RuntimeBinding; imageConfigSemantics: boolean },
   ): Promise<Reply> {
     const { policy, audit, engine, boundary, barriers } = this.#options;
     const correlationId = correlation();
     const start = this.#clock.mono();
+    const startedAt = this.#clock.wall();
+    let runtimeCapture: Reply['capture'];
+    let runtimeReason: Reply['runtimeReason'];
     let pin: Pin | undefined;
     let ticket: AuditTicket | undefined;
     let dispatched = false;
@@ -98,7 +105,13 @@ export class Broker {
       const accepted = ticket ? audit.finish(ticket, entry) : audit.deny(entry);
       ticket = undefined;
       let reply: Reply =
-        !accepted && dispatched ? { status: 'failed' } : { status, ...(snapshot ? { snapshot } : {}) };
+        !accepted && dispatched
+          ? { status: 'failed' }
+          : {
+              status,
+              ...(runtime && runtimeReason ? { runtimeReason } : {}),
+              ...(snapshot ? { snapshot, ...(runtimeCapture ? { capture: runtimeCapture } : {}) } : {}),
+            };
       // Complete bounded serialization BEFORE the last authorization/time check.
       let preparedBody = canonical(reply);
       // No await between final audit, current state/time check and the actual response commit.
@@ -156,13 +169,29 @@ export class Broker {
         controller.signal,
       );
       if (!live()) return final('failed', 'deadline');
-      const parsed = strictJson(body, this.bound);
-      const snapshot = project(parsed, pin, this.#clock.wall(), this.bound);
+      let snapshot: Reply['snapshot'];
+      try {
+        const parsed = strictJson(body, this.bound);
+        snapshot = project(parsed, pin, this.#clock.wall(), this.bound);
+        if (runtime)
+          runtimeCapture = projectRuntime(
+            parsed,
+            snapshot,
+            runtime.binding,
+            startedAt,
+            runtime.imageConfigSemantics,
+          );
+      } catch (error) {
+        // This read returned, but its closed runtime projection was invalid; dispatch remains audited.
+        if (runtime && error instanceof SafeFailure) runtimeReason = 'INVALID_RUNTIME_INPUT';
+        throw error;
+      }
       await interruptible(barriers?.beforePublication?.() ?? Promise.resolve(), controller.signal);
       if (!live()) return final('failed', 'deadline');
       if (!policy.recheck(target, this.#clock.wall(), pin)) return final('not_authorized', 'authorization');
       return final('checked', 'allowed', snapshot);
     } catch (error) {
+      if (runtime && error instanceof RuntimeProjectionFailure) runtimeReason = error.runtimeReason;
       return final(
         'failed',
         disconnect.aborted

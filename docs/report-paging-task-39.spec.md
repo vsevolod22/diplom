@@ -1,7 +1,7 @@
 # DIP-TASK-39 — Независимые страницы и компактные находки отчёта
 
 ## Purpose
-Зафиксировать узкий UI-контракт для чтения доступных отчётов CVE, Secrets и SBOM. Это полное предлагаемое тело DIP-DOC-10, не применённая спецификация; приёмка TASK39 и backend остаются отдельными решениями.
+Зафиксировать узкий UI-контракт для чтения доступных отчётов CVE, Secrets и SBOM. Это полное предлагаемое следующее тело DIP-DOC-10 поверх принятой версии 2; новая laptop/v2-wire итерация TASK39 и её приёмка не подтверждают готовность backend или deployment.
 
 ## Requirements
 
@@ -133,8 +133,60 @@
 - WHEN пользователь читает сводку при скрытой категории Secrets
 - THEN доступна проверенная исходная находка; pager не подменяет report context и не вызывает генерацию модели автоматически.
 
+### Requirement: Навигация только по доступным страницам
+Интерфейс SHALL показывать компактные явно подписанные действия cursor-навигации сверху и снизу подтверждённого непустого набора с доступным продолжением либо ранее посещённой страницей, не отображая бессмысленные кнопки для unsupported, failed, отсутствующего результата, ожидания или checked zero без страниц. Оба набора действий используют одно подтверждение и один запрос; статус объявляется один раз.
+
+#### Scenario: Реальные страницы CVE
+- GIVEN проверенная непустая страница CVE предоставляет nextCursor
+- WHEN пользователь читает начало или конец списка
+- THEN доступен подписанный pager CVE с обеих сторон, фактический номер и диапазон не дублируются в live announcements; нет выдуманного totalPages или global filter.
+
+#### Scenario: Нет доступной пагинации
+- GIVEN CVE unsupported, failed, ещё выполняются, отсутствуют либо подтверждают ноль строк без continuation
+- WHEN показан исход проверки
+- THEN причина или ожидание остаётся видимой, но не отображается форма disabled Назад/Далее; неподдерживаемая проверка не называется checked zero.
+
+### Requirement: Полноширинные находки на ноутбуке
+Интерфейс SHALL размещать компактное покрытие перед полноширинными результатами с читаемыми шрифтами, видимым фокусом и управляющими элементами высотой не менее 44px на 320/1024/1280/1440px, сохраняя видимые исходы и причины проверок.
+
+#### Scenario: Компоновка отчёта
+- GIVEN открыт отчёт на мобильном устройстве или ноутбуке
+- WHEN пользователь читает покрытие и CVE
+- THEN находки занимают полную доступную ширину ниже покрытия, а текст и кнопки не скрываются горизонтальным переполнением; декоративная scene не выдаётся за ход проверки.
+
+### Requirement: Закрытые метаданные CVE v2
+Интерфейс SHALL принимать явный resultContractVersion 2 только с полным закрытым evidence: неизменённой db identity envelopeVersion 1, точным dbPolicy receipt ровно из пяти полей версии 2 для cve-db-updated-at-14d-v2, числовыми workerCheckedAt/evaluatedAt, исходным ISO checkedAt и точно производным usableUntil. Проверка согласованности использует сохранённые clocks, точные UTC наносекунды, календарь, порядок времён, допуск будущего 300 секунд, интервал публикации до 7 дней, включительный предел UpdatedAt + 14 дней и фиксированные упорядоченные warnings; это не криптографическая проверка подписи браузером.
+
+#### Scenario: Исторический reload успешного или unsupported v2
+- GIVEN сохранены согласованные successful или unsupported CVE v2 и их исходные timestamps
+- WHEN владелец повторно открывает отчёт через год
+- THEN envelope/timestamps/receipt не переписываются, допустимость проверяется на сохранённые worker/evaluated clocks, а не на текущую дату; unsupported не получает вымышленный count.
+
+#### Scenario: Неполный либо несовместимый receipt
+- GIVEN ответ содержит v2-marker или часть новых metadata fields
+- WHEN версия неизвестна, поле снято, добавлено лишнее поле receipt, нарушен календарь/границы либо timestamps/status/warnings/expiry не согласованы
+- THEN ответ отвергается без stripping или legacy fallback; failed outcome не получает вымышленные usable evidence, а прежняя legacy wire shape остаётся неизменной.
+
+#### Scenario: Несогласованные status и страницы
+- GIVEN status/perCheck подтверждают versioned CVE evidence
+- WHEN redundant result или полученная страница предоставляют другие или отсутствующие metadata
+- THEN ответ не публикуется; page metadata drift очищает прежние и исторические строки с first-cursor recovery, не попадая в content-only retention exception.
+
+### Requirement: Правдивые сохранённые предупреждения базы
+Интерфейс SHALL показывать возраст базы и policy warnings на сохранённый момент оценки без обязательного раскрытия, отдельно отличая UpdatedAt, DownloadedAt, NextUpdate как ожидаемую публикацию и usableUntil как включительный предел политики; историческая допустимость не объявляется текущей готовностью или гарантией безопасности.
+
+#### Scenario: База старше суток и публикация просрочена
+- GIVEN receipt v2 содержит DB_DATA_OLDER_THAN_24H и DB_PUBLICATION_OVERDUE
+- WHEN показан checked либо unsupported CVE результат
+- THEN оба предупреждения и сохранённый evaluatedAt доступны сразу, подробности сохраняют исходные DB timestamps и worker checkedAt; NextUpdate не назван сроком допустимости.
+
+#### Scenario: Legacy без v2 evidence
+- GIVEN получен принятый legacy отчёт без нового receipt
+- WHEN показана информация базы
+- THEN политика 14 дней не выдумывается и актуальная допустимость остаётся неподтверждённой.
+
 ## Non-goals
-- Не изменять scanner/API, auth/session transport, admission, consent, source-citation verification или backend ИИ.
+- Не изменять scanner, producer API, auth/session transport, admission, consent, source-citation verification или backend ИИ; единственное новое wire-владение — закрытое чтение browser CVE v2 metadata без переписывания image contract.
 - Не заменять DOC1/2/6/9, их неприменённые дельты и future areas; не объявлять полный P0 или весь UI-план принятым.
 - Не выдумывать идентификатор отчёта, которого нет в текущем API: сверяются предоставленные status/target/check timestamps/counts/scanner и page identities; серверная авторизация остаётся обязательной на каждом GET.
 - Browser fixtures не подтверждают live readiness, ручную screen-reader проверку, Safari/Firefox или production deploy.

@@ -2,7 +2,7 @@ import { BadGatewayException, ServiceUnavailableException } from '@nestjs/common
 import type { LlmPolicy } from './policy.js';
 import { prepareSummary, checkedPrepared, type PreparedRequest } from './prepared-request.js';
 import { usageObservation, type QuotaPolicy, type UsageObservation } from './quota-policy.js';
-import { openRouterTransport } from './openrouter-transport.js';
+import { openRouterTransport, type BodySendGuard, type GuardedTransport } from './openrouter-transport.js';
 import type { ReportContext } from './report-context.js';
 import { object, invalidReply } from './response.js';
 
@@ -12,6 +12,7 @@ export interface LlmProvider {
   summarize(report: ReportContext, policy: LlmPolicy, signal: AbortSignal): Promise<unknown>;
   prepare?(report: ReportContext, policy: LlmPolicy): PreparedRequest;
   summarizePrepared?(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt: UsageReceipt): Promise<unknown>;
+  generateGuarded?(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt: UsageReceipt, guard: BodySendGuard): Promise<unknown>;
 }
 const failed = () => new BadGatewayException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
 export const configError = () => new ServiceUnavailableException({ errorCode: 'LLM_CONFIGURATION_UNAVAILABLE' });
@@ -26,7 +27,11 @@ export class OpenRouterProvider implements LlmProvider {
   async summarizePrepared(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt: UsageReceipt): Promise<unknown> {
     return this.send(request, policy, signal, receipt);
   }
-  private async send(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt?: UsageReceipt): Promise<unknown> {
+  async generateGuarded(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt: UsageReceipt, guard: BodySendGuard): Promise<unknown> {
+    if (!policy.freeOnly || typeof (this.transport as Partial<GuardedTransport>).sendGuarded !== 'function') throw configError();
+    return this.send(request, policy, signal, receipt, guard);
+  }
+  private async send(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt?: UsageReceipt, guard?: BodySendGuard): Promise<unknown> {
     if (signal.aborted) throw failed();
     const body = checkedPrepared(request, policy);
     const controller = new AbortController();
@@ -40,9 +45,11 @@ export class OpenRouterProvider implements LlmProvider {
         controller.signal.addEventListener('abort', () => reject(failed()), { once: true });
       });
       const operation = async () => {
-        const response = await this.transport(OPENROUTER_ENDPOINT, { method: 'POST', redirect: 'error',
+        const init: RequestInit = { method: 'POST', redirect: 'error',
           headers: { authorization: `Bearer ${this.key}`, 'content-type': 'application/json', accept: 'application/json' },
-          body, signal: controller.signal });
+          body, signal: controller.signal };
+        const response = await (guard ? (this.transport as GuardedTransport).sendGuarded(OPENROUTER_ENDPOINT, init, guard) :
+          this.transport(OPENROUTER_ENDPOINT, init));
         if (controller.signal.aborted) { await response.body?.cancel(); throw failed(); }
         if (!response.ok || response.redirected || response.status >= 300 ||
             !/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {

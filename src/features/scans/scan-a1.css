@@ -522,25 +522,26 @@
   box-shadow: 7px 7px 0 #51476b;
 }
 .scan-a1 .scan-a1__scene {
-  --passport-accent: #d1ff5e;
+  --passport-bg: var(--a1-bg, #141324);
+  --passport-surface: var(--a1-surface, #211f34);
+  --passport-ink: var(--a1-ink, #faf8ff);
+  --passport-muted: var(--a1-muted, #c6c0d6);
+  --passport-accent: var(--a1-accent, #d1ff5e);
+  --passport-line: var(--a1-line, #605b74);
   position: absolute;
   inset: 0;
   min-width: 0;
   isolation: isolate;
   pointer-events: none;
   padding: clamp(16px, 2vw, 28px);
-  background: #e8e5ef;
-  color: #252139;
+  background: var(--passport-bg);
+  color: var(--passport-ink);
   overflow-wrap: anywhere;
 }
 .scan-a1 .scan-a1__scene--list {
   padding-bottom: 150px;
 }
-.scan-a1 .scan-a1__scene--create {
-  --passport-accent: #fca58e;
-}
 .scan-a1 .scan-a1__scene--detail {
-  --passport-accent: #71d7db;
   padding: 12px 16px;
 }
 .scan-a1 .scan-a1__glow-effect {
@@ -567,7 +568,7 @@
   justify-content: space-between;
   gap: 4px 12px;
   padding-bottom: 10px;
-  border-bottom: 1px solid #8c859f;
+  border-bottom: 1px solid var(--passport-line);
   font-size: 0.6rem;
   font-weight: 800;
   letter-spacing: 0.12em;
@@ -577,7 +578,7 @@
   grid-template-columns: 22px minmax(0, 1fr);
   align-content: center;
   min-width: 0;
-  border-left: 1px solid #8c859f;
+  border-left: 1px solid var(--passport-line);
 }
 .scan-a1 .scan-a1__passport-target,
 .scan-a1 .scan-a1__passport-scope,
@@ -593,10 +594,11 @@
   top: 10px;
   left: -23px;
   width: 13px;
-  border-top: 1px solid #8c859f;
+  border-top: 1px solid var(--passport-line);
   content: '';
 }
 .scan-a1 .scan-a1__passport-label {
+  color: var(--passport-accent);
   display: flex;
   align-items: center;
   gap: 7px;
@@ -618,19 +620,20 @@
   width: fit-content;
   max-width: 100%;
   background: var(--passport-accent);
+  color: var(--passport-bg);
   font-weight: inherit;
 }
 .scan-a1 .scan-a1__passport-note,
 .scan-a1 .scan-a1__passport-footer {
   font-size: 0.65rem;
   line-height: 1.4;
-  color: #5c536e;
+  color: var(--passport-muted);
 }
 .scan-a1 .scan-a1__passport-scope {
   margin: 18px 0 14px;
   padding: 12px;
-  border: 1px solid #8c859f;
-  background: #f6f4fa;
+  border: 1px solid var(--passport-line);
+  background: var(--passport-surface);
 }
 .scan-a1 .scan-a1__passport-rows {
   display: grid;
@@ -647,7 +650,7 @@
 }
 .scan-a1 .scan-a1__passport-rule {
   height: 4px;
-  border-block: 1px solid #c1bacd;
+  border-block: 1px solid var(--passport-line);
 }
 .scan-a1 .scan-a1__passport-report {
   display: flex;
@@ -656,11 +659,11 @@
   justify-content: space-between;
   gap: 6px 12px;
   padding-top: 10px;
-  border-top: 1px solid #8c859f;
+  border-top: 1px solid var(--passport-line);
 }
 .scan-a1 .scan-a1__passport-footer {
   padding-top: 6px;
-  border-top: 1px solid #c1bacd;
+  border-top: 1px solid var(--passport-line);
 }
 .scan-a1 .scan-a1__scene--detail .scan-a1__passport {
   gap: 6px;

@@ -1,0 +1,24 @@
+# Parent ingress SOURCE ONLY candidate, 2026-10-09. Manifest excludes itself.
+# Owned candidate files (2 existing +2 new); independent review/rollout pending.
+6d70635aaccf4f2c5d481253f5c14cc1fc9185cec732caa316c16d3f6085b12a  server/api/src/main.ts
+4a45c7a8e65b008b794c74077fcd0f51bacb1239dda1a15dc169d4026c2b3e6f  server/deploy/stand.nginx.conf
+389c47f579aa709aa9d50302396ec2a6098aef291799c5af1545ddb323c695df  server/runtime/docs/parent-ingress.test.cjs
+e14a3091c84b59b998977e973e2daf67d4cec058a36b7eaf3247dabded469b1f  server/runtime/docs/parent-ingress-runbook.md
+# READ-ONLY bootstrap dependency snapshot: not authored or approved by this delegation.
+9fd3a21cf2d78239340fed7d2836e7dfac7446d01af6d6785e380cc188829db8  server/api/src/app.module.ts
+e0521b4a802a933c08125c1d9b9fcc744cc5745b948452eb17704e6fa10ce1cd  server/api/src/auth/auth.module.ts
+05422ba3a54c9afe92d854bd13bdb8d1ed5a68d4daffdc92d2f42099a45637af  server/api/src/auth/auth.controller.ts
+871b3fed4ecd3320ec19cc27cfa05fc083587efd96b5eb781f56cc29f17a3626  server/api/src/auth/auth.store.ts
+fcf307c8d040dcab055a6b31eadfad2bccbab9aaf7b1135112bb509e8ef93eb9  server/api/src/runtime/runtime-api.module.ts
+b66b7336c9963075478760b862bb132ae871386705efb8f83225c6f7a1f4bff4  server/api/src/runtime/runtime-api.service.ts
+ddd1bac2aee2f53932e332968ba926a28c9bf392c9cae5589587a269aeb34250  server/api/src/runtime/browser-runtime-identity.ts
+261aec6dc18720024fcd55be1cde09bb2bcd84c42979be98be734d4c018a6ad6  server/api/src/runtime/runtime-intake.ts
+515bd936938d7d54334aa8854c98751d9a84258ae410f357aa4e24fce623ff0a  server/api/src/runtime/runtime-store.ts
+57890ad1e101e7456985cda4a80d75efb7103d992692fa9f57b6344fb46522b7  server/api/src/runtime/runtime-json.ts
+56231684e2a8afe4f45ca9486e5954b35675ada9438ce757640d10854f97377a  server/runtime/src/runtime-json.ts
+60c85d3c4aa39775464edd24b436feb7a1c924431d7e801c5e20d3e80519f8fe  server/api/src/llm/history-ingress.ts
+fd31ff1f57887cb029b19a2119b04caddf41a030c3c4750ae2b5d6d79fb2118d  server/api/src/llm/history-contract.ts
+3b3b3f0839928b9e74c8e43941004869ce9ad577e7da93d238429a9b4779c696  server/runtime/docs/operator-runbook.md
+08971aa10ac6a0e236060a3147689e4f4ac1060cccee33ff31a55dd995716153  server/runtime/docs/owned-files.sha256
+a1091e0a9ad0d65798134fa912e215ac0daa1f9ecc596af0778b048ee4a1dcec  server/api/package.json
+bcee28d8acf79edb220a52942dc332ce0eb121656fed95b5e0ac5d54b7598fa9  server/api/tsconfig.json

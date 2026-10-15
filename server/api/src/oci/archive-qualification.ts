@@ -90,7 +90,8 @@ try {
       const response = await get(`${id}${suffix}`, owner.cookie);
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'no-store');
-      const body = await response.json() as Record<string, any>;
+      const body = await response.json() as { state: string; imageProfile: { qualified: boolean };
+        outcome: string; findingCount: number; componentCount: number };
       if (!suffix) { assert.equal(body.state, scenario.expected === 'checked' ? 'completed' : checks.length > 1 ? 'partial' : 'failed'); assert.equal(body.imageProfile.qualified, false); }
       if (suffix === '/vuln') { assert.equal(body.outcome, scenario.expected); if (scenario.expected === 'checked') assert.ok(body.findingCount > 0); }
       if (suffix === '/sbom') assert.equal(body.componentCount, scenario.expected === 'checked' ? 72 : 67);

@@ -20,6 +20,36 @@ const id = '00000000-0000-4000-8000-000000000001';
 const digest = `sha256:${'a'.repeat(64)}`;
 const row = { scanId: id, state: 'completed', digest, platform: 'linux/amd64', targetLabel: 'private/alpine' };
 const json = (data: unknown) => ({ ok: true, status: 200, json: async () => data });
+
+// Independent synthetic server: complete datasets are sliced at the requested legal page size.
+// No client normalizer/parser generates the response or silently repairs malformed row data.
+function reportPage(path: string, payload: Record<string, unknown>) {
+  const url = new URL(path, window.location.origin);
+  expect(url.searchParams.get('view')).toBe('report-v1');
+  const kind = url.pathname.endsWith('/results') ? 'secret' : url.pathname.endsWith('/sbom') ? 'sbom' : 'vuln';
+  const limit = Number(url.searchParams.get('limit'));
+  expect([5, 10, 25, 50]).toContain(limit);
+  const cursor = url.searchParams.get('cursor');
+  if (cursor !== null) expect(cursor).toMatch(/^fixture:\d+$/);
+  const offset = cursor === null ? 0 : Number(cursor.slice('fixture:'.length));
+  const key = kind === 'sbom' ? 'components' : 'findings';
+  const all = payload[key] as unknown[];
+  const rows = all.slice(offset, offset + limit);
+  const coverage = kind === 'secret' ? payload.coverage as Record<string, unknown> | null : payload;
+  const checked = coverage?.outcome === 'checked';
+  const total = checked ? kind === 'sbom' ? payload.componentCount : kind === 'secret' ? coverage?.findingCount : payload.findingCount : null;
+  const sort = kind === 'vuln' ? 'severity:desc' : kind === 'sbom' ? 'name:asc' : 'ruleId:asc';
+  expect(url.searchParams.get('sort')).toBe(sort);
+  return { ...payload, [key]: rows, nextCursor: offset + rows.length < all.length ? `fixture:${offset + rows.length}` : null,
+    page: { version: 1, limit, offset, returnedCount: rows.length, totalCount: total, matchedCount: total, sort,
+      filters: kind === 'vuln' ? { severity: null } : kind === 'sbom' ? { ecosystem: null, name: null } : { ruleId: null, linePresence: null } } };
+}
+async function expectCve(cveId: string) {
+  const id = await screen.findByText(cveId, { selector: '.scan-vuln-row__id' });
+  const row = within(id.closest('li')!);
+  expect(row.getByText('HIGH', { exact: true })).toBeTruthy();
+  return row;
+}
 const imagePage = (items: Array<{ label: string; reference: string; scannable: boolean }>, nextCursor: string | null = null, pages = 1) => ({
   items: items.map(item => ({ ...item, eligibility: item.scannable ? 'alpine-only' : 'unsupported', reason: item.scannable ? 'Alpine only' : 'найден в Docker Hub, сканирование пока недоступно', kind: item.scannable ? 'tag' : 'repository', tagConfirmed: item.scannable, checks: { secret: item.scannable, sbom: item.scannable, vuln: item.scannable ? 'conditional' : 'unsupported' } })),
   nextCursor, state: nextCursor ? 'more-available' : 'terminal', loaded: items.length, pages, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' },
@@ -28,6 +58,11 @@ const imagePage = (items: Array<{ label: string; reference: string; scannable: b
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 function mount(path: string, ownEligibility = false) {
+  // Runtime has its own contract and must not consume image-search or eligibility responses.
+  const scanFetch = fetch;
+  vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => input.startsWith('/api/v1/browser/runtime/')
+    ? Promise.resolve(new Response(JSON.stringify({ errorCode: 'RUNTIME_UNAVAILABLE' }), { status: 503 }))
+    : scanFetch(input, init)));
   // Existing discovery tests mock Hub pages only. Dispatch the new independent
   // read-only endpoint without consuming those pagination fixtures.
   if (!ownEligibility) {
@@ -657,6 +692,7 @@ describe('cookie-session live scans', () => {
     const statusUrl = `/api/v1/browser/scans/${id}`;
     const contextUrl = `${statusUrl}/llm/context`;
     const fetchMock = vi.fn(async (path: string, _init?: RequestInit) => {
+      void _init;
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path === `${statusUrl}/results?limit=50`) return json({ findings: [], nextCursor: null, coverage: null });
       if (path === contextUrl) return new Response(JSON.stringify({ errorCode: 'LLM_REPORT_UNAVAILABLE' }), {
@@ -747,7 +783,7 @@ describe('cookie-session live scans', () => {
       void options;
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path.startsWith('/api/v1/browser/scans?')) return json({ scans: [row], nextCursor: null });
-      if (path.endsWith('/results?limit=50')) return json({ findings: [], nextCursor: null, coverage: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'checked', errorCode: null, scannerVersion: null } });
+      if (path.includes('/results?')) return json(reportPage(path, { findings: [], nextCursor: null, coverage: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'checked', errorCode: null, scannerVersion: null } }));
       return json({ scanId: id, state: 'completed', digest, platform: 'linux/amd64', result: { findingCount: 0, check: 'secret', coverage: 'image', outcome: 'checked', errorCode: null, scannerVersion: null } });
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -760,8 +796,9 @@ describe('cookie-session live scans', () => {
     client.clear();
     mount(`/scans/${id}`);
     expect(await screen.findByText(/0 находок в выполненной проверенной области/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Отмена недоступна' }).hasAttribute('disabled')).toBe(true);
-    expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/results?limit=50`)).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
+    expect(screen.getByText('Отмена недоступна в текущем состоянии.')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/results?view=report-v1&limit=25&sort=ruleId%3Aasc`)).toBe(true);
   });
 
   it('shows remote Docker Hub results but does not allow unsupported repositories to launch', async () => {
@@ -894,41 +931,43 @@ describe('cookie-session live scans', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Alpine · 3.21/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /CVE · доступно/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ }));
-    expect(screen.getByRole('checkbox', { name: /Host \/ running container/ }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('checkbox', { name: /Host · отдельный opt-in не подключён/ }).hasAttribute('disabled')).toBe(true);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
     await waitFor(() => expect(posts).toEqual([['secret', 'sbom', 'vuln']]));
-    expect((await screen.findByRole('alert')).textContent).toMatch(/база уязвимостей не настроена или недоступна/);
+    expect((await within(screen.getByRole('form', { name: 'Параметры скана' })).findByRole('alert')).textContent).toMatch(/база уязвимостей не настроена или недоступна/);
     expect(screen.queryByText(/0 CVE/)).toBeNull();
   });
   it('renders independent partial outcomes and paginates subject-scoped CVE findings', async () => {
     const secret = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };
     const failedSbom = { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' };
-    const checkedVuln = { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 2, scannerVersion: '0.69.3', checkedAt: 'today' };
+    const checkedVuln = { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 6, scannerVersion: '0.69.3', checkedAt: 'today' };
     const finding = (n: number) => ({ findingId: `vuln-${n}`, cveId: `CVE-2026-${n}`, ecosystem: 'apk', packageName: 'busybox', installedVersion: '1', severity: 'HIGH', fixedVersion: null });
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/results?')) return json({ findings: [], nextCursor: null, coverage: secret });
-      if (path.includes('/sbom?')) return json({ outcome: 'failed', coverage: 'image', reason: 'SCAN_TIMEOUT', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null });
-      if (path.includes('/vuln?')) return json({ outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@${digest}`, platform: 'linux/amd64', findingCount: 2, scannerVersion: '0.69.3', checkedAt: 'today', findings: [finding(path.includes('cursor=1') ? 2 : 1)], nextCursor: path.includes('cursor=1') ? null : 1 });
+      if (path.includes('/results?')) return json(reportPage(path, { findings: [], nextCursor: null, coverage: secret }));
+      if (path.includes('/sbom?')) return json(reportPage(path, { outcome: 'failed', coverage: 'image', reason: 'SCAN_TIMEOUT', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null }));
+      if (path.includes('/vuln?')) return json(reportPage(path, { outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@${digest}`, platform: 'linux/amd64', findingCount: 6, scannerVersion: '0.69.3', checkedAt: 'today', findings: Array.from({ length: 6 }, (_, index) => finding(index + 1)), nextCursor: null }));
       return json({ scanId: id, state: 'partial', digest, platform: 'linux/amd64', checks: ['secret', 'sbom', 'vuln'], perCheck: { secret, sbom: failedSbom, vuln: checkedVuln }, result: null });
     });
     vi.stubGlobal('fetch', fetchMock);
     mount(`/scans/${id}`);
-    expect(await screen.findByText(/CVE-2026-1/)).toBeTruthy();
+    await expectCve('CVE-2026-1');
     expect(screen.getByText(/SBOM не проверен: SCAN_TIMEOUT/)).toBeTruthy();
-    expect(screen.getByText(/Находок в проверенной области: 2/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
-    expect(await screen.findByText(/CVE-2026-2/)).toBeTruthy();
-    expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/vuln?limit=50&cursor=1`)).toBe(true);
+    expect(screen.getByText(/Находок в проверенной области: 6/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Строк на странице · CVE'), { target: { value: '5' } });
+    await screen.findByText('Строки 1–5');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
+    await expectCve('CVE-2026-6');
+    expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/vuln?view=report-v1&limit=5&sort=severity%3Adesc&cursor=fixture%3A5`)).toBe(true);
   });
   it.each(['partial', 'failed'])('renders DB_UNAVAILABLE and unknown CVE count for %s and remount', async state => {
     const failed = { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE', checksVersion: 'trivy-0.69.3-archive-v1', scannerVersion: '0.69.3', checkedAt: '2026-10-06T16:00:00.000Z' };
     const secret = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?')) return json({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE', findings: [], nextCursor: null });
-      if (path.includes('/results?')) return json({ findings: [], nextCursor: null, coverage: secret });
+      if (path.includes('/vuln?')) return json(reportPage(path, { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE', findings: [], nextCursor: null }));
+      if (path.includes('/results?')) return json(reportPage(path, { findings: [], nextCursor: null, coverage: secret }));
       return json({ scanId: id, state, digest, platform: 'linux/amd64', checks: state === 'partial' ? ['secret', 'vuln'] : ['vuln'],
         perCheck: state === 'partial' ? { secret, vuln: failed } : { vuln: failed }, result: null });
     }));
@@ -944,11 +983,13 @@ describe('cookie-session live scans', () => {
     const checkedVuln = { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', checkedAt: 'today' };
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?')) return json({ outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@sha256:${'b'.repeat(64)}`, platform: 'linux/amd64', findingCount: 0, scannerVersion: '0.69.3', checkedAt: 'today', findings: [], nextCursor: null });
+      if (path.includes('/vuln?')) return json(reportPage(path, { outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@sha256:${'b'.repeat(64)}`, platform: 'linux/amd64', findingCount: 0, scannerVersion: '0.69.3', checkedAt: 'today', findings: [], nextCursor: null }));
       return json({ scanId: id, state: 'completed', digest, platform: 'linux/amd64', checks: ['vuln'], perCheck: { vuln: checkedVuln }, result: checkedVuln });
     }));
     mount(`/scans/${id}`);
-    expect(await screen.findByText(/Идентичность образа в CVE-отчёте не совпадает/)).toBeTruthy();
+    expect(await screen.findByText(/Идентичность или версия отчёта изменилась/)).toBeTruthy();
+        expect(screen.queryByText(/Полный итог CVE/)).toBeNull();
+        expect(screen.queryByRole('navigation', { name: /Пагинация CVE/ })).toBeNull();
     expect(screen.queryByText(/Находок в проверенной области:/)).toBeNull();
   });
   it('does not call a 503 CVE response a clean result', async () => {
@@ -959,7 +1000,9 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount(`/scans/${id}`);
-    expect(await screen.findByText(/проверьте настройку базы уязвимостей/)).toBeTruthy();
+    expect(await screen.findByText(/Не удалось подтвердить страницу CVE/)).toBeTruthy();
+        expect(screen.getByText('Число CVE неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Повторить загрузку CVE' })).toBeTruthy();
     expect(screen.queryByText(/Находок в проверенной области:/)).toBeNull();
   });
   it('rotates the attempt key on check change after a rejected request', async () => {
@@ -986,19 +1029,22 @@ describe('cookie-session live scans', () => {
     expect(posts[1].idempotencyKey).not.toBe(posts[0].idempotencyKey);
   });
   it('shows checked SBOM pages and failed coverage only for a status-identified SBOM', async () => {
-    const checked = { outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@${digest}`, platform: 'linux/amd64', os: { name: 'alpine', version: '3.21' }, componentCount: 2, scannerVersion: '0.69.3', checkedAt: '2026-01-01', components: [{ ecosystem: 'apk', name: 'busybox', version: '1' }], nextCursor: 1 };
+    const checked = { outcome: 'checked', coverage: 'image', image: `registry-1.docker.io/library/alpine@${digest}`, platform: 'linux/amd64', os: { name: 'alpine', version: '3.21' }, componentCount: 6, scannerVersion: '0.69.3', checkedAt: '2026-01-01', components: ['busybox', 'lib-a', 'lib-b', 'lib-c', 'lib-d', 'musl'].map(name => ({ ecosystem: 'apk', name, version: '1' })), nextCursor: null };
     let failed = false;
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/sbom?')) return json(failed ? { coverage: 'image', outcome: 'failed', reason: 'SCAN_TIMEOUT', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null } : path.includes('cursor=1') ? { ...checked, components: [{ ecosystem: 'apk', name: 'musl', version: '2' }], nextCursor: null } : checked);
-      return json({ scanId: id, state: 'completed', result: failed ? { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' } : { check: 'sbom', coverage: 'image', outcome: 'checked', componentCount: 2, scannerVersion: '0.69.3', checkedAt: '2026-01-01' } });
+      if (path.includes('/sbom?')) return json(reportPage(path, failed ? { coverage: 'image', outcome: 'failed', reason: 'SCAN_TIMEOUT', errorCode: 'SCAN_TIMEOUT', components: [], nextCursor: null } : checked));
+      return json({ scanId: id, digest, platform: 'linux/amd64', state: 'completed', result: failed ? { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' } : { check: 'sbom', coverage: 'image', outcome: 'checked', componentCount: 6, scannerVersion: '0.69.3', checkedAt: '2026-01-01' } });
     });
     vi.stubGlobal('fetch', fetchMock);
     const client = mount(`/scans/${id}`);
     expect(await screen.findByText('busybox')).toBeTruthy();
     expect(screen.getByText(/ОС alpine 3.21/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница SBOM' }));
+    fireEvent.change(screen.getByLabelText('Строк на странице · SBOM'), { target: { value: '5' } });
+    await screen.findByText('Строки 1–5');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · SBOM · сверху' }));
     expect(await screen.findByText('musl')).toBeTruthy();
+    expect(screen.getByText('Строки 6–6')).toBeTruthy();
     expect(fetchMock.mock.calls.some(([path]) => path.includes('/results?'))).toBe(false);
     failed = true;
     await client.invalidateQueries({ queryKey: ['live-scans'] });
@@ -1018,7 +1064,7 @@ describe('cookie-session live scans', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Alpine · 3.21/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Сервер отклонил цель или параметры сканирования. Скан не создан.');
+    await waitFor(() => expect(within(screen.getByRole('form', { name: 'Параметры скана' })).getByRole('alert')).toHaveProperty('textContent', 'Сервер отклонил цель или параметры сканирования. Скан не создан.'));
   });
 
   it('shows logout on real scans, revokes the server cookie and clears private cache without opening account', async () => {
@@ -1124,10 +1170,10 @@ describe('Stage2 unified Findings detail', () => {
   const finding = (n: number, advisory = true) => ({ findingId: `vuln-${n}`, cveId: `CVE-2026-${String(n).padStart(4, '0')}`, ecosystem: 'apk', packageName: `package-${n}`, installedVersion: '1', severity: 'HIGH', fixedVersion: null,
     severitySources: ['alpine'], provenanceRef: `target-${'a'.repeat(64)}`,
     ...(advisory ? { advisory: { schemaVersion: 1, state: 'available', assessments: [source('alpine'), source('nvd', 'LOW')], references: [], conflicts: ['severity'], conflictState: 'present', limitations: ['redaction', 'field_limit'] } } : {}) });
-  const vulnPage = (cursor = 0, count = 51, advisory = false) => ({ outcome: 'checked', coverage: 'image', image, platform: 'linux/amd64', findingCount: count,
-    scannerVersion: '0.69.3', checkedAt, findings: Array.from({ length: Math.min(50, count - cursor) }, (_, n) => finding(cursor + n + 1, advisory)), nextCursor: cursor + 50 < count ? cursor + 50 : null });
+  const vulnPage = (path: string, count = 51, advisory = false) => reportPage(path, { outcome: 'checked', coverage: 'image', image, platform: 'linux/amd64', findingCount: count,
+    scannerVersion: '0.69.3', checkedAt, findings: Array.from({ length: count }, (_, n) => finding(n + 1, advisory)), nextCursor: null });
   const secret = (count: number) => ({ check: 'secret', coverage: 'image', outcome: 'checked', findingCount: count, scannerVersion: '0.69.3', errorCode: null });
-  const secretPage = (cursor = 0, count = 52) => ({ findings: Array.from({ length: Math.min(50, count - cursor) }, (_, n) => ({ findingId: `secret-${cursor + n + 1}`, ruleId: `secret-rule-${cursor + n + 1}`, line: 1, evidenceRef: 'redacted' })), nextCursor: cursor + 50 < count ? cursor + 50 : null, coverage: secret(count) });
+  const secretPage = (path: string, count = 52) => reportPage(path, { findings: Array.from({ length: count }, (_, n) => ({ findingId: `secret-${n + 1}`, ruleId: `secret-rule-${n + 1}`, line: 1, evidenceRef: 'redacted' })), nextCursor: null, coverage: secret(count) });
   const status = (checks = ['secret', 'vuln'], scanId = id, secrets = 52, cves = 51) => ({ scanId, state: 'completed', digest, platform: 'linux/amd64', checks,
     perCheck: { ...(checks.includes('secret') ? { secret: secret(secrets) } : {}), ...(checks.includes('vuln') ? { vuln: { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: cves, scannerVersion: '0.69.3', checkedAt } } : {}) }, result: null });
 
@@ -1141,13 +1187,14 @@ describe('Stage2 unified Findings detail', () => {
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       requests.push(path);
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?')) return json({ ...vulnPage(0, 1), findings: [f] });
+      if (path.includes('/vuln?')) return json({ ...vulnPage(path, 1), findings: [f] });
       return json(status(['vuln'], id, 0, 1));
     }));
     mount(`/scans/${id}`);
-    await screen.findByText('CVE-2026-1234 · HIGH');
-    const findings = screen.getByRole('region', { name: 'Находки' });
-    expect(screen.getAllByRole('heading', { name: 'Находки' })).toHaveLength(1);
+    const row = await expectCve('CVE-2026-1234');
+    fireEvent.click(row.getByText('Подробности CVE-2026-1234 · описание, CVSS и ссылки'));
+    const findings = screen.getByRole('region', { name: 'Результаты проверок' });
+    expect(screen.getAllByRole('heading', { name: 'Результаты проверок' })).toHaveLength(1);
     expect(within(findings).getAllByText(/Bounds 1 < 2 & comparison/)).toHaveLength(2);
     expect(within(findings).getAllByText(/Язык источника: не указан/)).toHaveLength(2);
     expect(within(findings).getByText(/Источники расходятся: severity/)).toBeTruthy();
@@ -1172,34 +1219,40 @@ describe('Stage2 unified Findings detail', () => {
     writeText.mockRestore();
   });
 
-  it('keeps independent >50-page cursors and totals across actual all/CVE/Secrets filters', async () => {
+  it('keeps independent cursors for >50 rows and totals across actual all/CVE/Secrets filters', async () => {
     const requests: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       requests.push(path);
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?')) return json(vulnPage(path.includes('cursor=50') ? 50 : 0));
-      if (path.includes('/results?')) return json(secretPage(path.includes('cursor=50') ? 50 : 0));
+      if (path.includes('/vuln?')) return json(vulnPage(path));
+      if (path.includes('/results?')) return json(secretPage(path));
       return json(status());
     }));
     mount(`/scans/${id}`);
-    await screen.findByText('CVE-2026-0001 · HIGH');
-    await screen.findByText('secret · secret-rule-1');
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
-    await screen.findByText('CVE-2026-0051 · HIGH');
-    expect(screen.getByText('secret · secret-rule-1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница' }));
-    await screen.findByText('secret · secret-rule-51');
+    await expectCve('CVE-2026-0001');
+    await screen.findByText('secret-rule-1');
+    for (const [label, region] of [['CVE', 'Результаты CVE'], ['Secrets', 'Результаты Secrets']]) {
+      fireEvent.change(screen.getByLabelText(`Строк на странице · ${label}`), { target: { value: '50' } });
+      await within(screen.getByRole('region', { name: region })).findByText('Строки 1–50');
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
+    await expectCve('CVE-2026-0051');
+    expect(screen.getByText('secret-rule-1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets · сверху' }));
+    await screen.findByText('secret-rule-51');
     const beforeFilter = requests.length;
     fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'cve' } });
-    expect(screen.queryByText('secret · secret-rule-51')).toBeNull();
-    expect(screen.getByText('CVE-2026-0051 · HIGH')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Результаты Secrets' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Результаты CVE' })).toBeTruthy();
+    expect(screen.getByText('CVE-2026-0051', { selector: '.scan-vuln-row__id' })).toBeTruthy();
     fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'secret' } });
-    expect(screen.queryByText('CVE-2026-0051 · HIGH')).toBeNull();
-    expect(screen.getByText('secret · secret-rule-51')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Результаты CVE' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Результаты Secrets' })).toBeTruthy();
+    expect(screen.getByText('secret-rule-51')).toBeTruthy();
     fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'all' } });
-    expect(screen.getByText('CVE-2026-0051 · HIGH')).toBeTruthy();
-    expect(screen.getByText('Подтверждённое число CVE: 51')).toBeTruthy();
-    expect(screen.getByText('Подтверждённое число Secrets: 52')).toBeTruthy();
+    expect(screen.getByText('CVE-2026-0051', { selector: '.scan-vuln-row__id' })).toBeTruthy();
+    expect(screen.getByText('Полный итог CVE: 51')).toBeTruthy();
+    expect(screen.getByText('Полный итог Secrets: 52')).toBeTruthy();
     expect(document.body.textContent).not.toContain('103');
     expect(requests).toHaveLength(beforeFilter);
   });
@@ -1207,13 +1260,13 @@ describe('Stage2 unified Findings detail', () => {
   it('renders Secrets checked zero alongside CVE without substituting a combined zero', async () => {
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?')) return json(vulnPage(0, 1));
-      if (path.includes('/results?')) return json(secretPage(0, 0));
+      if (path.includes('/vuln?')) return json(vulnPage(path, 1));
+      if (path.includes('/results?')) return json(secretPage(path, 0));
       return json(status(['secret', 'vuln'], id, 0, 1));
     }));
     mount(`/scans/${id}`);
-    await screen.findByText('CVE-2026-0001 · HIGH');
-    await screen.findByText('Подтверждённое число Secrets: 0');
+    await expectCve('CVE-2026-0001');
+    await screen.findByText('Полный итог Secrets: 0');
     expect(screen.getByText(/0 находок в выполненной проверенной области Secrets/)).toBeTruthy();
     expect(screen.getByText(/исторический отчёт без advisory/)).toBeTruthy();
     expect(screen.queryByRole('link', { name: /FIRST/ })).toBeNull();
@@ -1222,49 +1275,54 @@ describe('Stage2 unified Findings detail', () => {
   it('retains confirmed totals on independent later-page failures, without hiding the other dataset', async () => {
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('cursor=50')) return { ok: false, status: 503, json: async () => ({}) };
-      if (path.includes('/vuln?')) return json(vulnPage());
-      if (path.includes('/results?')) return json(secretPage());
+      if (new URL(path, window.location.origin).searchParams.has('cursor')) return { ok: false, status: 503, json: async () => ({}) };
+      if (path.includes('/vuln?')) return json(vulnPage(path));
+      if (path.includes('/results?')) return json(secretPage(path));
       return json(status());
     }));
     mount(`/scans/${id}`);
-    await screen.findByText('CVE-2026-0001 · HIGH');
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
-    await screen.findByText('Страница CVE недоступна; ранее подтверждённое число сохранено.');
-    expect(screen.getByText('Подтверждённое число CVE: 51')).toBeTruthy();
-    expect(screen.getByText('secret · secret-rule-1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница' }));
-    await screen.findByText('Страница Secrets недоступна; ранее подтверждённое число сохранено.');
-    expect(screen.getByText('Подтверждённое число Secrets: 52')).toBeTruthy();
+    await expectCve('CVE-2026-0001');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
+    await within(screen.getByRole('region', { name: 'Результаты CVE' })).findByText(/Показана предыдущая подтверждённая страница/);
+    expect(screen.getByText('Полный итог CVE: 51')).toBeTruthy();
+    expect(screen.getByText('secret-rule-1')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets · сверху' }));
+    await within(screen.getByRole('region', { name: 'Результаты Secrets' })).findByText(/Показана предыдущая подтверждённая страница/);
+    expect(screen.getByText('Полный итог Secrets: 52')).toBeTruthy();
   });
 
   it('keeps unknown schema and nonchecked Secrets outcomes unknown, with no raw fallback', async () => {
     const failed = { check: 'secret', coverage: 'image', outcome: 'failed', findingCount: null, scannerVersion: '0.69.3', errorCode: 'SCAN_FAILED' };
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?')) return json({ ...vulnPage(0, 1), findings: [{ ...finding(1), advisory: { schemaVersion: 99, raw: 'DO_NOT_RENDER_RAW' } }] });
-      if (path.includes('/results?')) return json({ findings: [], nextCursor: null, coverage: failed });
-      return json({ ...status(), perCheck: { ...status().perCheck, secret: failed } });
+      if (path.includes('/vuln?')) return json({ ...vulnPage(path, 1), findings: [{ ...finding(1), advisory: { schemaVersion: 99, raw: 'DO_NOT_RENDER_RAW' } }] });
+      if (path.includes('/results?')) return json(reportPage(path, { findings: [], nextCursor: null, coverage: failed }));
+      const snapshot = status(['secret', 'vuln'], id, 0, 1);
+            return json({ ...snapshot, perCheck: { ...snapshot.perCheck, secret: failed } });
     }));
     mount(`/scans/${id}`);
-    await screen.findByText('CVE недоступны; число уязвимостей неизвестно.');
-    expect(screen.getByText('Число Secrets неизвестно.')).toBeTruthy();
+    await within(await screen.findByRole('region', { name: 'Результаты CVE' })).findByText(/Прежние данные и cursors сброшены/);
+    expect(screen.getByText('Число Secrets неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
     expect(document.body.textContent).not.toContain('DO_NOT_RENDER_RAW');
-    expect(screen.queryByText(/Подтверждённое число/)).toBeNull();
+    expect(screen.queryByText(/Полный итог CVE:|Полный итог Secrets:/)).toBeNull();
     expect(screen.queryByText(/0 находок/)).toBeNull();
   });
 
   it.each(['subject', 'session', 'route'] as const)('resets filters and all cursors and discards a pending CVE page after %s changes', async change => {
     const nextId = '00000000-0000-4000-8000-000000000002';
     let changed = false;
+    let pendingPath = '';
     let finish!: (value: ReturnType<typeof json>) => void;
     const requests: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       requests.push(path);
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/vuln?') && path.includes('cursor=50')) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
-      if (path.includes('/vuln?')) return json(vulnPage(0, changed ? 1 : 51));
-      if (path.includes('/results?')) return json(secretPage(path.includes('cursor=50') ? 50 : 0, changed ? 1 : 52));
+      if (path.includes('/vuln?') && new URL(path, window.location.origin).searchParams.has('cursor')) {
+        pendingPath = path;
+        return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
+      }
+      if (path.includes('/vuln?')) return json(vulnPage(path, changed ? 1 : 51));
+      if (path.includes('/results?')) return json(secretPage(path, changed ? 1 : 52));
       return json(status(['secret', 'vuln'], path.includes(nextId) ? nextId : id, changed ? 1 : 52, changed ? 1 : 51));
     }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1272,10 +1330,12 @@ describe('Stage2 unified Findings detail', () => {
       <Link to={`/scans/${nextId}`}>Другой скан</Link>
       <Routes><Route path="/scans/:scanId" element={<LiveScanSession><ScanDetailPage /></LiveScanSession>} /></Routes>
     </MemoryRouter></QueryClientProvider>);
-    await screen.findByText('CVE-2026-0001 · HIGH');
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница' }));
-    await screen.findByText('secret · secret-rule-51');
-    fireEvent.click(screen.getByRole('button', { name: 'Следующая страница CVE' }));
+    await expectCve('CVE-2026-0001');
+    fireEvent.change(screen.getByLabelText('Строк на странице · Secrets'), { target: { value: '50' } });
+    await within(screen.getByRole('region', { name: 'Результаты Secrets' })).findByText('Строки 1–50');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets · сверху' }));
+    await screen.findByText('secret-rule-51');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
     fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'secret' } });
     changed = true;
@@ -1286,12 +1346,14 @@ describe('Stage2 unified Findings detail', () => {
       transitionScanSession(subject, client, change === 'session');
       client.setQueryData(['demo-auth', 'me'], { id: subject, email: `${subject}${change === 'session' ? '+renewed' : ''}@example.com` });
     });
-    await screen.findByText('Подтверждённое число CVE: 1');
+    await screen.findByText('Полный итог CVE: 1');
     expect((screen.getByRole('combobox', { name: 'Категория' }) as HTMLSelectElement).value).toBe('all');
-    expect(screen.getByText('secret · secret-rule-1')).toBeTruthy();
-    await act(async () => finish(json(vulnPage(50))));
-    expect(screen.queryByText('CVE-2026-0051 · HIGH')).toBeNull();
-    expect(screen.queryByText('secret · secret-rule-51')).toBeNull();
+    expect(screen.getByText('secret-rule-1')).toBeTruthy();
+    await act(async () => finish(json(vulnPage(pendingPath))));
+    expect(screen.queryByText('CVE-2026-0026', { selector: '.scan-vuln-row__id' })).toBeNull();
+    expect(screen.queryByText('secret-rule-51')).toBeNull();
+    expect(screen.getByText('Полный итог CVE: 1')).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: /Пагинация CVE/ })).toBeNull();
     expect(requests.slice(boundary).some(path => path.includes('cursor='))).toBe(false);
   });
 });

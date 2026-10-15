@@ -1,4 +1,7 @@
-import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { AuthStore } from '../auth/auth.store.js';
+import { HistoryService } from './history.service.js';
+import { historyUnavailable } from './history-contract.js';
 import type { Identity } from '../security/identity.js';
 import { ReportReader, type ReportContext } from './report-context.js';
 import { policyFromEnvironment, disclosure, type LlmPolicy } from './policy.js';
@@ -17,8 +20,18 @@ export class LlmRuntime {
 @Injectable()
 export class LlmService {
   private readonly active = new Set<string>();
+  private historyService?: HistoryService;
   constructor(@Inject(ReportReader) private readonly reports: ReportReader, @Inject(LlmRuntime) private readonly runtime: LlmRuntime,
-      @Inject(LlmQuotaRuntime) private readonly quotas: LlmQuotaRuntime) {}
+      @Inject(LlmQuotaRuntime) private readonly quotas: LlmQuotaRuntime, @Optional() @Inject(AuthStore) private readonly auth?: AuthStore) {}
+  history(): HistoryService {
+    if (!this.auth) return historyUnavailable();
+    return this.historyService ??= new HistoryService(this.auth, this.reports, this.runtime, this.quotas, owner => this.acquire(owner));
+  }
+  onModuleDestroy() { this.historyService?.close(); }
+  private acquire(owner: string): () => void {
+    if (this.active.size >= 8 || this.active.has(owner)) throw new HttpException({ errorCode: 'LLM_CAPACITY' }, 429);
+    this.active.add(owner); return () => { this.active.delete(owner); };
+  }
   context(identity: Identity, scanId: string) {
     const report = this.reports.read(identity, scanId);
     const policy = this.runtime.policy();
@@ -58,9 +71,7 @@ export class LlmService {
     if (body.consent.policyVersion !== policy.version) throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
     if (report.findings.length > policy.findings || Buffer.byteLength(JSON.stringify(report)) > policy.requestBytes)
       throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
-    if (this.active.size >= 8 || this.active.has(identity.subject))
-      throw new HttpException({ errorCode: 'LLM_CAPACITY' }, 429);
-    this.active.add(identity.subject);
+    const releaseCapacity = this.acquire(identity.subject);
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal.addEventListener('abort', abort, { once: true });
@@ -114,7 +125,7 @@ export class LlmService {
     } finally {
       // A dispatched/settled/fault attempt cannot be refunded by this release CAS.
       if (ledger && reservation) { try { ledger.release(reservation); } catch { /* Durable liability remains; never fabricate a refund. */ } }
-      clearTimeout(deadline); signal.removeEventListener('abort', abort); controller.abort(); this.active.delete(identity.subject);
+      clearTimeout(deadline); signal.removeEventListener('abort', abort); controller.abort(); releaseCapacity();
     }
   }
   private current(authorize: () => Identity, initial: Identity, report: ReportContext, policy: LlmPolicy, signal: AbortSignal) {

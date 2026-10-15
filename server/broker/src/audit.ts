@@ -50,9 +50,14 @@ export class AuditBuffer {
   }
   correctPublication(correlationId: string, record: AuditRecord): boolean {
     if (!this.#available || !valid(record)) return false;
-    const index = this.#records.findLastIndex(
-      (r) => r.correlationId === correlationId && r.stage === 'publication',
-    );
+    let index = -1;
+    for (let i = this.#records.length - 1; i >= 0; i--) {
+      const record = this.#records[i];
+      if (record.correlationId === correlationId && record.stage === 'publication') {
+        index = i;
+        break;
+      }
+    }
     if (index < 0) return false;
     this.#records[index] = Object.freeze({ ...record });
     return true;

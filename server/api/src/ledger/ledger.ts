@@ -11,6 +11,8 @@ import { omittedAdvisory, plainObject, validateAdvisoryBudget } from '../worker/
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 import { assertArchiveDbFreshness, validateArchiveReport } from '../worker/archive-result-contract.js';
 import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
+import { CURRENT_DB_POLICY, LEGACY_DB_POLICY, DbUsabilityError, DbPolicyContractError, type CveDbPolicy } from '../worker/cve-db-policy.mjs';
+import { validatePolicyBinding, validateDbEvidence, finalizeDbEvidence, type CveDbEvidence } from '../worker/cve-db-evidence.js';
 import type { ImageConfigResult } from '../image-config/contract.js';
 import { validateConfigReport } from '../image-config/report-contract.js';
 import { admittedConfigTarget, CONFIG_LOAD_MS } from '../oci/pinned-image-config.js';
@@ -27,8 +29,9 @@ export type PinnedTarget = {
   checks?: string;
   scope?: string;
   executionProfile?: LocalExecutionBinding;
+  cvePolicy?: CveDbPolicy;
 };
-export type Job = { scanId: string; registry: string; repository: string; digest: string; platform: string; checks: string; scope: string; attempts: number; executionProfile?: LocalExecutionBinding };
+export type Job = { scanId: string; registry: string; repository: string; digest: string; platform: string; checks: string; scope: string; attempts: number; executionProfile?: LocalExecutionBinding; cvePolicy?: CveDbPolicy };
 export class IdempotencyConflict extends Error {}
 export class AdmissionLimited extends Error {}
 const SUBJECT_ACTIVE_LIMIT = 3;
@@ -51,7 +54,7 @@ type CheckName = LegacyCheck | 'config';
 type CheckedPayload =
   | { check: 'secret'; outcome: 'checked'; findings: SecretFinding[]; scannerVersion: '0.69.3' }
   | { check: 'sbom'; outcome: 'checked'; sbom: ImageSbom; scannerVersion: '0.69.3' }
-  | { check: 'vuln'; outcome: 'checked'; image: string; findings: VulnFinding[]; scannerVersion: '0.69.3' };
+  | { check: 'vuln'; outcome: 'checked'; image: string; findings: VulnFinding[]; scannerVersion: '0.69.3'; dbEvidence?: CveDbEvidence };
 export type CombinedOutcome = CheckedPayload | { check: LegacyCheck; outcome: 'failed'; errorCode: FailureCode };
 const canonicalChecks = (value: string): CheckName[] | null => {
   try {
@@ -65,11 +68,11 @@ const canonicalChecks = (value: string): CheckName[] | null => {
   } catch { return null; }
 };
 
-function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string): void {
+function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string, policy: CveDbPolicy = LEGACY_DB_POLICY): void {
   if (!Array.isArray(outcomes) || outcomes.length < 1 || outcomes.length > 3 ||
       outcomes.some(item => !sbomObject(item, item?.outcome === 'failed' ? ['check','outcome','errorCode'] :
         item?.check === 'sbom' ? ['check','outcome','sbom','scannerVersion'] :
-        item?.check === 'vuln' ? ['check','outcome','image','findings','scannerVersion'] :
+        item?.check === 'vuln' ? ['check','outcome','image','findings','scannerVersion', ...(policy === CURRENT_DB_POLICY ? ['dbEvidence'] : [])] :
           ['check','outcome','findings','scannerVersion']))) throw new TypeError('Invalid combined result');
   for (const item of outcomes) {
     if (!['secret', 'sbom', 'vuln'].includes(item.check)) throw new TypeError('Invalid combined check');
@@ -112,6 +115,7 @@ function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string): v
         seen.add(key);
       }
     } else {
+      if (policy === CURRENT_DB_POLICY) validateDbEvidence(item.dbEvidence, policy);
       if (typeof item.image !== 'string' ||
           !(archiveImage ? item.image === archiveImage : /^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/.test(item.image)) ||
           !Array.isArray(item.findings) || item.findings.length > MAX_VULN_FINDINGS)
@@ -145,16 +149,16 @@ function validateCombined(outcomes: CombinedOutcome[], archiveImage?: string): v
   }
 }
 
-function validateStoredArchive(report: ArchiveScanReport): { requested: string[]; checked: CombinedOutcome[] } {
+function validateStoredArchive(report: ArchiveScanReport, policy: CveDbPolicy = LEGACY_DB_POLICY): { requested: string[]; checked: CombinedOutcome[] } {
   const requested = ['secret', 'sbom', 'vuln'].filter(check => Object.hasOwn(report, check));
-  validateArchiveReport(report, requested);
-  assertArchiveDbFreshness(report, report.checkedAt);
+  validateArchiveReport(report, requested, policy);
+  assertArchiveDbFreshness(report, report.checkedAt, policy);
   const image = `${report.receipt.registry}/${report.receipt.repository}@${report.receipt.digest}`;
   const checked: CombinedOutcome[] = [];
   if (report.secret?.outcome === 'checked') checked.push({ check: 'secret', ...report.secret, scannerVersion: report.scannerVersion });
   if (report.sbom?.outcome === 'checked') checked.push({ check: 'sbom', ...report.sbom, scannerVersion: report.scannerVersion });
   if (report.vuln?.outcome === 'checked') {
-    if (!sbomObject(report.vuln, ['outcome', 'findings', 'db', 'os', 'node']) ||
+    if (!sbomObject(report.vuln, ['outcome', 'findings', 'db', 'os', 'node', ...(policy === CURRENT_DB_POLICY ? ['dbPolicy'] : [])]) ||
       !sbomObject(report.vuln.os, ['outcome']) || report.vuln.os.outcome !== 'checked' ||
       !(sbomObject(report.vuln.node, ['outcome']) && report.vuln.node.outcome === 'checked' ||
       sbomObject(report.vuln.node, ['outcome','reason']) && report.vuln.node.outcome === 'unsupported' &&
@@ -164,6 +168,11 @@ function validateStoredArchive(report: ArchiveScanReport): { requested: string[]
   if (checked.length) validateCombined(checked, image);
   return { requested, checked };
 }
+
+export type VulnDataset = {
+  image: string; platform: 'linux/amd64'; findingCount: number; coverage: 'image'; outcome: 'checked';
+  scannerVersion: string; checkedAt: string; findings: VulnFinding[]; dbEvidence?: CveDbEvidence;
+} | { coverage: 'image'; outcome: 'failed'; errorCode: FailureCode; findings: [] };
 
 type ScanRow = { id: string; registry: string; repository: string; digest: string; platform: string; fingerprint: string | null };
 type ClaimRow = { scanId: string; registry: string; repository: string; digest: string; platform: string; checks: string; scope: string; attempts: number };
@@ -179,7 +188,7 @@ export class ScanLedger {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 5000');
       const version = Number(this.db.pragma('user_version', { simple: true }));
-      if (version > 13 || version < 0) throw new Error('Unsupported ledger version');
+      if (version > 14 || version < 0) throw new Error('Unsupported ledger version');
       // FK enforcement must be toggled outside a transaction for SQLite's table rebuild.
       // Check the rebuilt references before commit, then restore enforcement afterward.
       if (version < 9) this.db.pragma('foreign_keys = OFF');
@@ -356,6 +365,23 @@ export class ScanLedger {
         if (version < 13) this.db.exec(`ALTER TABLE scan_vuln_findings ADD COLUMN advisory TEXT
           CHECK(advisory IS NULL OR length(CAST(advisory AS BLOB)) <= 16384);
           PRAGMA user_version = 13;`);
+        if (version < 14) {
+          this.db.exec(`CREATE TABLE scan_cve_policy (
+            scan_id TEXT PRIMARY KEY REFERENCES scans(id),
+            policy TEXT NOT NULL CHECK(policy IN ('legacy-db-freshness-v1','cve-db-updated-at-14d-v2')),
+            result_contract_version INTEGER NOT NULL,
+            CHECK((policy='legacy-db-freshness-v1' AND result_contract_version=1) OR
+              (policy='cve-db-updated-at-14d-v2' AND result_contract_version=2))
+          ); CREATE TABLE scan_cve_evidence (
+            scan_id TEXT PRIMARY KEY REFERENCES scans(id), attempt INTEGER NOT NULL CHECK(attempt>0),
+            evidence TEXT NOT NULL CHECK(length(CAST(evidence AS BLOB))<=8192)
+          );`);
+          const insert = this.db.prepare('INSERT INTO scan_cve_policy(scan_id,policy,result_contract_version) VALUES (?, ?, 1)');
+          for (const row of this.db.prepare('SELECT id,checks FROM scans').all() as Array<{id: string; checks: string}>) {
+            if (canonicalChecks(row.checks)?.includes('vuln')) insert.run(row.id, LEGACY_DB_POLICY);
+          }
+          this.db.pragma('user_version = 14');
+        }
         if ((this.db.pragma('foreign_key_check') as unknown[]).length)
           throw new Error('Ledger migration foreign key mismatch');
       });
@@ -382,6 +408,7 @@ export class ScanLedger {
   findByKey(subject: string, idempotencyKey: string): { scanId: string; digest: string; platform: string; fingerprint: string | null } | undefined {
     const [row] = this.orm.select({ id: scans.id, digest: scans.digest, platform: scans.platform, fingerprint: scans.fingerprint })
       .from(scans).where(and(eq(scans.subject, subject), eq(scans.idempotencyKey, idempotencyKey))).all();
+    if (row) this.cvePolicy(row.id);
     return row ? { scanId: row.id, digest: row.digest, platform: row.platform, fingerprint: row.fingerprint } : undefined;
   }
 
@@ -422,6 +449,7 @@ export class ScanLedger {
               existing.digest !== target.digest || existing.platform !== target.platform)) {
           throw new IdempotencyConflict('Idempotency key used for another request');
         }
+        this.cvePolicy(existing.id);
         return { scanId: existing.id, created: false };
       }
       this.checkAdmission(target.subject);
@@ -430,6 +458,12 @@ export class ScanLedger {
                        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`).run(
         scanId, target.subject, target.idempotencyKey, target.registry, target.repository,
         target.digest, target.platform, target.fingerprint ?? null, target.checks ?? '[]', target.scope ?? 'image');
+      if (canonicalChecks(target.checks ?? '')?.includes('vuln')) {
+        const binding = validatePolicyBinding({ policy: target.cvePolicy ?? LEGACY_DB_POLICY,
+          resultContractVersion: target.cvePolicy === CURRENT_DB_POLICY ? 2 : 1 });
+        this.db.prepare('INSERT INTO scan_cve_policy(scan_id,policy,result_contract_version) VALUES (?,?,?)')
+          .run(scanId, binding.policy, binding.resultContractVersion);
+      } else if (target.cvePolicy !== undefined) throw new DbPolicyContractError();
       if (target.executionProfile) this.db.prepare('INSERT INTO scan_execution_profiles(scan_id,binding) VALUES (?,?)')
         .run(scanId, JSON.stringify(target.executionProfile));
       this.db.prepare('INSERT INTO outbox (scan_id) VALUES (?)').run(scanId);
@@ -455,13 +489,14 @@ export class ScanLedger {
           AND o.next_run_at <= ? AND (o.lease_until IS NULL OR o.lease_until <= ?)
         ORDER BY s.created_at, s.id LIMIT 1`).get(now, now) as ClaimRow | undefined;
       if (!row) return undefined;
+      const cvePolicy = this.cvePolicy(row.scanId);
       this.db.prepare('UPDATE outbox SET lease_until = ?, attempts = attempts + 1 WHERE scan_id = ?')
         .run(now + (row.repository === 'library/nginx' && archiveLeaseMs ? Math.max(leaseMs, archiveLeaseMs) : leaseMs) +
                   (canonicalChecks(row.checks)?.includes('config') ? CONFIG_LOAD_MS + 1000 : 0), row.scanId);
       this.db.prepare("UPDATE scans SET state = 'running' WHERE id = ?").run(row.scanId);
       this.event(row.scanId, 'running');
       const executionProfile = this.executionProfile(row.scanId);
-      return { ...row, attempts: row.attempts + 1, ...(executionProfile ? { executionProfile } : {}) };
+      return { ...row, attempts: row.attempts + 1, ...(executionProfile ? { executionProfile } : {}), ...(cvePolicy ? { cvePolicy } : {}) };
     });
   }
 
@@ -496,7 +531,8 @@ export class ScanLedger {
       .get(scanId, attempts) as (Job & { subject: string }) | undefined;
     if (!row) return undefined;
     const { subject, ...job } = row;
-    return { subject, job };
+    const cvePolicy = this.cvePolicy(scanId);
+    return { subject, job: { ...job, ...(cvePolicy ? { cvePolicy } : {}) } };
   }
 
   configResult(scanId: string, subject: string): ImageConfigResult | undefined {
@@ -514,6 +550,7 @@ export class ScanLedger {
 
   finish(scanId: string, attempts: number, state: 'failed', errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE' = 'SCAN_FAILED'): boolean {
     return this.immediate(() => {
+      this.cvePolicy(scanId);
       const result = this.db.prepare(`UPDATE outbox SET delivered_at = CURRENT_TIMESTAMP, lease_until = NULL
         WHERE scan_id = ? AND attempts = ? AND delivered_at IS NULL
           AND EXISTS (SELECT 1 FROM scans WHERE id = ? AND state = 'running')`).run(scanId, attempts, scanId);
@@ -611,21 +648,23 @@ export class ScanLedger {
     const context = config ? this.configAttemptContext(scanId, attempts) : undefined;
     if (config && !context) return false;
     const safeConfig = config ? validateConfigReport(config, context!.job, canonicalChecks(context!.job.checks)?.includes('config') === true) : undefined;
-    const { requested, checked } = validateStoredArchive(report);
+    const policy = this.cvePolicy(scanId) ?? LEGACY_DB_POLICY;
+    const { requested, checked } = validateStoredArchive(report, policy);
     // Optional report metadata is dropped deterministically before the fenced transaction.
+    const precommitLimit = policy === CURRENT_DB_POLICY ? 1_999_488 : 2_000_000;
     let body = JSON.stringify(report);
-    if (Buffer.byteLength(body) > 2_000_000 && report.vuln?.outcome === 'checked') {
+    if (Buffer.byteLength(body) > precommitLimit && report.vuln?.outcome === 'checked') {
       report = { ...report, vuln: { ...report.vuln, findings: report.vuln.findings.map(f => ({ ...f })) } };
       if (report.vuln?.outcome === 'checked') {
         for (const finding of [...report.vuln.findings].sort((a, b) => a.findingId < b.findingId ? 1 : -1)) {
           if (!finding.advisory) continue;
           finding.advisory = omittedAdvisory('report_budget');
           body = JSON.stringify(report);
-          if (Buffer.byteLength(body) <= 2_000_000) break;
+          if (Buffer.byteLength(body) <= precommitLimit) break;
         }
       }
     }
-    if (Buffer.byteLength(body) > 2_000_000) throw new TypeError('Invalid archive result size');
+    if (Buffer.byteLength(body) > precommitLimit) throw new TypeError('Invalid archive result size');
     return this.immediate(() => {
       const row = this.db.prepare(`SELECT s.subject,s.registry,s.repository,s.digest,s.platform,s.checks,s.scope
         FROM scans s JOIN outbox o ON o.scan_id=s.id WHERE s.id=? AND s.state='running'
@@ -639,20 +678,46 @@ export class ScanLedger {
       const binding = this.executionProfile(scanId);
       if (binding && (!validLocalBinding(binding) || !localChecksAllowed(requested) || !localReceiptMatches(report.receipt, report.scannerVersion)))
         throw new TypeError('Execution receipt mismatch');
-      // Freshness is a clock check only; no hashing/network work inside the transaction.
-      assertArchiveDbFreshness(report);
+      if (this.cvePolicy(scanId) !== (requested.includes('vuln') ? policy : undefined)) throw new DbPolicyContractError();
+      // Final authoritative eligibility decision, captured once under the current attempt fence.
+      const evaluatedAt = Date.now();
+      if (policy === CURRENT_DB_POLICY && report.vuln && report.vuln.outcome !== 'failed' && report.vuln.db) {
+        try {
+          const evidence = finalizeDbEvidence({ db: report.vuln.db, checkedAt: report.checkedAt, dbPolicy: report.vuln.dbPolicy! }, evaluatedAt);
+          report = { ...report, vuln: { ...report.vuln, dbPolicy: evidence.dbPolicy } };
+        } catch (error) {
+          if (!(error instanceof DbUsabilityError)) throw error;
+          report = { ...report, vuln: { outcome: 'failed', reason: 'DB_UNAVAILABLE' } };
+        }
+      } else assertArchiveDbFreshness(report, evaluatedAt, policy);
+      const checkedCount = checked.length - (checked.some(item => item.check === 'vuln') && report.vuln?.outcome === 'failed' ? 1 : 0);
+      body = JSON.stringify(report);
+      if (Buffer.byteLength(body) > 2_000_000) throw new TypeError('Invalid archive result size');
       const changed = this.db.prepare(`UPDATE outbox SET delivered_at=CURRENT_TIMESTAMP,lease_until=NULL
         WHERE scan_id=? AND attempts=? AND delivered_at IS NULL`).run(scanId, attempts);
       if (changed.changes !== 1) throw new Error('Archive attempt mismatch');
       this.db.prepare('INSERT INTO scan_archive_results(scan_id,attempt,report) VALUES (?,?,?)').run(scanId, attempts, body);
       if (safeConfig) this.saveConfig(scanId, attempts, safeConfig);
       const selectedConfig = canonicalChecks(row.checks)?.includes('config') === true;
-      const count = checked.length + (selectedConfig && safeConfig?.config.outcome === 'checked' ? 1 : 0);
+      const count = checkedCount + (selectedConfig && safeConfig?.config.outcome === 'checked' ? 1 : 0);
       const terminal = count === requested.length + (selectedConfig ? 1 : 0) ? 'completed' : count ? 'partial' : 'failed';
       this.db.prepare(`UPDATE scans SET state=?,terminal_at=CURRENT_TIMESTAMP WHERE id=? AND state='running'`).run(terminal, scanId);
       this.event(scanId, terminal);
       return true;
     });
+  }
+
+  // Required independent authority: payload absence never identifies a legacy scan.
+  cvePolicy(scanId: string): CveDbPolicy | undefined {
+    const scan = this.db.prepare('SELECT checks FROM scans WHERE id=?').get(scanId) as { checks: string } | undefined;
+    if (!scan) throw new DbPolicyContractError();
+    const row = this.db.prepare('SELECT policy,result_contract_version AS resultContractVersion FROM scan_cve_policy WHERE scan_id=?')
+      .get(scanId);
+    if (!canonicalChecks(scan.checks)?.includes('vuln')) {
+      if (row) throw new DbPolicyContractError();
+      return undefined;
+    }
+    return validatePolicyBinding(row).policy;
   }
 
   executionProfile(scanId: string): LocalExecutionBinding | undefined {
@@ -664,12 +729,13 @@ export class ScanLedger {
   }
 
   archiveResult(scanId: string, subject: string): ArchiveScanReport | undefined {
+    if (!this.snapshot(scanId, subject)) return undefined;
     const row = this.db.prepare(`SELECT r.report, s.registry, s.repository, s.digest, s.platform, s.checks FROM scan_archive_results r JOIN scans s ON s.id=r.scan_id
       WHERE s.id=? AND s.subject=?`).get(scanId, subject) as { report: string; registry: string; repository: string; digest: string; platform: string; checks: string } | undefined;
     if (!row) return undefined;
     if (Buffer.byteLength(row.report) > 2_000_000) throw new TypeError('Invalid stored archive size');
     const report: ArchiveScanReport = JSON.parse(row.report);
-    const { requested } = validateStoredArchive(report);
+    const { requested } = validateStoredArchive(report, this.cvePolicy(scanId) ?? LEGACY_DB_POLICY);
     if (['registry', 'repository', 'digest', 'platform'].some(key => report.receipt[key as keyof typeof report.receipt] !== row[key as 'registry' | 'repository' | 'digest' | 'platform']) ||
         JSON.stringify(requested) !== JSON.stringify(canonicalChecks(row.checks)?.filter(check => check !== 'config')))
       throw new TypeError('Invalid stored archive binding');
@@ -677,7 +743,12 @@ export class ScanLedger {
   }
 
   finishCombined(scanId: string, attempts: number, outcomes: CombinedOutcome[], config?: ImageConfigResult): boolean {
-    if (outcomes.length || !config) validateCombined(outcomes);
+    const policy = this.cvePolicy(scanId) ?? LEGACY_DB_POLICY;
+    if (outcomes.length || !config) validateCombined(outcomes, undefined, policy);
+    for (const item of outcomes) {
+      if (item.check === 'vuln' && item.outcome === 'checked' && item.dbEvidence &&
+          Buffer.byteLength(JSON.stringify(item.dbEvidence)) > 7680) throw new DbPolicyContractError();
+    }
     const context = config ? this.configAttemptContext(scanId, attempts) : undefined;
     if (config && !context) return false;
     const safeConfig = config ? validateConfigReport(config, context!.job, canonicalChecks(context!.job.checks)?.includes('config') === true) : undefined;
@@ -697,6 +768,16 @@ export class ScanLedger {
           JSON.stringify(outcomes.map(item => item.check)) !== JSON.stringify(requested.filter(check => check !== 'config')) ||
           requested.includes('config') && !safeConfig || safeConfig && !isDeepStrictEqual(context, this.configAttemptContext(scanId, attempts)))
         throw new Error('Scan combined contract mismatch');
+      if (this.cvePolicy(scanId) !== (requested.includes('vuln') ? policy : undefined)) throw new DbPolicyContractError();
+      const evaluatedAt = Date.now();
+      outcomes = outcomes.map(item => {
+        if (policy !== CURRENT_DB_POLICY || item.check !== 'vuln' || item.outcome !== 'checked') return item;
+        try { return { ...item, dbEvidence: finalizeDbEvidence(item.dbEvidence!, evaluatedAt) }; }
+        catch (error) {
+          if (!(error instanceof DbUsabilityError)) throw error;
+          return { check: 'vuln', outcome: 'failed', errorCode: 'SCAN_UNAVAILABLE' };
+        }
+      });
       const image = `${row.registry}/${row.repository}@${row.digest}`;
       for (const item of outcomes) {
         if (item.outcome === 'checked' && item.check === 'sbom' &&
@@ -737,6 +818,13 @@ export class ScanLedger {
             (scan_id,image,platform,finding_count,coverage,outcome,scanner_version,checked_at)
             VALUES (?,?,?,?,'image','checked',?,CURRENT_TIMESTAMP)`).run(scanId,
               item.image, row.platform, item.findings.length, item.scannerVersion);
+          if (policy === CURRENT_DB_POLICY) {
+            const evidence = item.dbEvidence!;
+            const serialized = JSON.stringify(evidence);
+            if (Buffer.byteLength(serialized) > 8192) throw new DbPolicyContractError();
+            this.db.prepare('INSERT INTO scan_cve_evidence(scan_id,attempt,evidence) VALUES (?,?,?)').run(scanId, attempts, serialized);
+            this.db.prepare('UPDATE scan_vuln_results SET checked_at=? WHERE scan_id=?').run(new Date(evidence.checkedAt).toISOString(), scanId);
+          }
           const insert = this.db.prepare(`INSERT INTO scan_vuln_findings
             (scan_id,ordinal,finding_id,cve_id,ecosystem,package_name,installed_version,severity,severity_sources,provenance_ref,fixed_version,advisory)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
@@ -760,9 +848,11 @@ export class ScanLedger {
 
   // The image is supplied by the pinned worker job, not reconstructed from untrusted findings.
   finishWithVuln(scanId: string, attempts: number, image: string, findings: VulnFinding[], scannerVersion: string): boolean {
+    if (this.cvePolicy(scanId) !== LEGACY_DB_POLICY) throw new DbPolicyContractError();
     if (scannerVersion !== '0.69.3') throw new TypeError('Invalid vulnerability result');
     validateCombined([{ check: 'vuln', outcome: 'checked', image, findings, scannerVersion }]);
     return this.immediate(() => {
+      if (this.cvePolicy(scanId) !== LEGACY_DB_POLICY) throw new DbPolicyContractError();
       const delivered = this.db.prepare(`UPDATE outbox SET delivered_at = CURRENT_TIMESTAMP, lease_until = NULL
         WHERE scan_id = ? AND attempts = ? AND delivered_at IS NULL
           AND EXISTS (SELECT 1 FROM scans WHERE id = ? AND state = 'running')`).run(scanId, attempts, scanId);
@@ -792,12 +882,29 @@ export class ScanLedger {
 
   vuln(scanId: string, subject: string, cursor = 0, limit = 50): ({
     image: string; platform: 'linux/amd64'; findingCount: number; coverage: 'image'; outcome: 'checked';
-    scannerVersion: string; checkedAt: string; findings: VulnFinding[]; nextCursor: number | null;
+    scannerVersion: string; checkedAt: string; findings: VulnFinding[]; nextCursor: number | null; dbEvidence?: CveDbEvidence;
   } | { coverage: 'image'; outcome: 'failed'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE';
     findings: []; nextCursor: null }) | undefined {
     if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)
       throw new TypeError('Invalid pagination');
-    const row = this.db.prepare(`SELECT r.image, r.platform, r.finding_count AS findingCount, r.coverage,
+    const dataset = this.vulnDataset(scanId, subject);
+    if (!dataset) return undefined;
+    if (dataset.outcome === 'failed') return { ...dataset, nextCursor: null };
+    const findings = dataset.findings.slice(cursor, cursor + limit);
+    return { ...dataset, findings,
+      nextCursor: cursor + findings.length < dataset.findingCount ? cursor + findings.length : null };
+  }
+
+  // DEFERRED read snapshots never acquire an IMMEDIATE writer transaction.
+  readReportSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred(); }
+
+  vulnDataset(scanId: string, subject: string): VulnDataset | undefined {
+    return this.readReportSnapshot(() => this.loadVulnDataset(scanId, subject));
+  }
+
+  private loadVulnDataset(scanId: string, subject: string): VulnDataset | undefined {
+    if (!this.snapshot(scanId, subject)) return undefined;
+    const row = this.db.prepare(`SELECT r.image,r.platform,r.finding_count AS findingCount,
       r.outcome, r.scanner_version AS scannerVersion, r.checked_at AS checkedAt, r.error_code AS errorCode
       FROM scan_vuln_results r JOIN scans s ON s.id = r.scan_id WHERE s.id = ? AND s.subject = ?`)
       .get(scanId, subject) as { image: string | null; platform: 'linux/amd64' | null;
@@ -805,8 +912,8 @@ export class ScanLedger {
         scannerVersion: string | null; checkedAt: string | null;
         errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE' | null } | undefined;
     if (!row) return undefined;
-    if (row.outcome === 'failed') return { coverage: 'image', outcome: 'failed', errorCode: row.errorCode!,
-      findings: [], nextCursor: null };
+    const policy = this.cvePolicy(scanId);
+    if (row.outcome === 'failed') return { coverage: 'image', outcome: 'failed', errorCode: row.errorCode!, findings: [] };
     // Validate the complete bounded durable dataset before projecting a page.
     const stored = this.db.prepare(`SELECT finding_id AS findingId, cve_id AS cveId, ecosystem,
       package_name AS packageName, installed_version AS installedVersion, severity,
@@ -821,11 +928,25 @@ export class ScanLedger {
     });
     if (row.platform !== 'linux/amd64' || row.scannerVersion !== '0.69.3' || row.findingCount !== all.length)
       throw new TypeError('Invalid stored vulnerability result');
-    validateCombined([{ check: 'vuln', outcome: 'checked', image: row.image!, scannerVersion: row.scannerVersion, findings: all }]);
-    const findings = all.slice(cursor, cursor + limit);
+    // A legacy marker cannot erase surviving v2 evidence, even if its attempt link is corrupt.
+        if (policy === LEGACY_DB_POLICY && this.db.prepare('SELECT 1 FROM scan_cve_evidence WHERE scan_id=?').get(scanId))
+          throw new DbPolicyContractError();
+        const dbEvidence = policy === CURRENT_DB_POLICY ? this.standaloneDbEvidence(scanId) : undefined;
+    if (dbEvidence && row.checkedAt !== new Date(dbEvidence.checkedAt).toISOString()) throw new DbPolicyContractError();
+    validateCombined([{ check: 'vuln', outcome: 'checked', image: row.image!, scannerVersion: row.scannerVersion, findings: all,
+      ...(dbEvidence ? { dbEvidence } : {}) }], undefined, policy);
     return { image: row.image!, platform: row.platform, findingCount: row.findingCount, coverage: 'image',
-      outcome: 'checked', scannerVersion: row.scannerVersion, checkedAt: row.checkedAt!, findings,
-      nextCursor: cursor + findings.length < row.findingCount ? cursor + findings.length : null };
+      outcome: 'checked', scannerVersion: row.scannerVersion, checkedAt: row.checkedAt!, findings: all,
+      ...(dbEvidence ? { dbEvidence } : {}) };
+  }
+
+  private standaloneDbEvidence(scanId: string): CveDbEvidence {
+    const row = this.db.prepare(`SELECT e.evidence FROM scan_cve_evidence e JOIN outbox o ON o.scan_id=e.scan_id
+          WHERE e.scan_id=? AND e.attempt=o.attempts AND o.delivered_at IS NOT NULL`).get(scanId) as { evidence: string } | undefined;
+    if (!row || Buffer.byteLength(row.evidence) > 8192) throw new DbPolicyContractError();
+    const evidence: unknown = JSON.parse(row.evidence);
+    validateDbEvidence(evidence, CURRENT_DB_POLICY);
+    return evidence;
   }
 
   sbom(scanId: string, subject: string, cursor = 0, limit = 50): ({
@@ -855,6 +976,37 @@ export class ScanLedger {
       componentCount: row.componentCount!, coverage: row.coverage, outcome: 'checked',
       scannerVersion: row.scannerVersion!, checkedAt: row.checkedAt!, components,
       nextCursor: cursor + components.length < row.componentCount! ? cursor + components.length : null };
+  }
+
+  sbomDataset(scanId: string, subject: string): ReturnType<ScanLedger['sbom']> {
+    return this.readReportSnapshot(() => {
+      const report = this.sbom(scanId, subject, 0, 1);
+      if (!report || report.outcome !== 'checked') return report;
+      const components = this.db.prepare(`SELECT ecosystem,name,version FROM scan_sbom_components
+        WHERE scan_id = ? ORDER BY ordinal LIMIT 1001`).all(scanId) as SbomComponent[];
+      if (components.length !== report.componentCount || report.coverage !== 'image' || report.scannerVersion !== '0.69.3')
+        throw new TypeError('Invalid stored SBOM result');
+      validateCombined([{ check: 'sbom', outcome: 'checked', scannerVersion: report.scannerVersion,
+        sbom: { image: report.image, platform: report.platform, os: report.os, components } }]);
+      return { ...report, components, nextCursor: null };
+    });
+  }
+
+  secretDataset(scanId: string, subject: string): {
+    findings: SecretFinding[]; coverage: NonNullable<ReturnType<ScanLedger['result']>>;
+  } | undefined {
+    return this.readReportSnapshot(() => {
+      const coverage = this.result(scanId, subject);
+      if (!coverage) return undefined;
+      if (coverage.outcome !== 'checked') return { findings: [], coverage };
+      const findings = this.db.prepare(`SELECT finding_id AS findingId, rule_id AS ruleId, line, evidence_ref AS evidenceRef
+        FROM scan_findings WHERE scan_id = ? ORDER BY finding_id LIMIT 1001`).all(scanId) as SecretFinding[];
+      if (findings.length !== coverage.findingCount || coverage.check !== 'secret' || coverage.coverage !== 'image' ||
+          coverage.scannerVersion !== '0.69.3' || coverage.errorCode !== null)
+        throw new TypeError('Invalid stored secret result');
+      validateCombined([{ check: 'secret', outcome: 'checked', scannerVersion: coverage.scannerVersion, findings }]);
+      return { findings, coverage };
+    });
   }
 
   result(scanId: string, subject: string): { findingCount: number | null; check: string; coverage: string; outcome: string; errorCode: string | null; scannerVersion: string | null } | undefined {
@@ -924,12 +1076,14 @@ export class ScanLedger {
   requestedChecks(scanId: string, subject: string): readonly CheckName[] {
     const row = this.db.prepare('SELECT checks FROM scans WHERE id = ? AND subject = ?')
       .get(scanId, subject) as { checks: string } | undefined;
+    if (row) this.cvePolicy(scanId);
     return row ? canonicalChecks(row.checks) ?? [] : [];
   }
 
   snapshot(scanId: string, subject: string): { state: string; digest: string; platform: string } | undefined {
     const [row] = this.orm.select({ state: scans.state, digest: scans.digest, platform: scans.platform }).from(scans)
       .where(and(eq(scans.id, scanId), eq(scans.subject, subject))).all();
+    if (row) this.cvePolicy(scanId);
     return row;
   }
 
@@ -948,6 +1102,7 @@ export class ScanLedger {
         (SELECT min(seq) FROM scan_events WHERE scan_id = s.id)
       WHERE s.subject = ? AND e.seq <= ? AND e.seq < ? ORDER BY e.seq DESC LIMIT ?`)
       .all(subject, bound, last, limit + 1) as Array<{ createdSeq: number; scanId: string; state: string; digest: string; platform: string; targetLabel: string }>;
+    for (const row of rows.slice(0, limit)) this.cvePolicy(row.scanId);
     return { scans: rows.slice(0, limit).map(row => ({ scanId: row.scanId, state: row.state, digest: row.digest,
           platform: row.platform, targetLabel: row.targetLabel })),
       nextCursor: rows.length > limit ? `${bound}:${rows[limit - 1].createdSeq}` : null };
@@ -962,7 +1117,7 @@ export class ScanLedger {
     return this.immediate(() => {
       this.db.prepare('DELETE FROM admission_windows WHERE minute < ?').run(Math.floor(Date.now() / 60000) - 1440);
       this.db.prepare(`DELETE FROM scan_audit WHERE created_at < datetime('now', ?)`).run(`-${days} days`);
-      for (const table of ['scan_execution_profiles', 'scan_check_results', 'scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
+      for (const table of ['scan_cve_evidence', 'scan_cve_policy', 'scan_execution_profiles', 'scan_check_results', 'scan_archive_results', 'scan_findings', 'scan_sbom_components', 'scan_sbom_results', 'scan_vuln_findings', 'scan_vuln_results', 'scan_events']) this.db.prepare(`DELETE FROM ${table} WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`).run(`-${days} days`);
       this.db.prepare(`DELETE FROM scan_results WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)
         .run(`-${days} days`);
       this.db.prepare(`DELETE FROM outbox WHERE scan_id IN (SELECT id FROM scans WHERE terminal_at < datetime('now', ?))`)

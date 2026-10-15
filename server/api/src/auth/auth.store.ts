@@ -6,6 +6,12 @@ import { Injectable, OnModuleDestroy, ServiceUnavailableException } from '@nestj
 import Database from 'better-sqlite3';
 
 export type User = { id: string; email: string };
+// Server-only authority, never serialized in User/API responses.
+export type SessionSnapshot = Readonly<{ subject: string; sessionId: string; generation: number; expiresAt: number; accessIncarnation: string }>;
+export function browserAccessFingerprint(): string {
+  return digest(JSON.stringify(['AUTH_ORIGIN', 'AUTH_ALLOW_INSECURE_LOCAL_HTTP', 'SCAN_BROWSER_ALLOWED_USER_IDS',
+    'SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS'].map(key => process.env[key] ?? null)));
+}
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const WINDOW_MS = 15 * 60 * 1000;
 const DUMMY_SALT = Buffer.alloc(16, 0).toString('hex');
@@ -20,6 +26,8 @@ const canonicalPath = (path: string): string => {
 @Injectable()
 export class AuthStore implements OnModuleDestroy {
   private readonly db?: Database.Database;
+  private readonly snapshots = new WeakMap<SessionSnapshot, string>();
+  private readonly accessFingerprint = browserAccessFingerprint();
 
   constructor() {
     const path = process.env.AUTH_DB_PATH;
@@ -42,6 +50,20 @@ export class AuthStore implements OnModuleDestroy {
           bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL
         );
       `);
+      this.db.transaction(() => {
+        this.db!.exec(`CREATE TABLE IF NOT EXISTS trusted_sessions (
+          token_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,
+          session_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL CHECK(generation>0)
+        );
+        CREATE TABLE IF NOT EXISTS browser_access (
+          id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL, incarnation TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO trusted_sessions SELECT token_hash,lower(hex(randomblob(16))),1 FROM sessions;`);
+        const previous = this.db!.prepare('SELECT fingerprint FROM browser_access WHERE id=1').get() as { fingerprint: string } | undefined;
+        if (previous?.fingerprint !== this.accessFingerprint) this.db!.prepare(`INSERT INTO browser_access VALUES(1,?,?)
+          ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint,incarnation=excluded.incarnation`)
+          .run(this.accessFingerprint, randomBytes(16).toString('hex'));
+      }).immediate();
     } catch {
       this.db?.close();
       // An unavailable configured volume must not fall back to ephemeral credentials.
@@ -98,18 +120,21 @@ export class AuthStore implements OnModuleDestroy {
     return { id: row.id, email: row.email };
   }
 
-  createSession(userId: string): string {
+  createSession(userId: string, presentedToken?: string | null): string {
     const db = this.database();
     const now = Date.now();
     const token = randomBytes(32).toString('base64url');
     db.transaction(() => {
+      if (presentedToken) db.prepare('UPDATE sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL')
+        .run(now, digest(presentedToken));
       db.prepare('DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL').run(now);
       db.prepare(`DELETE FROM sessions WHERE token_hash IN (
         SELECT token_hash FROM sessions WHERE user_id = ? ORDER BY expires_at DESC, rowid DESC LIMIT -1 OFFSET 4
       )`).run(userId);
       db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
         .run(digest(token), userId, now + SESSION_MS);
-    })();
+      db.prepare('INSERT INTO trusted_sessions VALUES(?,?,1)').run(digest(token), randomBytes(16).toString('hex'));
+    }).immediate();
     return token;
   }
 
@@ -121,9 +146,42 @@ export class AuthStore implements OnModuleDestroy {
     return row ?? null;
   }
 
+  sessionForToken(token: string): SessionSnapshot | null {
+    const db = this.database();
+    if (browserAccessFingerprint() !== this.accessFingerprint) throw new ServiceUnavailableException({ errorCode: 'AUTH_UNAVAILABLE' });
+    const row = db.prepare(`SELECT s.user_id AS subject,t.session_id AS sessionId,t.generation,s.expires_at AS expiresAt,
+      a.incarnation AS accessIncarnation FROM sessions s JOIN trusted_sessions t USING(token_hash)
+      JOIN browser_access a ON a.id=1 WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?
+      AND a.fingerprint=?`).get(digest(token), Date.now(), this.accessFingerprint) as SessionSnapshot | undefined;
+    if (!row) return null;
+    const snapshot = Object.freeze({ ...row }); this.snapshots.set(snapshot, digest(token)); return snapshot;
+  }
+
+  guardSession<T>(snapshot: SessionSnapshot, action: () => T, busyMs = 100): T {
+    const db = this.database(), tokenHash = this.snapshots.get(snapshot);
+    if (!tokenHash || browserAccessFingerprint() !== this.accessFingerprint || !Number.isInteger(busyMs) || busyMs < 0 || busyMs > 100)
+      throw new ServiceUnavailableException({ errorCode: 'AUTH_UNAVAILABLE' });
+    const previous = db.pragma('busy_timeout', { simple: true }) as number;
+    try {
+      db.pragma(`busy_timeout = ${busyMs}`);
+      return db.transaction(() => {
+        const live = db.prepare(`SELECT 1 FROM sessions s JOIN trusted_sessions t USING(token_hash)
+          JOIN browser_access a ON a.id=1 WHERE s.token_hash=? AND s.user_id=? AND s.revoked_at IS NULL
+          AND s.expires_at>? AND s.expires_at=? AND t.session_id=? AND t.generation=?
+          AND a.incarnation=? AND a.fingerprint=?`).get(tokenHash, snapshot.subject, Date.now(), snapshot.expiresAt,
+          snapshot.sessionId, snapshot.generation, snapshot.accessIncarnation, this.accessFingerprint);
+        if (!live) throw new ServiceUnavailableException({ errorCode: 'AUTH_UNAVAILABLE' });
+        const result = action();
+        if (result && typeof result === 'object' && 'then' in result) throw new ServiceUnavailableException({ errorCode: 'AUTH_UNAVAILABLE' });
+        return result;
+      }).immediate();
+    } finally { db.pragma(`busy_timeout = ${previous}`); }
+  }
+
   revoke(token: string): void {
-    this.database().prepare('UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
-      .run(Date.now(), digest(token));
+    const db = this.database();
+    db.transaction(() => db.prepare('UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+      .run(Date.now(), digest(token))).immediate();
   }
 
   onModuleDestroy(): void { this.db?.close(); }

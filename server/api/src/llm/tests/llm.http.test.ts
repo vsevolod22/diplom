@@ -189,12 +189,12 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       await denied(post(await consent()), 409, before);
       policy = fixturePolicy;
       for (const corrupt of [
-        (page: any) => ({ ...page, nextCursor: 0 }),
-        (page: any) => ({ ...page, nextCursor: null }),
-        (page: any) => ({ ...page, coverage: { ...page.coverage, findingCount: 1001 } }),
-        (page: any) => ({ ...page, findings: [page.findings[0], page.findings[0]] }),
+        (page: ReturnType<ScansService['results']>) => ({ ...page, nextCursor: 0 }),
+        (page: ReturnType<ScansService['results']>) => ({ ...page, nextCursor: null }),
+        (page: ReturnType<ScansService['results']>) => ({ ...page, coverage: { ...page.coverage, findingCount: 1001 } }),
+        (page: ReturnType<ScansService['results']>) => ({ ...page, findings: [page.findings[0], page.findings[0]] }),
       ]) {
-        service.results = (...args) => corrupt(original(...args));
+        service.results = (...args) => corrupt(original(...args)) as unknown as ReturnType<ScansService['results']>;
         await denied(post(body), 409, before);
       }
       service.results = original;
@@ -348,14 +348,14 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       const service = app.get(ScansService), original = service.vuln.bind(service);
       try {
         for (const corrupt of [
-          (page: any) => ({ ...page, scannerVersion: '9.9.9' }),
-          (page: any) => ({ ...page, checkedAt: '2020-01-01T00:00:00.000Z' }),
-          (page: any) => ({ ...page, platform: 'linux/arm64' }),
-          (page: any) => ({ ...page, image: `image@sha256:${'f'.repeat(64)}` }),
-          (page: any) => ({ ...page, findingCount: 0 }),
-          (page: any) => ({ ...page, outcome: 'checked', findingCount: 0 }),
+          (page: ReturnType<ScansService['vuln']>) => ({ ...page, scannerVersion: '9.9.9' }),
+          (page: ReturnType<ScansService['vuln']>) => ({ ...page, checkedAt: '2020-01-01T00:00:00.000Z' }),
+          (page: ReturnType<ScansService['vuln']>) => ({ ...page, platform: 'linux/arm64' }),
+          (page: ReturnType<ScansService['vuln']>) => ({ ...page, image: `image@sha256:${'f'.repeat(64)}` }),
+          (page: ReturnType<ScansService['vuln']>) => ({ ...page, findingCount: 0 }),
+          (page: ReturnType<ScansService['vuln']>) => ({ ...page, outcome: 'checked', findingCount: 0 }),
         ]) {
-          service.vuln = (...args) => corrupt(original(...args));
+          service.vuln = (...args) => corrupt(original(...args)) as unknown as ReturnType<ScansService['vuln']>;
           assert.throws(() => reader.read(identity, partial), /LLM_REPORT_UNAVAILABLE|Conflict/);
         }
       } finally { service.vuln = original; }
@@ -388,8 +388,8 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       const service = app.get(ScansService), original = service.results.bind(service);
       try {
         // Deliberately invalid trusted projection, like the corruption fixtures above.
-        const corrupt = (page: any) => ({ ...page, coverage: { ...page.coverage, outcome: undefined } });
-        service.results = (...args) => corrupt(original(...args));
+        const corrupt = (page: ReturnType<ScansService['results']>) => ({ ...page, coverage: { ...page.coverage, outcome: undefined } });
+        service.results = (...args) => corrupt(original(...args)) as unknown as ReturnType<ScansService['results']>;
         await denied(post({ reportVersion: 'unknown', consent: { accepted: true, policyVersion: fixturePolicy.version } }, owner.cookie, clean), 409);
       } finally { service.results = original; }
     });

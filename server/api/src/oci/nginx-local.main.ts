@@ -1,12 +1,15 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { configureParentIngress } from '../parent-ingress.js';
 import { NginxLocalModule } from './nginx-local.module.js';
 
 if (!process.env.SCAN_JWT_SECRET || Buffer.byteLength(process.env.SCAN_JWT_SECRET) < 32 ||
     !process.env.SCAN_JWT_ISSUER || !process.env.SCAN_JWT_AUDIENCE) throw new Error('Dedicated JWT configuration required');
 const bind = process.env.SCAN_BIND_ADDRESS ?? '127.0.0.1';
 if (bind !== '127.0.0.1' && bind !== '0.0.0.0') throw new Error('Invalid bind address');
-const app = await NestFactory.create(NginxLocalModule, { logger: false });
+const app = await NestFactory.create<NestExpressApplication>(NginxLocalModule, { logger: false, bodyParser: false });
+configureParentIngress(app);
 await app.listen(Number(process.env.PORT || 3001), bind);
 const stop = async () => { await app.close(); process.exit(0); };
 process.on('SIGTERM', () => { void stop(); });

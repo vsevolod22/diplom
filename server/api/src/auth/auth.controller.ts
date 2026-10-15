@@ -62,7 +62,7 @@ export class AuthController {
       return invalid(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED');
     const user = await this.store.register(email, password);
     if (!user) return invalid(HttpStatus.CONFLICT, 'REGISTRATION_UNAVAILABLE');
-    setCookie(res, this.store.createSession(user.id), secure);
+    setCookie(res, this.store.createSession(user.id, tokenFrom(req)), secure);
     return user;
   }
 
@@ -76,7 +76,7 @@ export class AuthController {
       return invalid(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED');
     const user = await this.store.login(email, password);
     if (!user) throw new UnauthorizedException({ errorCode: 'INVALID_CREDENTIALS' });
-    setCookie(res, this.store.createSession(user.id), secure);
+    setCookie(res, this.store.createSession(user.id, tokenFrom(req)), secure);
     return user;
   }
 

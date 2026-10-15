@@ -31,10 +31,12 @@ function sanitizePlain(value: string): string {
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gi, '')
     .replace(/<(script|style|iframe|object|svg)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
     .replace(/<[^<>]*>/g, '')
+    // eslint-disable-next-line no-useless-escape -- Preserve the audited markup-stripping regex verbatim.
     .replace(/!?\[([^\[\]]*)\]\([^)]*\)/g, '$1')
     .replace(/(?:https?:\/\/|www\.)[^\s<>]+/gi, '')
     .replace(/\b(?:(?:basic|bearer)\s+(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\r\n,;}]+)|(?:password|passwd|secret|credentials?|api[_-]?key|access[_-]?key|token|signature|x-amz-[\w-]+)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\r\n,;}]+))/gi, '')
     .replace(/\b(?:CANARY[\w-]*|[\w-]*CANARY[\w-]*|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gi, '')
+    // eslint-disable-next-line no-control-regex -- Intentionally strip control characters from advisory display text.
     .replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ufeff\ud800-\udfff]/gu, ' ')
     .trim();
 }

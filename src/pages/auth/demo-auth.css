@@ -16,7 +16,7 @@
 .demo-auth__back { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; text-decoration: none; }
 .demo-auth__grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: clamp(32px, 7vw, 110px); align-items: center; padding: clamp(48px, 9vw, 130px) 0; }
 .demo-auth__eyebrow { color: #d5fb57; font-size: 11px; font-weight: 800; letter-spacing: .17em; }
-.demo-auth__intro h1 { max-width: 760px; margin: 24px 0; font-family: Impact, 'Arial Narrow', sans-serif; font-size: clamp(50px, 7vw, 106px); line-height: .95; letter-spacing: -.04em; }
+.demo-auth__intro h1 { overflow-wrap: anywhere; max-width: 760px; margin: 24px 0; font-family: Impact, 'Arial Narrow', sans-serif; font-size: clamp(50px, 7vw, 106px); line-height: .95; letter-spacing: -.04em; }
 .demo-auth__intro h1 span { color: #d5fb57; }
 .demo-auth__intro p { max-width: 520px; color: #c7c6d0; line-height: 1.7; }
 .demo-auth__demo-link { display: inline-flex; align-items: center; gap: 16px; min-height: 48px; margin-top: 25px; font-weight: 800; text-decoration-thickness: 2px; text-underline-offset: 5px; }

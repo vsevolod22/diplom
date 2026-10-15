@@ -23,6 +23,7 @@ function octal(bytes: Buffer): number {
   return result;
 }
 function name(value: string, link = false, symlink = false): string {
+  // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in archive paths and links.
   if (!value || Buffer.byteLength(value) > ARCHIVE_LIMITS.fieldBytes || /[\x00-\x1f\x7f\\]/.test(value)) return reject();
   if (symlink) return value; // Image symlinks are never resolved or extracted on the host.
   if (value.startsWith('/')) return reject();
@@ -133,6 +134,7 @@ export class LayerTarValidator {
       const key = record.slice(0, equals), value = record.slice(equals + 1);
       // Unknown extensions can change extraction semantics (sparse, xattrs etc.).
       if (!['path', 'linkpath', 'size', 'mtime', 'atime', 'ctime', 'uid', 'gid', 'uname', 'gname'].includes(key) || key in attributes) reject();
+      // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in PAX attributes.
       if (Buffer.byteLength(value) > ARCHIVE_LIMITS.fieldBytes || /[\x00-\x1f\x7f]/.test(value)) reject();
       attributes[key] = value; offset += length;
     }

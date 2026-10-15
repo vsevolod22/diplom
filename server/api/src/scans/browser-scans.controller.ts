@@ -76,20 +76,20 @@ export class BrowserScansController {
 
   @Get(':scanId/results')
   @Header('Cache-Control', 'no-store')
-  results(@Req() req: BrowserRequest, @Param('scanId') id: string, @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
-    return this.scans.results(this.identity(req), id, cursor, limit);
+  results(@Req() req: BrowserRequest, @Param('scanId') id: string, @Query() query: unknown) {
+    return this.scans.report(this.identity(req), id, 'secret', query);
   }
 
   @Get(':scanId/sbom')
   @Header('Cache-Control', 'no-store')
-  sbom(@Req() req: BrowserRequest, @Param('scanId') id: string, @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
-    return this.scans.sbom(this.identity(req), id, cursor, limit);
+  sbom(@Req() req: BrowserRequest, @Param('scanId') id: string, @Query() query: unknown) {
+    return this.scans.report(this.identity(req), id, 'sbom', query);
   }
 
   @Get(':scanId/vuln')
   @Header('Cache-Control', 'no-store')
-  vuln(@Req() req: BrowserRequest, @Param('scanId') id: string, @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
-    return this.scans.vuln(this.identity(req), id, cursor, limit);
+  vuln(@Req() req: BrowserRequest, @Param('scanId') id: string, @Query() query: unknown) {
+    return this.scans.report(this.identity(req), id, 'vuln', query);
   }
 
   @Get(':scanId/events')

@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, lstatSync } from 'node:fs';
 import { Broker } from '../src/broker.js';
-import { PolicyStore } from '../src/policy.js';
 import { AuditBuffer } from '../src/audit.js';
 import { UnixEngine } from '../src/engine.js';
 import { LIMITS, limits } from '../src/contracts.js';
@@ -14,6 +13,7 @@ test('same real HTTP/Unix authorization path: positive exactly one canonical GET
   try {
     const result = await h.ask();
     assert.equal(result.status, 'checked');
+    assert.ok(result.snapshot);
     assert.equal(result.snapshot.containerId, A);
     assert.equal(result.snapshot.facts.privileged, true);
     assert.equal(h.engine.dispatches, 1);
@@ -146,6 +146,7 @@ test('empty UsernsMode via authorized HTTP/Unix path is unknown, not private', a
   try {
     const reply = await h.ask();
     assert.equal(reply.status, 'checked');
+    assert.ok(reply.snapshot);
     assert.equal(reply.snapshot.facts.namespaces.user, 'unknown');
     assert.equal(h.engine.dispatches, 1);
     assert.equal(h.calls.length, 1);

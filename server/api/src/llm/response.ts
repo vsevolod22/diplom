@@ -9,6 +9,7 @@ export const invalidReply = (): never => { throw new BadGatewayException({ error
 
 function plainText(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > 2000 ||
+      // eslint-disable-next-line no-control-regex, no-useless-escape -- Preserve the audited security regex rejecting controls and markup.
       /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff<>`*#~\[\]{}\\]|[a-z][a-z0-9+.-]*:\/\/|https?:|javascript:|data:|mailto:|www\.|CANARY|[A-Za-z0-9_+/=-]{40,}|\b(?:Bearer|password|api[_-]?key|token|secret)\s*[:=]|\b(?:sk-|sk-or-|AKIA)[A-Za-z0-9_-]+/i.test(value)) return invalidReply();
   return value;
 }

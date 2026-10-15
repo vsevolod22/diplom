@@ -29,7 +29,7 @@ test('v6 upgrades forward once; legacy rows stay untouched and SBOM survives reo
   const legacy = ledger.enqueue({ ...target, checks: '["secret"]', idempotencyKey: 'legacy' }).scanId;
   ledger.close();
   const raw = new Database(file);
-  raw.exec('DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
+  raw.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
   raw.close();
   ledger = new ScanLedger(file);
   assert.equal(ledger.state(legacy, 'alice'), 'queued');
@@ -66,7 +66,7 @@ test('v6 upgrades forward once; legacy rows stay untouched and SBOM survives reo
   assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), false);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 13);
+  assert.equal(db.pragma('user_version', { simple: true }), 14);
   assert.equal(count(db, 'scan_sbom_results'), 1);
   assert.equal(count(db, 'scan_sbom_components'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
@@ -160,7 +160,7 @@ test('SBOM failures survive reopen with subject-scoped coverage, not secret find
   ledger.close();
   ledger = new ScanLedger(file);
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 13);
+  assert.equal(db.pragma('user_version', { simple: true }), 14);
   assert.equal(count(db, 'scan_sbom_results'), 3);
   assert.equal(count(db, 'scan_sbom_components'), 0);
   assert.equal(count(db, 'scan_results'), 0);
@@ -179,7 +179,7 @@ test('v6 migration persists failed SBOM coverage across reopen', () => fixture(f
   let ledger = new ScanLedger(file);
   ledger.close();
   const old = new Database(file);
-  old.exec('DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
+  old.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
   old.close();
   ledger = new ScanLedger(file);
   const scanId = ledger.enqueue(target).scanId;
@@ -191,7 +191,7 @@ test('v6 migration persists failed SBOM coverage across reopen', () => fixture(f
     errorCode: 'SCAN_UNAVAILABLE', components: [], nextCursor: null });
   assert.equal(ledger.result(scanId, 'alice'), undefined);
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 13);
+  assert.equal(db.pragma('user_version', { simple: true }), 14);
   assert.equal(count(db, 'scan_sbom_results'), 1);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
   db.close();

@@ -58,12 +58,14 @@ test('durable replay is exclusive; terminal is last and reconnect after terminal
 });
 
 test('partial terminal event closes SSE on replay and after its final cursor', () => {
-  const { ledger, service, dispose } = setup();
+  const { ledger, scanId: initialScanId, service, dispose } = setup();
   try {
+    assert.equal(ledger.cancel(initialScanId, 'alice'), 'cancelled');
     const { scanId } = ledger.enqueue({ subject: 'alice', idempotencyKey: 'partial-key', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest: `sha256:${'a'.repeat(64)}`, platform: 'linux/amd64', checks: '["secret","sbom"]', scope: 'image' });
     const queued = ledger.events(scanId, 'alice', null)![0];
     const job = ledger.claim()!;
+    assert.equal(job.scanId, scanId);
     assert.equal(ledger.finishCombined(scanId, job.attempts, [
       { check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [] },
       { check: 'sbom', outcome: 'failed', errorCode: 'SCAN_FAILED' },

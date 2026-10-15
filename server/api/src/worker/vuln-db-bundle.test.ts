@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { preflightVulnDbBundle, type BundlePreflightOptions } from './vuln-db-bundle.js';
+import { CURRENT_DB_POLICY, LEGACY_DB_POLICY, evaluateDbPolicy } from './cve-db-policy.mjs';
 
 const NOW = new Date('2026-10-03T12:00:00.000Z');
 const artifact = Buffer.from('SYNTHETIC TEST BYTES; NOT A TRIVY VULNERABILITY DB');
@@ -47,7 +48,13 @@ async function fixture(t: TestContext) {
   };
   await writeDescriptor();
   await writeFile(join(directory, 'bundle.bin'), artifact);
-  return { directory, options, descriptor, metadata, writeDescriptor };
+  const writeCoherentMetadata = async (value: typeof metadata) => {
+    const bytes = Buffer.from(JSON.stringify(value));
+    await writeFile(join(directory, 'db', 'metadata.json'), bytes);
+    await writeDescriptor({ ...descriptor, metadataSha256: createHash('sha256').update(bytes).digest('hex'),
+      updatedAt: value.UpdatedAt, downloadedAt: value.DownloadedAt, nextUpdate: value.NextUpdate });
+  };
+  return { directory, options, descriptor, metadata, writeDescriptor, writeCoherentMetadata };
 }
 
 test('valid signed envelope and pinned synthetic bytes: preflight only', async (t) => {
@@ -156,6 +163,46 @@ test('rejects unknown signer/source/schema and noncanonical descriptor', async (
   await writeDescriptor();
   await writeFile(join(directory, 'descriptor.json'), JSON.stringify(descriptor) + '\n');
   await assert.rejects(preflightVulnDbBundle(options), fail);
+});
+
+test('v2 coherent signed metadata reaches the temporal gate: inclusive14d, +1ns, overdue publication, old download', async t => {
+  const { options, metadata, writeCoherentMetadata } = await fixture(t);
+  const v2 = { ...options, policy: CURRENT_DB_POLICY };
+  const value = { ...metadata, UpdatedAt: '2026-09-19T12:00:00.000000000Z',
+    DownloadedAt: '2026-09-19T12:00:01.000000000Z', NextUpdate: '2026-09-20T12:00:00.000000000Z' };
+  await writeCoherentMetadata(value);
+  const verified = await preflightVulnDbBundle(v2);
+  assert.equal(verified.identity.envelopeVersion, 1);
+  assert.equal(verified.identity.updatedAt, value.UpdatedAt);
+  assert.deepEqual(evaluateDbPolicy(verified.identity, CURRENT_DB_POLICY, NOW.getTime())?.warnings,
+    ['DB_DATA_OLDER_THAN_24H', 'DB_PUBLICATION_OVERDUE']);
+  await assert.rejects(preflightVulnDbBundle({ ...v2, now: new Date(NOW.getTime() + 1) }), fail);
+  await assert.rejects(preflightVulnDbBundle({ ...v2, policy: LEGACY_DB_POLICY }), fail);
+  await writeCoherentMetadata({ ...value, UpdatedAt: '2026-09-19T11:59:59.999999999Z', DownloadedAt: NOW.toISOString() });
+  await assert.rejects(preflightVulnDbBundle(v2), fail); // +1ns and re-download cannot rejuvenate
+  for (const change of [
+    { UpdatedAt: '2026-10-03T12:05:00.000000001Z', DownloadedAt: '2026-10-03T12:05:00.000000001Z', NextUpdate: '2026-10-04T12:00:00.000Z' },
+    { UpdatedAt: '2026-09-31T12:00:00.000Z' },
+    { NextUpdate: value.UpdatedAt },
+    { NextUpdate: '2026-09-26T12:00:00.000000001Z' },
+    { DownloadedAt: '2026-09-19T11:59:59.999999999Z' },
+  ]) {
+    await writeCoherentMetadata({ ...value, ...change });
+    await assert.rejects(preflightVulnDbBundle(v2), fail);
+  }
+});
+
+test('R1 real-clock post-hash check rejects coherent signed14day crossing; fixed clock is test-only', async t => {
+  const { options, metadata, writeCoherentMetadata } = await fixture(t);
+  await writeCoherentMetadata({ ...metadata, UpdatedAt: '2026-09-19T12:00:00.000Z',
+    DownloadedAt: '2026-09-19T12:00:01.000Z', NextUpdate: '2026-09-20T12:00:00.000Z' });
+  const production = { ...options, now: undefined, policy: CURRENT_DB_POLICY };
+  let reads = 0;
+  t.mock.method(Date, 'now', () => NOW.getTime() + (reads++ ? 1 : 0));
+  await assert.rejects(preflightVulnDbBundle(production), fail);
+  assert.equal(reads, 2);
+  assert.equal((await preflightVulnDbBundle({ ...production, now: NOW })).identity.updatedAt,
+    '2026-09-19T12:00:00.000Z');
 });
 
 test('rejects stale, expired NextUpdate, invalid timestamps and excessive clock skew', async (t) => {

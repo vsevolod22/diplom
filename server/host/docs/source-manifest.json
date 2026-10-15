@@ -1,0 +1,56 @@
+{
+  "schema": "host-source-manifest-v1",
+  "projectId": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "task": "DIP-TASK-8",
+  "scope": "new server/host/** only; source-only, not real capture or qualification",
+  "files": [
+    {
+      "path": "server/host/README.md",
+      "sha256": "aba9cd4cb700d4944280111acd8e18c6eac7863f7a288648e396f2fb19bb34bf",
+      "sizeBytes": 3460
+    },
+    {
+      "path": "server/host/docs/assessment.md",
+      "sha256": "2b75e0ba059e3964661faecc26f89d31cd2c8a0584b7afdbb35d6916db35592c",
+      "sizeBytes": 10918
+    },
+    {
+      "path": "server/host/docs/safety-plan.md",
+      "sha256": "079d17d3648d79b39b73446054a1dad7d3ffd864cb422eb3dd7acd67762f8d4b",
+      "sizeBytes": 7197
+    },
+    {
+      "path": "server/host/src/cli.mjs",
+      "sha256": "3ad4498ec19438a3cfba17e7678fe35b0c45a9d95f36ceb4ece97e12d4a2ac1e",
+      "sizeBytes": 2665
+    },
+    {
+      "path": "server/host/src/collector.mjs",
+      "sha256": "cdad2f1106bcec8e721238eac92cf96766f454645bf47a8147a2b1ea1630a1dd",
+      "sizeBytes": 7011
+    },
+    {
+      "path": "server/host/src/contract.mjs",
+      "sha256": "4b322f8e707534b1a32e13e230f8bb1d04ef250ab49b24cd56f8bf68deac16e3",
+      "sizeBytes": 5287
+    },
+    {
+      "path": "server/host/src/intake.mjs",
+      "sha256": "40b87c23ddb7cf41171f2476d229b5091a881d7d0ebc49c463bad6b93268b4f1",
+      "sizeBytes": 4648
+    },
+    {
+      "path": "server/host/tests/host.test.mjs",
+      "sha256": "9b2d33ab710f2c6702b5e833cf461c25c5f2e732dc7dc9b45a512359ad6f062d",
+      "sizeBytes": 19215
+    }
+  ],
+  "generatedReportsExcluded": [
+    "server/host/docs/source-manifest.json",
+    "server/host/docs/evidence.md"
+  ],
+  "runtimeRun": "d18c354c-0705-417b-990a-b4a273569e75",
+  "runtimeRunStatus": "completed",
+  "task6Status": "testing90",
+  "hostCollectionExecuted": false
+}

@@ -10,6 +10,7 @@ import { parseSecretFindings, type SecretFinding } from './secret-findings.js';
 import { parseVulnFindings, type VulnFinding } from './vuln-findings.js';
 import { assertDbFreshness, preflightVulnDbBundle, type VerifiedDbIdentity } from './vuln-db-bundle.js';
 import type { VulnScanOptions } from './vuln-worker.js';
+import { CURRENT_DB_POLICY, LEGACY_DB_POLICY, evaluateDbPolicy, type DbPolicyReceipt } from './cve-db-policy.mjs';
 import { runArchiveProcess } from './archive-process.js';
 import { auditArchiveScratch } from './archive-scratch.js';
 
@@ -21,8 +22,8 @@ export type ArchiveScanReport = {
   secret?: { outcome: 'checked'; findings: SecretFinding[] } | Failure;
   sbom?: { outcome: 'checked'; sbom: ImageSbom } | Failure;
   vuln?: { outcome: 'checked'; findings: VulnFinding[]; db: Readonly<VerifiedDbIdentity>;
-    os: { outcome: 'checked' }; node: { outcome: 'checked' } | Unsupported } |
-    (Failure | Unsupported) & { db?: Readonly<VerifiedDbIdentity>; os?: Unsupported; node?: Unsupported };
+    os: { outcome: 'checked' }; node: { outcome: 'checked' } | Unsupported; dbPolicy?: DbPolicyReceipt } |
+    (Failure | Unsupported) & { db?: Readonly<VerifiedDbIdentity>; os?: Unsupported; node?: Unsupported; dbPolicy?: DbPolicyReceipt };
 };
 
 const failure = (reason: Failure['reason'] = 'SCAN_FAILED'): Failure => ({ outcome: 'failed', reason });
@@ -40,7 +41,7 @@ async function verifiedArchive(binding: ArchiveBinding): Promise<void> {
   } finally { await file.close(); }
 }
 async function verifiedDb(options: VulnScanOptions) {
-  const result = await preflightVulnDbBundle({ ...options.trust, directory: options.releaseDir });
+  const result = await preflightVulnDbBundle({ ...options.trust, directory: options.releaseDir, policy: options.policy ?? LEGACY_DB_POLICY });
   const mount = await lstat(`${options.cacheDir}/db`);
   if (!mount.isDirectory() || mount.isSymbolicLink()) throw new Error('Invalid DB mount');
   for (const name of ['metadata.json', 'trivy.db']) {
@@ -146,11 +147,15 @@ export async function scanNginxArchive(checks: Array<'secret' | 'sbom' | 'vuln'>
       if (finalBytes > ARCHIVE_LIMITS.scratchBytes) throw new Error('Invalid archive scratch');
     } catch { scratchInvalid = true; controller.abort(); }
     if (signal.aborted) for (const check of checks) report[check] = abortedFailure();
-    // Independent checks survive DB expiry while the final scratch audit is running.
-    if (report.vuln && report.vuln.outcome !== 'failed' && report.vuln.db) {
-      try { assertDbFreshness(report.vuln.db); } catch { report.vuln = failure('DB_UNAVAILABLE'); }
-    }
+    // Capture true completion once; ledger replaces only the provisional evaluation at its own fence.
     report.checkedAt = Date.now(); report.metrics.scratchPeak = scratchPeak;
+    if (report.vuln && report.vuln.outcome !== 'failed' && report.vuln.db) {
+      try {
+        const policy = options.vuln?.policy ?? LEGACY_DB_POLICY;
+        assertDbFreshness(report.vuln.db, report.checkedAt, policy);
+        if (policy === CURRENT_DB_POLICY) report.vuln.dbPolicy = evaluateDbPolicy(report.vuln.db, policy, report.checkedAt);
+      } catch { report.vuln = failure('DB_UNAVAILABLE'); }
+    }
     return report;
   } finally { clearInterval(monitor); while (monitoring) await new Promise(resolve => setTimeout(resolve, 10)); await archive.cleanup(); }
 }

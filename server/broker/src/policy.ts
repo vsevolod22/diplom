@@ -90,6 +90,7 @@ function check(state: PolicyState): void {
       typeof c.endpoint !== 'string' ||
       c.endpoint.length > 100 ||
       (c.transport === 'unix' &&
+        // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in enrolled Unix socket paths.
         (!isAbsolute(c.endpoint) || normalize(c.endpoint) !== c.endpoint || /[\x00-\x1f]/.test(c.endpoint)))
     )
       throw new Error();

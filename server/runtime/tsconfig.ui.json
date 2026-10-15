@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": [
+    "../../src/features/scans/RuntimeScanPanel.tsx",
+    "../../src/shared/api/scans/runtimeTransport.ts",
+    "../../src/pages/scans/ScanCreatePage.tsx"
+  ]
+}

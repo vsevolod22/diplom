@@ -69,6 +69,7 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
   const byLocation = new Map<string, VulnFinding>();
   for (const result of value.Results as unknown[]) {
     if (!object(result) || typeof result.Target !== 'string' || result.Target.length === 0 ||
+        // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in scanner target names.
         result.Target.length > 512 || /[\x00-\x1f\x7f]/.test(result.Target) ||
         /(?:https?:\/\/|[?#])/.test(result.Target) ||
         !((result.Class === 'os-pkgs' && result.Type === 'alpine') ||

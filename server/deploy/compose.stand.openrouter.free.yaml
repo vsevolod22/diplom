@@ -17,6 +17,9 @@ services:
     env_file:
       - path: ../.env.local
         required: true
+      # Optional API-only replacement key; comment-only/absent preserves the legacy key.
+      - path: ../.env.openrouter.local
+        required: false
     environment:
       # Human approvals remain mandatory/default-off. The key has no interpolation here.
       LLM_ENABLED: ${LLM_ENABLED:-false}

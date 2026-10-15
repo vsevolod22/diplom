@@ -2,6 +2,8 @@ import { Body, Controller, Get, Header, HttpCode, HttpException, Inject, Param, 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { BrowserIdentity, type BrowserRequest } from './browser-identity.js';
 import { LlmService } from './llm.service.js';
+import type { HistoryResult } from './history.service.js';
+import { chatRepresentation, writeDelivery } from './history-delivery.js';
 
 @Controller('api/v1/browser/scans/:scanId/llm')
 export class LlmController {
@@ -26,6 +28,47 @@ export class LlmController {
     req.on('aborted', abort); res.on('close', abort);
     try { return await this.safe(() => this.llm.summary(() => this.identity.resolve(req, true), scanId, body, controller.signal)); }
     finally { req.off('aborted', abort); res.off('close', abort); }
+  }
+  @Get('history')
+  async history(@Req() req: BrowserRequest, @Res() res: ServerResponse, @Param('scanId') scanId: string) {
+    return this.historyResponse(res, () => this.llm.history().read(req, scanId));
+  }
+  @Get('chat/context')
+  async chatContext(@Req() req: BrowserRequest, @Res() res: ServerResponse, @Param('scanId') scanId: string) {
+    return this.historyResponse(res, () => this.llm.history().context(req, scanId));
+  }
+  @Get('chat/usage')
+  async chatUsage(@Req() req: BrowserRequest, @Res() res: ServerResponse, @Param('scanId') scanId: string) {
+    return this.historyResponse(res, () => this.llm.history().usage(req, scanId));
+  }
+  @Post('history/decision')
+  async decision(@Req() req: BrowserRequest, @Res() res: ServerResponse, @Param('scanId') scanId: string, @Body() body: unknown) {
+    return this.historyResponse(res, () => this.llm.history().decision(req, scanId, body));
+  }
+  @Post('chat')
+  async chat(@Req() req: IncomingMessage, @Res() res: ServerResponse, @Param('scanId') scanId: string, @Body() body: unknown) {
+    const representation = chatRepresentation(req.headers.accept);
+    const controller = new AbortController(), abort = () => controller.abort();
+    req.on('aborted', abort); res.on('close', abort);
+    let result: HistoryResult | undefined;
+    try {
+      result = await this.safe(() => this.llm.history().generate(req, scanId, body, controller.signal, representation));
+      if (representation === 'ndjson') {
+        if (!result.delivery) throw new ServiceUnavailableException({ errorCode: 'LLM_UNAVAILABLE' });
+        await this.safe(() => writeDelivery({ delivery: result!.delivery!, write: result!.write, release: () => result?.release?.() }, res, controller.signal));
+      } else this.writeHistoryResponse(res, result);
+    } finally { result?.release?.(); req.off('aborted', abort); res.off('close', abort); }
+  }
+  private async historyResponse(res: ServerResponse, operation: () => HistoryResult | Promise<HistoryResult>) {
+    const result = await this.safe(operation);
+    this.writeHistoryResponse(res, result);
+  }
+  private writeHistoryResponse(res: ServerResponse, result: HistoryResult) {
+    const body = JSON.stringify(result.value);
+    // Guard surrounds the actual final write, not a permission used after an await.
+    result.write(() => {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body);
+    });
   }
   private async safe<T>(operation: () => T): Promise<Awaited<T>> {
     try { return await operation(); }

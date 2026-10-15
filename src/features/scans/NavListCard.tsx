@@ -23,6 +23,8 @@ export function NavListCard({ items }: { items: NavItem[] }) {
             >
               <motion.span
                 className="scan-nav-card__item"
+                // Motion makes tap targets focusable; the surrounding link owns keyboard interaction.
+                tabIndex={-1}
                 whileHover={reducedMotion ? undefined : { x: 4 }}
                 whileTap={reducedMotion ? undefined : { scale: 0.98 }}
                 transition={{ type: 'spring', bounce: 0.4, duration: 0.3 }}

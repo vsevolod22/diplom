@@ -124,6 +124,34 @@ test('public HTTPS origin sets Secure cookie even behind an HTTP reverse proxy',
   }
 });
 
+test('successful auth rotates only the presented session; failures and an independent device preserve authority', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'auth-rotation-'));
+  const keys = ['AUTH_DB_PATH', 'AUTH_ORIGIN', 'AUTH_ALLOW_INSECURE_LOCAL_HTTP'] as const;
+  const previous = keys.map(key => process.env[key]);
+  process.env.AUTH_DB_PATH = join(dir, 'auth.sqlite'); process.env.AUTH_ORIGIN = origin;
+  process.env.AUTH_ALLOW_INSECURE_LOCAL_HTTP = 'true';
+  const server = await serve();
+  try {
+    const first = await post(server.url, 'register', credentials), s1 = first.headers.get('set-cookie')!.split(';')[0];
+    const device = await post(server.url, 'login', credentials), s3 = device.headers.get('set-cookie')!.split(';')[0];
+    const me = (cookie: string) => fetch(`${server.url}/auth/me`, { headers: { cookie } });
+    assert.equal((await post(server.url, 'login', { ...credentials, password: 'bad-password-1234' }, { cookie: s1 })).status, 401);
+    assert.equal((await me(s1)).status, 200); assert.equal((await me(s3)).status, 200);
+    const second = await post(server.url, 'login', credentials, { cookie: s1 }), s2 = second.headers.get('set-cookie')!.split(';')[0];
+    assert.equal(second.status, 200); assert.equal((await me(s1)).status, 401);
+    assert.equal((await me(s2)).status, 200); assert.equal((await me(s3)).status, 200);
+    assert.equal((await post(server.url, 'register', credentials, { cookie: s2 })).status, 409);
+    assert.equal((await me(s2)).status, 200, 'failed registration does not revoke');
+    const next = await post(server.url, 'register', { ...credentials, email: 'switched@example.com' }, { cookie: s2 });
+    assert.equal(next.status, 201); assert.equal((await me(s2)).status, 401);
+    assert.equal((await me(s3)).status, 200, 'account switch does not globally revoke devices');
+    assert.equal((await me(next.headers.get('set-cookie')!.split(';')[0])).status, 200);
+  } finally {
+    await server.app.close(); rmSync(dir, { recursive: true, force: true });
+    keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+  }
+});
+
 test('missing AUTH_DB_PATH fails closed rather than using memory', async () => {
   const old = process.env.AUTH_DB_PATH;
   const oldOrigin = process.env.AUTH_ORIGIN;

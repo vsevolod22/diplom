@@ -7,6 +7,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { Writable } from 'node:stream';
+import { CURRENT_DB_POLICY, evaluateDbPolicy } from '../../api/src/worker/cve-db-policy.mjs';
 
 const MAX_DB = 2 * 1024 ** 3;
 const MAX_BUNDLE = 512 * 1024 ** 2;
@@ -15,13 +16,6 @@ const MANIFEST = /^sha256:[a-f0-9]{64}$/;
 const SOURCE = 'ghcr.io/aquasecurity/trivy-db';
 const fail = () => new Error('DB release attestation failed');
 
-function timestamp(raw) {
-  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/.test(raw)) throw fail();
-  const ms = raw.replace(/\.(\d{1,9})Z$/, (_, n) => `.${n.padEnd(3, '0').slice(0, 3)}Z`);
-  const time = Date.parse(ms);
-  if (!Number.isFinite(time) || new Date(time).toISOString() !== ms) throw fail();
-  return time;
-}
 
 async function regular(path, max) {
   const st = await lstat(path);
@@ -82,13 +76,8 @@ async function main() {
   const metadataBytes = await readFile(metadataPath);
   const metadata = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(metadataBytes));
   if (!metadata || Array.isArray(metadata) || metadata.Version !== 2) throw fail();
-  const updated = timestamp(metadata.UpdatedAt);
-  const downloaded = timestamp(metadata.DownloadedAt);
-  const next = timestamp(metadata.NextUpdate);
-  const now = Date.now();
-  if (updated > now + 300000 || downloaded > now + 300000 || downloaded < updated ||
-      now - updated > 48 * 3600000 || now - downloaded > 24 * 3600000 ||
-      next <= updated || next - updated > 7 * 86400000 || now >= next) throw fail();
+  const timestamps = { updatedAt: metadata.UpdatedAt, downloadedAt: metadata.DownloadedAt, nextUpdate: metadata.NextUpdate };
+  evaluateDbPolicy(timestamps, CURRENT_DB_POLICY);
   const bundlePath = join(directory, 'bundle.bin');
   const dbPath = join(directory, 'db', 'trivy.db');
   const artifactSha256 = await hashFile(bundlePath, MAX_BUNDLE);
@@ -114,6 +103,8 @@ async function main() {
       try { await lstat(join(directory, name)); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
       throw fail();
     }
+    const receipt = evaluateDbPolicy(timestamps, CURRENT_DB_POLICY);
+    if (receipt.warnings.length) console.warn(`Operator usability warnings: ${receipt.warnings.join(', ')}`);
     const signature = sign(null, descriptor, privateKey);
     if (signature.length !== 64) throw fail();
     for (const [name, bytes] of [['descriptor.json', descriptor], ['descriptor.sig', signature]]) {

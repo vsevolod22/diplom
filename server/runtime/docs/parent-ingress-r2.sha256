@@ -1,0 +1,41 @@
+# Parent ingress R2 SOURCE ONLY candidate, 2026-10-09; after independent DIP-ARTF-228.
+# Manifest excludes itself. Re-review exact bytes BEFORE freeze/proof/activation.
+# OWNED12: expanded authorized source/test/runbook slice, not independent approval.
+0515499888fafd1c852874ddc1817377a924f4fa21b777fe13c3457443c2afc2  server/api/src/main.ts
+883f487452433438bcc9fef5252f5c5d603642d6448c43fb6b08eb5be14e1839  server/api/src/oci/nginx-local.main.ts
+3488a7b27ceee81d8c1f36bc3b326f01024838bf7bd46a5236022d226a0b4ce9  server/api/src/oci/nginx-local.module.ts
+9eac8aa1d5e205e91fd39eba835eade301fa2c3377194211f718b6fdb53093a3  server/api/src/parent-ingress.ts
+5380ba7afcf88076f91ccf765d39ec38ecc30a3cc1fe3a5dd60321172d13abdb  server/api/src/runtime/runtime-http.ts
+eee3df6b4bcb277cf1dbcee2e40671fdbf931df7fa1a940ed0670a1fe9c62cee  server/api/src/runtime/runtime-intake.ts
+9b1c7f7ecf79c60df2cc8bc2668a2fc5dd0782030ec2b352028c99c05869cc7d  server/api/src/runtime/browser-runtime-identity.ts
+a522d9416199535e6d113c4cd56745dd622201003bb5829d43c861a1dab52db1  server/api/src/runtime/runtime-api.service.ts
+6fd01eb072fd5e97e0075512bbac1a5fdf03ee8e37f079560956a66cb6325093  src/shared/api/scans/runtimeTransport.ts
+52a2aef79bafa3da69fcc2e6a6b86867d4f9fb662003791a5531394a8a35344a  server/deploy/stand.nginx.conf
+c69887dafd37c1b98a71fcabcc66bb1fe7c70f94836ccc829968c08c9597e088  server/runtime/docs/parent-ingress.test.cjs
+94fa0c6d1d35bdab111eaebdc944134168ae6171554ec0ef84e05305772bd513  server/runtime/docs/parent-ingress-runbook.md
+# READONLY25: context snapshot only, not authored here or a complete deployment dependency closure.
+9fd3a21cf2d78239340fed7d2836e7dfac7446d01af6d6785e380cc188829db8  server/api/src/app.module.ts
+e0521b4a802a933c08125c1d9b9fcc744cc5745b948452eb17704e6fa10ce1cd  server/api/src/auth/auth.module.ts
+05422ba3a54c9afe92d854bd13bdb8d1ed5a68d4daffdc92d2f42099a45637af  server/api/src/auth/auth.controller.ts
+871b3fed4ecd3320ec19cc27cfa05fc083587efd96b5eb781f56cc29f17a3626  server/api/src/auth/auth.store.ts
+fcf307c8d040dcab055a6b31eadfad2bccbab9aaf7b1135112bb509e8ef93eb9  server/api/src/runtime/runtime-api.module.ts
+515bd936938d7d54334aa8854c98751d9a84258ae410f357aa4e24fce623ff0a  server/api/src/runtime/runtime-store.ts
+57890ad1e101e7456985cda4a80d75efb7103d992692fa9f57b6344fb46522b7  server/api/src/runtime/runtime-json.ts
+56231684e2a8afe4f45ca9486e5954b35675ada9438ce757640d10854f97377a  server/runtime/src/runtime-json.ts
+ddbbf3b2d43cb390b88fbff36993cbc95a8b351bb8618116381e4ccbd3c539c0  server/api/src/runtime/browser-runtime.controller.ts
+018a342de01226603766d9ca0698b5afb358d09996fa9871de13c61745a84979  server/api/src/runtime/runtime-image-link.adapter.ts
+60c85d3c4aa39775464edd24b436feb7a1c924431d7e801c5e20d3e80519f8fe  server/api/src/llm/history-ingress.ts
+fd31ff1f57887cb029b19a2119b04caddf41a030c3c4750ae2b5d6d79fb2118d  server/api/src/llm/history-contract.ts
+872c4f7f0402a5fbaa2897d16571b00c3657ee76c0d96f5b9fcfb437d3c70994  server/api/src/llm/llm.controller.ts
+186858f50343a595329cb962a54b7e78a558333be23bee4e3d72cface237062c  server/api/src/oci/nginx-local-profile.ts
+2514e707d06ec90a4197bd4f43340c3c8bb060174e1e275f019a8b2f7bb05ee5  server/api/src/oci/nginx-local-policy.ts
+065919d68b7b28423e17365e68b13d8600278d4f874ede6458b9aabb3b015bda  server/api/src/oci/oci.module.ts
+80da99c6e44b02ffce9dd1fe9cd4d43c1a62d59bb18af751987c5a26143bc252  server/api/src/security/security.module.ts
+3b3b3f0839928b9e74c8e43941004869ce9ad577e7da93d238429a9b4779c696  server/runtime/docs/operator-runbook.md
+08971aa10ac6a0e236060a3147689e4f4ac1060cccee33ff31a55dd995716153  server/runtime/docs/owned-files.sha256
+a1091e0a9ad0d65798134fa912e215ac0daa1f9ecc596af0778b048ee4a1dcec  server/api/package.json
+bcee28d8acf79edb220a52942dc332ce0eb121656fed95b5e0ac5d54b7598fa9  server/api/tsconfig.json
+1d13470ed10170c737cbf4367bc6fbe311fae956fb86489667c16ba97873df5c  server/runtime/tsconfig.ui.json
+f6587a7a355ac1c51610d65f1851223a72b9e0e64e09f548c3e8faca0ab0e3a6  server/deploy/compose.stand.nginx.local.yaml
+d7c168e9dc1ee5d15159bc76e81add84cc72ddc708389361dc1bffd63ee826bf  server/broker/src/broker.ts
+9fb46d03c891bfe058f5d8509ecc839e563ce412b1f07844ffbc106aeef590aa  server/runtime/src/live-port.ts

@@ -29,6 +29,7 @@ export class UnixEngine implements EngineTransport {
       c.transport !== 'unix' ||
       !isAbsolute(c.endpoint) ||
       normalize(c.endpoint) !== c.endpoint ||
+      // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in Unix socket paths.
       /[\x00-\x1f]/.test(c.endpoint)
     ) {
       return Promise.reject(new SafeFailure('upstream'));

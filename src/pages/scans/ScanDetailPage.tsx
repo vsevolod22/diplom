@@ -277,9 +277,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                     {cancellation.isPending ? 'Отменяем…' : 'Отменить скан'}
                   </Button>
                 ) : (
-                  <Button variant="secondary" type="button" disabled>
-                    Отмена недоступна
-                  </Button>
+                  <p>Отмена недоступна в текущем состоянии.</p>
                 )}
                 <p>{demo ? 'Демо не отправляет серверную отмену.' : 'Отмена завершает скан без публикации промежуточных результатов. Статус подтверждается GET snapshot.'}</p>
                 {cancellation.isError ? (
@@ -293,7 +291,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
               <ScanScene variant="detail" />
             </div>
             <div className="scan-a1__grid">
-              <section className="scan-a1__panel" aria-labelledby="scan-a1-coverage">
+              <section className="scan-a1__panel scan-a1__coverage-panel" aria-labelledby="scan-a1-coverage">
                 <p className="scan-a1__eyebrow">02 / ПОКРЫТИЕ</p>
                 <h3 id="scan-a1-coverage">Покрытие проверок</h3>
                 <p className="scan-a1__muted">Исход каждой проверки отдельно от статуса скана.</p>
@@ -359,7 +357,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                   </ReportAccordion>
                 </div>
               </section>
-              <section className="scan-a1__panel" aria-labelledby="scan-a1-findings">
+              <section className="scan-a1__panel scan-a1__findings-panel" aria-labelledby="scan-a1-findings">
                 <p className="scan-a1__eyebrow">03 / РЕЗУЛЬТАТЫ</p>
                 <h3 id="scan-a1-findings">Результаты проверок</h3>
                 <ScanFilterSheet filter={filter} onFilterChange={changeFilter} cveValue={demo ? "vulnerability" : "cve"} />
@@ -378,7 +376,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
               transport={transport}
             /> : <section className="scan-a1__ai" aria-labelledby="scan-a1-ai">
               <h3 id="scan-a1-ai">Сводка отчёта</h3>
-              <p>{demo ? 'Демо не отправляет данные модели и не имитирует ИИ-сводку.' : 'ИИ-сводка доступна только для завершённого авторизованного отчёта.'} Чат пока не реализован.</p>
+              <p>{demo ? 'Демо не отправляет данные модели и не имитирует ИИ-сводку.' : 'ИИ-сводка доступна только для завершённого авторизованного отчёта.'} Чат доступен только для авторизованного отчёта при разрешении сервера.</p>
             </section>}
           </>
         ) : null}

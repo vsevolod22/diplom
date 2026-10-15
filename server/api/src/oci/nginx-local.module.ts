@@ -15,8 +15,9 @@ import { ReportReader } from '../llm/report-context.js';
 import { LlmRuntime, LlmService } from '../llm/llm.service.js';
 import { llmExceptionProvider } from '../llm/llm-exception.filter.js';
 import { LlmQuotaRuntime } from '../llm/quota-runtime.js';
+import { RuntimeApiModule } from '../runtime/runtime-api.module.js';
 
-@Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule],
+@Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule, RuntimeApiModule],
   controllers: [ScansController, BrowserScansController, LlmController],
   // LlmModule imports the default ScansModule; compose here to retain one LOCAL service.
   providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, LlmQuotaRuntime, llmExceptionProvider,

@@ -33,7 +33,11 @@ test('real browser POST → worker → v11 → GET/SSE → strict parser, indepe
   try {
     const service = app.get(ScansService);
     Object.defineProperty(service, 'readiness', { value: async () => true });
-    Object.defineProperty(service, 'vulnDbReady', { value: async () => true });
+    Object.defineProperty(service, 'vulnDbReady', { value: async () => {
+          const at = Date.now();
+          return { updatedAt: new Date(at - 60_000).toISOString(), downloadedAt: new Date(at - 30_000).toISOString(),
+            nextUpdate: new Date(at + 86400_000).toISOString() };
+        } });
     let bytes = configBytes();
     Object.defineProperty(app.get(OciResolver), 'resolvePublicAlpine', { value: async () => ({ registry: 'registry-1.docker.io', repository: 'library/alpine', digest: bytes.digest, platform: 'linux/amd64' }) });
     await app.listen(0, '127.0.0.1');
@@ -96,7 +100,7 @@ test('real browser POST → worker → v11 → GET/SSE → strict parser, indepe
     }
     const reader = new Database(env.SCAN_LEDGER_PATH);
     try {
-      assert.equal(reader.pragma('user_version', { simple: true }), 13);
+      assert.equal(reader.pragma('user_version', { simple: true }), 14);
       assert.equal(JSON.stringify(reader.prepare('SELECT * FROM scan_check_results').all()).includes('CANARY'), false);
       assert.equal(JSON.stringify(reader.prepare('SELECT * FROM scan_audit').all()).includes('CANARY'), false);
       assert.equal(reader.pragma('integrity_check', { simple: true }), 'ok');

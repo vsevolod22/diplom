@@ -8,6 +8,7 @@ import { NGINX_SUPPORTED_CANDIDATE, archiveProfileVersion, type ArchiveReceipt }
 import { scanNginxArchive } from './archive-scan-worker.js';
 import { auditArchiveScratch } from './archive-scratch.js';
 import type { VulnScanOptions } from './vuln-worker.js';
+import { CURRENT_DB_POLICY } from './cve-db-policy.mjs';
 
 const target = NGINX_SUPPORTED_CANDIDATE;
 const diffId = `sha256:${'b'.repeat(64)}`;
@@ -46,7 +47,7 @@ function lifecycle(directory: string, invoke: NonNullable<Parameters<typeof scan
   const identity = db();
   return { requireScanner() {}, prepare: async () => ({ archivePath, directory: `${directory}/attempt`, receipt, metrics,
     cleanup: async () => rm(`${directory}/attempt`, { recursive: true, force: true }) }), invoke,
-    verifiedDb: async () => identity, audit };
+    verifiedDb: async (options: VulnScanOptions) => { void options; return identity; }, audit };
 }
 function persist(ledger: ScanLedger, checks: string[], report: Awaited<ReturnType<typeof scanNginxArchive>>) {
   const id = ledger.enqueue({ ...target, digest: target.digest as `sha256:${string}`, subject: 'alice',
@@ -107,6 +108,38 @@ test('runner retains clean Secrets and checked OS CVE during concurrent scanner 
   assert.ok(audits >= 3);
   assert.equal(report.secret?.outcome, 'checked'); assert.equal(report.vuln?.outcome, 'checked');
   assert.equal(persist(ledger, ['secret', 'vuln'], report), 'completed');
+}));
+
+test('v2 archive runner retains overdue3day data, exact policy receipt and independent SBOM', async () => fixture(async (directory, ledger) => {
+  const now = Date.now();
+  const identity = { ...db(), updatedAt: new Date(now - 3 * 86400_000).toISOString(),
+    downloadedAt: new Date(now - 3 * 86400_000 + 1000).toISOString(), nextUpdate: new Date(now - 2 * 86400_000).toISOString() };
+  const deps = lifecycle(directory, async check => check === 'sbom'
+    ? { bomFormat: 'CycloneDX', specVersion: '1.6', version: 1,
+        metadata: { component: { name: archivePath, type: 'container', properties: [
+          { name: 'aquasecurity:trivy:ImageID', value: target.configDigest },
+          { name: 'aquasecurity:trivy:DiffID', value: diffId },
+          { name: 'aquasecurity:trivy:SchemaVersion', value: '2' },
+          { name: 'aquasecurity:trivy:OS:Family', value: 'alpine' },
+          { name: 'aquasecurity:trivy:OS:Name', value: '3.23.3' }] } },
+        components: [{ type: 'operating-system', name: 'alpine', version: '3.23.3' },
+          { type: 'library', name: 'busybox', version: '1', purl: 'pkg:apk/alpine/busybox@1?arch=x86_64&distro=3.23.3' }] }
+    : { ...raw(), Results: [{ Class: 'os-pkgs', Type: 'alpine', Target: 'alpine', Packages: [{ Name: 'busybox', Version: '1' }] }] });
+  let verifications = 0;
+  deps.verifiedDb = async options => { verifications++; assert.equal(options.policy, CURRENT_DB_POLICY); return identity; };
+  const report = await scanNginxArchive(['sbom', 'vuln'], { target, vuln: { ...vulnOptions, policy: CURRENT_DB_POLICY } }, deps);
+  assert.equal(verifications, 2); assert.equal(report.vuln?.outcome, 'checked');
+  assert.equal(report.sbom?.outcome, 'checked');
+  if (report.vuln?.outcome !== 'checked') throw Error('fixture');
+  assert.deepEqual(report.vuln.dbPolicy?.warnings, ['DB_DATA_OLDER_THAN_24H', 'DB_PUBLICATION_OVERDUE']);
+  assert.equal(report.vuln.dbPolicy?.evaluatedAt, report.checkedAt);
+  const id = ledger.enqueue({ ...target, digest: target.digest as `sha256:${string}`, subject: 'alice',
+    idempotencyKey: randomUUID(), checks: '["sbom","vuln"]', scope: 'image', cvePolicy: CURRENT_DB_POLICY }).scanId;
+  const job = ledger.claim()!;
+  assert.equal(ledger.finishArchive(id, job.attempts, report), true);
+  assert.equal(ledger.archiveResult(id, 'alice')?.vuln?.outcome, 'checked');
+  assert.equal(ledger.archiveResult(id, 'alice')?.sbom?.outcome, 'checked');
+  assert.equal(ledger.archiveResult(id, 'alice')?.checkedAt, report.checkedAt);
 }));
 
 test('unexpected scratch symlink/real audit error fails closed as SCAN_FAILED, never false SCAN_TIMEOUT', async () => {

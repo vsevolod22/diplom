@@ -1,4 +1,8 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
+import { ReportViewContractError, reportViewIdentity } from '@/shared/api/scans/reportView';
+import type { SbomReportQuery, SecretReportQuery, VulnReportQuery } from '@/shared/api/scans/reportView';
+import { SbomReportControls, SecretReportControls, UnsupportedReportControls, VulnReportControls } from './ReportViewControls';
+import { cveMetadataIdentity, hasCveMetadata, savedDbAge } from '@/shared/api/scans/cveDbMetadata';
 import type {
   ScanResults,
   ScanSbom,
@@ -100,13 +104,31 @@ export function ScanReportSections(props: Props) {
 }
 
 type SectionProps = Props & { reportKey: string };
-function VulnReport({ status, transport, reportKey }: SectionProps) {
+function useReportSelection<Q>(initial: Q) {
+  const [selection, setSelection] = useState({ query: initial, revision: 0 });
+  const select = (query: Q) => setSelection(previous => ({ query, revision: previous.revision + 1 }));
+  return [selection.query, select, selection.revision] as const;
+}
+function viewRowFingerprint(rows: Parameters<typeof fingerprintReportRows>[0], reportView: boolean): string {
+  try { return fingerprintReportRows(rows); }
+  catch (error) { if (reportView) throw new ReportViewContractError(); throw error; }
+}
+function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
+  const [query, setQuery, revision] = useReportSelection<VulnReportQuery>({ view: 'report-v1', limit: 25, sort: 'severity:desc', severity: null });
+  const supported = !demo && transport.kind === 'live';
   const load = useCallback(
-    (cursor: string | undefined, signal: AbortSignal) => transport.vuln(status.scanId, cursor, signal),
-    [transport, status.scanId],
+    (cursor: string | undefined, signal: AbortSignal) => transport.vuln(status.scanId, cursor, signal, supported ? query : undefined),
+    [transport, status.scanId, supported, query],
   );
   const describe = useCallback(
     (page: ScanVuln): PageDescription => {
+      if (supported && !page.page) throw new ReportViewContractError();
+      const result = status.perCheck?.vuln;
+      if (hasCveMetadata(page) || hasCveMetadata(result)) {
+        if (!('resultContractVersion' in page) || !result || result.resultContractVersion !== 2 ||
+            page.outcome !== result.outcome || cveMetadataIdentity(page) !== cveMetadataIdentity(result) ||
+            (page.outcome === 'unsupported' && page.reason !== result.reason)) throw new ReportIdentityError();
+      }
       if (page.outcome !== 'checked')
         return {
           checked: false,
@@ -128,14 +150,17 @@ function VulnReport({ status, transport, reportKey }: SectionProps) {
           page.os,
           page.node,
           page.db,
+          'resultContractVersion' in page ? cveMetadataIdentity(page) : null,
+          reportViewIdentity(page.page),
         ]),
         rowIds: page.findings.map((item) => item.findingId),
-        rowFingerprint: fingerprintReportRows(page.findings),
-        total: page.findingCount,
+        rowFingerprint: viewRowFingerprint(page.findings, !!page.page),
+        total: page.page?.matchedCount ?? page.findingCount,
+        ...(page.page ? { wholeTotal: page.page.totalCount, offset: page.page.offset } : {}),
         nextCursor: page.nextCursor,
       };
     },
-    [status],
+    [status, supported],
   );
   return (
     <section aria-label="Результаты CVE" className="scan-report-section">
@@ -143,7 +168,8 @@ function VulnReport({ status, transport, reportKey }: SectionProps) {
         CVE <span className="scan-report-section__scope">registry IMAGE</span>
       </h4>
       <CursorReportPager
-        reportKey={reportKey}
+        reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
+        controls={pending => supported ? <VulnReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
         label="CVE"
         load={load}
         describe={describe}
@@ -154,7 +180,10 @@ function VulnReport({ status, transport, reportKey }: SectionProps) {
           page.outcome === 'failed' ? (
             <p>CVE не проверены: {page.reason ?? page.errorCode}. Число уязвимостей неизвестно.</p>
           ) : page.outcome === 'unsupported' ? (
-            <p>CVE не поддерживаются: {page.reason}. Это не нулевое число находок.</p>
+            <>
+              <p>CVE не поддерживаются: {page.reason}. Это не нулевое число находок.</p>
+              <CveDbFacts page={page} />
+            </>
           ) : (
             <>
               <p className="scan-a1__muted">
@@ -176,26 +205,14 @@ function VulnReport({ status, transport, reportKey }: SectionProps) {
                 ) : null}
                 {!page.os || !page.node ? <p>Часть сведений о покрытии OS/Node не предоставлена.</p> : null}
               </div>
-              <details className="scan-report-section__metadata">
-                <summary>Версии scanner и базы CVE</summary>
-                {page.db ? (
-                  <p>
-                    DB {page.db.manifestDigest} · {page.db.signer} (локальная аттестация, не подпись издателя)
-                    · обновлена {page.db.updatedAt} · срок {page.db.nextUpdate}
-                  </p>
-                ) : (
-                  <p>Идентичность DB не предоставлена.</p>
-                )}
-                <p>
-                  scanner {page.scannerVersion} · проверено {page.checkedAt}
-                  {status.perCheck?.vuln?.checksVersion
-                    ? ` · checks ${status.perCheck.vuln.checksVersion}`
-                    : ''}
-                </p>
-              </details>
+              <CveDbFacts page={page} />
+              <p className="scan-a1__muted">scanner {page.scannerVersion} · проверено {page.checkedAt}
+                {status.perCheck?.vuln?.checksVersion ? ` · checks ${status.perCheck.vuln.checksVersion}` : ''}
+              </p>
               {page.findingCount === 0 ? (
                 <p>0 CVE в выполненной проверенной области; это не гарантия безопасности.</p>
               ) : null}
+              {page.page?.matchedCount === 0 && page.findingCount > 0 ? <p>Нет совпадений глобального фильтра CVE. Полный отчёт содержит {page.findingCount} находок.</p> : null}
               <ul className="scan-vuln-list" aria-label="Находки CVE">
                 {page.findings.map((finding) => (
                   <VulnAdvisoryCard key={finding.findingId} finding={finding} />
@@ -209,13 +226,47 @@ function VulnReport({ status, transport, reportKey }: SectionProps) {
   );
 }
 
-function SbomReport({ status, transport, reportKey }: SectionProps) {
+function isV2CvePage(page: ScanVuln): page is Extract<ScanVuln, { resultContractVersion: 2 }> {
+  return 'resultContractVersion' in page && page.resultContractVersion === 2;
+}
+
+function CveDbFacts({ page }: { page: Exclude<ScanVuln, { outcome: 'failed' }> }) {
+  const v2 = isV2CvePage(page) ? page : null;
+  return <div className="scan-report-db">
+    {v2 ? <div className="scan-report-db__policy">
+      <p><strong>Политика CVE DB: UpdatedAt + 14 дней включительно</strong> · {v2.dbPolicy.status === 'stale-but-usable' ? 'допустима с предупреждениями' : 'допустима'} на сохранённый момент проверки, не сейчас.</p>
+      <p>Возраст базы на сохранённый момент: {savedDbAge(v2.db, v2.dbPolicy.evaluatedAt)} · оценено {new Date(v2.dbPolicy.evaluatedAt).toISOString()}.</p>
+      {v2.dbPolicy.warnings.includes('DB_DATA_OLDER_THAN_24H') ? <p className="scan-vuln-row__warning">DB_DATA_OLDER_THAN_24H: данные базы старше 24 часов на момент оценки.</p> : null}
+      {v2.dbPolicy.warnings.includes('DB_PUBLICATION_OVERDUE') ? <p className="scan-vuln-row__warning">DB_PUBLICATION_OVERDUE: ожидаемая публикация NextUpdate просрочена на момент оценки.</p> : null}
+      <p>Исторический результат не подтверждает текущую готовность базы или безопасность образа.</p>
+    </div> : <p className="scan-a1__muted">Legacy CVE: versioned policy evidence не предоставлено; правило 14 дней и актуальная допустимость не подтверждены.</p>}
+    <details className="scan-report-section__metadata">
+      <summary>Версии scanner и базы CVE</summary>
+      {page.db ? <>
+        <p>DB {page.db.manifestDigest} · {page.db.signer} (локальная аттестация, не подпись издателя; браузер не проверяет подпись).</p>
+        <p>UpdatedAt · обновлена {page.db.updatedAt}</p>
+        <p>DownloadedAt · загружена {page.db.downloadedAt}</p>
+        <p>NextUpdate · ожидаемая публикация {page.db.nextUpdate}, не срок допустимости.</p>
+      </> : <p>Идентичность DB не предоставлена.</p>}
+      {v2 ? <>
+        <p>usableUntil · предел политики {v2.usableUntil} (включительно).</p>
+        <p>worker checkedAt · {v2.checkedAt} · сохранённый clock {v2.workerCheckedAt}</p>
+        <p>result contract 2 · envelope 1 · {v2.dbPolicy.policy}</p>
+      </> : null}
+    </details>
+  </div>;
+}
+
+function SbomReport({ status, transport, reportKey, demo }: SectionProps) {
+  const [query, setQuery, revision] = useReportSelection<SbomReportQuery>({ view: 'report-v1', limit: 25, sort: 'name:asc', ecosystem: null, name: null });
+  const supported = !demo && transport.kind === 'live';
   const load = useCallback(
-    (cursor: string | undefined, signal: AbortSignal) => transport.sbom(status.scanId, cursor, signal),
-    [transport, status.scanId],
+    (cursor: string | undefined, signal: AbortSignal) => transport.sbom(status.scanId, cursor, signal, supported ? query : undefined),
+    [transport, status.scanId, supported, query],
   );
   const describe = useCallback(
     (page: ScanSbom): PageDescription => {
+      if (supported && !page.page) throw new ReportViewContractError();
       if (page.outcome !== 'checked')
         return {
           checked: false,
@@ -229,20 +280,22 @@ function SbomReport({ status, transport, reportKey }: SectionProps) {
       checkVersion(status, 'sbom', page, page.componentCount);
       return {
         checked: true,
-        identity: JSON.stringify([page.image, page.platform, page.checkedAt, page.scannerVersion, page.os]),
+        identity: JSON.stringify([page.image, page.platform, page.checkedAt, page.scannerVersion, page.os, reportViewIdentity(page.page)]),
         rowIds: page.components.map((item) => JSON.stringify([item.ecosystem, item.name, item.version])),
-        rowFingerprint: fingerprintReportRows(page.components),
-        total: page.componentCount,
+        rowFingerprint: viewRowFingerprint(page.components, !!page.page),
+        total: page.page?.matchedCount ?? page.componentCount,
+        ...(page.page ? { wholeTotal: page.page.totalCount, offset: page.page.offset } : {}),
         nextCursor: page.nextCursor,
       };
     },
-    [status],
+    [status, supported],
   );
   return (
     <section aria-label="Пакеты SBOM" className="scan-report-section">
       <h4>Пакеты SBOM</h4>
       <CursorReportPager
-        reportKey={reportKey}
+        reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
+        controls={pending => supported ? <SbomReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
         label="SBOM"
         load={load}
         describe={describe}
@@ -264,6 +317,7 @@ function SbomReport({ status, transport, reportKey }: SectionProps) {
               <p className="scan-a1__muted">
                 scanner {page.scannerVersion} · проверено {page.checkedAt}
               </p>
+              {page.page?.matchedCount === 0 ? <p>Нет совпадений глобального фильтра SBOM; полный инвентарь: {page.componentCount} пакетов.</p> : null}
               <ul className="scan-report-inventory">
                 {page.components.map((component) => (
                   <li key={JSON.stringify(component)}>
@@ -283,17 +337,21 @@ function SbomReport({ status, transport, reportKey }: SectionProps) {
 }
 
 function SecretReport({ status, transport, reportKey, demo, filter, onResetFilter }: SectionProps) {
+  const [query, setQuery, revision] = useReportSelection<SecretReportQuery>({ view: 'report-v1', limit: 25, sort: 'ruleId:asc', ruleId: null, linePresence: null });
+  const supported = !demo && transport.kind === 'live';
   const load = useCallback(
-    (cursor: string | undefined, signal: AbortSignal) => transport.results(status.scanId, cursor, signal),
-    [transport, status.scanId],
+    (cursor: string | undefined, signal: AbortSignal) => transport.results(status.scanId, cursor, signal, supported ? query : undefined),
+    [transport, status.scanId, supported, query],
   );
   const describe = useCallback(
     (page: ScanResults): PageDescription => {
+      if (supported && !page.page) throw new ReportViewContractError();
       const coverage = page.coverage.find((item) => item.check === 'Secrets');
       const result = status.perCheck?.secret;
       if (
         !demo &&
         (coverage?.status !== result?.outcome ||
+          (coverage?.checkedAt !== undefined && result?.checkedAt !== undefined && coverage.checkedAt !== result.checkedAt) ||
           (result?.outcome === 'checked' &&
             ((result.findingCount != null && result.findingCount !== coverage?.findingCount) ||
               (result.scannerVersion != null && result.scannerVersion !== coverage?.scannerVersion))))
@@ -303,20 +361,22 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
         throw new ReportIdentityError();
       return {
         checked: coverage?.status === 'checked',
-        identity: JSON.stringify(coverage),
+        identity: JSON.stringify([coverage, reportViewIdentity(page.page)]),
         rowIds: coverage?.status === 'checked' ? page.findings.map((item) => item.findingId) : [],
-        rowFingerprint: fingerprintReportRows(coverage?.status === 'checked' ? page.findings : []),
-        total: coverage?.status === 'checked' ? (coverage.findingCount ?? null) : null,
+        rowFingerprint: viewRowFingerprint(coverage?.status === 'checked' ? page.findings : [], !!page.page),
+        total: coverage?.status === 'checked' ? (page.page?.matchedCount ?? coverage.findingCount ?? null) : null,
+        ...(page.page ? { wholeTotal: page.page.totalCount, offset: page.page.offset } : {}),
         nextCursor: coverage?.status === 'checked' ? page.nextCursor : null,
       };
     },
-    [status, demo],
+    [status, demo, supported],
   );
   return (
     <section aria-label="Результаты Secrets" className="scan-report-section">
       <h4>Secrets</h4>
       <CursorReportPager
-        reportKey={reportKey}
+        reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
+        controls={pending => supported ? <SecretReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
         label="Secrets"
         load={load}
         describe={describe}
@@ -348,12 +408,14 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
                     <li key={finding.findingId}>
                       <strong>{finding.ruleId}</strong>
                       <span>
-                        {finding.category} · severity: {finding.severity}
+                        {finding.category} · {finding.line == null ? 'Номер строки неизвестен' : `Строка ${finding.line}`}
                       </span>
                       <span>ID: {finding.findingId}</span>
                     </li>
                   ))}
                 </ul>
+              ) : page.page?.matchedCount === 0 && coverage?.findingCount !== 0 ? (
+                <p>Нет совпадений глобального фильтра Secrets; полный отчёт: {coverage?.findingCount ?? 'неизвестен'}.</p>
               ) : demo && filter !== 'all' ? (
                 <p>
                   Нет совпадений фильтра на загруженной странице.{' '}
@@ -369,7 +431,7 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
                 <p>Нет подтверждённых находок: область не проверена полностью.</p>
               )}
               <p className="scan-a1__muted">
-                Значения секретов не отображаются. Severity unknown не превращается в оценку риска.
+                Значения секретов не отображаются. Номер строки и правило не являются оценкой severity.
               </p>
             </>
           );

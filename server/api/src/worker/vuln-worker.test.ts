@@ -9,6 +9,7 @@ import test, { type TestContext } from 'node:test';
 import type { Job } from '../ledger/ledger.js';
 import { preflightVulnDbBundle } from './vuln-db-bundle.js';
 import { scanVulnPinned, type VulnScanOptions } from './vuln-worker.js';
+import { CURRENT_DB_POLICY } from './cve-db-policy.mjs';
 
 const job: Job = { scanId: 'scan', attempts: 1, registry: 'registry-1.docker.io',
   repository: 'library/alpine', digest: `sha256:${'a'.repeat(64)}`, platform: 'linux/amd64',
@@ -56,7 +57,7 @@ async function fixture(t: TestContext, stale = false) {
     trust: { trustedPublicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       expectedSigner: descriptor.signer, expectedSource: descriptor.source, expectedSchemaVersion: 2,
       expectedArtifactSha256: descriptor.artifactSha256, expectedManifestDigest: manifestDigest } };
-  return { options, releaseDir, cacheDir };
+  return { options, releaseDir, cacheDir, updatedAt: Date.parse(descriptor.updatedAt) };
 }
 function scanner() {
   const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; kill: (signal: string) => boolean };
@@ -99,6 +100,44 @@ test('signed fresh DB preflight precedes fixed vuln-only argv; result contains s
   } finally { delete process.env.SENSITIVE_TRIVY_TOKEN; }
 });
 
+test('v2 signed synthetic3day DB remains usable; postscanner authentication and honest receipt required', async t => {
+  const { options, releaseDir } = await fixture(t, true);
+  const fake = scanner(); let validations = 0;
+  const pending = scanVulnPinned({ ...job, cvePolicy: CURRENT_DB_POLICY }, options, { ...fake.lifecycle,
+    preflight: async options => { validations++; assert.equal(options.policy, CURRENT_DB_POLICY); return preflightVulnDbBundle(options); } });
+  for (let i = 0; i < 100 && !fake.calls.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(fake.calls.length, 1);
+  fake.child.stdout.write(report()); fake.child.emit('close', 0);
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(validations, 2);
+  if (result.ok) {
+    assert.equal(result.dbEvidence?.db.envelopeVersion, 1);
+    assert.equal(result.dbEvidence?.checkedAt, result.dbEvidence?.dbPolicy.evaluatedAt);
+    assert.deepEqual(result.dbEvidence?.dbPolicy.warnings, ['DB_DATA_OLDER_THAN_24H', 'DB_PUBLICATION_OVERDUE']);
+  }
+  const tamper = scanner();
+  const rejected = scanVulnPinned({ ...job, cvePolicy: CURRENT_DB_POLICY }, options, tamper.lifecycle);
+  for (let i = 0; i < 100 && !tamper.calls.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(tamper.calls.length, 1);
+  await writeFile(join(releaseDir, 'descriptor.sig'), Buffer.alloc(64));
+  tamper.child.stdout.write(report()); tamper.child.emit('close', 0);
+  assert.deepEqual(await rejected, failure);
+});
+
+test('R1 production worker has no frozen clock and rejects signed hash-phase crossing before spawn', async t => {
+  const { options, updatedAt } = await fixture(t);
+  // Move only the evaluation clock, not the coherently signed fixture timestamps.
+  const fake = scanner(); let reads = 0;
+  t.mock.method(Date, 'now', () => updatedAt + 14 * 86400_000 + (reads++ ? 1 : 0));
+  fake.lifecycle.preflight = async trust => {
+    assert.equal(trust.now, undefined);
+    return preflightVulnDbBundle(trust);
+  };
+  assert.deepEqual(await scanVulnPinned({ ...job, cvePolicy: CURRENT_DB_POLICY }, options, fake.lifecycle), failure);
+  assert.equal(fake.calls.length, 0);
+  assert.equal(reads, 2);
+});
+
 test('wrong image, platform, scope, checks, path or timeout never spawn', async t => {
   const { options } = await fixture(t);
   const fake = scanner();
@@ -113,7 +152,7 @@ test('wrong image, platform, scope, checks, path or timeout never spawn', async 
 });
 
 test('missing, tampered, stale or mismatched DB prevents scanner launch', async t => {
-  const { options, releaseDir, cacheDir } = await fixture(t);
+  const { options, releaseDir } = await fixture(t);
   const fake = scanner();
 
   await writeFile(join(releaseDir, 'db', 'trivy.db'), 'tampered');

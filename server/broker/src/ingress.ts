@@ -127,6 +127,7 @@ export function createIngress(broker: Broker): Server {
             !requestLine ||
             !ROUTE.test(requestLine[1]) ||
             lines.some((line) => /[\r\n]/.test(line)) ||
+            // eslint-disable-next-line no-control-regex -- Raw HTTP headers must reject control characters before Node normalization.
             lines.slice(1).some((line) => !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+: [^\x00-\x1f\x7f]*$/.test(line));
         }
         state.prefix = Buffer.alloc(0);

@@ -26,9 +26,9 @@ test('local enrollment: full target, audience, scope, consent, current versions 
     'consentVersion',
     'policyVersion',
     'caller',
-  ]) {
+  ] as const) {
     const state = fixtureState('/private/engine.sock');
-    (state.grants[0] as any)[field] = typeof (state.grants[0] as any)[field] === 'number' ? 2 : 'wrong';
+    Object.assign(state.grants[0], { [field]: typeof state.grants[0][field] === 'number' ? 2 : 'wrong' });
     store.replace(state);
     assert.equal(store.authorize(request(), 100_000), undefined, field);
   }

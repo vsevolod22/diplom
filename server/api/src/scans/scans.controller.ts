@@ -31,21 +31,18 @@ export class ScansController {
   }
 
   @Get(':scanId/results')
-  results(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string,
-    @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
-    return this.scans.results(request.identity!, scanId, cursor, limit);
+  results(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string, @Query() query: unknown) {
+    return this.scans.report(request.identity!, scanId, 'secret', query);
   }
 
   @Get(':scanId/sbom')
-  sbom(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string,
-    @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
-    return this.scans.sbom(request.identity!, scanId, cursor, limit);
+  sbom(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string, @Query() query: unknown) {
+    return this.scans.report(request.identity!, scanId, 'sbom', query);
   }
 
   @Get(':scanId/vuln')
-  vuln(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string,
-    @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
-    return this.scans.vuln(request.identity!, scanId, cursor, limit);
+  vuln(@Req() request: AuthenticatedRequest, @Param('scanId') scanId: string, @Query() query: unknown) {
+    return this.scans.report(request.identity!, scanId, 'vuln', query);
   }
 
   @Get(':scanId/events')

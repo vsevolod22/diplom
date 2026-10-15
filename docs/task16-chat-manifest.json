@@ -1,0 +1,266 @@
+{
+  "task": "DIP-TASK-16",
+  "revision": "R5-admitted-unavailable-receipt",
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "context_run_id": "6ad60d60-18c5-4a6c-860f-9d8bece7232d",
+  "observed_head": "741e4aaf4b6c41dd176ddfe6ff175781958f8f73",
+  "state": "uncommitted; testing85; independent269 security recheck pending; no full acceptance/proof execution approval",
+  "authority": "Parent ended proof freeze; minimal admitted unavailable-receipt error-only branch plus focused tests/docs authorized",
+  "files": [
+    {
+      "path": "src/features/scans/ScanChatPanel.tsx",
+      "bytes": 22567,
+      "sha256": "949ccf31a9f9e4f85def9da394a6134f875e71a03ec037f7556241a1f3e26053"
+    },
+    {
+      "path": "src/features/scans/safeMarkdown.tsx",
+      "bytes": 2176,
+      "sha256": "2d40a0c93c23f629864a3beca84009f2ff24a60ed9acf091bb6377ed372ba9ce"
+    },
+    {
+      "path": "src/features/scans/safeMarkdownPolicy.ts",
+      "bytes": 2263,
+      "sha256": "2ab612b0c73ed9102c242ecbd19cf52188e7ce828be5029c439b304c4362f0b5"
+    },
+    {
+      "path": "src/features/scans/SafeMarkdownRenderer.tsx",
+      "bytes": 1538,
+      "sha256": "52230178debedd4b081d582a704a9543664925aba7a4f293b15c1bd99c3eda87"
+    },
+    {
+      "path": "src/features/scans/ScanSummaryPanel.tsx",
+      "bytes": 13225,
+      "sha256": "8375be9c21d76bc9cb98af97cc1da5bf02e95c03773732c20162f2e136832f9d"
+    },
+    {
+      "path": "src/shared/api/scans/llmChatClient.ts",
+      "bytes": 12248,
+      "sha256": "575fd6ffaaa68cdf9085cb054dc01991fabdfcf7ef11b9aa986e126d3067d605"
+    },
+    {
+      "path": "src/shared/api/scans/llmChatContract.ts",
+      "bytes": 14202,
+      "sha256": "0bc43f881992432b292a73b4d5cf5f9c52079efbf3a97218311d8b63a55ec6b9"
+    },
+    {
+      "path": "tests-vite/ui/scans/llmChatFixtures.ts",
+      "bytes": 6716,
+      "sha256": "a86dc435b40b590008b0fa41b6627299e668598d35af2bc70e57acb6ad9b409e"
+    },
+    {
+      "path": "tests-vite/ui/scans/llmChatClient.test.ts",
+      "bytes": 19318,
+      "sha256": "0b5553ab9845312ec2f244bb4a818ca0c38994ccdd2033e22619073cacae8b25"
+    },
+    {
+      "path": "tests-vite/ui/scans/ScanChatPanel.test.tsx",
+      "bytes": 22840,
+      "sha256": "8797372d3c0898b0411092e360866bcbebbe0a494964de1ee6f623ab2b45e3b3"
+    },
+    {
+      "path": "tests-vite/ui/scans/safeMarkdown.test.tsx",
+      "bytes": 8353,
+      "sha256": "e4a5ff85dffec874ff1b2b2084b6e219d794c9260000ec67292c4c1ce256dff9"
+    },
+    {
+      "path": "docs/task16-chat-ui.md",
+      "bytes": 26539,
+      "sha256": "02dec37f6eb938536cad013e571d460eea027df5a87cc9013be5a27782d16588"
+    },
+    {
+      "path": "docs/task16-chat-tests.json",
+      "bytes": 21131,
+      "sha256": "464ba050b292b4b66984185e6c13fc6b3d676d35aa7790a4af4b77af75ec8337"
+    },
+    {
+      "path": "server/api/src/llm/llm.controller.ts",
+      "bytes": 4410,
+      "sha256": "d1403a50fa7a6ac6b5a164a4a571c9a1dfe2c5fc8d6a54d3c23bc915becf80af"
+    },
+    {
+      "path": "server/api/src/llm/history.service.ts",
+      "bytes": 20287,
+      "sha256": "289743ff07da95c5ccb2243fd1ea46c0bcddeb33eb94253bcf0216f8cc103f50"
+    },
+    {
+      "path": "server/api/src/llm/history-delivery.ts",
+      "bytes": 9868,
+      "sha256": "f7232a36c0285a1354e5ae63f3d72215ffaf9f759ce14c7e7b05dc8f4700b0e4"
+    },
+    {
+      "path": "server/api/src/llm/tests/history.http.test.ts",
+      "bytes": 72670,
+      "sha256": "2e61cab4661c75afed50f5d04e9f6e7e621bc39683632a5743d7d1b34a595307"
+    },
+    {
+      "path": "server/api/src/llm/tests/history-delivery.test.ts",
+      "bytes": 18910,
+      "sha256": "41f042fb162f29d9e3a36e9b5d9826c2deb385ea768bd02c830da518c33c6b26"
+    },
+    {
+      "path": "server/api/src/llm/TASK14.md",
+      "bytes": 25394,
+      "sha256": "ebfbad343924272f7b60597c448cc412ab9e19f55d4164cc0b1c733ddbd9299a"
+    }
+  ],
+  "manifest_self_excluded": true,
+  "supplemental": [
+    {
+      "path": "docs/task16-r5-evidence.md",
+      "bytes": 9789,
+      "sha256": "68d647924a9acb0122e97e2634b6d370c9357f7cbbfd3af82d9ac4f42be8765f",
+      "artifact": "DIP-ARTF-274"
+    },
+    {
+      "path": "docs/task16-r5-backend-tests.tap",
+      "bytes": 1184,
+      "sha256": "cba2eeef3add04bfe40bedc6c883ce01bbee150dbf51597948248594ca2cdf77",
+      "artifact": "DIP-ARTF-272"
+    },
+    {
+      "path": "docs/task16-r5-client-tests.json",
+      "bytes": 11338,
+      "sha256": "c476b42038ea948b77287fbb154c6300488dfaaa867af10ceb4c51bbc9ca69dd",
+      "artifact": "DIP-ARTF-273"
+    },
+    {
+      "path": "docs/task16-r5-diff.patch",
+      "bytes": 49404,
+      "sha256": "d3a0fc119c140e95593dcbc777ed8913fcacd6266abde81677d7177cbf711bd2"
+    },
+    {
+      "path": "docs/task16-r5-diff.patch.gz",
+      "bytes": 14512,
+      "sha256": "623988e1812e5cb2c160c85a9c015d9fe0f724bf26c5066302d55f10bf31fbb8",
+      "artifact": "DIP-ARTF-271",
+      "encoding": "gzip",
+      "decoded_bytes": 49404,
+      "decoded_sha256": "d3a0fc119c140e95593dcbc777ed8913fcacd6266abde81677d7177cbf711bd2"
+    },
+    {
+      "path": "docs/task16-r5-backend-source.json.gz",
+      "bytes": 26677,
+      "sha256": "d07ddcefec7e3d7bc4eea8132193b05f80a694aab4e6035488b19ea9f9b8e72f",
+      "artifact": "DIP-ARTF-270",
+      "encoding": "gzip",
+      "decoded_bytes": 129315,
+      "decoded_sha256": "64120448d10ffa29126480aa1c9d4521240f55c07d942477a0624365fe87783e"
+    },
+    {
+      "path": "docs/task16-r4-evidence.md",
+      "bytes": 12517,
+      "sha256": "4675a9906c2c2d02bc7f3a90f0299c90f8ffc0de5112f6c00b0dd6dd06c8d1b5"
+    }
+  ],
+  "comparison_to_R4": {
+    "artifact": "DIP-ARTF-265",
+    "bytes": 9749,
+    "sha256": "ed67eae070aa0b5a98f10b8f6f27921be966a039ad537798e650cceb25882e8b",
+    "changed": [
+      "tests-vite/ui/scans/llmChatClient.test.ts",
+      "docs/task16-chat-ui.md",
+      "server/api/src/llm/history.service.ts",
+      "server/api/src/llm/history-delivery.ts",
+      "server/api/src/llm/tests/history.http.test.ts",
+      "server/api/src/llm/tests/history-delivery.test.ts",
+      "server/api/src/llm/TASK14.md"
+    ],
+    "unchanged": [
+      "src/features/scans/ScanChatPanel.tsx",
+      "src/features/scans/safeMarkdown.tsx",
+      "src/features/scans/safeMarkdownPolicy.ts",
+      "src/features/scans/SafeMarkdownRenderer.tsx",
+      "src/features/scans/ScanSummaryPanel.tsx",
+      "src/shared/api/scans/llmChatClient.ts",
+      "src/shared/api/scans/llmChatContract.ts",
+      "tests-vite/ui/scans/llmChatFixtures.ts",
+      "tests-vite/ui/scans/ScanChatPanel.test.tsx",
+      "tests-vite/ui/scans/safeMarkdown.test.tsx",
+      "docs/task16-chat-tests.json",
+      "server/api/src/llm/llm.controller.ts"
+    ],
+    "changed_count": 7,
+    "unchanged_count": 12,
+    "patch_paths": [
+      "server/api/src/llm/history.service.ts",
+      "server/api/src/llm/history-delivery.ts",
+      "server/api/src/llm/tests/history.http.test.ts",
+      "server/api/src/llm/tests/history-delivery.test.ts",
+      "tests-vite/ui/scans/llmChatClient.test.ts",
+      "server/api/src/llm/TASK14.md",
+      "docs/task16-chat-ui.md",
+      "docs/task16-r4-evidence.md"
+    ],
+    "patch_path_count": 8,
+    "preimages_verified_against_265": true,
+    "old_manifest_is_historical_not_current": true
+  },
+  "curated_scope": {
+    "previous_parent_graph_sha256": "ac2d1be63aa4dcb4346df347dc9469cf3ee40d2f7a814675de20209cade2cf34",
+    "historical_not_current_R5": true,
+    "complete_graph_recomputed": false,
+    "execution_approved": false,
+    "task16_manifest_is_not_curated_pin": true
+  },
+  "verification": {
+    "backend_R5": {
+      "command": "pnpm exec tsx --test --test-reporter=tap --test-name-pattern R5 src/llm/tests/history-delivery.test.ts src/llm/tests/history.http.test.ts",
+      "cwd": "server/api",
+      "passed": 4,
+      "failed": 0,
+      "evidence": "DIP-ARTF-272",
+      "old_heavy_R3_R4_excluded": true,
+      "rerun_during_packaging": false
+    },
+    "api_typecheck": {
+      "command": "pnpm exec tsc --noEmit",
+      "result": "passed after final R5 backend tests",
+      "rerun_during_packaging": false
+    },
+    "client_R5": {
+      "exact_command": "pnpm exec vitest run tests-vite/ui/scans/llmChatClient.test.ts -t '^R5 unavailable' --reporter=default --reporter=json --outputFile=docs/task16-r5-client-tests.json",
+      "passed": 1,
+      "failed": 0,
+      "intentionally_deselected": 43,
+      "discovered": 44,
+      "evidence": "DIP-ARTF-273",
+      "scoped_test_eslint": "passed",
+      "full_frontend_typecheck_or_build": false
+    },
+    "full_green_claim": false,
+    "intermediate_failures": "RED502!==200; first post-fix3PASS/1 counter fixture failure0!==3; optional-hook instrumentation corrected; failed && command did not typecheck",
+    "R4_missing_usage_assertion_updated_not_rerun": true,
+    "historical_reports_not_fresh_validation": [
+      "DIP-ARTF-251",
+      "DIP-ARTF-264",
+      "DIP-ARTF-267"
+    ],
+    "added_line_whitespace": "passed; no suite reruns"
+  },
+  "wire": {
+    "accept": "application/x-ndjson",
+    "mode": "validated-completed-reply",
+    "nativeProviderStream": false,
+    "admitted_unavailable_receipt": "only after original pending and exact durable failed-head proof: error seq0/receipt unavailable, no usage/content/citation/delta/done",
+    "admitted_accepted_receipt": "unchanged same-attempt validated durable observe: usage seq0/error seq1 receipt accepted",
+    "default_JSON": "legacy502 unchanged",
+    "pre_admission": "existing safe JSON denial; no admitted outcome",
+    "guards": "same trusted fresh session/access/report/policy/epoch/revision write closure and capacity lease through finish",
+    "bounds": {
+      "line_bytes": 8192,
+      "aggregate_bytes": 196608,
+      "frames": 52,
+      "delta_bytes": 1024,
+      "delivery_deadline_ms": 5000
+    },
+    "partial_UI": "not published; terminal error not answer",
+    "refund_or_resend": false
+  },
+  "constraints": [
+    "No store/schema/quota/auth/provider/prepared-wire/main/runtime/nginx/APIflags/lockfile/pages/styles/report39/notices changes by R5",
+    "Controller/client/parser/panel/Markdown/Summary runtime hashes unchanged from265",
+    "No actual provider/LIVE/Docker/private/secrets/proof execution/deploy/commit/branch/specapply/declaration/close/run/work claim",
+    "Synthetic focused checks are not independent security/correctness/main/nginx/browser/operator/deployment/full acceptance",
+    "Manifest excludes self/temp baselines/peer graph; archived R4 patch263 nine paths, current R5 patch eight paths"
+  ]
+}

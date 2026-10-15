@@ -69,6 +69,14 @@ function mockApi(
       if (path.endsWith('/llm/context')) return json(policy);
       if (path.endsWith('/llm/summary')) return summary();
       if (path.includes('/results')) {
+        const url = new URL(path, window.location.origin);
+        if (url.searchParams.get('view') === 'report-v1') return json({
+          findings: [0, 1].map(index => ({ findingId: `secret-0-${index}`, ruleId: 'rule-0000000000000000', line: 1, evidenceRef: `result-0-secret-${index}` })),
+          nextCursor: null,
+          coverage,
+          page: { version: 1, limit: 25, offset: 0, returnedCount: 2, totalCount: 2, matchedCount: 2, sort: 'ruleId:asc', filters: { ruleId: null, linePresence: null } },
+        });
+        // Citation resolution deliberately retains the separate legacy scanner API.
         const late = path.includes('cursor=1');
         return json({
           findings: [
@@ -148,7 +156,9 @@ it('malformed/offline summary context leaves original status, coverage and findi
   mockApi('completed', undefined, { secret: 'PRIVATE_CANARY' });
   mount();
   await screen.findByText(/Не удалось безопасно получить сводку/);
-  expect(screen.getByText('ID: secret-0-0')).toBeTruthy();
+  expect(await screen.findByText('ID: secret-0-0')).toBeTruthy();
+    expect(screen.getByText('Полный итог Secrets: 2')).toBeTruthy();
+    expect(screen.queryByText(/Прежние данные и cursors сброшены/)).toBeNull();
   expect(screen.getByRole('heading', { name: 'Покрытие проверок' })).toBeTruthy();
   expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
   expect(requests.some((request) => request.init?.method === 'POST')).toBe(false);

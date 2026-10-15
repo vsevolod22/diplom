@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-        "dev:auth": "node scripts/dev-auth.mjs",
-            "stand:auth": "node scripts/stand-auth.mjs",
+    "dev:auth": "node scripts/dev-auth.mjs",
+    "stand:auth": "node scripts/stand-auth.mjs",
     "dev:admin": "vite --config vite.admin.config.ts",
     "build": "tsc -b && vite build",
     "build:admin": "tsc -b && vite build --config vite.admin.config.ts",
@@ -14,6 +14,11 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
+    "test:api": "pnpm --filter @diplom/scan-api test",
+    "test:broker": "node server/broker/run.mjs test",
+    "test:e2e": "playwright test --config tests-e2e/playwright.config.ts",
+    "test:report-integration": "node tests-e2e/report-live-api.mjs",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:api && pnpm test:broker && pnpm build && pnpm build:admin",
     "test:watch": "vitest",
     "preview": "vite preview"
   },

@@ -1,0 +1,80 @@
+{
+  "schema": "host-source-manifest-r2-v1",
+  "projectId": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "task": "DIP-TASK-8",
+  "review": "DIP-ARTF-236",
+  "previousManifestSha256": "5a8f96996a3a8917a99e1fbc47e284981fa497eb3cb45b3bd8ba02ea9f05a222",
+  "scope": "server/host/** only; source-only R1/R2 rework; return for independent review",
+  "files": [
+    {
+      "path": "server/host/README.md",
+      "sha256": "e8f5611fa7e784c1ed03eee1c54c25bf3dcd213cb2400fb4786f782548ed6c8d",
+      "sizeBytes": 5076
+    },
+    {
+      "path": "server/host/docs/assessment.md",
+      "sha256": "511e615d5db475d6ce9fc61098c3b8ad4ee20e4f4779a1ec6e8c6b4cd916cd02",
+      "sizeBytes": 12459
+    },
+    {
+      "path": "server/host/docs/safety-plan.md",
+      "sha256": "b5e57b6dbd0dbef7e6d9e275aee7978836a5089855eb421a2b22c81a3c8eb2af",
+      "sizeBytes": 9958
+    },
+    {
+      "path": "server/host/docs/supervisor-proposal-r2.md",
+      "sha256": "98aaabcd697f206a6e6b3dbd4902d4f08faa7948aba55fce9f873b10842d9c37",
+      "sizeBytes": 6891
+    },
+    {
+      "path": "server/host/src/capture-authority.mjs",
+      "sha256": "683af02ea6c0737a321bb746d701a7a07e9045ffee7f4eb625427bfcf6900f1d",
+      "sizeBytes": 974
+    },
+    {
+      "path": "server/host/src/cli.mjs",
+      "sha256": "9eb97522ce6c406fb6f422564e10ca117b099b4c90a036d6ebeeceb79c22e822",
+      "sizeBytes": 3917
+    },
+    {
+      "path": "server/host/src/collector.mjs",
+      "sha256": "ebbda196a1f46c6978cffe70b50b3d34de3f2de0b7cbb5ef779dcd7b4f7b4ee5",
+      "sizeBytes": 10141
+    },
+    {
+      "path": "server/host/src/contract.mjs",
+      "sha256": "4b322f8e707534b1a32e13e230f8bb1d04ef250ab49b24cd56f8bf68deac16e3",
+      "sizeBytes": 5287
+    },
+    {
+      "path": "server/host/src/intake.mjs",
+      "sha256": "40b87c23ddb7cf41171f2476d229b5091a881d7d0ebc49c463bad6b93268b4f1",
+      "sizeBytes": 4648
+    },
+    {
+      "path": "server/host/src/supervisor.mjs",
+      "sha256": "5fc2f8b895cff1f71b8e5e6ccc43ccf9ba5f984140ebfb7699d8d4e0101f54c8",
+      "sizeBytes": 2074
+    },
+    {
+      "path": "server/host/tests/host.test.mjs",
+      "sha256": "a6b824365f20a9145c219dd726d29347372471dd1abd8b4ff4ba2cd6b38195ee",
+      "sizeBytes": 19936
+    },
+    {
+      "path": "server/host/tests/rework.test.mjs",
+      "sha256": "b67435c6737c6b3e121668eaaa4929c880a3576d3a86320f075e58ff41240bbb",
+      "sizeBytes": 15932
+    }
+  ],
+  "generatedHistoricalReportsExcluded": [
+    "server/host/docs/source-manifest.json",
+    "server/host/docs/evidence.md",
+    "server/host/docs/source-manifest-r2.json",
+    "server/host/docs/evidence-r2.md"
+  ],
+  "hostCaptureExecuted": false,
+  "processTreeQualified": false,
+  "durableCaptureReplayImplemented": false,
+  "taskClosed": false
+}

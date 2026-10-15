@@ -7,7 +7,7 @@ import { connect } from 'node:net';
 import { once } from 'node:events';
 import { AuditBuffer } from '../src/audit.js';
 import { verifyPrivateBoundary } from '../src/boundary.js';
-import { Broker, type Barriers } from '../src/broker.js';
+import { Broker, type Barriers, type Reply } from '../src/broker.js';
 import { UnixEngine } from '../src/engine.js';
 import { createIngress, listenPrivate } from '../src/ingress.js';
 import { PolicyStore } from '../src/policy.js';
@@ -75,7 +75,7 @@ export async function harness(
   const ingress = createIngress(broker);
   await listenPrivate(ingress, ingressPath);
   const ask = (path = route(), headers: Record<string, string> = {}) =>
-    new Promise<any>((resolve, reject) => {
+    new Promise<Reply>((resolve, reject) => {
       const req = httpRequest(
         {
           socketPath: ingressPath,

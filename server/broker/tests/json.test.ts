@@ -10,6 +10,11 @@ const store = new PolicyStore();
 store.replace(fixtureState('/private/engine.sock'));
 const pin = store.authorize(request(), 100_000)!;
 const encode = (v: unknown) => Buffer.from(JSON.stringify(v));
+// Deliberately mutable raw Engine payloads for malformed-input projection tests.
+interface RawInspect extends Record<string, unknown> {
+  Config: Record<string, unknown>;
+  HostConfig: Record<string, unknown>;
+}
 
 test('duplicate-aware strict JSON, Unicode, depth/fields/nodes/string boundaries', () => {
   for (const input of [
@@ -42,7 +47,7 @@ test('duplicate-aware strict JSON, Unicode, depth/fields/nodes/string boundaries
 
 test('allowlist projection keeps dangerous facts; all-field canaries never emitted/hash raw', () => {
   const canary = 'SECRET_CANARY_RAW_ENV_LABEL_PATH_LOG';
-  const raw: any = inspect();
+  const raw: RawInspect = inspect();
   Object.assign(raw, {
     Env: [canary],
     LogPath: canary,
@@ -153,13 +158,13 @@ for (const [field, fact, cases] of [
 ] as const) {
   test(`${field}: namespace-specific configured modes do not attest effective isolation`, () => {
     for (const [value, expected] of cases) {
-      const raw: any = inspect();
+      const raw: RawInspect = inspect();
       if (value !== undefined) raw.HostConfig[field] = value;
       const snapshot = project(strictJson(encode(raw)), pin, 100_000);
       assert.equal(snapshot.facts.namespaces[fact], expected, `${field}=${String(value)}`);
     }
     for (const invalid of [null, false, 0, {}, []]) {
-      const raw: any = inspect();
+      const raw: RawInspect = inspect();
       raw.HostConfig[field] = invalid;
       assert.throws(() => project(strictJson(encode(raw)), pin, 100_000));
     }
@@ -173,17 +178,17 @@ test('optional unknown is not false/safe; missing/mismatched required facts fail
   assert.equal(snapshot.facts.resources.memory, 'unknown');
   assert.equal(snapshot.facts.capAdd, 'unknown');
   for (const change of [
-    (v: any) => (v.Id = 'b'.repeat(64)),
-    (v: any) => delete v.Config,
-    (v: any) => delete v.HostConfig.Privileged,
-    (v: any) => (v.HostConfig.ReadonlyRootfs = 'false'),
-    (v: any) => (v.Config.User = 0),
-    (v: any) => (v.Mounts = [{ Type: 'bind', RW: 'false' }]),
-    (v: any) => (v.HostConfig.CapAdd = [1]),
-    (v: any) => (v.HostConfig.SecurityOpt = {}),
-    (v: any) => (v.HostConfig.Memory = -1),
-    (v: any) => (v.HostConfig.PortBindings = { 'bad/tcp': [] }),
-    (v: any) => (v.Mounts = Array.from({ length: 257 }, () => ({ Type: 'bind', RW: true }))),
+    (v: RawInspect) => (v.Id = 'b'.repeat(64)),
+    (v: RawInspect) => Reflect.deleteProperty(v, 'Config'),
+    (v: RawInspect) => delete v.HostConfig.Privileged,
+    (v: RawInspect) => (v.HostConfig.ReadonlyRootfs = 'false'),
+    (v: RawInspect) => (v.Config.User = 0),
+    (v: RawInspect) => (v.Mounts = [{ Type: 'bind', RW: 'false' }]),
+    (v: RawInspect) => (v.HostConfig.CapAdd = [1]),
+    (v: RawInspect) => (v.HostConfig.SecurityOpt = {}),
+    (v: RawInspect) => (v.HostConfig.Memory = -1),
+    (v: RawInspect) => (v.HostConfig.PortBindings = { 'bad/tcp': [] }),
+    (v: RawInspect) => (v.Mounts = Array.from({ length: 257 }, () => ({ Type: 'bind', RW: true }))),
   ]) {
     const raw = inspect();
     change(raw);

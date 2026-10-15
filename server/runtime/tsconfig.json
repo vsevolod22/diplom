@@ -1,0 +1,5 @@
+{
+  "extends": "../api/tsconfig.json",
+
+  "include": ["src/**/*.ts", "../api/src/runtime/**/*.ts", "../broker/src/**/*.ts"]
+}
