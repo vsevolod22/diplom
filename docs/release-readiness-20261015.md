@@ -1,6 +1,12 @@
 # Итоговая проверка проекта — 2026-10-15
 
-## Последний результат продолжения
+## Актуальный постоянный локальный стенд
+
+По следующему запросу пользователя добавлен и **оставлен работающим** полный LOCAL stack `dip-local-full` на **http://127.0.0.1:8080**. Команды: `pnpm stand:local`, `pnpm stand:local:status`, `pnpm stand:local:stop`; отдельные persistent volumes и signing secret не затрагивают старый HOLD. Это новое окружение, не восстановление прежних пользовательских данных. Подробности: [local-full-stand.md](local-full-stand.md).
+
+Настоящий browser E2E на этом стенде **PASS**: registration/login/logout, Secrets+SBOM+Image config launch, worker completed, report/reload/list и fresh-context login с тем же report. Alpine3.20: Secrets checked0, SBOM checked14, config checked1. Исправлен overflow длинного digest: 6 browser regressions PASS (320/375/768/1280/1440 и200% zoom), также подтверждён в собранном nginx UI320/375/1280. Полный Vitest553/553, launcher13/13, lint/typecheck PASS. CVE без подписанной базы, LLM/host/runtime остаются выключены; для первого скана CVE не выбирать.
+
+## Исторический результат предыдущего продолжения
 
 После коммита `636b834` по повторному запросу пользователя выполнены дополнительные проверки несколькими независимыми агентами:
 

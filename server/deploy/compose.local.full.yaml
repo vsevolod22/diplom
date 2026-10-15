@@ -1,0 +1,88 @@
+# Only with compose.stand.yaml, via scripts/local-stand.mjs. No private env overlays.
+name: dip-local-full
+services:
+  auth-volume-init:
+    labels: { org.diplom.local-stand: v1 }
+  scan-volume-init:
+    labels: { org.diplom.local-stand: v1 }
+  egress:
+    image: dip-local-full-egress:local
+    build:
+      context: ../..
+      dockerfile: server/deploy/gateway/Dockerfile
+      labels: { org.diplom.local-stand: v1 }
+    labels: { org.diplom.local-stand: v1 }
+    restart: unless-stopped
+  api:
+    image: dip-local-full-api:local
+    build:
+      context: ../..
+      dockerfile: server/deploy/api.Dockerfile
+      labels: { org.diplom.local-stand: v1 }
+    labels: { org.diplom.local-stand: v1 }
+    command: [node, --import, tsx, src/oci/nginx-local.main.ts]
+    restart: unless-stopped
+    environment:
+      SCAN_BIND_ADDRESS: 0.0.0.0
+      PORT: "3001"
+      SCAN_JWT_SECRET: ${SCAN_JWT_SECRET:?Use scripts/local-stand.mjs}
+      SCAN_JWT_ISSUER: dip-local-full
+      SCAN_JWT_AUDIENCE: dip-local-full
+      AUTH_DB_PATH: /auth/auth.sqlite
+      AUTH_ORIGIN: http://127.0.0.1:8080
+      AUTH_ALLOW_INSECURE_LOCAL_HTTP: "true"
+      SCAN_BROWSER_ALLOWED_USER_IDS: ""
+      SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS: "true"
+      SCAN_LEDGER_PATH: /data/ledger.sqlite
+      SCAN_WORKER_READY_PATH: /data/worker.ready
+      SCAN_VULN_ENABLED: "false"
+      LLM_ENABLED: "false"
+      LLM_ROUTING_APPROVED: "false"
+      LLM_QUOTA_ENABLED: "false"
+      LLM_HISTORY_ENABLED: "false"
+  worker:
+    image: dip-local-full-worker:local
+    build:
+      context: ../..
+      dockerfile: server/deploy/worker.Dockerfile
+      labels: { org.diplom.local-stand: v1 }
+    labels: { org.diplom.local-stand: v1 }
+    command: [node, --import, tsx, src/worker/nginx-local-worker.main.ts]
+    restart: unless-stopped
+    environment:
+      SCAN_LEDGER_PATH: /data/ledger.sqlite
+      SCAN_WORKER_READY_PATH: /data/worker.ready
+      TRIVY_CACHE_DIR: /tmp/trivy
+      SCAN_VULN_ENABLED: "false"
+    # Required by the existing LOCAL worker's checked cgroup envelope.
+    mem_limit: 1g
+    memswap_limit: 1g
+  web:
+    image: dip-local-full-web:local
+    build:
+      context: ../..
+      dockerfile: server/deploy/stand.Dockerfile
+      labels: { org.diplom.local-stand: v1 }
+    labels: { org.diplom.local-stand: v1 }
+    restart: unless-stopped
+    ports: ["127.0.0.1:8080:8080"]
+volumes:
+  auth_accounts:
+    name: dip-local-full_auth_accounts
+    labels: { org.diplom.local-stand: v1 }
+  scan_ledger:
+    name: dip-local-full_scan_ledger
+    labels: { org.diplom.local-stand: v1 }
+networks:
+  auth_internal:
+    name: dip-local-full_auth_internal
+    labels: { org.diplom.local-stand: v1 }
+  scan_internal:
+    name: dip-local-full_scan_internal
+    labels: { org.diplom.local-stand: v1 }
+  registry_uplink:
+    name: dip-local-full_registry_uplink
+    labels: { org.diplom.local-stand: v1 }
+  web_edge:
+    name: dip-local-full_web_edge
+    labels: { org.diplom.local-stand: v1 }

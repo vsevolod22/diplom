@@ -453,29 +453,29 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               {localSelected ? <div role="group" aria-label="Доказанные наборы локального профиля">
                 {localCheckSets.map(set => <label key={set.join(',')}><input type="radio" name="local-check-set"
                   checked={JSON.stringify(canonicalSelected) === JSON.stringify(set)} onChange={() => { ++submissionVersion.current; setValue('checks', [...set]); setConfirmed(false); attempt.current = null; setError(''); }} />
-                  {set.length === 1 ? set[0] : 'Secrets + SBOM + CVE'}</label>)}
+                  <span>{set.length === 1 ? set[0] : 'Secrets + SBOM + CVE'}</span></label>)}
                 <p>Image config и недоказанные сочетания для этого профиля недоступны.</p>
               </div> : <>
               <label>
                 <input type="checkbox" value="secret" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                Secrets · проверка образа
+                <span>Secrets · проверка образа</span>
               </label>
               <label>
                 <input type="checkbox" value="sbom" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                SBOM · перечень пакетов, не проверка уязвимостей
+                <span>SBOM · перечень пакетов, не проверка уязвимостей</span>
               </label>
               <label>
                 <input type="checkbox" value="vuln" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                CVE · доступно только при настроенной сервером базе уязвимостей
+                <span>CVE · доступно только при настроенной сервером базе уязвимостей</span>
               </label>
               <label>
                 <input type="checkbox" value="config" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                Image config · OCI User metadata, не runtime / Dockerfile
+                <span>Image config · OCI User metadata, не runtime / Dockerfile</span>
               </label>
               </>}
               <label>
                 <input type="checkbox" disabled />
-                Host · отдельный opt-in не подключён; runtime evidence — в отдельной панели ниже
+                <span>Host · отдельный opt-in не подключён; runtime evidence — в отдельной панели ниже</span>
               </label>
               {errors.checks ? <p role="alert">{errors.checks.message}</p> : null}
             </fieldset>

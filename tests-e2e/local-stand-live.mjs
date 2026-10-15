@@ -240,7 +240,12 @@ async function verifyReport(page, scanId, snapshot) {
   assert.equal(sbom.value?.outcome, 'checked', 'SBOM report coverage');
   assert.equal(sbom.value.componentCount, snapshot.perCheck.sbom.componentCount, 'SBOM count identity');
   assert.ok(sbom.value.components?.length > 0, 'Actual worker package inventory must be present');
-  assert.equal(sbom.value.image, snapshot.imageReference, 'SBOM image identity');
+  assert.ok(sbom.value.image.endsWith(`@${snapshot.digest}`), 'SBOM digest identity');
+  assert.equal(
+    sbom.value.image,
+    snapshot.imageReference ?? `registry-1.docker.io/library/alpine@${snapshot.digest}`,
+    'SBOM image identity',
+  );
   assert.equal(sbom.value.platform, snapshot.platform, 'SBOM platform identity');
   const secretsSection = page.getByRole('region', { name: 'Результаты Secrets', exact: true });
   const sbomSection = page.getByRole('region', { name: 'Пакеты SBOM', exact: true });

@@ -10,6 +10,7 @@ test-results/
 *.tsbuildinfo
 *.local
 .local-auth/
+.local-stand/
 .env
 .env.*
 !.env.example
