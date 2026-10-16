@@ -1,2 +1,3 @@
 import { runWorker } from './worker-runtime.js';
-await runWorker('local');
+import { localDbTrustAnchorFromEnv } from './vuln-db-trust.js';
+await runWorker('local', localDbTrustAnchorFromEnv());

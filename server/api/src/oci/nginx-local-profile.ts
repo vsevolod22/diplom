@@ -2,6 +2,9 @@ import { ServiceUnavailableException } from '@nestjs/common';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { ScansService } from '../scans/scans.service.js';
+import type { LedgerStore } from '../ledger/ledger-store.js';
+import type { OciResolver } from './oci-resolver.js';
+import { PRODUCTION_DB_TRUST_ANCHOR, type DbTrustAnchor } from '../worker/vuln-db-trust.js';
 import type { ImageReference } from '../scans/image-reference.js';
 import type { ImageSuggestion } from '../scans/image-search.js';
 import { inspectNginxCandidate } from './nginx-candidate.js';
@@ -23,6 +26,12 @@ export async function localWorkerReady(path = LOCAL_READY_PATH, now = Date.now()
 
 // Ordinary accounts/controllers/trust: this class has no proof startup or test key.
 export class NginxLocalScansService extends ScansService {
+  private readonly trustAnchor: DbTrustAnchor;
+  constructor(ledger: LedgerStore, resolver: OciResolver, anchor: DbTrustAnchor = PRODUCTION_DB_TRUST_ANCHOR) {
+    super(ledger, resolver);
+    this.trustAnchor = Object.freeze({ publicKeyPath: anchor.publicKeyPath, expectedSpkiSha256: anchor.expectedSpkiSha256 });
+  }
+  protected override dbTrustAnchor(): DbTrustAnchor { return this.trustAnchor; }
   protected override async readiness() { return await super.readiness() && await localWorkerReady(); }
   protected override acceptsReference(ref: ImageReference) {
     return super.acceptsReference(ref) || ref.registry === policy.registry && ref.repository === policy.repository && ref.selector === policy.digest;

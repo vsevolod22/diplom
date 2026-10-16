@@ -1,7 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, ServiceUnavailableException, HttpException, HttpStatus } from '@nestjs/common';
 import type { ServerResponse } from 'node:http';
-import { createHash, createPublicKey } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+
 import { isAbsolute } from 'node:path';
 
 import { LedgerStore } from '../ledger/ledger-store.js';
@@ -10,6 +9,7 @@ import { OciResolver } from '../oci/oci-resolver.js';
 import { parseScanRequest } from './scan-request.js';
 import { assertDbFreshness, preflightVulnDbBundle, type VerifiedDbIdentity } from '../worker/vuln-db-bundle.js';
 import { CURRENT_DB_POLICY } from '../worker/cve-db-policy.mjs';
+import { PRODUCTION_DB_TRUST_ANCHOR, readDbTrustPublicKey, type DbTrustAnchor } from '../worker/vuln-db-trust.js';
 import { dbEvidenceMetadata, type CveDbEvidence } from '../worker/cve-db-evidence.js';
 import type { ArchiveScanReport } from '../worker/archive-scan-worker.js';
 import { chainReady } from './scan-readiness.js';
@@ -68,6 +68,8 @@ export class ScansService {
   }
   imageSuggestion(suggestion: ImageSuggestion): ImageSuggestion { return suggestion; }
 
+  protected dbTrustAnchor(): DbTrustAnchor { return PRODUCTION_DB_TRUST_ANCHOR; }
+
   // Historical subclasses may still return boolean; true is NOT authenticated v2 authority.
   protected async vulnDbReady(): Promise<Readonly<VerifiedDbIdentity> | boolean> {
     const directory = process.env.SCAN_VULN_RELEASE_DIR;
@@ -76,12 +78,8 @@ export class ScansService {
     if (!directory || !isAbsolute(directory) || !/^sha256:[a-f0-9]{64}$/.test(manifest ?? '') ||
         !/^[a-f0-9]{64}$/.test(artifact ?? '')) return false;
     try {
-      const key = await readFile(new URL('../../../deploy/trust/db-signing-key.pub.pem', import.meta.url));
-      // Reject a replaced trust anchor, even if the path exists in a local installation.
-      const publicKey = createPublicKey(key);
-      if (createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex') !==
-          'd75c6f6b2384de68978090fc837387ab4f3e878ee004bccf27ea98a84fbee078') return false;
-      const verified = await preflightVulnDbBundle({ directory, trustedPublicKeyPem: key.toString('utf8'),
+      const key = readDbTrustPublicKey(this.dbTrustAnchor());
+      const verified = await preflightVulnDbBundle({ directory, trustedPublicKeyPem: key,
         expectedSigner: 'local-db-operator-v1', expectedSource: `ghcr.io/aquasecurity/trivy-db@${manifest}`,
         expectedSchemaVersion: 2, expectedManifestDigest: manifest!, expectedArtifactSha256: artifact!, policy: CURRENT_DB_POLICY });
       return verified.identity;

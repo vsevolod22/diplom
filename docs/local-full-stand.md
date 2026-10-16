@@ -8,7 +8,7 @@ pnpm stand:local:status
 pnpm stand:local:stop
 ```
 
-`stand:local` собирает и запускает detached project **dip-local-full**. Откройте **http://127.0.0.1:8080/register**, зарегистрируйте новый аккаунт, затем перейдите на **/scans/new**. Для первого запуска выберите **Alpine 3.20**, проверки **Secrets + SBOM + Image config**, подтвердите цель и нажмите «Запустить скан». Вход и регистрация находятся на `/login` и `/register`, не на API URL.
+`stand:local` собирает и запускает detached project **dip-local-full**. Откройте **http://127.0.0.1:8080/register**, зарегистрируйте новый аккаунт, затем перейдите на **/scans/new**. Для первого запуска выберите **Alpine 3.20**, проверки **Secrets + SBOM + CVE + Image config**, подтвердите цель и нажмите «Запустить скан». Вход и регистрация находятся на `/login` и `/register`, не на API URL.
 
 Это собранный frontend/nginx + настоящий Nest API + worker/Trivy + egress gateway + две постоянные SQLite-базы. Порты API/worker наружу не публикуются, web слушает только `127.0.0.1:8080`. Аккаунты/задания в старом Docker project и dev-auth на 5173 сюда не переносятся. Cookie привязаны к host, а не порту; для параллельной проверки auth-dev и полного стенда лучше использовать разные browser profiles.
 
@@ -19,7 +19,7 @@ pnpm stand:local:stop
 - `stop` останавливает только проверенные контейнеры этого project, **не удаляет** volumes/accounts/reports/secret. Init containers с exit0 — нормальное завершение подготовки новых volumes.
 - Старый `dip-auth-stand`, `.local-auth`, его env/ключи/volumes/HOLD не читаются и не мигрируются launcher'ом. Он отказывает при чужих/unlabelled ресурсах в своём namespace.
 - Это loopback LOCAL profile с разрешением зарегистрированным локальным аккаунтам запускать ограниченные image scans, не публичный сервис и не общий произвольный Docker scanner. Target/check sets дополнительно проверяет сервер; показываемый nginx — условный профиль, не разрешение на любой образ.
-- **CVE выключен** до отдельного подключения проверенного подписанного offline release; выбор CVE без базы не даёт рабочего CVE scan. Провайдер ИИ, history, host/runtime capture также не включены. Отсутствие возможностей не маскируется нулевыми findings.
+- **CVE включён на текущей машине** через `.local-stand/cve.json`, отдельный LOCAL-only публичный ключ и immutable signed release. См. [local-cve-20261016.md](local-cve-20261016.md). На чистой установке отсутствие activation оставляет CVE выключенным; некорректная существующая activation блокирует запуск, а не ослабляет проверки. Провайдер ИИ, history, host/runtime capture не включены.
 - После изменения UI повторите `pnpm stand:local`, чтобы пересобрать web. Обычный `pnpm dev:auth` подключает только auth API и не заменяет полный стенд.
 
 ## Исправление интерфейса
@@ -33,7 +33,13 @@ pnpm exec playwright test --config tests-e2e/scan-create-long-reference.config.t
 node --test scripts/test_local_stand.mjs
 ```
 
-## Проверка действительно работающего стенда
+## Текущая CVE-проверка — 2026-10-16
+
+`node tests-e2e/local-stand-live.mjs --cve` прошёл полный browser E2E за29.3s: четыре проверки на Alpine3.20, current signed DB/closed v2 metadata, owner report/render/reload/freshlogin. Secrets0, SBOM14, CVE0, Image config1. Дополнительный pinned архивный Alpine3.16 через owner HTTP завершился completed: Secrets0, SBOM14, **CVE4**, config1. Нет fake DB или снятых signature/source/freshness/read-only gates. Стенд оставлен UP.
+
+Launcher status/up/stop поддерживает exact read-only binds на Docker Desktop/macOS (literal `/host_mnt` mapping только при согласованной declaration), не открывает private signing key. Текущие тесты launcher27/27, setup24/24, API639/639 и UI553/553 PASS; lint/typecheck PASS.
+
+## Историческая проверка до подключения CVE
 
 `node tests-e2e/local-stand-live.mjs` создаёт только свой synthetic аккаунт и один настоящий scan на уже работающем `dip-local-full`, без Docker lifecycle и HTTP mocks. Аккаунт и отчёт остаются в новом стенде; credentials/cookies существуют только в памяти. В обычной проверке пользователю следует создавать свой аккаунт — чужие synthetic отчёты закрыты owner auth.
 
@@ -51,4 +57,4 @@ node --test scripts/test_local_stand.mjs
 
 Общий frontend Vitest **553/553 PASS**, launcher tests **13/13 PASS**, typecheck/ESLint PASS. Новый web образ также отдаёт required license notice HTTP200; stale Dockerignore-exclusions четырёх tracked notice-файлов удалены. Raw sanitized runtime receipt — в игнорируемом `test-results/local-stand-live.json`, без credentials.
 
-Это current LOCAL image-only acceptance, **не** восстановление старых данных, свежая CVE qualification, ручная VoiceOver-приёмка, arbitrary Engine/host scan или production readiness.
+Исторический прогон выше не включал CVE; новая CVE-приёмка описана отдельно. Ни один из них не является восстановлением старых данных, ручной VoiceOver-приёмкой, arbitrary Engine/host scan или production readiness.

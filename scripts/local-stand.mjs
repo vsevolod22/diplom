@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,14 +53,18 @@ export function dockerEnvironment(ambient = process.env) {
   }
   return env;
 }
-export function composeArguments(root, args) {
+export function composeArguments(root, args, cve = null) {
   return ['compose', '--env-file', '/dev/null', '-p', PROJECT,
     '-f', join(root, 'server/deploy/compose.stand.yaml'),
-    '-f', join(root, 'server/deploy/compose.local.full.yaml'), ...args];
+    '-f', join(root, 'server/deploy/compose.local.full.yaml'),
+    ...(cve ? ['-f', join(root, 'server/deploy/compose.local.cve.yaml')] : []), ...args];
 }
-function composeEnvironment(env, secret = CONFIG_SECRET) {
+function composeEnvironment(env, secret = CONFIG_SECRET, cve = null) {
   return { ...env, SCAN_JWT_SECRET: secret, AUTH_ORIGIN: ORIGIN,
-    AUTH_ALLOW_INSECURE_LOCAL_HTTP: 'true', SCAN_BROWSER_ALLOWED_USER_IDS: '', SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS: 'true' };
+    AUTH_ALLOW_INSECURE_LOCAL_HTTP: 'true', SCAN_BROWSER_ALLOWED_USER_IDS: '', SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS: 'true',
+    ...(cve ? { SCAN_VULN_RELEASE_HOST_DIR: cve.releaseHostDir,
+      SCAN_VULN_MANIFEST_DIGEST: cve.manifestDigest, SCAN_VULN_ARTIFACT_SHA256: cve.artifactSha256,
+      LOCAL_CVE_TRUST_SHA256: cve.publicKeySha256 } : {}) };
 }
 export function runDocker(args, { root, env, timeout = 30_000 }) {
   return new Promise((resolveOutput, reject) => {
@@ -74,19 +78,108 @@ export function runDocker(args, { root, env, timeout = 30_000 }) {
   });
 }
 
-export function expectedEnvironment(service) {
+const CVE_KEYS = ['version', 'release', 'manifestDigest', 'artifactSha256', 'publicKeySha256'];
+const RELEASE_PATH = /^db-releases\/[a-z0-9][a-z0-9_-]{0,127}$/;
+const CVE_TMPFS = ['/tmp:rw,noexec,nosuid,size=16m', '/tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=512m'];
+function cveEnvironment(cve) {
+  return cve ? { SCAN_VULN_ENABLED: 'true', SCAN_VULN_RELEASE_DIR: '/opt/release',
+    SCAN_VULN_MANIFEST_DIGEST: cve.manifestDigest, SCAN_VULN_ARTIFACT_SHA256: cve.artifactSha256,
+    LOCAL_CVE_TRUST_SHA256: cve.publicKeySha256 } : { SCAN_VULN_ENABLED: 'false' };
+}
+function cveShape(value) {
+  requireSafe(value && sameKeys(value, CVE_KEYS) && value.version === 1 &&
+    typeof value.release === 'string' && RELEASE_PATH.test(value.release) &&
+    /^sha256:[a-f0-9]{64}$/.test(value.manifestDigest) && /^[a-f0-9]{64}$/.test(value.artifactSha256) &&
+    /^[a-f0-9]{64}$/.test(value.publicKeySha256), 'Invalid LOCAL CVE activation schema or pins.');
+}
+function safeDirectory(path, mode, io, uid) {
+  const stat = io.lstatSync(path);
+  requireSafe(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === uid &&
+    (mode === undefined ? (stat.mode & 0o022) === 0 : (stat.mode & 0o7777) === mode),
+  'Unsafe LOCAL CVE directory ownership, mode or symlink.');
+}
+function safePublicFile(path, mode, io, uid) {
+  const stat = io.lstatSync(path);
+  requireSafe(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.uid === uid &&
+    (stat.mode & 0o7777) === mode, 'Unsafe LOCAL CVE file ownership, mode, link or type.');
+  return stat;
+}
+function readPublicBounded(path, mode, limit, io, uid) {
+  const before = safePublicFile(path, mode, io, uid);
+  const fd = io.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const opened = io.fstatSync(fd);
+    requireSafe(opened.dev === before.dev && opened.ino === before.ino && opened.size > 0 && opened.size <= limit,
+      'Invalid LOCAL CVE public file size or identity.');
+    const buffer = Buffer.alloc(limit + 1);
+    let total = 0, count;
+    while (total < buffer.length && (count = io.readSync(fd, buffer, total, buffer.length - total, null)) > 0) total += count;
+    const after = io.fstatSync(fd);
+    requireSafe(total === before.size && total <= limit && after.size === before.size &&
+      after.mtimeMs === before.mtimeMs && after.ctimeMs === before.ctimeMs && after.mode === before.mode,
+    'LOCAL CVE public file changed while reading.');
+    return buffer.subarray(0, total);
+  } finally { io.closeSync(fd); }
+}
+function validateCveRelease(root, value, { io = fs, uid = process.getuid() } = {}) {
+  cveShape(value);
+  const directory = join(root, '.local-stand'), releaseHostDir = join(directory, value.release);
+  safeDirectory(directory, 0o700, io, uid);
+  safeDirectory(join(directory, 'db-releases'), undefined, io, uid);
+  safeDirectory(releaseHostDir, 0o555, io, uid);
+  safeDirectory(join(releaseHostDir, 'db'), 0o555, io, uid);
+  requireSafe(sameList(io.readdirSync(releaseHostDir), ['descriptor.json', 'descriptor.sig', 'bundle.bin', 'db']) &&
+    sameList(io.readdirSync(join(releaseHostDir, 'db')), ['metadata.json', 'trivy.db']), 'Unexpected LOCAL CVE release contents.');
+  for (const file of ['descriptor.json', 'descriptor.sig', 'bundle.bin', 'db/metadata.json', 'db/trivy.db']) {
+    safePublicFile(join(releaseHostDir, file), 0o444, io, uid);
+  }
+  safeDirectory(join(directory, 'trust'), undefined, io, uid);
+  const publicKeyPath = join(directory, 'trust/db-signing-key.pub.pem');
+  const pem = readPublicBounded(publicKeyPath, 0o444, 4096, io, uid);
+  requireSafe(/^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END PUBLIC KEY-----\r?\n?$/.test(pem.toString('utf8')),
+    'Invalid LOCAL CVE public PEM.');
+  const key = createPublicKey(pem);
+  requireSafe(key.asymmetricKeyType === 'ed25519' &&
+    createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex') === value.publicKeySha256,
+  'LOCAL CVE public key does not match activation SPKI SHA256.');
+  return Object.freeze({ ...value, releaseHostDir, publicKeyPath });
+}
+
+// No provisioning here: absence alone disables CVE; a present invalid file always refuses.
+// Canonical bytes are JSON.stringify in CVE_KEYS order, without whitespace or a newline.
+export function loadCveActivation(root, { io = fs, uid = process.getuid() } = {}) {
+  const directory = join(root, '.local-stand');
+  try { io.lstatSync(directory); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  safeDirectory(directory, 0o700, io, uid);
+  const path = join(directory, 'cve.json');
+  try { io.lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const bytes = readPublicBounded(path, 0o600, 4096, io, uid);
+  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  cveShape(value);
+  requireSafe(JSON.stringify(Object.fromEntries(CVE_KEYS.map(key => [key, value[key]]))) === bytes.toString('utf8'),
+    'LOCAL CVE activation must be canonical public JSON.');
+  return validateCveRelease(root, value, { io, uid });
+}
+function cveMounts(service, cve) {
+  if (!cve || !['api', 'worker'].includes(service)) return [];
+  return [{ type: 'bind', source: cve.releaseHostDir, target: '/opt/release', read_only: true },
+    { type: 'bind', source: cve.publicKeyPath, target: '/opt/local-db-trust/public.pem', read_only: true },
+    ...(service === 'worker' ? [{ type: 'bind', source: join(cve.releaseHostDir, 'db'), target: '/tmp/trivy/db', read_only: true }] : [])];
+}
+
+export function expectedEnvironment(service, cve = null) {
   if (service === 'worker') return { SCAN_LEDGER_PATH: '/data/ledger.sqlite', SCAN_WORKER_READY_PATH: '/data/worker.ready',
-    TRIVY_CACHE_DIR: '/tmp/trivy', SCAN_VULN_ENABLED: 'false' };
+    TRIVY_CACHE_DIR: '/tmp/trivy', ...cveEnvironment(cve) };
   if (service !== 'api') return {};
   return { SCAN_BIND_ADDRESS: '0.0.0.0', PORT: '3001', SCAN_JWT_SECRET: CONFIG_SECRET,
     SCAN_JWT_ISSUER: PROJECT, SCAN_JWT_AUDIENCE: PROJECT, AUTH_DB_PATH: '/auth/auth.sqlite',
     AUTH_ORIGIN: ORIGIN, AUTH_ALLOW_INSECURE_LOCAL_HTTP: 'true', SCAN_BROWSER_ALLOWED_USER_IDS: '',
     SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS: 'true', SCAN_LEDGER_PATH: '/data/ledger.sqlite',
-    SCAN_WORKER_READY_PATH: '/data/worker.ready', SCAN_VULN_ENABLED: 'false', LLM_ENABLED: 'false',
+    SCAN_WORKER_READY_PATH: '/data/worker.ready', ...cveEnvironment(cve), LLM_ENABLED: 'false',
     LLM_ROUTING_APPROVED: 'false', LLM_QUOTA_ENABLED: 'false', LLM_HISTORY_ENABLED: 'false' };
 }
 
-export function validateConfig(config, root) {
+export function validateConfig(config, root, cve = null) {
   requireSafe(config.name === PROJECT && sameKeys(config.services, SERVICES) && sameKeys(config.volumes, VOLUMES) &&
     sameKeys(config.networks, NETWORKS), 'Unexpected Compose project or resource set.');
   requireSafe(!config.secrets && !config.configs, 'External Compose secrets/configs are not allowed.');
@@ -104,9 +197,9 @@ export function validateConfig(config, root) {
       !spec.configs && !spec.privileged && !spec.devices && !spec.volumes_from && !spec.external_links &&
       !spec.pid && !spec.ipc && !spec.develop && !spec.post_start && !spec.pre_stop,
     'Unexpected service authority or configuration.');
-    const env = spec.environment ?? {}, expected = expectedEnvironment(service);
+    const env = spec.environment ?? {}, expected = expectedEnvironment(service, cve);
     requireSafe(sameKeys(env, Object.keys(expected)) && Object.entries(expected).every(([key, value]) => env[key] === value),
-      'Unexpected service environment; optional operator features must remain off.');
+      'Unexpected service environment or LOCAL CVE pins.');
     if (DOCKERFILES[service]) {
       requireSafe(spec.image === `${PROJECT}-${service}:local` && spec.build?.context === root &&
         spec.build.dockerfile === `server/deploy/${DOCKERFILES[service]}` && spec.build.labels?.[LABEL] === 'v1' &&
@@ -116,11 +209,17 @@ export function validateConfig(config, root) {
     } else requireSafe(spec.image === 'busybox:1.37.0' && !spec.build, 'Unexpected volume initializer.');
     if (COMMANDS[service]) requireSafe(JSON.stringify(spec.command) === JSON.stringify(COMMANDS[service]), 'Unexpected service entrypoint.');
     requireSafe(!spec.entrypoint, 'Unexpected service entrypoint override.');
-    const mounts = spec.volumes ?? [];
-    requireSafe(mounts.length === Object.keys(MOUNTS[service]).length &&
-          sameKeys(Object.fromEntries(mounts.map(mount => [mount.target, true])), Object.keys(MOUNTS[service])) && mounts.every(mount =>
-      mount.type === 'volume' && MOUNTS[service][mount.target] === mount.source && !mount.read_only && !mount.volume?.subpath),
+    const mounts = spec.volumes ?? [], binds = cveMounts(service, cve);
+    // Compose JSON omits create_host_path:false as the bind option's zero value.
+    requireSafe(mounts.length === Object.keys(MOUNTS[service]).length + binds.length &&
+      sameList(mounts.map(mount => mount.target), [...Object.keys(MOUNTS[service]), ...binds.map(mount => mount.target)]) &&
+      mounts.every(mount => (mount.type === 'volume' && MOUNTS[service][mount.target] === mount.source &&
+        !mount.read_only && !mount.volume?.subpath) || binds.some(bind => mount.type === 'bind' &&
+        mount.target === bind.target && mount.source === bind.source && mount.read_only === true &&
+        mount.bind && (mount.bind.create_host_path === undefined || mount.bind.create_host_path === false) &&
+        Object.keys(mount.bind).every(key => key === 'create_host_path'))),
     'Bind, shared or unexpected service mount.');
+    if (service === 'worker' && cve) requireSafe(sameList(spec.tmpfs, CVE_TMPFS), 'Unexpected LOCAL CVE worker tmpfs.');
     requireSafe(sameKeys(spec.networks, CONNECTIONS[service]) &&
       (!spec.network_mode || (CONNECTIONS[service].length === 0 && spec.network_mode === 'none')),
     'Unexpected service networking.');
@@ -135,9 +234,50 @@ export function validateConfig(config, root) {
     config.services.worker.pids_limit === 128, 'LOCAL worker resource envelope changed.');
 }
 
+function inspectedCve(item, service, root, platform) {
+  const pairs = (item.Config.Env ?? []).map(entry => entry.split(/=(.*)/s));
+  const cvePairs = pairs.filter(([key]) => key.startsWith('SCAN_VULN_') || key.startsWith('LOCAL_CVE_'));
+  const env = Object.fromEntries(cvePairs.map(([key, value]) => [key, value]));
+  requireSafe(Object.keys(env).length === cvePairs.length, 'Duplicate preexisting LOCAL CVE environment.');
+  if (!['api', 'worker'].includes(service)) {
+    requireSafe(cvePairs.length === 0, 'Unexpected preexisting LOCAL CVE environment.');
+    return null;
+  }
+  let cve = null;
+  if (env.SCAN_VULN_ENABLED === 'true') {
+    const declarations = (item.HostConfig?.Mounts ?? []).filter(mount => mount.Target === '/opt/release');
+    const declaration = declarations[0], source = declaration?.Source;
+    requireSafe(declarations.length === 1 && declaration.Type === 'bind' && declaration.ReadOnly === true &&
+      typeof root === 'string' && typeof source === 'string', 'Missing or unsafe preexisting LOCAL CVE release declaration.');
+    const prefix = `${join(root, '.local-stand')}/`;
+    // Desktop can store its literal VM prefix in the declaration too. Match only
+    // this project's known prefix; never normalize an arbitrary observed path.
+    const matchedPrefix = [prefix, ...(platform === 'darwin' ? [`/host_mnt${prefix}`] : [])]
+      .find(candidate => source.startsWith(candidate) && RELEASE_PATH.test(source.slice(candidate.length)));
+    requireSafe(matchedPrefix, 'Foreign preexisting LOCAL CVE release path.');
+    cve = validateCveRelease(root, { version: 1, release: source.slice(matchedPrefix.length),
+      manifestDigest: env.SCAN_VULN_MANIFEST_DIGEST, artifactSha256: env.SCAN_VULN_ARTIFACT_SHA256,
+      publicKeySha256: env.LOCAL_CVE_TRUST_SHA256 });
+  }
+  const expected = cveEnvironment(cve);
+  requireSafe(sameKeys(env, Object.keys(expected)) && Object.entries(expected).every(([key, value]) => env[key] === value),
+    'Unexpected preexisting LOCAL CVE environment or pins.');
+  return cve;
+}
+
+function declaredBindMatches(declaration, mount, bind, platform) {
+  if (!declaration || declaration.Type !== 'bind' || declaration.Target !== bind.target || declaration.ReadOnly !== true ||
+      (declaration.BindOptions && !sameKeys(declaration.BindOptions, []))) return false;
+  if (declaration.Source === bind.source && mount.Source === bind.source) return true;
+  if (platform !== 'darwin' || !bind.source.startsWith('/')) return false;
+  const desktopSource = `/host_mnt${bind.source}`;
+  // Require a matching declaration even for Desktop's exact, bounded VM alias.
+  return mount.Source === desktopSource && (declaration.Source === bind.source || declaration.Source === desktopSource);
+}
+
 // Inventory by name AND project label: an unexpected resource cannot hide behind
 // a renamed container. Inspect only candidates, never old stand/dev resources.
-export async function inspectNamespace(run, options) {
+export async function inspectNamespace(run, options, { platform = process.platform } = {}) {
   const containers = [], volumes = [], networks = [];
   for (const [kind, destination] of [['container', containers], ['volume', volumes], ['network', networks]]) {
     const format = `{{.${kind === 'container' ? 'Names' : 'Name'}}}\t{{.Label "com.docker.compose.project"}}`;
@@ -153,10 +293,22 @@ export async function inspectNamespace(run, options) {
         requireSafe(SERVICES.includes(service) && name === `${PROJECT}-${service}-1` &&
           item.Config.Image === (DOCKERFILES[service] ? `${PROJECT}-${service}:local` : 'busybox:1.37.0'),
         'Refusing unexpected preexisting container.');
-        requireSafe((item.Mounts ?? []).every(mount =>
-          (mount.Type === 'volume' && MOUNTS[service][mount.Destination] &&
-                      mount.Name === `${PROJECT}_${MOUNTS[service][mount.Destination]}`) ||
-          (mount.Type === 'tmpfs' && mount.Destination === '/tmp' && Boolean(DOCKERFILES[service]) && service !== 'egress')),
+        // Existing owned services may still be in either exact mode while Compose transitions.
+        const cve = inspectedCve(item, service, options.root, platform), binds = cveMounts(service, cve), mounts = item.Mounts ?? [];
+        const declarations = (item.HostConfig?.Mounts ?? []).filter(mount =>
+          mount.Type === 'bind' || binds.some(bind => bind.target === mount.Target));
+        requireSafe(sameList(declarations.map(mount => mount.Target), binds.map(bind => bind.target)),
+          'Preexisting container uses missing or foreign bind declarations.');
+        const persistent = mounts.filter(mount => mount.Type !== 'tmpfs');
+        requireSafe(sameList(persistent.map(mount => mount.Destination),
+          [...Object.keys(MOUNTS[service]), ...binds.map(bind => bind.target)]) && mounts.every(mount =>
+          (mount.Type === 'volume' && MOUNTS[service][mount.Destination] && mount.RW === true &&
+            mount.Name === `${PROJECT}_${MOUNTS[service][mount.Destination]}` && !mount.SubPath) ||
+          binds.some(bind => mount.Type === 'bind' && mount.Destination === bind.target && mount.RW === false &&
+            (!mount.Propagation || mount.Propagation === 'rprivate') &&
+            declaredBindMatches(declarations.find(declaration => declaration.Target === bind.target), mount, bind, platform)) ||
+          (mount.Type === 'tmpfs' && ((mount.Destination === '/tmp' && ['api', 'worker', 'web'].includes(service)) ||
+            (mount.Destination === '/tmp/trivy' && service === 'worker' && cve)))),
         'Preexisting container uses foreign mounts.');
         const networks = CONNECTIONS[service].length ? CONNECTIONS[service].map(key => `${PROJECT}_${key}`) : ['none'];
         requireSafe(sameKeys(item.NetworkSettings?.Networks, networks),
@@ -215,16 +367,17 @@ export function loadSecret(root, { mustExist = false, io = fs, random = randomBy
 }
 
 export async function localStand(argv, { root = ROOT, run = runDocker, ambient = process.env, log = console.log,
-  getSecret = loadSecret } = {}) {
+  getSecret = loadSecret, platform = process.platform } = {}) {
   const [command, ...flags] = argv;
   requireSafe(['up', 'stop', 'status'].includes(command) &&
     (flags.length === 0 || (command === 'up' && flags.length === 1 && flags[0] === '--build')),
   'Usage: node scripts/local-stand.mjs up [--build] | stop | status');
+  const cve = loadCveActivation(root);
   const options = { root, env: dockerEnvironment(ambient) };
-  const config = JSON.parse(await run(composeArguments(root, ['config', '--format', 'json']),
-    { ...options, env: composeEnvironment(options.env) }));
-  validateConfig(config, root);
-  const resources = await inspectNamespace(run, options);
+  const config = JSON.parse(await run(composeArguments(root, ['config', '--format', 'json'], cve),
+    { ...options, env: composeEnvironment(options.env, CONFIG_SECRET, cve) }));
+  validateConfig(config, root, cve);
+  const resources = await inspectNamespace(run, options, { platform });
   if (command === 'status') {
     log(resources.containers.length ? 'dip-local-full services:' : 'No dip-local-full containers; stored volumes, if any, are preserved.');
     for (const item of resources.containers) log(`${item.Config.Labels['com.docker.compose.service']}: ${item.State.Status}`);
@@ -239,8 +392,8 @@ export async function localStand(argv, { root = ROOT, run = runDocker, ambient =
   checkIgnores(root);
   const secret = getSecret(root, { mustExist: resources.containers.length > 0 || resources.volumes.length > 0 });
   log('Starting detached dip-local-full (up/build timeout: 600 seconds).');
-  await run(composeArguments(root, ['up', ...(flags.includes('--build') ? ['--build'] : []), '-d']),
-    { ...options, env: composeEnvironment(options.env, secret), timeout: 600_000 });
+  await run(composeArguments(root, ['up', ...(flags.includes('--build') ? ['--build'] : []), '-d'], cve),
+    { ...options, env: composeEnvironment(options.env, secret, cve), timeout: 600_000 });
   log('Detached stand started at http://127.0.0.1:8080. Register a new local account; use status to inspect service state.');
 }
 

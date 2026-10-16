@@ -1,4 +1,4 @@
-// Run: node tests-e2e/local-stand-live.mjs
+// Run: node tests-e2e/local-stand-live.mjs [--cve]
 // Existing projectdip-local-full only: no server/process/container lifecycle or config reads.
 // Creates one retained synthetic account and at most one retained, real worker scan.
 // Credentials exist only in memory. No screenshots, traces, storage state or raw reports are saved.
@@ -6,7 +6,17 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { chromium, expect as baseExpect } from '@playwright/test';
+import { z } from 'zod';
+
+const args = process.argv.slice(2);
+if (args.length > 1 || args.some((arg) => arg !== '--cve')) {
+  console.error('Usage: node tests-e2e/local-stand-live.mjs [--cve]');
+  process.exit(2);
+}
+const cve = args.includes('--cve');
+const workerTimeoutMs = cve ? 240000 : 180000;
 
 const origin = 'http://127.0.0.1:8080';
 const scansPath = '/api/v1/browser/scans';
@@ -18,6 +28,7 @@ const password = randomBytes(36).toString('base64url');
 const receipt = {
   origin,
   stand: 'projectdip-local-full',
+  mode: cve ? 'cve' : 'default',
   startedAt: new Date().toISOString(),
   passed: false,
   checks: [],
@@ -31,6 +42,7 @@ let browser;
 let phase = 'browser launch';
 let permittedIntent;
 let stopping = false;
+let savedCveReport;
 const pageErrors = [];
 const contexts = [];
 const terminal = ['completed', 'partial', 'failed', 'cancelled'];
@@ -225,6 +237,200 @@ async function verifyLayout(page, form) {
   check('built CSS: selected archive reference + consent fit at 320/375/1280, no clipping/overflow');
 }
 
+// Closed metadata mirrors scanTransport.ts/cveDbMetadata.ts; no DB files or keys are read.
+const dbTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/);
+const savedClock = z.number().int().positive().max(253402300799999).refine(Number.isSafeInteger);
+const dbIdentity = z
+  .strictObject({
+    envelopeVersion: z.literal(1),
+    signer: z.literal('local-db-operator-v1'),
+    schemaVersion: z.literal(2),
+    source: z.string().regex(/^ghcr\.io\/aquasecurity\/trivy-db@sha256:[a-f0-9]{64}$/),
+    manifestDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    metadataSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    dbSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    updatedAt: dbTimestamp,
+    downloadedAt: dbTimestamp,
+    nextUpdate: dbTimestamp,
+  })
+  .refine((db) => db.source === `ghcr.io/aquasecurity/trivy-db@${db.manifestDigest}`);
+const subCoverage = z.union([
+  z.strictObject({ outcome: z.literal('checked') }),
+  z.strictObject({
+    outcome: z.literal('unsupported'),
+    reason: z.enum([
+      'SCAN_FAILED',
+      'SCAN_TIMEOUT',
+      'DB_UNAVAILABLE',
+      'OS_EOL',
+      'OS_UNKNOWN',
+      'NODE_INVENTORY_ABSENT',
+    ]),
+  }),
+]);
+const cveFields = {
+  outcome: z.literal('checked'),
+  coverage: z.literal('image'),
+  findingCount: z.number().int().nonnegative(),
+  scannerVersion: z.string().min(1),
+  checkedAt: z.string(),
+  db: dbIdentity,
+  os: subCoverage.optional(),
+  node: subCoverage.optional(),
+  resultContractVersion: z.literal(2),
+  dbPolicy: z.strictObject({
+    version: z.literal(2),
+    policy: z.literal('cve-db-updated-at-14d-v2'),
+    evaluatedAt: savedClock,
+    status: z.enum(['usable', 'stale-but-usable']),
+    warnings: z.array(z.enum(['DB_DATA_OLDER_THAN_24H', 'DB_PUBLICATION_OVERDUE'])).max(2),
+  }),
+  usableUntil: dbTimestamp,
+  workerCheckedAt: savedClock,
+};
+const cveStatus = z.union([
+  z.strictObject({ check: z.literal('vuln'), ...cveFields }),
+  z.strictObject({
+    check: z.literal('vuln'),
+    ...cveFields,
+    scannerVersion: z.literal('0.69.3'),
+    errorCode: z.null(),
+    checksVersion: z.string().min(1).max(80),
+  }),
+]);
+const cveReport = z.strictObject({
+  ...cveFields,
+  image: z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/),
+  platform: z.literal('linux/amd64'),
+  findings: z
+    .array(
+      z.object({
+        findingId: z.string().regex(/^vuln-[a-f0-9]{64}$/),
+        cveId: z.string().regex(/^CVE-\d{4}-\d{4,12}$/),
+      }),
+    )
+    .max(100),
+  nextCursor: z.number().int().nonnegative().nullable(),
+});
+function timestampNs(value) {
+  const [seconds, fraction] = value.slice(0, -1).split('.');
+  const base = `${seconds}.000Z`;
+  const ms = Date.parse(base);
+  assert.ok(Number.isFinite(ms) && new Date(ms).toISOString() === base, 'Valid DB calendar');
+  return BigInt(ms) * 1000000n + BigInt(fraction.padEnd(9, '0'));
+}
+function verifyCveMetadata(value) {
+  const day = 86400000000000n;
+  const { db, dbPolicy, workerCheckedAt, checkedAt, usableUntil } = value;
+  assert.ok(workerCheckedAt <= dbPolicy.evaluatedAt, 'Saved worker clock precedes policy evaluation');
+  assert.equal(checkedAt, new Date(workerCheckedAt).toISOString(), 'Saved worker clock identity');
+  const updated = timestampNs(db.updatedAt),
+    downloaded = timestampNs(db.downloadedAt);
+  const next = timestampNs(db.nextUpdate);
+  for (const clock of [workerCheckedAt, dbPolicy.evaluatedAt]) {
+    const now = BigInt(clock) * 1000000n;
+    assert.ok(
+      updated <= now + 300000000000n &&
+        downloaded <= now + 300000000000n &&
+        downloaded >= updated &&
+        next > updated &&
+        next - updated <= 7n * day &&
+        now - updated <= 14n * day,
+      'DB timestamps satisfy policy at saved clock (not current wall clock)',
+    );
+  }
+  const evaluated = BigInt(dbPolicy.evaluatedAt) * 1000000n;
+  const warnings = [];
+  if (evaluated - updated > day) warnings.push('DB_DATA_OLDER_THAN_24H');
+  if (evaluated >= next) warnings.push('DB_PUBLICATION_OVERDUE');
+  assert.deepEqual(dbPolicy.warnings, warnings, 'Saved policy warnings');
+  assert.equal(dbPolicy.status, warnings.length ? 'stale-but-usable' : 'usable', 'Saved policy status');
+  const expiry = updated + 14n * day;
+  const expected = `${new Date(Number((expiry / 1000000000n) * 1000n)).toISOString().slice(0, 19)}.${String(expiry % 1000000000n).padStart(9, '0')}Z`;
+  assert.equal(usableUntil, expected, 'Nanosecond-precise DB usableUntil');
+}
+
+async function verifyCveReport(page, path, snapshot) {
+  const response = await http(page, `${path}/vuln?limit=50`);
+  statusIs(response, 200, 'persisted CVE GET');
+  const report = response.value;
+  const coverage = snapshot.perCheck.vuln;
+  assert.ok(cveReport.safeParse(report).success, 'Closed checked CVE v2 report contract');
+  assert.ok(cveStatus.safeParse(coverage).success, 'Closed checked CVE v2 status contract');
+  verifyCveMetadata(report);
+  verifyCveMetadata(coverage);
+  for (const key of Object.keys(cveFields))
+    assert.ok(isDeepStrictEqual(report[key], coverage[key]), `CVE report/status ${key} identity`);
+  assert.equal(
+    report.image,
+    snapshot.imageReference ?? `registry-1.docker.io/library/alpine@${snapshot.digest}`,
+    'CVE image identity',
+  );
+  assert.ok(report.image.endsWith(`@${snapshot.digest}`), 'CVE digest identity');
+  assert.equal(report.platform, snapshot.platform, 'CVE platform identity');
+  assert.equal(report.findings.length, Math.min(50, report.findingCount), 'CVE first-page count');
+  assert.equal(report.nextCursor, report.findingCount > 50 ? 50 : null, 'CVE first-page cursor');
+  assert.equal(
+    new Set(report.findings.map((item) => item.findingId)).size,
+    report.findings.length,
+    'Unique CVE finding IDs',
+  );
+  if (savedCveReport)
+    assert.ok(
+      isDeepStrictEqual(report, savedCveReport),
+      'CVE report, DB identity and saved clocks survive reload/fresh login',
+    );
+  else savedCveReport = report;
+  receipt.cve = {
+    findingCount: report.findingCount,
+    firstPageCount: report.findings.length,
+    findingIds: report.findings.map((item) => item.findingId),
+    cveIds: [...new Set(report.findings.map((item) => item.cveId))],
+    resultContractVersion: report.resultContractVersion,
+    dbManifestDigest: report.db.manifestDigest,
+    dbUpdatedAt: report.db.updatedAt,
+    dbDownloadedAt: report.db.downloadedAt,
+    dbNextUpdate: report.db.nextUpdate,
+    usableUntil: report.usableUntil,
+    workerCheckedAt: report.workerCheckedAt,
+    checkedAt: report.checkedAt,
+    evaluatedAt: report.dbPolicy.evaluatedAt,
+  };
+  const section = page.getByRole('region', { name: 'Результаты CVE', exact: true });
+  await expect(section).toBeVisible();
+  await expect(section).toContainText(`Находок в проверенной области: ${report.findingCount}.`);
+  await expect(section).toContainText('Это не гарантия безопасности');
+  await expect(section.locator('ul.scan-vuln-list > li')).toHaveCount(Math.min(25, report.findingCount));
+  const knownCveIds = new Set(report.findings.map((item) => item.cveId));
+  if (report.nextCursor === null)
+    assert.ok(
+      (await section.locator('.scan-vuln-row__id').allTextContents()).every((id) => knownCveIds.has(id)),
+      'Rendered CVE IDs belong to actual persisted findings',
+    );
+  if (report.findingCount === 0)
+    await expect(section).toContainText(
+      '0 CVE в выполненной проверенной области; это не гарантия безопасности.',
+    );
+  await expect(section).toContainText(`оценено ${new Date(report.dbPolicy.evaluatedAt).toISOString()}`);
+  await expect(section).toContainText('на сохранённый момент проверки, не сейчас');
+  const metadata = section.locator('details.scan-report-section__metadata');
+  await metadata.locator('summary').click();
+  for (const text of [
+    report.db.manifestDigest,
+    report.db.updatedAt,
+    report.db.downloadedAt,
+    report.db.nextUpdate,
+    report.usableUntil,
+    report.checkedAt,
+    `сохранённый clock ${report.workerCheckedAt}`,
+    'result contract 2 · envelope 1 · cve-db-updated-at-14d-v2',
+  ])
+    await expect(metadata).toContainText(text);
+  await expect(metadata).toBeVisible();
+  await metadata.locator('summary').click();
+}
+
 async function verifyReport(page, scanId, snapshot) {
   const path = `${scansPath}/${scanId}`;
   const secret = await http(page, `${path}/results?limit=50`);
@@ -260,6 +466,7 @@ async function verifyReport(page, scanId, snapshot) {
     await expect(secretsSection.locator('ul.scan-report-inventory > li')).toHaveCount(
       Math.min(25, snapshot.perCheck.secret.findingCount),
     );
+  if (cve) await verifyCveReport(page, path, snapshot);
   await expect(page.getByRole('alert')).toHaveCount(0);
   if (snapshot.checks.includes('config')) {
     await expect(page.locator('[aria-label="Image config coverage"]')).toContainText(
@@ -300,25 +507,43 @@ async function smoke() {
   await verifyLayout(page, form);
 
   phase = 'safe target eligibility and UI consent';
-  // Prefer 3.20, otherwise the currently rendered, enabled 3.21 button; no heavy retries.
+  // CVE requires 3.20; default mode may use the enabled 3.21 button. No launch retries.
   const target320 = form.getByRole('button', { name: /Alpine · 3\.20\s/ });
   const target =
-    (await target320.count()) && (await target320.isEnabled())
+    cve || ((await target320.count()) && (await target320.isEnabled()))
       ? target320
       : form.getByRole('button', { name: /Alpine · 3\.21\s/ });
   await expect(target).toBeEnabled();
   await target.click();
   const imageReference = await form.locator('input[type="hidden"]').inputValue();
-  assert.match(imageReference, /^registry-1\.docker\.io\/library\/alpine:3\.(20|21)$/);
+  assert.match(
+    imageReference,
+    cve
+      ? /^registry-1\.docker\.io\/library\/alpine:3\.20$/
+      : /^registry-1\.docker\.io\/library\/alpine:3\.(20|21)$/,
+  );
+  let checks = cve ? ['secret', 'sbom', 'vuln', 'config'] : ['secret', 'sbom', 'config'];
   const eligibility = await http(page, `${scansPath}/images/eligibility`, {
     imageReference,
-    checks: ['secret', 'sbom', 'config'],
+    checks,
   });
   statusIs(eligibility, 200, 'safe image eligibility');
   const allowed = eligibility.value?.allowedCheckSets;
   assert.ok(Array.isArray(allowed), 'Eligibility must expose allowed check sets');
-  let checks = ['secret', 'sbom', 'config'];
-  if (!eligibility.value.eligible || !allowed.some((set) => JSON.stringify(set) === JSON.stringify(checks))) {
+  if (cve) {
+    assert.ok(
+      eligibility.value.eligible === true &&
+        eligibility.value.reason === 'READY' &&
+        eligibility.value.imageReference === imageReference &&
+        allowed.some((set) => isDeepStrictEqual(set, checks)),
+      'CVE requires READY for Alpine 3.20 with exact secret,sbom,vuln,config; no fallback or scan',
+    );
+    receipt.eligibility = { reason: 'READY', checks: [...checks] };
+  }
+  if (
+    !cve &&
+    (!eligibility.value.eligible || !allowed.some((set) => JSON.stringify(set) === JSON.stringify(checks)))
+  ) {
     checks = ['secret', 'sbom'];
     const fallback = await http(page, `${scansPath}/images/eligibility`, { imageReference, checks });
     statusIs(fallback, 200, 'Secrets + SBOM eligibility');
@@ -334,7 +559,16 @@ async function smoke() {
   await form
     .getByRole('checkbox', { name: /Image config · OCI User metadata/ })
     .setChecked(checks.includes('config'));
-  await expect(form.getByRole('checkbox', { name: /CVE · доступно только/ })).not.toBeChecked();
+  const cveCheckbox = form.getByRole('checkbox', { name: /CVE · доступно только/ });
+  if (cve) await cveCheckbox.check();
+  else await expect(cveCheckbox).not.toBeChecked();
+  assert.deepEqual(
+    await form
+      .locator('input[name="checks"]:checked')
+      .evaluateAll((inputs) => inputs.map((input) => input.value)),
+    checks,
+    'UI selected exact check set',
+  );
   const consent = form.getByRole('checkbox', { name: /Подтверждаю выбранную цель и область/ });
   const submit = form.getByRole('button', { name: 'Запустить скан', exact: true });
   await expect(consent).not.toBeChecked();
@@ -343,7 +577,11 @@ async function smoke() {
   await expect(submit).toBeEnabled();
   permittedIntent = { imageReference, checks };
   receipt.requested = permittedIntent;
-  check('server eligibility + safe Alpine selection + explicit check set and consent; CVE excluded');
+  check(
+    cve
+      ? 'server READY exact four-check set + Alpine 3.20 + UI CVE/config and explicit consent; no fallback'
+      : 'server eligibility + safe Alpine selection + explicit check set and consent; CVE excluded',
+  );
 
   phase = 'single UI scan launch';
   const response = page.waitForResponse(
@@ -360,8 +598,8 @@ async function smoke() {
   await expect(page).toHaveURL(receipt.url);
   check('UI POST 202 receipt → own detail route');
 
-  phase = 'real worker terminal status (maximum 180s, no relaunch)';
-  const deadline = Date.now() + 180000;
+  phase = `real worker terminal status (maximum ${workerTimeoutMs / 1000}s, no relaunch)`;
+  const deadline = Date.now() + workerTimeoutMs;
   let snapshot;
   do {
     const result = await http(page, path, undefined, Math.max(1, Math.min(10000, deadline - Date.now())));
@@ -390,7 +628,10 @@ async function smoke() {
     if (terminal.includes(snapshot.state)) break;
     await pause(Math.min(2000, Math.max(0, deadline - Date.now())));
   } while (Date.now() < deadline);
-  assert.ok(terminal.includes(snapshot.state), 'Worker did not reach terminal status within 180s');
+  assert.ok(
+    terminal.includes(snapshot.state),
+    `Worker did not reach terminal status within ${workerTimeoutMs / 1000}s`,
+  );
   assert.equal(
     snapshot.state,
     'completed',
@@ -422,8 +663,18 @@ async function smoke() {
     'real worker completed; Secrets checked with confirmed count; SBOM checked with inventory; optional config evidence',
   );
 
+  if (cve) {
+    phase = 'initial persisted CVE v2 report and DOM';
+    await verifyReport(page, value.scanId, snapshot);
+    check('real GET /vuln checked count + closed v2 metadata, saved policy clocks and rendered CVE region');
+  }
   phase = 'persisted report reload';
   await page.reload();
+  if (cve) {
+    const reloaded = await http(page, path);
+    statusIs(reloaded, 200, 'reloaded persisted scan');
+    assert.ok(isDeepStrictEqual(reloaded.value, snapshot), 'Saved worker evidence unchanged after reload');
+  }
   await verifyReport(page, value.scanId, snapshot);
   const llm = await http(page, `${path}/llm/context`);
   statusIs(llm, 200, 'read-only LLM context');
@@ -446,11 +697,14 @@ async function smoke() {
   await verifyReport(fresh.page, value.scanId, snapshot);
   const persisted = await http(fresh.page, path);
   statusIs(persisted, 200, 'fresh-session persisted scan');
-  assert.deepEqual(
-    persisted.value,
-    snapshot,
+  assert.ok(
+    isDeepStrictEqual(persisted.value, snapshot),
     'Persisted worker evidence is unchanged after new-context login',
   );
+  if (cve)
+    check(
+      'CVE count, report identity, DB metadata and saved worker/evaluation clocks durable after reload and fresh UI login',
+    );
   check(
     'list persistence + fresh context UI login + same persisted report; anonymous 401/internal JWT route 404',
   );

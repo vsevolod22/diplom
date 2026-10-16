@@ -16,11 +16,12 @@ import { LlmRuntime, LlmService } from '../llm/llm.service.js';
 import { llmExceptionProvider } from '../llm/llm-exception.filter.js';
 import { LlmQuotaRuntime } from '../llm/quota-runtime.js';
 import { RuntimeApiModule } from '../runtime/runtime-api.module.js';
+import { localDbTrustAnchorFromEnv } from '../worker/vuln-db-trust.js';
 
 @Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule, RuntimeApiModule],
   controllers: [ScansController, BrowserScansController, LlmController],
   // LlmModule imports the default ScansModule; compose here to retain one LOCAL service.
   providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, LlmQuotaRuntime, llmExceptionProvider,
     { provide: ScansService, inject: [LedgerStore, OciResolver],
-    useFactory: (ledger: LedgerStore, resolver: OciResolver) => new NginxLocalScansService(ledger, resolver) }] })
+    useFactory: (ledger: LedgerStore, resolver: OciResolver) => new NginxLocalScansService(ledger, resolver, localDbTrustAnchorFromEnv()) }] })
 export class NginxLocalModule {}

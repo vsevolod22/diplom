@@ -1,0 +1,49 @@
+# Only scripts/local-stand.mjs may add this overlay, after validating public cve.json.
+# No signing key, private env file or parent trust-directory mount is passed through.
+services:
+  api:
+    environment:
+      SCAN_VULN_ENABLED: "true"
+      SCAN_VULN_RELEASE_DIR: /opt/release
+      SCAN_VULN_MANIFEST_DIGEST: ${SCAN_VULN_MANIFEST_DIGEST:?Use scripts/local-stand.mjs}
+      SCAN_VULN_ARTIFACT_SHA256: ${SCAN_VULN_ARTIFACT_SHA256:?Use scripts/local-stand.mjs}
+      LOCAL_CVE_TRUST_SHA256: ${LOCAL_CVE_TRUST_SHA256:?Use scripts/local-stand.mjs}
+    volumes:
+      - type: bind
+        source: ${SCAN_VULN_RELEASE_HOST_DIR:?Use scripts/local-stand.mjs}
+        target: /opt/release
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ../../.local-stand/trust/db-signing-key.pub.pem
+        target: /opt/local-db-trust/public.pem
+        read_only: true
+        bind: { create_host_path: false }
+  worker:
+    environment:
+      SCAN_VULN_ENABLED: "true"
+      SCAN_VULN_RELEASE_DIR: /opt/release
+      SCAN_VULN_MANIFEST_DIGEST: ${SCAN_VULN_MANIFEST_DIGEST:?Use scripts/local-stand.mjs}
+      SCAN_VULN_ARTIFACT_SHA256: ${SCAN_VULN_ARTIFACT_SHA256:?Use scripts/local-stand.mjs}
+      LOCAL_CVE_TRUST_SHA256: ${LOCAL_CVE_TRUST_SHA256:?Use scripts/local-stand.mjs}
+    volumes:
+      - type: bind
+        source: ${SCAN_VULN_RELEASE_HOST_DIR:?Use scripts/local-stand.mjs}
+        target: /opt/release
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ../../.local-stand/trust/db-signing-key.pub.pem
+        target: /opt/local-db-trust/public.pem
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${SCAN_VULN_RELEASE_HOST_DIR:?Use scripts/local-stand.mjs}/db
+        target: /tmp/trivy/db
+        read_only: true
+        bind: { create_host_path: false }
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=512m
+    mem_limit: 1g
+    memswap_limit: 1g
