@@ -5,11 +5,18 @@ import type { Identity } from '../security/identity.js';
 
 export type BrowserRequest = { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string } };
 
+export type BrowserScanLocalOrigin = 'http://127.0.0.1:8080' | 'http://127.0.0.1:8081';
+// Composition authority only: never populated from request data or environment.
+export const BROWSER_SCAN_LOCAL_ORIGIN = Symbol('BROWSER_SCAN_LOCAL_ORIGIN');
+
 // Shared cookie bridge: private JWT scopes and existing browser gates remain independent.
-export function browserIdentity(store: AuthStore, req: BrowserRequest, mutation = false): Identity {
+export function browserIdentity(store: AuthStore, req: BrowserRequest, mutation = false,
+  localOrigin: BrowserScanLocalOrigin = 'http://127.0.0.1:8080'): Identity {
+  if (localOrigin !== 'http://127.0.0.1:8080' && localOrigin !== 'http://127.0.0.1:8081')
+    throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DISABLED' });
   const localDemoRequested = process.env.SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS === 'true';
   const localDemo = localDemoRequested && process.env.AUTH_ALLOW_INSECURE_LOCAL_HTTP === 'true' &&
-    process.env.AUTH_ORIGIN === 'http://127.0.0.1:8080';
+    process.env.AUTH_ORIGIN === localOrigin;
   const allowed = process.env.SCAN_BROWSER_ALLOWED_USER_IDS;
   if ((localDemoRequested && !localDemo) || (!localDemo && !allowed))
     throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DISABLED' });

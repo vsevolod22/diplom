@@ -27,28 +27,29 @@ for (const [table, action] of [['outbox', 'UPDATE'], ['scans', 'UPDATE'], ['scan
     const db = new Database(file);
     try {
       db.exec(`CREATE TRIGGER reject_write BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'controlled write failure'); END`);
-      assert.throws(() => ledger.finishCombined(id, job.attempts, [secret], report), /controlled write failure/);
+      assert.throws(() => ledger.finishCombined(id, job.attempts, [secret], report, job.leaseToken), /controlled write failure/);
       assert.equal(ledger.state(id, 'alice'), 'running'); assert.equal(ledger.result(id, 'alice'), undefined);
       assert.equal(ledger.configResult(id, 'alice'), undefined); assert.ok(ledger.configAttemptContext(id, job.attempts));
       assert.deepEqual(ledger.events(id, 'alice', null)?.map(event => event.state), ['queued','running']);
       db.exec('DROP TRIGGER reject_write');
-      assert.equal(ledger.finishCombined(id, job.attempts, [secret], report), true);
-      assert.equal(ledger.finishCombined(id, job.attempts, [secret], report), false);
+      assert.equal(ledger.finishCombined(id, job.attempts, [secret], report, job.leaseToken), true);
+      assert.equal(ledger.finishCombined(id, job.attempts, [secret], report, job.leaseToken), false);
       assert.deepEqual(ledger.events(id, 'alice', null)?.map(event => event.state), ['queued','running','completed']);
     } finally { db.close(); }
   }));
 }
 
 test('retry clears lease without incrementing attempt and rejects precomputed report before finalization', async () => fixture(async (ledger) => {
-  const id = ledger.enqueue(target).scanId, job = ledger.claim(1000, 100)!;
+  const now = Date.now();
+  const id = ledger.enqueue(target).scanId, job = ledger.claim(now, 100)!;
   const report = await runImageConfig(ledger, job, new AbortController().signal, fixtureLoader(bytes));
-  ledger.retry(id, job.attempts, 99_000);
-  assert.equal(ledger.attemptActive(id, job.attempts), true); assert.equal(ledger.configAttemptContext(id, job.attempts), undefined);
-  assert.equal(ledger.finishCombined(id, job.attempts, [secret], report), false);
+  ledger.retry(id, job.attempts, now + 99_000, job.leaseToken);
+  assert.equal(ledger.attemptActive(id, job.attempts, job.leaseToken), false); assert.equal(ledger.configAttemptContext(id, job.attempts), undefined);
+  assert.equal(ledger.finishCombined(id, job.attempts, [secret], report, job.leaseToken), false);
   assert.equal(ledger.result(id, 'alice'), undefined); assert.equal(ledger.configResult(id, 'alice'), undefined);
-  assert.equal(ledger.claim(98_999), undefined); const next = ledger.claim(99_000)!; assert.equal(next.attempts, 2);
-  assert.equal(ledger.finishCombined(id, job.attempts, [secret], report), false);
-  assert.equal(ledger.finishCombined(id, next.attempts, [secret], await runImageConfig(ledger, next, new AbortController().signal, fixtureLoader(bytes))), true);
+  assert.equal(ledger.claim(now + 98_999), undefined); const next = ledger.claim(now + 99_000)!; assert.equal(next.attempts, 2);
+  assert.equal(ledger.finishCombined(id, job.attempts, [secret], report, job.leaseToken), false);
+  assert.equal(ledger.finishCombined(id, next.attempts, [secret], await runImageConfig(ledger, next, new AbortController().signal, fixtureLoader(bytes)), next.leaseToken), true);
 }));
 
 test('closed report rejects extra/raw fields, mismatched findings, versions and counts; sanitization preserves siblings', async () => fixture(async (ledger) => {
@@ -59,10 +60,10 @@ test('closed report rejects extra/raw fields, mismatched findings, versions and 
     { ...report, findings: [{ ...report.findings[0], manifestDigest: `sha256:${'a'.repeat(64)}` }] },
     { ...report, completedRuleIds: [] }, { ...report, dockerfile: { outcome: 'checked' } }]) {
     assert.throws(() => validateConfigReport(unsafe, job, true), /Invalid config report/);
-    assert.throws(() => ledger.finishCombined(id, job.attempts, [secret], unsafe as typeof report));
+    assert.throws(() => ledger.finishCombined(id, job.attempts, [secret], unsafe as typeof report, job.leaseToken));
   }
   const safe = sanitizeConfigReport({ ...report, raw: 'CANARY_RAW' }, job, true);
-  assert.equal(ledger.finishCombined(id, job.attempts, [secret], safe), true);
+  assert.equal(ledger.finishCombined(id, job.attempts, [secret], safe, job.leaseToken), true);
   assert.equal(ledger.result(id, 'alice')?.outcome, 'checked'); assert.equal(ledger.configResult(id, 'alice')?.config.outcome, 'failed');
   assert.equal(ledger.state(id, 'alice'), 'partial');
 }));
@@ -75,21 +76,22 @@ test('populated v10 forward migration preserves all legacy tables/states/keys/pr
       const owner = `owner-${index}`; const id = original.enqueue({ ...target, subject: owner, checks: '["secret"]', idempotencyKey: `old-${index}` }).scanId;
       if (state === 'queued') continue;
       if (state === 'cancelled') { original.cancel(id, owner); continue; }
-      const job = original.claim(1000 + index)!;
-      if (state === 'completed') original.finishWithResult(id, job.attempts, secret.outcome === 'checked' ? secret.findings : [], '0.69.3');
-      if (state === 'failed') original.finish(id, job.attempts, 'failed');
+      const job = original.claim(Date.now() + index)!;
+      if (state === 'completed') original.finishWithResult(id, job.attempts, secret.outcome === 'checked' ? secret.findings : [], '0.69.3', job.leaseToken);
+      if (state === 'failed') original.finish(id, job.attempts, 'failed', undefined, job.leaseToken);
     }
     original.close();
     const raw = new Database(file);
-    raw.exec("UPDATE scans SET state='partial', terminal_at=CURRENT_TIMESTAMP WHERE subject='owner-5'; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_check_results; DROP TABLE scan_execution_profiles; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=10;");
+    raw.exec("UPDATE scans SET state='partial', terminal_at=CURRENT_TIMESTAMP WHERE subject='owner-5'; DROP TABLE scan_checkpoints; ALTER TABLE outbox DROP COLUMN lease_token; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_check_results; DROP TABLE scan_execution_profiles; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=10;");
     const tables = raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[];
     const before = Object.fromEntries(tables.map(({ name }) => [name, raw.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all()]));
     raw.close();
     const upgraded = new ScanLedger(file), second = new ScanLedger(file);
     const reader = new Database(file);
     try {
-      assert.equal(reader.pragma('user_version', { simple: true }), 14);
-      for (const { name } of tables) assert.deepEqual(reader.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all(), before[name]);
+      assert.equal(reader.pragma('user_version', { simple: true }), 15);
+      for (const { name } of tables) assert.deepEqual(reader.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all(),
+              name === 'outbox' ? (before[name] as object[]).map(row => ({ ...row, lease_token: null })) : before[name]);
       assert.deepEqual(reader.prepare('SELECT * FROM scan_check_results').all(), []);
       assert.deepEqual(reader.pragma('foreign_key_check'), []); assert.equal(reader.pragma('integrity_check', { simple: true }), 'ok');
       assert.equal(second.configResult((before.scans as { id: string }[])[0].id, 'owner-0'), undefined);
@@ -120,7 +122,7 @@ test('SQL constraints: FK, uniqueness, attempt, versions, UTF-8 byte bound; reop
     for (const [field, value] of [[0, 'missing'], [1, 'secret'], [2, 0], [3, 'safe'], [4, 'future'], [5, 'future'], [6, 'é'.repeat(8193)]]) {
       const invalid = [...valid]; invalid[field as number] = value; assert.throws(() => insert.run(...invalid));
     }
-    assert.equal(ledger.finishCombined(id, job.attempts, [secret], report), true);
+    assert.equal(ledger.finishCombined(id, job.attempts, [secret], report, job.leaseToken), true);
     assert.throws(() => insert.run(...valid));
     const reopened = new ScanLedger(file);
     try { assert.deepEqual(reopened.configResult(id, 'alice'), report); assert.equal(reopened.configResult(id, 'bob'), undefined); }

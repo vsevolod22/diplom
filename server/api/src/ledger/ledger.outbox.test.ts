@@ -14,23 +14,26 @@ test('lease expiry, retry, stale ack, terminal replay and subject isolation surv
   const dir = mkdtempSync(join(tmpdir(), 'scan-outbox-'));
   try {
     const filename = join(dir, 'ledger.sqlite');
-    let ledger = new ScanLedger(filename);
+    let now = 1000;
+    let ledger = new ScanLedger(filename, () => now);
     const first = ledger.enqueue(target);
     const job = ledger.claim(1000, 100);
     assert.equal(job?.scanId, first.scanId);
     assert.equal(job?.digest, target.digest);
     assert.equal(ledger.claim(1050), undefined);
     ledger.close();
-    ledger = new ScanLedger(filename);
-    const recovered = ledger.claim(1100, 100);
+    now = 1100;
+    ledger = new ScanLedger(filename, () => now);
+    const recovered = ledger.claim(now, 100);
     assert.equal(recovered?.attempts, 2);
-    assert.equal(ledger.finish(first.scanId, 1, 'failed'), false);
-    assert.equal(ledger.retry(first.scanId, 2, 2000), true);
+    assert.equal(ledger.finish(first.scanId, 1, 'failed', undefined, job?.leaseToken), false);
+    assert.equal(ledger.retry(first.scanId, 2, 2000, recovered?.leaseToken), true);
     assert.equal(ledger.claim(1999), undefined);
-    const final = ledger.claim(2000);
+    now = 2000;
+    const final = ledger.claim(now);
     assert.equal(final?.attempts, 3);
-    assert.equal(ledger.finish(first.scanId, 3, 'failed'), true);
-    assert.equal(ledger.finish(first.scanId, 3, 'failed'), false);
+    assert.equal(ledger.finish(first.scanId, 3, 'failed', undefined, final?.leaseToken), true);
+    assert.equal(ledger.finish(first.scanId, 3, 'failed', undefined, final?.leaseToken), false);
     assert.equal(ledger.claim(999999), undefined);
     assert.equal(ledger.state(first.scanId, 'alice'), 'failed');
     assert.equal(ledger.state(first.scanId, 'bob'), undefined);
@@ -58,7 +61,7 @@ test('migrates old schema atomically without losing queued scan', () => {
     assert.equal(ledger.claim(100)?.scanId, 'old-id');
     ledger.close();
     const migrated = new Database(filename);
-    assert.equal(migrated.pragma('user_version', { simple: true }), 14);
+    assert.equal(migrated.pragma('user_version', { simple: true }), 15);
     migrated.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

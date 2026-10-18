@@ -74,6 +74,51 @@ const retry = () => fireEvent.click(cve().getByRole('button', { name: 'Повт�
 const lastVulnRequest = () => requests.filter(url => url.pathname.endsWith('/vuln')).at(-1)!;
 
 describe('actual parser → opt-in HTTP transport → sections / dual cursor pagers', () => {
+  it('loads all saved cancelled datasets, pages them independently and reloads without discarding results', async () => {
+    const cancelled: ScanStatus = { ...status, state: 'cancelled' };
+    const view = mount(['secret', 'sbom', 'vuln'], cancelled);
+    const sbom = within(screen.getByRole('region', { name: 'Пакеты SBOM' }));
+    const secrets = within(screen.getByRole('region', { name: 'Результаты Secrets' }));
+    await screen.findByText('CVE-2026-1000');
+    await sbom.findByText('package-00');
+    await secrets.findByText('ID: secret-0');
+    await next();
+    fireEvent.click(sbom.getByRole('button', { name: 'Далее · SBOM · сверху' }));
+    await sbom.findByText('package-25');
+    fireEvent.click(secrets.getByRole('button', { name: 'Далее · Secrets · сверху' }));
+    await secrets.findByText('ID: secret-25');
+    for (const section of [cve(), sbom, secrets]) expect(section.getByText('Страница 2')).toBeVisible();
+    view.unmount();
+    mount(['secret', 'sbom', 'vuln'], cancelled);
+    await screen.findByText('CVE-2026-1000');
+    await screen.findByText('package-00');
+    await screen.findByText('ID: secret-0');
+    expect(cve().getByText('Страница 1')).toBeVisible();
+  });
+  it.each(['secret', 'sbom', 'vuln'] as const)('loads only the saved cancelled %s subset, without treating absent siblings as zero', async check => {
+    mount(['secret', 'sbom', 'vuln'], { ...status, state: 'cancelled', perCheck: {
+      secret: null, sbom: null, vuln: null, [check]: status.perCheck![check],
+    } });
+    await screen.findByText(check === 'secret' ? 'ID: secret-0' : check === 'sbom' ? 'package-00' : 'CVE-2026-1000');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].pathname.endsWith(check === 'secret' ? '/results' : `/${check}`)).toBe(true);
+    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(2);
+    expect(screen.queryByText(/Ожидаем результат CVE/)).not.toBeInTheDocument();
+  });
+  it('retains a completed failed checkpoint as failed after cancellation, never a checked zero', async () => {
+    overrides.push(wire => json({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_TIMEOUT', findings: [], nextCursor: null,
+      page: { ...wire.page, returnedCount: 0, totalCount: null, matchedCount: null } }));
+    mount(['vuln'], { ...status, state: 'cancelled', perCheck: { vuln: { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' } } });
+    await screen.findByText('CVE не проверены: SCAN_TIMEOUT. Число уязвимостей неизвестно.');
+    expect(requests).toHaveLength(1);
+    expect(screen.queryByText(/0 CVE|Полный итог CVE: 0/)).not.toBeInTheDocument();
+  });
+  it('does not request cancelled reports without checkpoints or invent checked zero', () => {
+    mount(['secret', 'sbom', 'vuln'], { ...status, state: 'cancelled', perCheck: { secret: null, sbom: null, vuln: null } });
+    expect(requests).toHaveLength(0);
+    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(3);
+    expect(screen.queryByText(/Полный итог|0 CVE|0 находок/)).not.toBeInTheDocument();
+  });
   it('preserves top/bottom pagers; page-size5 resets cursors, truthful range and totals', async () => {
     mount();
     await screen.findByText('CVE-2026-1000');
@@ -122,6 +167,17 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
     expect(requests.at(-1)?.searchParams.get('ruleId')).toBe('RULE_B');
     expect(secrets.queryByText(/severity:/)).not.toBeInTheDocument();
     expect(cve().getByText('Строки 1–25')).toBeVisible();
+  });
+  it('renders a known Secrets line zero without exposing its evidence payload', async () => {
+    secretOverride = wire => json({
+      ...wire,
+      findings: wire.findings.map((finding, index) => index === 0 ? { ...finding, line: 0 } : finding),
+    });
+    mount(['secret']);
+    const secrets = within(screen.getByRole('region', { name: 'Результаты Secrets' }));
+    await secrets.findByText('ID: secret-0');
+    expect(secrets.getByText('secret · Строка 0', { exact: true })).toBeVisible();
+    expect(secrets.queryByText('redacted:0', { exact: false })).not.toBeInTheDocument();
   });
   it.each([[400, 'REPORT_CURSOR_QUERY_MISMATCH'], [409, 'REPORT_CURSOR_STALE']])('clears rows/history and retries FIRST on query-bound %s/%s', async (code, errorCode) => {
     mount(); await screen.findByText('CVE-2026-1000');

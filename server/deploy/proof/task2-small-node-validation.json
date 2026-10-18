@@ -1,0 +1,26 @@
+{
+  "recordedAt": "2026-10-16T21:28:38.968Z",
+  "discoveryCompleted": true,
+  "qualifyingCandidateFound": false,
+  "candidateInvestigations": 2,
+  "actualProofAttempts": 0,
+  "disposition": "blocked-by-unchanged-compressed-layer-cap; search allowance exhausted",
+  "tests": {
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0,
+    "durationMs": 37.520209
+  },
+  "earlierEvidenceHashesPreserved": true,
+  "hashes": {
+    "scripts/task2-qualification-small-candidates.mjs": "511b6b133419e56d14fccbffd682b662162d19ef0605bae4b792fe068706fcbd",
+    "scripts/task2-qualification-small-candidates.test.mjs": "323dfd07c6596241aaa8cf1fca782991cf3025ad8f454ac2c9667838fad75251",
+    "server/deploy/proof/task2-small-node-metadata.json": "f81726acfe64d0f1473a6a3710d8bc9bea9d5ba0bd1d0e75d83c353628d06b37",
+    "server/deploy/proof/task2-small-node-tests.tap": "d9a6e93ddb2383edd10857319e281767db647fd39ccc7ac96f1004ca9aa1a712",
+    "server/api/src/oci/nginx-candidate.ts": "9c01f71635718901e4cc264e8f2b04734a844d222c808ee3a1895e7828ee8dd9",
+    "server/api/src/oci/bounded-image-archive.ts": "19a9fc5a525fcc4a1988cc791146b06177cf31df813dae07cf57192f61f681d1",
+    "server/api/src/oci/layer-tar-validator.ts": "4c7fe95da18edfd2d1d7081de0a69fcf97a00494e478a494c25e585ef3954170",
+    "server/api/src/oci/archive-budget.ts": "7af4a8466173d027aaf02d8b8f8e22c4df40c7091611945da244ac0201a5ceed",
+    "server/api/src/oci/gateway-transport.ts": "f10e70fe8424bbb18ac0ae0288331fc86c2c52e2a760433fa6888ab109eb08ce"
+  }
+}

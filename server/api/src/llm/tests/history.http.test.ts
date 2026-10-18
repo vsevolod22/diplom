@@ -93,7 +93,7 @@ test('actual cookie Nest → durable history → current report/cache → real a
         platform: 'linux/amd64', scope: 'image', checks: '["secret"]' }).scanId;
       const job = scans.claim()!;
       assert.ok(scans.finishCombined(id, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [
-        { findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }])); return id;
+        { findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }], undefined, job.leaseToken)); return id;
     };
     const id = scan('history-x'), y = scan('history-y');
     const path = (endpoint: string, scanId = id) => `${base}/browser/scans/${scanId}/llm/${endpoint}`;
@@ -276,7 +276,7 @@ test('full HTTP history C/C+1 rollback, maximum completion, durable original rep
       digest: digest as `sha256:${string}`, platform: 'linux/amd64', scope: 'image', checks: '["secret"]' }).scanId;
     const job = ledger.claim()!;
     assert.ok(ledger.finishCombined(scanId, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings:
-      Array.from({ length: 32 }, (_, n) => ({ findingId: `secret-0-${n + 1}`, ruleId: 'rule-0123456789abcdef', line: n + 1, evidenceRef: `result-0-secret-${n + 1}` })) }]));
+      Array.from({ length: 32 }, (_, n) => ({ findingId: `secret-0-${n + 1}`, ruleId: 'rule-0123456789abcdef', line: n + 1, evidenceRef: `result-0-secret-${n + 1}` })) }], undefined, job.leaseToken));
     const report = app.get(ReportReader).read({ subject: owner, scope: ['scan:read'] }, scanId), binding = reportBinding(report);
     const sources = report.findings.map(finding => ({ ...binding, finding })); assert.equal(sources.length, 32);
     assert.equal(bytes(historyProjection(history.snapshot(owner, scanId))), bytes(historyProjection(history.snapshot(owner, scanId), binding)),
@@ -325,7 +325,7 @@ test('full HTTP history C/C+1 rollback, maximum completion, durable original rep
       digest: digest as `sha256:${string}`, platform: 'linux/amd64', scope: 'image', checks: '["secret"]' }).scanId;
     const completionJob = ledger.claim()!;
     assert.ok(ledger.finishCombined(completionId, completionJob.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings:
-      Array.from({ length: 32 }, (_, n) => ({ findingId: `secret-0-${n + 1}`, ruleId: 'rule-0123456789abcdef', line: n + 1, evidenceRef: `result-0-secret-${n + 1}` })) }]));
+      Array.from({ length: 32 }, (_, n) => ({ findingId: `secret-0-${n + 1}`, ruleId: 'rule-0123456789abcdef', line: n + 1, evidenceRef: `result-0-secret-${n + 1}` })) }], undefined, completionJob.leaseToken));
     const completionReport = app.get(ReportReader).read({ subject: owner, scope: ['scan:read'] }, completionId), cb = reportBinding(completionReport);
     const cs = completionReport.findings.map(finding => ({ ...cb, finding }));
     const chatUrl = `${base}/browser/scans/${completionId}/llm`;
@@ -530,7 +530,7 @@ test('TASK16 R4 real cookie/service/controller admitted failure frames preserve 
     owner = (await registered.json() as { id: string }).id; let cookie = registered.headers.get('set-cookie')!.split(';')[0];
     const scans = app.get(LedgerStore).ledger!;
     scanId = scans.enqueue({ subject: owner, idempotencyKey: 'task16-delivery', registry: 'registry-1.docker.io', repository: 'library/alpine', digest: digest as `sha256:${string}`, platform: 'linux/amd64', scope: 'image', checks: '["secret"]' }).scanId;
-    const job = scans.claim()!; assert.ok(scans.finishCombined(scanId, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [{ findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }]));
+    const job = scans.claim()!; assert.ok(scans.finishCombined(scanId, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [{ findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }], undefined, job.leaseToken));
     const url = `${base}/browser/scans/${scanId}/llm`;
     const get = async (suffix: string) => (await fetch(`${url}/${suffix}`, { headers: { cookie } })).json() as Promise<{ epoch: string; revision: number; reportVersion: string; policyVersion: string }>;
     const input = async () => { const c = await get('chat/context'); return { epoch: c.epoch, revision: c.revision, reportVersion: c.reportVersion, mutationId: randomUUID(), question: 'Explain the current finding.', consent: { accepted: true, policyVersion: c.policyVersion } }; };
@@ -690,7 +690,7 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
     owner = (await registration.json() as { id: string }).id; let cookie = registration.headers.get('set-cookie')!.split(';')[0];
     const scans = app.get(LedgerStore).ledger!;
     scanId = scans.enqueue({ subject: owner, idempotencyKey: 'task16-r5', registry: 'registry-1.docker.io', repository: 'library/alpine', digest: digest as `sha256:${string}`, platform: 'linux/amd64', scope: 'image', checks: '["secret"]' }).scanId;
-    const job = scans.claim()!; assert.ok(scans.finishCombined(scanId, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [{ findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }]));
+    const job = scans.claim()!; assert.ok(scans.finishCombined(scanId, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [{ findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }], undefined, job.leaseToken));
     const url = `${base}/browser/scans/${scanId}/llm`;
     const input = async () => { const c = await (await fetch(`${url}/chat/context`, { headers: { cookie } })).json() as { epoch: string; revision: number; reportVersion: string; policyVersion: string }; return { epoch: c.epoch, revision: c.revision, reportVersion: c.reportVersion, mutationId: randomUUID(), question: 'Explain this finding.', consent: { accepted: true, policyVersion: c.policyVersion } }; };
     const post = (body: unknown, accept = 'application/x-ndjson') => fetch(`${url}/chat`, { method: 'POST', headers: { cookie, origin, 'content-type': 'application/json', accept }, body: JSON.stringify(body) });

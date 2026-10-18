@@ -69,13 +69,13 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       { check: 'vuln', outcome: 'checked', image, scannerVersion: '0.69.3', findings: [{ ...first, advisory }, ...vulnerabilities.slice(1)] },
     ], buildResult({ outcome: 'checked' }, { dockerfile: false, iac: false }, {
       manifestDigest: digest, configDigest: `sha256:${'d'.repeat(64)}`, platform: { os: 'linux', architecture: 'amd64' },
-    }, 'DEFAULT_ROOT')), true);
+    }, 'DEFAULT_ROOT'), job.leaseToken), true);
     const archive = (key: string, results: Pick<ReturnType<typeof archiveFixture>, 'secret' | 'sbom' | 'vuln'>) => {
       const value = { ...archiveFixture(), ...results };
       const scanId = ledger.enqueue({ ...value.receipt, subject: owner.id, idempotencyKey: key,
         scope: 'image', checks: JSON.stringify(Object.keys(results)) }).scanId;
       const attempt = ledger.claim()!;
-      assert.equal(ledger.finishArchive(scanId, attempt.attempts, value), true);
+      assert.equal(ledger.finishArchive(scanId, attempt.attempts, value, undefined, attempt.leaseToken), true);
       return scanId;
     };
     const path = (scanId = id) => `${base}/browser/scans/${scanId}/llm`;
@@ -165,7 +165,7 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
         { check: 'secret', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' },
         { check: 'sbom', outcome: 'checked', scannerVersion: '0.69.3', sbom: { image, platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' }, components: [{ ecosystem: 'apk', name: 'busybox', version: '1.0' }] } },
         { check: 'vuln', outcome: 'failed', errorCode: 'SCAN_UNAVAILABLE' },
-      ]), true);
+      ], undefined, pjob.leaseToken), true);
       const identity = app.get(BrowserIdentity).resolve({ headers: { cookie: owner.cookie }, socket: {} });
       const r = app.get(ReportReader).read(identity, partial);
       assert.equal(r.state, 'partial'); assert.equal((r.coverage.secret as { errorCode: string }).errorCode, 'SCAN_TIMEOUT');
@@ -370,7 +370,7 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       const clean = enqueue('zero-clean', ['secret']), attempt = ledger.claim()!;
       assert.equal(ledger.finishCombined(clean, attempt.attempts, [
         { check: 'secret', outcome: 'checked', findings: [], scannerVersion: '0.69.3' },
-      ]), true);
+      ], undefined, attempt.leaseToken), true);
       const failed = archive('zero-failed', { secret: { outcome: 'failed', reason: 'SCAN_FAILED' } });
       const unknown = enqueue('zero-unknown', ['secret', 'vuln']); ledger.cancel(unknown, owner.id);
       const identity = app.get(BrowserIdentity).resolve({ headers: { cookie: owner.cookie }, socket: {} });

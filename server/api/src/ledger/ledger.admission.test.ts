@@ -37,7 +37,7 @@ test('capacity is atomic across connections, persisted across restart and replay
     assert.throws(() => b.checkAdmission('alice'), AdmissionLimited);
     assert.equal(b.checkAdmission('bob'), undefined);
     const firstJob = b.claim()!;
-    assert.equal(a.finish(firstJob.scanId, firstJob.attempts, 'failed'), true);
+    assert.equal(a.finish(firstJob.scanId, firstJob.attempts, 'failed', undefined, firstJob.leaseToken), true);
     assert.equal(b.enqueue({ ...target, idempotencyKey: 'fourth-key' }).created, true);
     const db = new Database(file);
     for (let i = 0; i < 6; i++) a.reserveAttempt('alice', 60000);

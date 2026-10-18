@@ -39,6 +39,12 @@ node --test scripts/test_local_stand.mjs
 
 Launcher status/up/stop поддерживает exact read-only binds на Docker Desktop/macOS (literal `/host_mnt` mapping только при согласованной declaration), не открывает private signing key. Текущие тесты launcher27/27, setup24/24, API639/639 и UI553/553 PASS; lint/typecheck PASS.
 
+## Автообновление CVE
+
+На текущей машине установлен отдельный macOS LaunchAgent `io.diplom.local-full.cve-refresh`, интервал6часов в пользовательской сессии. `pnpm cve:auto:status` проверяет загруженную конфигурацию и показывает последний bounded public status; `pnpm cve:refresh` выполняет ручную проверку. База обновлена до manifest `9dd4076…b43c`, UpdatedAt `2026-10-16T01:13:54.947090392Z`; последующий настоящий browser scan PASS за29.453s. Native launchd run завершился `unchanged` в11:36:12.831Z.
+
+Обновлятор не запускает Docker Desktop или остановленный стенд, не меняет старый HOLD и production trust. При новом выпуске API кратковременно недоступен, worker завершает durable work до переключения. Подробности по безопасности, ошибкам, budget и сохранённому аудиту: [local-cve-auto-refresh.md](local-cve-auto-refresh.md). Совместные host-script тесты174/174, UI553/553, API639/639, lint/typecheck PASS.
+
 ## Историческая проверка до подключения CVE
 
 `node tests-e2e/local-stand-live.mjs` создаёт только свой synthetic аккаунт и один настоящий scan на уже работающем `dip-local-full`, без Docker lifecycle и HTTP mocks. Аккаунт и отчёт остаются в новом стенде; credentials/cookies существуют только в памяти. В обычной проверке пользователю следует создавать свой аккаунт — чужие synthetic отчёты закрыты owner auth.

@@ -37,17 +37,17 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   const legacy = ledger.enqueue({ ...target, checks: '["secret"]', idempotencyKey: 'legacy' }).scanId;
   ledger.close();
   const raw = new Database(file);
-  raw.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7;');
+  raw.exec('DROP TABLE scan_checkpoints; ALTER TABLE outbox DROP COLUMN lease_token; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; PRAGMA user_version = 7;');
   raw.close();
   ledger = new ScanLedger(file);
   assert.equal(ledger.state(legacy, 'alice'), 'queued');
   const old = ledger.claim()!;
-  assert.equal(ledger.finishWithResult(legacy, old.attempts, [], '0.69.3'), true);
+  assert.equal(ledger.finishWithResult(legacy, old.attempts, [], '0.69.3', old.leaseToken), true);
   const scanId = ledger.enqueue(target).scanId;
   const job = ledger.claim()!;
   assert.equal(job.scanId, scanId);
-  assert.equal(ledger.finishWithVuln(scanId, job.attempts, image, findings, '0.69.3'), true);
-  assert.equal(ledger.finishWithVuln(scanId, job.attempts, image, findings, '0.69.3'), false);
+  assert.equal(ledger.finishWithVuln(scanId, job.attempts, image, findings, '0.69.3', job.leaseToken), true);
+  assert.equal(ledger.finishWithVuln(scanId, job.attempts, image, findings, '0.69.3', job.leaseToken), false);
   ledger.close();
   ledger = new ScanLedger(file);
   const page = ledger.vuln(scanId, 'alice', 0, 1)!;
@@ -68,7 +68,7 @@ test('v7 upgrades forward through v8/v9 without modifying legacy rows, and resul
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'completed']);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 14);
+  assert.equal(db.pragma('user_version', { simple: true }), 15);
   assert.equal(count(db, 'scan_vuln_results'), 1);
   assert.equal(count(db, 'scan_vuln_findings'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
@@ -88,7 +88,7 @@ test('wrong image, digest, checks or scope rolls back delivery and events', () =
     const scanId = ledger.enqueue({ ...target, ...changes, idempotencyKey: `wrong-${i}` }).scanId;
     const job = ledger.claim()!;
     assert.equal(job.scanId, scanId);
-    assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, reportImage, findings, '0.69.3'));
+    assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, reportImage, findings, '0.69.3', job.leaseToken));
     assert.equal(ledger.state(scanId, 'alice'), 'running');
     assert.equal(ledger.vuln(scanId, 'alice'), undefined);
     assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
@@ -107,10 +107,10 @@ test('stale and cancelled attempts cannot publish findings', () => fixture(file 
   const scanId = a.enqueue(target).scanId;
   const first = a.claim(1000, 100)!;
   const second = b.claim(1100, 100)!;
-  assert.equal(a.finishWithVuln(scanId, first.attempts, image, findings, '0.69.3'), false);
+  assert.equal(a.finishWithVuln(scanId, first.attempts, image, findings, '0.69.3', first.leaseToken), false);
   assert.equal(b.cancel(scanId, 'bob'), 'not_found');
   assert.equal(b.cancel(scanId, 'alice'), 'cancelled');
-  assert.equal(a.finishWithVuln(scanId, second.attempts, image, findings, '0.69.3'), false);
+  assert.equal(a.finishWithVuln(scanId, second.attempts, image, findings, '0.69.3', second.leaseToken), false);
   assert.equal(a.vuln(scanId, 'alice'), undefined);
   a.close(); b.close();
 }));
@@ -124,20 +124,20 @@ test('invalid or duplicate bounded findings and pagination reject; insertion fai
     [{ ...findings[0], severitySources: ['https://secret'] }],
     [{ ...findings[0], fixedVersion: 'x'.repeat(81) }], [{ ...findings[0], raw: 'secret' }]];
   for (const value of bad) assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, image,
-    value as VulnFinding[], '0.69.3'), TypeError);
-  assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, image, findings, 'untrusted'), TypeError);
+    value as VulnFinding[], '0.69.3', job.leaseToken), TypeError);
+  assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, image, findings, 'untrusted', job.leaseToken), TypeError);
   for (const [cursor, limit] of [[-1, 1], [0, 0], [0, 101], [1.5, 1]])
     assert.throws(() => ledger.vuln(scanId, 'alice', cursor, limit), TypeError);
   const db = new Database(file);
   db.exec(`CREATE TRIGGER reject_finding BEFORE INSERT ON scan_vuln_findings
     BEGIN SELECT RAISE(ABORT, 'finding unavailable'); END`);
-  assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, image, findings, '0.69.3'), /finding unavailable/);
+  assert.throws(() => ledger.finishWithVuln(scanId, job.attempts, image, findings, '0.69.3', job.leaseToken), /finding unavailable/);
   assert.equal(ledger.state(scanId, 'alice'), 'running');
   assert.equal(ledger.vuln(scanId, 'alice'), undefined);
   assert.equal(count(db, 'scan_vuln_results'), 0);
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
   db.exec('DROP TRIGGER reject_finding');
-  assert.equal(ledger.finishWithVuln(scanId, job.attempts, image, [], '0.69.3'), true);
+  assert.equal(ledger.finishWithVuln(scanId, job.attempts, image, [], '0.69.3', job.leaseToken), true);
   const zero = ledger.vuln(scanId, 'alice');
   assert.equal(zero?.outcome, 'checked');
   if (zero?.outcome !== 'checked') throw new Error('Expected checked result');
@@ -150,8 +150,8 @@ test('standalone vuln failure records failed coverage, never a false zero or sec
   for (const [i, code] of (['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE'] as const).entries()) {
     const scanId = ledger.enqueue({ ...target, idempotencyKey: `failure-${i}` }).scanId;
     const job = ledger.claim()!;
-    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code), true);
-    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code), false);
+    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code, job.leaseToken), true);
+    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code, job.leaseToken), false);
     assert.equal(ledger.result(scanId, 'alice'), undefined);
     assert.deepEqual(ledger.vuln(scanId, 'alice'), { coverage: 'image', outcome: 'failed',
       errorCode: code, findings: [], nextCursor: null });
@@ -174,12 +174,12 @@ test('failure-result insertion abort rolls back outbox, terminal state and event
   const db = new Database(file);
   db.exec(`CREATE TRIGGER reject_failure BEFORE INSERT ON scan_vuln_results
     BEGIN SELECT RAISE(ABORT, 'result unavailable'); END`);
-  assert.throws(() => ledger.finish(scanId, job.attempts, 'failed', 'SCAN_TIMEOUT'), /result unavailable/);
+  assert.throws(() => ledger.finish(scanId, job.attempts, 'failed', 'SCAN_TIMEOUT', job.leaseToken), /result unavailable/);
   assert.equal(ledger.state(scanId, 'alice'), 'running');
   assert.equal(ledger.vuln(scanId, 'alice'), undefined);
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
   db.exec('DROP TRIGGER reject_failure');
-  assert.equal(ledger.finish(scanId, job.attempts, 'failed', 'SCAN_TIMEOUT'), true);
+  assert.equal(ledger.finish(scanId, job.attempts, 'failed', 'SCAN_TIMEOUT', job.leaseToken), true);
   db.close(); ledger.close();
 }));
 
@@ -200,17 +200,17 @@ test('v8 migration failure rolls back schema and version', () => fixture(file =>
 test('v12 to v13 is nullable, preserves legacy rows/config tables, and rolls back a partial ALTER', () => fixture(file => {
   let ledger = new ScanLedger(file);
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
-  ledger.finishWithVuln(id, job.attempts, image, findings, '0.69.3');
+  ledger.finishWithVuln(id, job.attempts, image, findings, '0.69.3', job.leaseToken);
   ledger.close();
   let raw = new Database(file);
-  raw.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=12');
+  raw.exec('DROP TABLE scan_checkpoints; ALTER TABLE outbox DROP COLUMN lease_token; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; ALTER TABLE scan_vuln_findings DROP COLUMN advisory; PRAGMA user_version=12');
   const before = raw.prepare('SELECT * FROM scan_vuln_findings').all();
   const configSchema = raw.prepare("SELECT sql FROM sqlite_master WHERE name IN ('scan_check_results','scan_execution_profiles') ORDER BY name").all();
   raw.close();
   ledger = new ScanLedger(file);
   assert.deepEqual(ledger.vuln(id, 'alice')?.findings, findings); ledger.close();
   raw = new Database(file);
-  assert.equal(raw.pragma('user_version', { simple: true }), 14);
+  assert.equal(raw.pragma('user_version', { simple: true }), 15);
   assert.deepEqual(raw.prepare('SELECT * FROM scan_vuln_findings').all(), before.map(row => ({ ...row as object, advisory: null })));
   assert.deepEqual(raw.prepare("SELECT sql FROM sqlite_master WHERE name IN ('scan_check_results','scan_execution_profiles') ORDER BY name").all(), configSchema);
   assert.throws(() => raw.prepare('UPDATE scan_vuln_findings SET advisory=?').run('界'.repeat(5462)), /CHECK/);
@@ -224,9 +224,9 @@ test('ordinary advisory persists/reopens; off-page stored tampering and write in
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
   const values = findings.map(f => ({ ...f, advisory: normalizeAdvisory({ Title: 'Safe title', Description: 'CANARY-secret safe remainder', DataSource: { ID: 'alpine' }, CVSS: { nvd: { V3Score: 0 } } }, f.provenanceRef, f.cveId) }));
   const invalid = structuredClone(values); invalid[0].advisory.references[0].url = 'https://evil.test';
-  assert.throws(() => ledger.finishWithVuln(id, job.attempts, image, invalid, '0.69.3'));
+  assert.throws(() => ledger.finishWithVuln(id, job.attempts, image, invalid, '0.69.3', job.leaseToken));
   assert.equal(ledger.vuln(id, 'alice'), undefined);
-  assert.equal(ledger.finishWithVuln(id, job.attempts, image, values, '0.69.3'), true);
+  assert.equal(ledger.finishWithVuln(id, job.attempts, image, values, '0.69.3', job.leaseToken), true);
   ledger.close(); ledger = new ScanLedger(file);
   assert.deepEqual(ledger.vuln(id, 'alice', 0, 1)?.findings, [values[0]]);
   assert.equal(ledger.vuln(id, 'bob'), undefined);
@@ -242,7 +242,7 @@ test('ordinary advisory persists/reopens; off-page stored tampering and write in
 test('ordinary aggregate read validates the entire scan across page boundaries', () => fixture(file => {
   const ledger = new ScanLedger(file), id = ledger.enqueue(target).scanId, job = ledger.claim()!;
   const values = Array.from({ length: 300 }, (_, i) => finding(`CVE-2025-${String(i).padStart(4, '0')}`));
-  assert.equal(ledger.finishWithVuln(id, job.attempts, image, values, '0.69.3'), true);
+  assert.equal(ledger.finishWithVuln(id, job.attempts, image, values, '0.69.3', job.leaseToken), true);
   const raw = new Database(file), update = raw.prepare('UPDATE scan_vuln_findings SET advisory=? WHERE scan_id=? AND ordinal=?');
   raw.transaction(() => values.forEach((f, i) => update.run(JSON.stringify(normalizeAdvisory({ Title: 'Title', Description: 'x'.repeat(4096) }, f.provenanceRef, f.cveId)), id, i)))();
   assert.throws(() => ledger.vuln(id, 'alice', 299, 1), /Invalid vulnerability advisory/);

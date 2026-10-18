@@ -34,7 +34,7 @@ test('source-only complete bounded datasets are owner scoped and legacy page lim
       { check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: secrets },
       { check: 'sbom', outcome: 'checked', scannerVersion: '0.69.3', sbom: { image, platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' }, components } },
       { check: 'vuln', outcome: 'checked', scannerVersion: '0.69.3', image, findings: vuln },
-    ]), true);
+    ], undefined, job.leaseToken), true);
     const before = ledger.snapshot(id, target.subject);
     const datasets = ledger.readReportSnapshot(() => ({ vuln: ledger.vulnDataset(id, target.subject),
       sbom: ledger.sbomDataset(id, target.subject), secret: ledger.secretDataset(id, target.subject) }));
@@ -74,7 +74,7 @@ test('source-only missing/failed datasets retain unknown outcomes without invent
       { check: 'secret', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' },
       { check: 'sbom', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' },
       { check: 'vuln', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' },
-    ]), true);
+    ], undefined, job.leaseToken), true);
     assert.deepEqual(ledger.vulnDataset(id, target.subject), { outcome: 'failed', coverage: 'image', errorCode: 'SCAN_TIMEOUT', findings: [] });
     assert.equal(ledger.sbomDataset(id, target.subject)?.outcome, 'failed');
     assert.equal(ledger.secretDataset(id, target.subject)?.coverage.findingCount, null);

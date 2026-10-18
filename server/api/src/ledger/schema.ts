@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { check, integer, sqliteTable, text, unique } from 'drizzle-orm/sqlite-core';
 
-// Runtime migrations in ledger.ts exclusively own schema v14, including CVE policy binding and partial state
+// Runtime migrations in ledger.ts exclusively own schema v15, including CVE policy binding and partial state
 // and keyed scan_check_results. This is the query model, not an auto-push migration.
 export const scans = sqliteTable('scans', {
   id: text('id').primaryKey(),
@@ -39,5 +39,6 @@ export const outbox = sqliteTable('outbox', {
   deliveredAt: text('delivered_at'),
   attempts: integer('attempts').notNull().default(0),
   leaseUntil: integer('lease_until'),
+  leaseToken: text('lease_token'),
   nextRunAt: integer('next_run_at').notNull().default(0),
 });

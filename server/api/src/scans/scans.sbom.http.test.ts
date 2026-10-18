@@ -86,7 +86,7 @@ test('HTTP admits only standalone SBOM/secret, replays per subject and serves sc
     const components = [{ ecosystem: 'apk' as const, name: 'alpine-baselayout', version: '3.6.8-r1' },
       { ecosystem: 'npm' as const, name: '@org/module', version: '1.2.3' }];
     assert.equal(ledger.finishWithSbom(job.scanId, job.attempts,
-      { image, platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' }, components }, '0.69.3'), true);
+      { image, platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' }, components }, '0.69.3', job.leaseToken), true);
     const first = await fetch(`${path}/${receipt.scanId}/sbom?limit=1`, { headers: auth('alice') });
     assert.equal(first.status, 200);
     const page = await first.json() as Record<string, unknown>;
@@ -114,7 +114,7 @@ test('HTTP admits only standalone SBOM/secret, replays per subject and serves sc
       repository: 'library/alpine', digest: digest as `sha256:${string}`, platform: 'linux/amd64', checks: '["sbom"]', scope: 'image' }).scanId;
     const failedJob = ledger.claim()!;
     assert.equal(failedJob.scanId, failed);
-    assert.equal(ledger.finish(failed, failedJob.attempts, 'failed', 'SCAN_TIMEOUT'), true);
+    assert.equal(ledger.finish(failed, failedJob.attempts, 'failed', 'SCAN_TIMEOUT', failedJob.leaseToken), true);
     const failureStatus = await (await fetch(`${path}/${failed}`, { headers: auth('alice') })).json() as { result: unknown };
     assert.deepEqual(failureStatus.result, { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' });
     assert.deepEqual(await (await fetch(`${path}/${failed}/sbom`, { headers: auth('alice') })).json(),
@@ -137,7 +137,7 @@ test('HTTP admits only standalone SBOM/secret, replays per subject and serves sc
     const browserJob = ledger.claim()!;
     assert.equal(browserJob.scanId, browserScan);
     assert.equal(ledger.finishWithSbom(browserScan, browserJob.attempts,
-      { image, platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' }, components }, '0.69.3'), true);
+      { image, platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' }, components }, '0.69.3', browserJob.leaseToken), true);
     const browserReport = await fetch(`${browserPath}?limit=1`, { headers: { cookie: browser.cookie } });
     assert.equal(browserReport.status, 200);
     assert.equal(browserReport.headers.get('cache-control'), 'no-store');

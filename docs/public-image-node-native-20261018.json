@@ -1,0 +1,110 @@
+{
+  "status": "PASS_SINGLE_NATIVE_TARGET",
+  "scope": "single fixed native image/API/UI proof only",
+  "wholeSystemQualification": false,
+  "nativeModeInvoked": true,
+  "nativeExecution": true,
+  "nativeWorkerEvidence": "checked-report-and-db-evidence-observed",
+  "origin": "http://127.0.0.1:8081",
+  "proofTarget": "node",
+  "requestedReference": "registry-1.docker.io/library/node:22.14.0-alpine3.21",
+  "requestedChecks": [
+    "secret",
+    "sbom",
+    "vuln",
+    "config"
+  ],
+  "startedAt": "2026-10-18T14:05:06.605Z",
+  "scanLaunchRequests": 1,
+  "nativeAttemptMayExist": true,
+  "scanId": "4dfdcc89-c78f-415f-b73b-74cde4798a4d",
+  "state": "completed",
+  "outcomes": {
+    "secret": {
+      "outcome": "checked",
+      "findingCount": 0
+    },
+    "sbom": {
+      "outcome": "checked",
+      "componentCount": 217
+    },
+    "vuln": {
+      "outcome": "checked",
+      "findingCount": 158
+    },
+    "config": {
+      "outcome": "checked",
+      "findingCount": 1
+    }
+  },
+  "pageErrors": 0,
+  "blockedExternalRequests": 0,
+  "blockedMutations": 0,
+  "blockedUnrelatedEligibility": 1,
+  "accountMayExist": true,
+  "mockedHttp": false,
+  "injectedOciOrScanner": false,
+  "lifecycleOperations": 0,
+  "accountRetained": true,
+  "browserClosed": true,
+  "target": {
+    "image": "registry-1.docker.io/library/node@sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+    "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+    "platform": "linux/amd64"
+  },
+  "imageProfile": {
+    "version": "public-hub-amd64-v1",
+    "configDigest": "sha256:33544e83793ca080b49f5a30fb7dbe8a678765973de6ea301572a0ef53e76333",
+    "resourcePolicyVersion": "public-hub-resources-v1",
+    "qualified": false
+  },
+  "inventory": {
+    "componentCount": 217,
+    "os": {
+      "name": "alpine",
+      "version": "3.21.3"
+    },
+    "npmComponentsReported": 200,
+    "npmEvidence": "present-in-accepted-sbom",
+    "nodeCoverage": {
+      "outcome": "checked"
+    }
+  },
+  "counts": {
+    "secrets": 0,
+    "sbom": 217,
+    "vulnTotal": 158,
+    "cve": 158,
+    "debianTemp": 0,
+    "config": 1
+  },
+  "db": {
+    "resultContractVersion": 2,
+    "signer": "local-db-operator-v1",
+    "source": "ghcr.io/aquasecurity/trivy-db@sha256:9dd4076bb4c826ace2a305983a2285de1044fbf99d27eb619b91abc4dfc1b43c",
+    "schemaVersion": 2,
+    "manifestDigest": "sha256:9dd4076bb4c826ace2a305983a2285de1044fbf99d27eb619b91abc4dfc1b43c",
+    "artifactSha256": "79f9dd6dc3e6fd12c9aee927b1eb671615f63a9eec03060b3dca97772b2e3053",
+    "metadataSha256": "a8959db48b46270ecc35f6cbadf2fbbfe31f5939fbc5a99539e350fc6f06b142",
+    "dbSha256": "bf1f1b29d76cae9ff085d418cb4bfdb3906b6069f837abdef06558b8102dd1db",
+    "updatedAt": "2026-10-16T01:13:54.947090392Z",
+    "downloadedAt": "2026-10-16T10:47:56.065968Z",
+    "nextUpdate": "2026-10-17T01:13:54.947090202Z",
+    "policy": {
+      "version": 2,
+      "policy": "cve-db-updated-at-14d-v2",
+      "evaluatedAt": 1792332369916,
+      "status": "stale-but-usable",
+      "warnings": [
+        "DB_DATA_OLDER_THAN_24H",
+        "DB_PUBLICATION_OVERDUE"
+      ]
+    },
+    "usableUntil": "2026-10-30T01:13:54.947090392Z",
+    "workerCheckedAt": 1792332369864,
+    "node": {
+      "outcome": "checked"
+    }
+  },
+  "finishedAt": "2026-10-18T14:06:18.591Z"
+}

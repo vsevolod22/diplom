@@ -69,7 +69,7 @@ test('LOCAL composition registers default-off LLM routes without importing defau
     const scanId = ledger.enqueue({ ...report.receipt, executionProfile: NGINX_LOCAL_BINDING, subject: owner,
       idempotencyKey: 'synthetic-local-llm-report', scope: 'image', checks: JSON.stringify(['secret']) }).scanId;
     const attempt = ledger.claim()!;
-    assert.equal(ledger.finishArchive(scanId, attempt.attempts, report), true);
+    assert.equal(ledger.finishArchive(scanId, attempt.attempts, report, undefined, attempt.leaseToken), true);
     const path = `${base}/browser/scans/${scanId}/llm`;
     const post = (body: unknown, session = cookie) => fetch(`${path}/summary`, { method: 'POST',
       headers: { cookie: session, origin, 'content-type': 'application/json' }, body: JSON.stringify(body) });

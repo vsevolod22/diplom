@@ -1,0 +1,777 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-10-16T21:19:41.977Z",
+  "scannerImage": "sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c",
+  "scope": "native-local-inventory-detection; identity-projected-temporary-sinks; NOT remote admission or whole-task qualification",
+  "containers": [
+    {
+      "name": "task2-qualification-0362d372-3ddc-4067-8bf3-5d718cddc98f",
+      "scanner": "version",
+      "cleanup": true,
+      "isolation": {
+        "image": "sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c",
+        "readonly": true,
+        "network": "none",
+        "privileged": false,
+        "capDrop": [
+          "ALL"
+        ],
+        "noNewPrivileges": true,
+        "user": "65532:65532",
+        "readOnlyBinds": 1
+      },
+      "exitCode": 0,
+      "stdoutBytes": 16,
+      "stderrBytes": 0,
+      "diagnosticClasses": [],
+      "stdoutSha256": "ea3524df63e27041d6b4a85932a889aba8e3cd3cc2ee01404822111bb673e17c",
+      "version": "0.69.3",
+      "fixtureRemoved": true
+    },
+    {
+      "name": "task2-qualification-fa0b6e3d-9ef4-49f6-b3f2-539dc6f4f313",
+      "scanner": "secret",
+      "cleanup": true,
+      "isolation": {
+        "image": "sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c",
+        "readonly": true,
+        "network": "none",
+        "privileged": false,
+        "capDrop": [
+          "ALL"
+        ],
+        "noNewPrivileges": true,
+        "user": "65532:65532",
+        "readOnlyBinds": 1
+      },
+      "exitCode": 0,
+      "stdoutBytes": 5856,
+      "stderrBytes": 0,
+      "diagnosticClasses": [],
+      "stdoutSha256": "1e1de44046922dea53c5fa4548bbd1b5319f4fad596606b0bc95c18d355fddc8",
+      "fixtureRemoved": true
+    },
+    {
+      "name": "task2-qualification-755dfb6a-e0fe-4d1b-8937-912fdc52befa",
+      "scanner": "vuln",
+      "cleanup": true,
+      "isolation": {
+        "image": "sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c",
+        "readonly": true,
+        "network": "none",
+        "privileged": false,
+        "capDrop": [
+          "ALL"
+        ],
+        "noNewPrivileges": true,
+        "user": "65532:65532",
+        "readOnlyBinds": 2
+      },
+      "exitCode": 0,
+      "stdoutBytes": 37462,
+      "stderrBytes": 0,
+      "diagnosticClasses": [],
+      "stdoutSha256": "c291adac2362d7521b930f019dc7a08933b70e110468aac6c2d673a885610b12",
+      "fixtureRemoved": true
+    },
+    {
+      "name": "task2-qualification-fb6f7be1-656c-4aa5-9664-a9f24defda98",
+      "scanner": "vuln",
+      "cleanup": true,
+      "isolation": {
+        "image": "sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c",
+        "readonly": true,
+        "network": "none",
+        "privileged": false,
+        "capDrop": [
+          "ALL"
+        ],
+        "noNewPrivileges": true,
+        "user": "65532:65532",
+        "readOnlyBinds": 1
+      },
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 142,
+      "diagnosticClasses": [
+        "database error",
+        "first run",
+        "skip-db-update"
+      ],
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "fixtureRemoved": true
+    },
+    {
+      "name": "task2-qualification-e96f205a-aea8-46d5-aa61-17e072717632",
+      "scanner": "vuln",
+      "cleanup": true,
+      "isolation": {
+        "image": "sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c",
+        "readonly": true,
+        "network": "none",
+        "privileged": false,
+        "capDrop": [
+          "ALL"
+        ],
+        "noNewPrivileges": true,
+        "user": "65532:65532",
+        "readOnlyBinds": 2
+      },
+      "exitCode": 0,
+      "stdoutBytes": 33289,
+      "stderrBytes": 0,
+      "diagnosticClasses": [],
+      "stdoutSha256": "e02bf5e476edc201d088303d35b98719711a5f566a9a365b38060a6f4d53503d",
+      "fixtureRemoved": true
+    }
+  ],
+  "checks": [
+    {
+      "name": "public-db-signature-artifact-metadata-extracted-bytes",
+      "status": "PASS"
+    },
+    {
+      "name": "native-trivy-version-0-69-3",
+      "status": "PASS"
+    },
+    {
+      "name": "native-built-in-github-pat-positive-and-normalized-redaction",
+      "status": "PASS",
+      "count": 2,
+      "rawContainsCompleteSyntheticToken": false
+    },
+    {
+      "name": "native-offline-npm-positive",
+      "status": "PASS",
+      "count": 5,
+      "cveIds": [
+        "CVE-2020-28500",
+        "CVE-2021-23337",
+        "CVE-2025-13465",
+        "CVE-2026-2950",
+        "CVE-2026-4800"
+      ]
+    },
+    {
+      "name": "native-ghsa-and-nvd-cvss-assessments-retained",
+      "status": "PASS"
+    },
+    {
+      "name": "raw-local-identity-rejected-identity-only-projection-normalizes",
+      "status": "PASS",
+      "findingCount": 7,
+      "changedFields": [
+        "ArtifactName",
+        "Metadata.RepoDigests"
+      ],
+      "fakeArchiveReceipt": false
+    },
+    {
+      "name": "duplicated-native-rows-normalize-identically",
+      "status": "PASS"
+    },
+    {
+      "name": "adversarial-derivative-both-source-assessments-conflict-redaction",
+      "status": "PASS",
+      "native": false
+    },
+    {
+      "name": "native-missing-db-nonzero-no-checked-report",
+      "status": "PASS"
+    },
+    {
+      "name": "native-eol-exit-zero-is-not-supported-coverage",
+      "status": "PASS",
+      "os": "3.14.10",
+      "EOSL": true,
+      "productionOutcomeNotExercised": "unsupported/OS_EOL archive publication requires an exact accepted receipt"
+    },
+    {
+      "name": "same-real-db-stale-and-expired-clock-derivatives",
+      "status": "PASS",
+      "fixedClockTests": true,
+      "dbBytesModified": false
+    },
+    {
+      "name": "http-status-results-vuln-report-view-sse-owner-redaction-before-reopen",
+      "status": "PASS"
+    },
+    {
+      "name": "http-status-results-vuln-report-view-sse-owner-redaction-after-reopen",
+      "status": "PASS"
+    },
+    {
+      "name": "all-temp-sqlite-tables-main-wal-shm-redaction-before-retention",
+      "status": "PASS"
+    },
+    {
+      "name": "all-temp-sqlite-tables-main-wal-shm-redaction-after-retention",
+      "status": "PASS"
+    },
+    {
+      "name": "temp-retention-deletes-results-evidence-events-and-reopen-stays-absent",
+      "status": "PASS"
+    }
+  ],
+  "success": true,
+  "sourcesBefore": {
+    "server/api/src/worker/secret-findings.ts": "260db40620b9eb498fc12c31eb281118030e1cc6492f5452192442d60e9767d9",
+    "server/api/src/worker/vuln-findings.ts": "af7b14fc11f3974bd133b09aea1a314f27b9f82c1852a16e96a96824407fc968",
+    "server/api/src/worker/vuln-advisory.ts": "47bc418807796612788a72c90d0e0f6172b54308c7a89cbb8f957d1aae0ef670",
+    "server/api/src/worker/cve-db-policy.mjs": "685829a0c33509dbf115bd8cd60489ee72358f8181c44649448baa6408088207",
+    "server/api/src/worker/vuln-db-bundle.ts": "fc5501614adf7f421b1e06e7e25a61976141ffb1466917c7e1ee41fa36338f67",
+    "server/api/src/ledger/ledger.ts": "afad51f929bf8ef9eb19406ac55176f7fc00c496fc76d56954367171eb539157",
+    "server/api/src/scans/scans.service.ts": "096f6ea58e1777b30c04008fb3e7896df1ff34b58bc7df9b0e13ad4796ad81c9",
+    "scripts/task2-qualification-native.mjs": "21b842a6490de3e44aae43162110cfd0fba351c63af704039848981066ca5b76",
+    "scripts/task2-qualification-run.ts": "375a7633c624540792752fe44b31504fc9c7710aaa30ba7759b901657fc8d5bb"
+  },
+  "db": {
+    "envelopeVersion": 1,
+    "signer": "local-db-operator-v1",
+    "source": "ghcr.io/aquasecurity/trivy-db@sha256:9dd4076bb4c826ace2a305983a2285de1044fbf99d27eb619b91abc4dfc1b43c",
+    "schemaVersion": 2,
+    "artifactSha256": "79f9dd6dc3e6fd12c9aee927b1eb671615f63a9eec03060b3dca97772b2e3053",
+    "metadataSha256": "a8959db48b46270ecc35f6cbadf2fbbfe31f5939fbc5a99539e350fc6f06b142",
+    "dbSha256": "bf1f1b29d76cae9ff085d418cb4bfdb3906b6069f837abdef06558b8102dd1db",
+    "manifestDigest": "sha256:9dd4076bb4c826ace2a305983a2285de1044fbf99d27eb619b91abc4dfc1b43c",
+    "updatedAt": "2026-10-16T01:13:54.947090392Z",
+    "downloadedAt": "2026-10-16T10:47:56.065968Z",
+    "nextUpdate": "2026-10-17T01:13:54.947090202Z"
+  },
+  "dbTrustScope": "current LOCAL public key; not production trust or publisher attestation",
+  "fixture": {
+    "kind": "generated Docker archive; inventory only, no installed executable application",
+    "os": "3.22.2",
+    "package": "lodash@4.17.20",
+    "archiveSha256": "86605b20c934d1c12baa9355496db1f8db905d41286e58ee52baec9c71df64c1",
+    "configDigest": "sha256:c2ec1a20b4160dd7387bbe1ceccb4b47f28a3a42878069810f626e4c5e98a55d",
+    "diffId": "sha256:a877f170f9cee858cce349a4aa850ee6787e4e8c8fb289fd11435e61d0a82e47",
+    "syntheticCredentialCount": 2
+  },
+  "secretFindings": [
+    {
+      "findingId": "secret-2-0",
+      "ruleId": "rule-22550b936ddce0b0",
+      "line": 1,
+      "evidenceRef": "result-2-secret-0"
+    },
+    {
+      "findingId": "secret-2-1",
+      "ruleId": "rule-22550b936ddce0b0",
+      "line": 2,
+      "evidenceRef": "result-2-secret-1"
+    }
+  ],
+  "nativeNpm": [
+    {
+      "findingId": "vuln-298b35a14bbff7a0bbdf678773f838ae20aa04d2a51e41cc5cea7fcbbb01e7fb",
+      "cveId": "CVE-2021-23337",
+      "packageName": "lodash",
+      "installedVersion": "4.17.20",
+      "severity": "HIGH",
+      "severitySources": [
+        "ghsa",
+        "nvd",
+        "redhat",
+        "ruby-advisory-db",
+        "ubuntu"
+      ],
+      "assessments": [
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": null
+        },
+        {
+          "source": "ghsa",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "ruby-advisory-db",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "redhat",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "ubuntu",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v2",
+            "version": "2.0",
+            "versionState": "available",
+            "reportedScore": 6.5,
+            "scoreState": "available",
+            "vector": null,
+            "vectorState": "unsupported"
+          }
+        },
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 7.2,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 7.2,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "redhat",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 7.2,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "vectorState": "available"
+          }
+        }
+      ],
+      "conflicts": [
+        "severity"
+      ]
+    },
+    {
+      "findingId": "vuln-171e1b379d131b218cf31b230ff3da84f354bacda5549755fa0bf9979eb0077d",
+      "cveId": "CVE-2026-4800",
+      "packageName": "lodash",
+      "installedVersion": "4.17.20",
+      "severity": "HIGH",
+      "severitySources": [
+        "alma",
+        "ghsa",
+        "nvd",
+        "oracle-oval",
+        "redhat",
+        "rocky",
+        "ubuntu"
+      ],
+      "assessments": [
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": "CRITICAL",
+          "cvss": null
+        },
+        {
+          "source": "alma",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "ghsa",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "oracle-oval",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "redhat",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "rocky",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "ubuntu",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 8.1,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "redhat",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 8.1,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 9.8,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "vectorState": "available"
+          }
+        }
+      ],
+      "conflicts": [
+        "severity",
+        "cvss"
+      ]
+    },
+    {
+      "findingId": "vuln-674c7491bbb86c08b57c169084f036b17e8726b20a6628ca3d14add833f3f23b",
+      "cveId": "CVE-2020-28500",
+      "packageName": "lodash",
+      "installedVersion": "4.17.20",
+      "severity": "MEDIUM",
+      "severitySources": [
+        "ghsa",
+        "nvd",
+        "redhat",
+        "ruby-advisory-db",
+        "ubuntu"
+      ],
+      "assessments": [
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": null
+        },
+        {
+          "source": "ghsa",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "redhat",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "ruby-advisory-db",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "ubuntu",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v2",
+            "version": "2.0",
+            "versionState": "available",
+            "reportedScore": 5,
+            "scoreState": "available",
+            "vector": null,
+            "vectorState": "unsupported"
+          }
+        },
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 5.3,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 5.3,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "redhat",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 5.3,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "vectorState": "available"
+          }
+        }
+      ],
+      "conflicts": []
+    },
+    {
+      "findingId": "vuln-15cb74337d3615952ec1cc927a8d898fde0295600a40742cc43ad7a0cee0cd03",
+      "cveId": "CVE-2025-13465",
+      "packageName": "lodash",
+      "installedVersion": "4.17.20",
+      "severity": "MEDIUM",
+      "severitySources": [
+        "alma",
+        "ghsa",
+        "nvd",
+        "oracle-oval",
+        "redhat",
+        "rocky",
+        "ubuntu"
+      ],
+      "assessments": [
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": null
+        },
+        {
+          "source": "alma",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "oracle-oval",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "redhat",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "rocky",
+          "severity": "HIGH",
+          "cvss": null
+        },
+        {
+          "source": "ghsa",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "ubuntu",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 5.3,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 6.5,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "redhat",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 8.2,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H",
+            "vectorState": "available"
+          }
+        }
+      ],
+      "conflicts": [
+        "severity",
+        "cvss"
+      ]
+    },
+    {
+      "findingId": "vuln-96a8390caa694050e5baec5410911bb6318a566d439201e42040a1c819d9ed94",
+      "cveId": "CVE-2026-2950",
+      "packageName": "lodash",
+      "installedVersion": "4.17.20",
+      "severity": "MEDIUM",
+      "severitySources": [
+        "ghsa",
+        "nvd",
+        "redhat",
+        "ubuntu"
+      ],
+      "assessments": [
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": null
+        },
+        {
+          "source": "ghsa",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "redhat",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "ubuntu",
+          "severity": "MEDIUM",
+          "cvss": null
+        },
+        {
+          "source": "nvd",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 5.3,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "redhat",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 6.5,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+            "vectorState": "available"
+          }
+        },
+        {
+          "source": "ghsa",
+          "severity": null,
+          "cvss": {
+            "family": "v3",
+            "version": "3.1",
+            "versionState": "available",
+            "reportedScore": 6.5,
+            "scoreState": "available",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "vectorState": "available"
+          }
+        }
+      ],
+      "conflicts": [
+        "cvss"
+      ]
+    }
+  ],
+  "actualDbPolicy": {
+    "version": 2,
+    "policy": "cve-db-updated-at-14d-v2",
+    "evaluatedAt": 1792185586589,
+    "status": "usable",
+    "warnings": []
+  },
+  "checkedIsNotSafe": {
+    "asserted": true,
+    "basis": "checked reports retain positive Secrets and CVEs; not a clean/safe verdict",
+    "legacyStatusBooleanAbsent": true
+  },
+  "tempStoreRemoved": true,
+  "sourcesAfter": {
+    "server/api/src/worker/secret-findings.ts": "260db40620b9eb498fc12c31eb281118030e1cc6492f5452192442d60e9767d9",
+    "server/api/src/worker/vuln-findings.ts": "af7b14fc11f3974bd133b09aea1a314f27b9f82c1852a16e96a96824407fc968",
+    "server/api/src/worker/vuln-advisory.ts": "47bc418807796612788a72c90d0e0f6172b54308c7a89cbb8f957d1aae0ef670",
+    "server/api/src/worker/cve-db-policy.mjs": "685829a0c33509dbf115bd8cd60489ee72358f8181c44649448baa6408088207",
+    "server/api/src/worker/vuln-db-bundle.ts": "fc5501614adf7f421b1e06e7e25a61976141ffb1466917c7e1ee41fa36338f67",
+    "server/api/src/ledger/ledger.ts": "afad51f929bf8ef9eb19406ac55176f7fc00c496fc76d56954367171eb539157",
+    "server/api/src/scans/scans.service.ts": "096f6ea58e1777b30c04008fb3e7896df1ff34b58bc7df9b0e13ad4796ad81c9",
+    "scripts/task2-qualification-native.mjs": "21b842a6490de3e44aae43162110cfd0fba351c63af704039848981066ca5b76",
+    "scripts/task2-qualification-run.ts": "375a7633c624540792752fe44b31504fc9c7710aaa30ba7759b901657fc8d5bb"
+  },
+  "sourceDriftDuringRun": false,
+  "finishedAt": "2026-10-16T21:19:47.176Z"
+}

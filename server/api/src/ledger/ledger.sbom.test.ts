@@ -29,7 +29,7 @@ test('v6 upgrades forward once; legacy rows stay untouched and SBOM survives reo
   const legacy = ledger.enqueue({ ...target, checks: '["secret"]', idempotencyKey: 'legacy' }).scanId;
   ledger.close();
   const raw = new Database(file);
-  raw.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
+  raw.exec('DROP TABLE scan_checkpoints; ALTER TABLE outbox DROP COLUMN lease_token; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
   raw.close();
   ledger = new ScanLedger(file);
   assert.equal(ledger.state(legacy, 'alice'), 'queued');
@@ -37,11 +37,11 @@ test('v6 upgrades forward once; legacy rows stay untouched and SBOM survives reo
   // Finish the legacy job before enqueueing SBOM so ordering is deterministic.
   const old = ledger.claim()!;
   assert.equal(old.scanId, legacy);
-  assert.equal(ledger.finishWithResult(legacy, old.attempts, [], '0.69.3'), true);
+  assert.equal(ledger.finishWithResult(legacy, old.attempts, [], '0.69.3', old.leaseToken), true);
   const scanId = ledger.enqueue(target).scanId;
   const job = ledger.claim()!;
   assert.equal(job.scanId, scanId);
-  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), true);
+  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3', job.leaseToken), true);
   ledger.close();
   ledger = new ScanLedger(file);
   const page = ledger.sbom(scanId, 'alice', 0, 1)!;
@@ -63,10 +63,10 @@ test('v6 upgrades forward once; legacy rows stay untouched and SBOM survives reo
   assert.equal(ledger.result(scanId, 'alice'), undefined);
   assert.equal(ledger.state(scanId, 'alice'), 'completed');
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'completed']);
-  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), false);
+  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3', job.leaseToken), false);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 14);
+  assert.equal(db.pragma('user_version', { simple: true }), 15);
   assert.equal(count(db, 'scan_sbom_results'), 1);
   assert.equal(count(db, 'scan_sbom_components'), 2);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
@@ -84,7 +84,7 @@ test('wrong target, checks and scope roll back delivery, coverage and event', ()
     const scanId = ledger.enqueue({ ...target, ...changes, idempotencyKey: `wrong-${i}` }).scanId;
     const job = ledger.claim()!;
     assert.equal(job.scanId, scanId);
-    assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, report, '0.69.3'));
+    assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, report, '0.69.3', job.leaseToken));
     assert.equal(ledger.state(scanId, 'alice'), 'running');
     assert.equal(ledger.sbom(scanId, 'alice'), undefined);
     assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
@@ -103,10 +103,10 @@ test('stale attempt and cancel cannot publish or duplicate SBOM', () => fixture(
   const scanId = a.enqueue(target).scanId;
   const first = a.claim(1000, 100)!;
   const second = b.claim(1100, 100)!;
-  assert.equal(a.finishWithSbom(scanId, first.attempts, sbom, '0.69.3'), false);
+  assert.equal(a.finishWithSbom(scanId, first.attempts, sbom, '0.69.3', first.leaseToken), false);
   assert.equal(b.cancel(scanId, 'bob'), 'not_found');
   assert.equal(b.cancel(scanId, 'alice'), 'cancelled');
-  assert.equal(a.finishWithSbom(scanId, second.attempts, sbom, '0.69.3'), false);
+  assert.equal(a.finishWithSbom(scanId, second.attempts, sbom, '0.69.3', second.leaseToken), false);
   assert.equal(a.sbom(scanId, 'alice'), undefined);
   a.close();
   b.close();
@@ -121,21 +121,21 @@ test('malformed inputs and pagination fail closed; insert failure rolls back ato
     { ...sbom, components: [{ ...sbom.components[0], name: 'secret=value' }] },
     { ...sbom, components: [{ ...sbom.components[0], purl: 'raw-secret' }] },
     { ...sbom, os: { name: 'ubuntu', version: '1' } }, { ...sbom, raw: 'secret' }];
-  for (const value of bad) assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, value as ImageSbom, '0.69.3'), TypeError);
-  assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, sbom, 'untrusted'), TypeError);
+  for (const value of bad) assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, value as ImageSbom, '0.69.3', job.leaseToken), TypeError);
+  assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, sbom, 'untrusted', job.leaseToken), TypeError);
   for (const [cursor, limit] of [[-1, 1], [0, 0], [0, 101], [1.5, 1]])
     assert.throws(() => ledger.sbom(scanId, 'alice', cursor, limit), TypeError);
   const db = new Database(file);
   db.exec(`CREATE TRIGGER reject_component BEFORE INSERT ON scan_sbom_components
     BEGIN SELECT RAISE(ABORT, 'component unavailable'); END`);
-  assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), /component unavailable/);
+  assert.throws(() => ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3', job.leaseToken), /component unavailable/);
   assert.equal(ledger.state(scanId, 'alice'), 'running');
   assert.equal(ledger.sbom(scanId, 'alice'), undefined);
   assert.equal(count(db, 'scan_sbom_results'), 0);
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
   db.exec('DROP TRIGGER reject_component');
-  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), true);
-  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), false);
+  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3', job.leaseToken), true);
+  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3', job.leaseToken), false);
   assert.equal(count(db, 'scan_sbom_components'), 2);
   db.close();
   ledger.close();
@@ -147,8 +147,8 @@ test('SBOM failures survive reopen with subject-scoped coverage, not secret find
     const scanId = ledger.enqueue({ ...target, idempotencyKey: `failure-${i}` }).scanId;
     const job = ledger.claim()!;
     assert.equal(job.scanId, scanId);
-    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code), true);
-    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code), false);
+    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code, job.leaseToken), true);
+    assert.equal(ledger.finish(scanId, job.attempts, 'failed', code, job.leaseToken), false);
     assert.equal(ledger.state(scanId, 'alice'), 'failed');
     assert.equal(ledger.result(scanId, 'alice'), undefined);
     assert.deepEqual(ledger.sbom(scanId, 'alice'), { coverage: 'image', outcome: 'failed',
@@ -160,7 +160,7 @@ test('SBOM failures survive reopen with subject-scoped coverage, not secret find
   ledger.close();
   ledger = new ScanLedger(file);
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 14);
+  assert.equal(db.pragma('user_version', { simple: true }), 15);
   assert.equal(count(db, 'scan_sbom_results'), 3);
   assert.equal(count(db, 'scan_sbom_components'), 0);
   assert.equal(count(db, 'scan_results'), 0);
@@ -179,19 +179,19 @@ test('v6 migration persists failed SBOM coverage across reopen', () => fixture(f
   let ledger = new ScanLedger(file);
   ledger.close();
   const old = new Database(file);
-  old.exec('DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
+  old.exec('DROP TABLE scan_checkpoints; ALTER TABLE outbox DROP COLUMN lease_token; DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy; DROP TABLE scan_execution_profiles; DROP TABLE scan_check_results; DROP TABLE scan_vuln_findings; DROP TABLE scan_vuln_results; DROP TABLE scan_sbom_components; DROP TABLE scan_sbom_results; PRAGMA user_version = 6;');
   old.close();
   ledger = new ScanLedger(file);
   const scanId = ledger.enqueue(target).scanId;
   const job = ledger.claim()!;
-  assert.equal(ledger.finish(scanId, job.attempts, 'failed', 'SCAN_UNAVAILABLE'), true);
+  assert.equal(ledger.finish(scanId, job.attempts, 'failed', 'SCAN_UNAVAILABLE', job.leaseToken), true);
   ledger.close();
   ledger = new ScanLedger(file);
   assert.deepEqual(ledger.sbom(scanId, 'alice'), { coverage: 'image', outcome: 'failed',
     errorCode: 'SCAN_UNAVAILABLE', components: [], nextCursor: null });
   assert.equal(ledger.result(scanId, 'alice'), undefined);
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 14);
+  assert.equal(db.pragma('user_version', { simple: true }), 15);
   assert.equal(count(db, 'scan_sbom_results'), 1);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
   db.close();
@@ -204,9 +204,9 @@ test('stale and cancelled attempts cannot persist SBOM failures', () => fixture(
   const scanId = a.enqueue(target).scanId;
   const first = a.claim(1000, 100)!;
   const second = b.claim(1100, 100)!;
-  assert.equal(a.finish(scanId, first.attempts, 'failed', 'SCAN_TIMEOUT'), false);
+  assert.equal(a.finish(scanId, first.attempts, 'failed', 'SCAN_TIMEOUT', first.leaseToken), false);
   assert.equal(b.cancel(scanId, 'alice'), 'cancelled');
-  assert.equal(b.finish(scanId, second.attempts, 'failed', 'SCAN_FAILED'), false);
+  assert.equal(b.finish(scanId, second.attempts, 'failed', 'SCAN_FAILED', second.leaseToken), false);
   assert.equal(a.sbom(scanId, 'alice'), undefined);
   assert.equal(a.result(scanId, 'alice'), undefined);
   const db = new Database(file);
@@ -228,11 +228,11 @@ test('unsupported checks fail without falsely claiming coverage; invalid scope a
     const job = ledger.claim()!;
     assert.equal(job.scanId, scanId);
     if (i < 3) {
-      assert.equal(ledger.finish(scanId, job.attempts, 'failed'), true);
+      assert.equal(ledger.finish(scanId, job.attempts, 'failed', undefined, job.leaseToken), true);
       assert.equal(ledger.state(scanId, 'alice'), 'failed');
       assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running', 'failed']);
     } else {
-      assert.throws(() => ledger.finish(scanId, job.attempts, 'failed'), /contract mismatch/);
+      assert.throws(() => ledger.finish(scanId, job.attempts, 'failed', undefined, job.leaseToken), /contract mismatch/);
       assert.equal(ledger.state(scanId, 'alice'), 'running');
       assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
       assert.equal(ledger.cancel(scanId, 'alice'), 'cancelled');
@@ -242,18 +242,18 @@ test('unsupported checks fail without falsely claiming coverage; invalid scope a
   }
   const scanId = ledger.enqueue({ ...target, idempotencyKey: 'rollback' }).scanId;
   const job = ledger.claim()!;
-  assert.throws(() => ledger.finish(scanId, job.attempts, 'failed', 'raw-secret' as 'SCAN_FAILED'), /constraint|Invalid failure code/);
+  assert.throws(() => ledger.finish(scanId, job.attempts, 'failed', 'raw-secret' as 'SCAN_FAILED', job.leaseToken), /constraint|Invalid failure code/);
   const db = new Database(file);
   db.exec(`CREATE TRIGGER reject_sbom_failure BEFORE INSERT ON scan_sbom_results
     BEGIN SELECT RAISE(ABORT, 'sbom unavailable'); END`);
-  assert.throws(() => ledger.finish(scanId, job.attempts, 'failed'), /sbom unavailable/);
+  assert.throws(() => ledger.finish(scanId, job.attempts, 'failed', undefined, job.leaseToken), /sbom unavailable/);
   assert.equal(ledger.state(scanId, 'alice'), 'running');
   assert.equal(ledger.sbom(scanId, 'alice'), undefined);
   assert.equal(count(db, 'scan_sbom_results'), 0);
   assert.equal(count(db, 'scan_results'), 0);
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued', 'running']);
   db.exec('DROP TRIGGER reject_sbom_failure');
-  assert.equal(ledger.finish(scanId, job.attempts, 'failed'), true);
+  assert.equal(ledger.finish(scanId, job.attempts, 'failed', undefined, job.leaseToken), true);
   db.close();
   ledger.close();
 }));
@@ -262,7 +262,7 @@ test('prune removes SBOM metadata and components with terminal scan', () => fixt
   const ledger = new ScanLedger(file);
   const scanId = ledger.enqueue(target).scanId;
   const job = ledger.claim()!;
-  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3'), true);
+  assert.equal(ledger.finishWithSbom(scanId, job.attempts, sbom, '0.69.3', job.leaseToken), true);
   const db = new Database(file);
   db.prepare("UPDATE scans SET terminal_at = datetime('now', '-40 days') WHERE id = ?").run(scanId);
   assert.equal(ledger.prune(30), 1);

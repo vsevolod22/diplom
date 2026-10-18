@@ -16,7 +16,7 @@ import { configBytes, fixtureLoader } from '../worker/config-test-fixtures.js';
 
 // Actual Nest auth/controller/service, actual consumer/private adapter/module and SQLite.
 // Only readiness, OCI byte transport and legacy scanner ports are controlled.
-test('real browser POST → worker → v11 → GET/SSE → strict parser, independent coverage and redaction', async () => {
+test('real browser POST → worker → v15 → GET/SSE → strict parser, independent coverage and redaction', async () => {
   const { parseCurrentStatus, parseScanEventHint } = await import(new URL('../../../../src/shared/api/scans/scanTransport.ts', import.meta.url).href);
   const directory = mkdtempSync(join(tmpdir(), 'config-http-'));
   const origin = 'http://127.0.0.1:8080';
@@ -100,7 +100,7 @@ test('real browser POST → worker → v11 → GET/SSE → strict parser, indepe
     }
     const reader = new Database(env.SCAN_LEDGER_PATH);
     try {
-      assert.equal(reader.pragma('user_version', { simple: true }), 14);
+      assert.equal(reader.pragma('user_version', { simple: true }), 15);
       assert.equal(JSON.stringify(reader.prepare('SELECT * FROM scan_check_results').all()).includes('CANARY'), false);
       assert.equal(JSON.stringify(reader.prepare('SELECT * FROM scan_audit').all()).includes('CANARY'), false);
       assert.equal(reader.pragma('integrity_check', { simple: true }), 'ok');

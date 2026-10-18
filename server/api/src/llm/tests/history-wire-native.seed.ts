@@ -440,7 +440,7 @@ async function setup(files: Record<string, string>, fixtures: Record<string, str
     checkpoint('report_enqueue'); const scanId = ledger.enqueue({ ...report.receipt, executionProfile: NGINX_LOCAL_BINDING, subject: a.id,
       idempotencyKey: 'history-wire-synthetic-report-v1', scope: 'image', checks: '["secret"]' }).scanId;
     checkpoint('report_claim'); const job = ledger.claim(); assert(job);
-    checkpoint('report_finish'); assert(ledger.finishArchive(scanId, job.attempts, report));
+    checkpoint('report_finish'); assert(ledger.finishArchive(scanId, job.attempts, report, undefined, job.leaseToken));
     checkpoint('report_pending'); assert.equal(ledger.pending().length, 0);
     checkpoint('report_projection'); const projected = reader(ledgerStore).read({ subject: a.id, scope: ['scan:read'] }, scanId);
     checkpoint('history_original_head'); const head = history.snapshot(a.id, scanId); assert.equal(head.revision, 0);

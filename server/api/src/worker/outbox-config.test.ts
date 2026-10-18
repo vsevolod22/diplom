@@ -23,7 +23,7 @@ for (const [user, expected] of [['0', 'checked'], ['1000', 'checked'], ['CANARY_
         const body = url.pathname.includes('/manifests/') ? bytes.manifest : bytes.config;
         return { status: 200, headers: { 'content-type': url.pathname.includes('/manifests/') ? 'application/vnd.oci.image.manifest.v1+json' : 'application/octet-stream' }, body };
       });
-      await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', configLoader }, async () => { throw new Error('legacy must not run'); }, 1000);
+      await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', configLoader }, async () => { throw new Error('legacy must not run'); });
       assert.equal(calls, 2);
       const result = ledger.configResult(id, 'alice')!;
       assert.equal(result.config.outcome, expected);
@@ -66,7 +66,7 @@ for (const configOk of [false, true]) for (const siblingsOk of [false, true]) {
         if (!siblingsOk) throw new Error('controlled scanner failure');
         return { ok: true, findings: [], scannerVersion: '0.69.3' };
       },
-      1000, async () => siblingsOk ? { ok: true, scannerVersion: '0.69.3', sbom: { image, platform: 'linux/amd64',
+      Date.now(), async () => siblingsOk ? { ok: true, scannerVersion: '0.69.3', sbom: { image, platform: 'linux/amd64',
         os: { name: 'alpine', version: '3.21.3' }, components: [{ ecosystem: 'apk', name: 'busybox', version: '1.2-r0' }] } }
         : { ok: false, errorCode: 'SCAN_TIMEOUT' }, async () => siblingsOk
           ? { ok: true, scannerVersion: '0.69.3', image, findings: [] } : { ok: false, errorCode: 'SCAN_TIMEOUT' });
@@ -81,6 +81,30 @@ for (const configOk of [false, true]) for (const siblingsOk of [false, true]) {
   });
 }
 
+test('cancel during first scanner preserves independently completed config without inventing secret coverage', { timeout: 5000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outbox-config-cancel-'));
+  const file = join(dir, 'ledger.sqlite'), ledger = new ScanLedger(file);
+  try {
+    const bytes = configBytes('0');
+    const id = ledger.enqueue({ subject: 'alice', idempotencyKey: 'config-cancel', registry: 'registry-1.docker.io',
+      repository: 'library/alpine', digest: bytes.digest, platform: 'linux/amd64', checks: '["secret","config"]' }).scanId;
+    await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', configLoader: createPinnedConfigLoader(async (_gateway, url) => ({
+      status: 200, headers: { 'content-type': url.pathname.includes('/manifests/') ? 'application/vnd.oci.image.manifest.v1+json' : 'application/octet-stream' },
+      body: url.pathname.includes('/manifests/') ? bytes.manifest : bytes.config,
+    })) }, async () => {
+      assert.equal(ledger.configResult(id, 'alice'), undefined);
+      ledger.cancel(id, 'alice');
+      return { ok: true, findings: [], scannerVersion: '0.69.3' };
+    });
+    const saved = ledger.configResult(id, 'alice');
+    assert.equal(saved?.config.outcome, 'checked'); assert.equal(JSON.stringify(saved).includes('CANARY'), false);
+    assert.equal(ledger.result(id, 'alice'), undefined); assert.equal(ledger.state(id, 'alice'), 'cancelled');
+    const reopened = new ScanLedger(file);
+    try { assert.deepEqual(reopened.configResult(id, 'alice'), saved); assert.equal(reopened.configResult(id, 'bob'), undefined); }
+    finally { reopened.close(); }
+  } finally { ledger.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('off branch persists skipped and preserves legacy outcome without config I/O', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-config-off-'));
   const ledger = new ScanLedger(join(dir, 'ledger.sqlite'));
@@ -88,7 +112,7 @@ test('off branch persists skipped and preserves legacy outcome without config I/
     const id = ledger.enqueue({ subject: 'alice', idempotencyKey: 'config-off', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest: configBytes().digest, platform: 'linux/amd64', checks: '["secret"]' }).scanId;
     await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', configLoader: async () => { throw new Error('must not load'); } },
-      async () => ({ ok: true, findings: [], scannerVersion: '0.69.3' }), 1000);
+      async () => ({ ok: true, findings: [], scannerVersion: '0.69.3' }));
     assert.equal(ledger.state(id, 'alice'), 'completed');
     assert.deepEqual(ledger.configResult(id, 'alice')?.config, { outcome: 'skipped', reason: 'CHECK_DISABLED' });
     assert.equal(ledger.result(id, 'alice')?.outcome, 'checked');

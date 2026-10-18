@@ -20,9 +20,37 @@ pnpm stand:local:stop    # остановить без удаления акка
 
 Откройте http://127.0.0.1:8080/register и создайте **новый локальный аккаунт** с паролем от 12 символов. Затем откройте http://127.0.0.1:8080/scans/new, выберите **Alpine 3.20**, отметьте **Secrets, SBOM, CVE, Image config**, подтвердите цель и запустите скан. Результат появится на странице задания и останется в `/scans` после повторного входа. Здесь нужны страницы `/scans`, не `/demo/scans`; порт `5173` — другой dev-режим.
 
-**На текущей машине CVE уже подключён**: подписанный локальным оператором offline release с фактическим UpdatedAt `2026-10-15T19:09:25.631494278Z`. Alpine 3.20 дал 0 CVE, архивный **Alpine 3.16 — 4 CVE**; это результаты конкретных сканов, не гарантия безопасности. На новой установке без `.local-stand/cve.json` CVE остаётся выключен. [Подключение базы и проверка доверия](docs/local-cve-20261016.md). ИИ требует отдельной настройки провайдера/согласия; host/runtime capture не включены.
+**На текущей машине CVE подключён и настроено обновление каждые 6 часов** через отдельный macOS LaunchAgent. Текущая подписанная локальным оператором база имеет UpdatedAt `2026-10-16T01:13:54.947090392Z`; настоящий browser scan с новой базой проверен. `pnpm cve:auto:status` показывает расписание и последний результат, `pnpm cve:refresh` запускает проверку вручную. [Автообновление и ограничения](docs/local-cve-auto-refresh.md), [первоначальное подключение и доверие](docs/local-cve-20261016.md). Alpine 3.20 дал 0 CVE, архивный **Alpine 3.16 — 4 CVE** на первоначальной базе; это результаты конкретных сканов, не гарантия безопасности. На новой установке без `.local-stand/cve.json` CVE остаётся выключен. ИИ требует отдельной настройки провайдера/согласия; host/runtime capture не включены.
 
 Аккаунты/отчёты сохраняются в отдельных volumes `dip-local-full_auth_accounts` и `dip-local-full_scan_ledger`. Подпись локального API сохраняется в игнорируемом `.local-stand/scan-jwt`; файл не печатается и не вращается при рестарте. Не удаляйте его или volumes ради перезапуска. Launcher не читает private env и не изменяет старый project `dip-auth-stand`/HOLD. Стенд доступен только через loopback; не публикуйте его в сеть.
+
+## Новый расширенный image-only профиль
+
+**Актуально на 18.10.2026, после 14:06 UTC:** отдельный стенд `dip-public-images` **работает на http://127.0.0.1:8081**. Координатор завершил guarded recovery/redeploy с проверенными quiescent SQLite backups и сохранением аккаунтов, истории, JWT и volumes этого public-стенда; исходный public HOLD архивирован. Старый **8080 остаётся отдельным legacy-профилем**, не изменён, HTTP 200 подтверждён координатором. Это не снятие иных исторических HOLD и не перенос данных между стендами.
+
+Для использования уже работающего 8081 не нужно повторять launcher/recovery. Откройте **отдельный browser profile или выделенный incognito context**, перейдите на http://127.0.0.1:8081/register и создайте **новый аккаунт** с паролем от 12 символов. Cookies одного hostname не разделяются номером порта: не используйте в этом же context сессию 8080. Затем откройте http://127.0.0.1:8081/scans/new, вручную введите один из canonical references:
+
+```text
+registry-1.docker.io/library/debian:bookworm-slim
+registry-1.docker.io/library/node:22.14.0-alpine3.21
+```
+
+Выберите Secrets, SBOM, CVE и Image config, дождитесь свежего серверного допуска, подтвердите цель/область и отправьте один запуск. Отчёт доступен в `/scans`, включая reload и повторный вход **на 8081**. Поиск — только подсказка; новый scan заново проверяет target, readiness и DB. POST 202 ещё не означает завершённую проверку.
+
+**Настоящие native browser/API/UI proofs прошли на развёрнутой revision:**
+
+| Запуск 18.10.2026, UTC | Secrets | SBOM | Уязвимости | Image config |
+| --- | --- | --- | --- | --- |
+| Debian `bookworm-slim`, 14:03:09.760–14:04:25.768 | checked, 0 | checked, 88; Debian 12.15 | checked, 241 всего: **236 CVE + 5 Debian TEMP advisories**, не 241 CVE | checked, 1 |
+| Node `22.14.0-alpine3.21`, 14:05:06.605–14:06:18.591 | checked, 0 | checked, 217; npm 200 | checked, **158 CVE + 0 Debian TEMP** | checked, 1 |
+
+Это результаты конкретных pinned сканов, не обещание таких же результатов для будущего tag. Проверены actual manual entry → fresh eligibility → POST → native worker → report → reload → fresh login; HTTP/OCI/scanner не подменялись. [Полная безопасная Node-квитанция](docs/public-image-node-native-20261018.json), [текущий статус и границы доказательств](docs/public-image-final-20261018.md).
+
+Профиль `public-hub-amd64-v1` допускает **только публичные official/namespaced Docker Hub images, IMAGE и linux/amd64** поддерживаемого формата и размера — **не буквально любой образ/registry/OS**. Worker ограничен **4 GiB RAM без дополнительного swap**, CPU 1, PIDs 128 и tmpfs 2304 MiB; acquisition/archive/report limits конечны. Неподдерживаемые форматы/экосистемы, EOL, неизвестный inventory и превышение ресурсов не считаются checked/0. Entry point исследуемого образа не запускается; Docker socket worker не получает. Runtime/host/LLM этим профилем не включаются.
+
+CVE DB на 8081 **закреплена, автообновление не подключено**: UpdatedAt `2026-10-16T01:13:54.947090392Z`, usableUntil `2026-10-30T01:13:54.947090392Z`. На время proof сохранены предупреждения `DB_DATA_OLDER_THAN_24H` и `DB_PUBLICATION_OVERDUE`; подпись `local-db-operator-v1` — аттестация **локального оператора, не Aqua**. Истёкшая DB не разрешает новый CVE scan. Старый LOCAL updater/scheduler не управляет 8081; pins вручную не менять.
+
+[Как пользоваться 8081 и читать ограничения](docs/public-image-ready-20261018.md). Два native PASS снимают прежнее утверждение «native NOT_RUN», но **не закрывают всю TASK2, полную OS/ecosystem/negative-матрицу или production acceptance**. Исторические source-only и HOLD-этапы сохраняют свои даты и доказательства.
 
 ## Быстро посмотреть только интерфейс
 
@@ -66,6 +94,7 @@ OpenRouter key вводится оператором только через с�
 ## Навигация по документации
 
 - [Финальная проверка и незакрытые критерии](docs/release-readiness-20261015.md)
+- [Проверки testing-задач и актуальная синхронизация Flownix](docs/testing-followup-20261016.md)
 - [Архитектура](docs/architecture/README.md)
 - [Backend/API](server/api/README.md)
 - [Runtime subsystem](server/runtime/docs/operator-runbook.md)

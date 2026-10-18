@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { VulnFinding } from '@/shared/api/scans/scanTransport';
 import { canonicalReferences, FIRST_CALCULATOR, validCvssVector } from '@/shared/api/scans/vulnAdvisory';
+import { isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import type { AdvisoryV1 } from '@/shared/api/scans/vulnAdvisory';
 
 type PlainField = AdvisoryV1['assessments'][number]['title'];
@@ -47,6 +48,7 @@ function CopyVector({ vector }: { vector: string }) {
 }
 export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
   const advisory = finding.advisory;
+  const debianTemp = isDebianTempId(finding.cveId);
   const references = canonicalReferences(finding.cveId);
   const incompleteAssessments =
     !advisory || advisory.state === 'omitted' || advisory.conflictState === 'unknown';
@@ -62,6 +64,7 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
     <li className="scan-vuln-row" data-severity={finding.severity}>
       <div className="scan-vuln-row__headline">
         <strong className="scan-vuln-row__id">{finding.cveId}</strong>
+        {debianTemp ? <span>Debian advisory (не CVE)</span> : null}
         <span className="scan-vuln-row__severity">{finding.severity}</span>
       </div>
       <dl className="scan-vuln-row__facts">
@@ -99,6 +102,7 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
       </p>
       <details className="scan-vuln-row__details">
         <summary>Подробности {finding.cveId} · описание, CVSS и ссылки</summary>
+        <p>{debianTemp ? 'Advisory ID' : 'CVE ID'}: {finding.cveId}</p>
         <p>ID находки: {finding.findingId}</p>
         <p>Provenance: {finding.provenanceRef ?? 'не предоставлен'}</p>
         {!advisory ? (
@@ -171,7 +175,8 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
             · базовый инструмент без автозаполнения; вставьте проверенный вектор вручную.
           </p>
         ) : null}
-        <p>Проверенный русский источник для этой CVE недоступен. Ссылка БДУ не подтверждена.</p>
+        {debianTemp ? <p>Временный Debian advisory ID, не CVE. Сопоставленные внешние ссылки не предоставлены.</p>
+          : <p>Проверенный русский источник для этой CVE недоступен. Ссылка БДУ не подтверждена.</p>}
       </details>
       {advisory && advisory.conflicts.length > 0 ? (
         <p className="scan-vuln-row__warning">

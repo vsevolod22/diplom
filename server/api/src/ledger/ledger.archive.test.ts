@@ -37,9 +37,9 @@ function fixture(run: (ledger: ScanLedger, file: string) => void) {
 test('archive result is atomically fenced, partial, scoped and replayed without duplicate evidence', () => fixture((ledger, file) => {
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
   const value = report();
-  assert.equal(ledger.finishArchive(id, job.attempts + 1, value), false);
-  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
-  assert.equal(ledger.finishArchive(id, job.attempts, value), false);
+  assert.equal(ledger.finishArchive(id, job.attempts + 1, value, undefined, job.leaseToken), false);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), false);
   assert.equal(ledger.state(id, 'alice'), 'partial');
   assert.deepEqual(ledger.archiveResult(id, 'alice'), value);
   assert.equal(ledger.archiveResult(id, 'bob'), undefined);
@@ -54,28 +54,28 @@ test('archive result is atomically fenced, partial, scoped and replayed without 
 test('cancelled/reclaimed attempts cannot write and invalid payload never reaches SQLite', () => fixture(ledger => {
   const id = ledger.enqueue(target).scanId, old = ledger.claim(100, 10)!;
   const current = ledger.claim(111, 100)!;
-  assert.equal(ledger.finishArchive(id, old.attempts, report()), false);
+  assert.equal(ledger.finishArchive(id, old.attempts, report(), undefined, old.leaseToken), false);
   const unsafe = report(); (unsafe.secret as unknown as Record<string, unknown>).raw = 'SECRET_CANARY';
-  assert.throws(() => ledger.finishArchive(id, current.attempts, unsafe));
+  assert.throws(() => ledger.finishArchive(id, current.attempts, unsafe, undefined, current.leaseToken));
   assert.equal(ledger.archiveResult(id, 'alice'), undefined);
-  ledger.cancel(id, 'alice'); assert.equal(ledger.finishArchive(id, current.attempts, report()), false);
+  ledger.cancel(id, 'alice'); assert.equal(ledger.finishArchive(id, current.attempts, report(), undefined, current.leaseToken), false);
 }));
 test('DB expiry at the write boundary cannot persist coverage and rolls back terminal evidence', () => fixture(ledger => {
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
   const value = report();
   value.vuln = { outcome: 'unsupported', reason: 'OS_EOL', db: dbIdentity(new Date(Date.now() - 1).toISOString()),
     os: { outcome: 'unsupported', reason: 'OS_EOL' }, node: { outcome: 'unsupported', reason: 'NODE_INVENTORY_ABSENT' } };
-  assert.throws(() => ledger.finishArchive(id, job.attempts, value));
+  assert.throws(() => ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken));
   assert.equal(ledger.state(id, 'alice'), 'running');
   assert.equal(ledger.archiveResult(id, 'alice'), undefined);
   assert.deepEqual(ledger.events(id, 'alice', null)?.map(item => item.state), ['queued', 'running']);
   value.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
-  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), true);
   assert.equal(ledger.state(id, 'alice'), 'partial');
 }));
 test('receipt/check mismatch rolls back all terminal writes', () => fixture(ledger => {
   const id = ledger.enqueue({ ...target, repository: 'library/alpine' }).scanId, job = ledger.claim()!;
-  assert.throws(() => ledger.finishArchive(id, job.attempts, report()), /Archive job mismatch/);
+  assert.throws(() => ledger.finishArchive(id, job.attempts, report(), undefined, job.leaseToken), /Archive job mismatch/);
   assert.equal(ledger.state(id, 'alice'), 'running'); assert.equal(ledger.archiveResult(id, 'alice'), undefined);
 }));
 
@@ -96,7 +96,7 @@ function advisoryReport(count = 1): ArchiveScanReport {
 }
 test('embedded advisory roundtrip rejects stored injection and never rechecks historical freshness against now', () => fixture((ledger, file) => {
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!, value = advisoryReport();
-  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), true);
   const now = Date.now; Date.now = () => now() + 365 * 86400_000;
   try { assert.deepEqual(ledger.archiveResult(id, 'alice'), value); } finally { Date.now = now; }
   const raw = new Database(file);
@@ -118,7 +118,7 @@ test('archive report budget omits metadata before commit and preserves core N/ID
   assert.ok(jsonBytes(value) > 2_000_000, `fixture must cross cap: ${jsonBytes(value)}`);
   const ids = value.vuln.findings.map(f => f.findingId);
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
-  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), true);
   const saved = ledger.archiveResult(id, 'alice');
   if (saved?.vuln?.outcome !== 'checked') throw new Error('checked expected');
   assert.equal(saved.vuln.findings.length, 1000); assert.deepEqual(saved.vuln.findings.map(f => f.findingId), ids);
@@ -136,7 +136,7 @@ test('v2 mandatory final receipt is reserved in the UTF8 archive budget without 
   const ids = value.vuln.findings.map(f => f.findingId);
   assert.ok(jsonBytes(value) > 2_000_000);
   const id = ledger.enqueue({ ...target, cvePolicy: CURRENT_DB_POLICY }).scanId, job = ledger.claim()!;
-  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), true);
   const saved = ledger.archiveResult(id, 'alice');
   if (saved?.vuln?.outcome !== 'checked') throw Error('checked expected');
   assert.deepEqual(saved.vuln.findings.map(f => f.findingId), ids);
@@ -147,15 +147,36 @@ test('v2 mandatory final receipt is reserved in the UTF8 archive budget without 
   try { assert.deepEqual(reopened.archiveResult(id, 'alice'), saved); } finally { reopened.close(); }
 }));
 
+test('checkpoint cancellation budget omits only optional advisory metadata, retaining all core findings', () => fixture(ledger => {
+  const value = advisoryReport(1000);
+  value.secret = { outcome: 'checked', findings: Array.from({ length: 1000 }, (_, i) => ({ findingId: `secret-${i}-0`, ruleId: 'r'.repeat(80), line: i, evidenceRef: `result-${i}-secret-0` })) };
+  if (value.sbom?.outcome !== 'checked' || value.vuln?.outcome !== 'checked') throw Error('fixture');
+  value.sbom.sbom.components = Array.from({ length: 1000 }, (_, i) => ({ ecosystem: 'apk', name: `p${i}`.padEnd(128, 'x'), version: '1'.repeat(80) }));
+  value.vuln.dbPolicy = evaluateDbPolicy(value.vuln.db, CURRENT_DB_POLICY, value.checkedAt)!;
+  assert.ok(jsonBytes(value) > 2_000_000);
+  const id = ledger.enqueue({ ...target, cvePolicy: CURRENT_DB_POLICY }).scanId, job = ledger.claim()!;
+  const { secret, sbom, vuln, ...base } = value;
+  assert.equal(ledger.checkpointArchive(job, 'secret', { ...base, secret }), true);
+  assert.equal(ledger.checkpointArchive(job, 'sbom', { ...base, sbom }), true);
+  assert.equal(ledger.checkpointArchive(job, 'vuln', { ...base, vuln }), true);
+  assert.equal(ledger.cancel(id, 'alice'), 'cancelled');
+  const saved = ledger.archiveResult(id, 'alice')!;
+  if (saved.vuln?.outcome !== 'checked') throw Error('fixture');
+  assert.ok(jsonBytes(saved) <= 2_000_000);
+  assert.deepEqual(saved.vuln.findings.map(f => f.findingId), value.vuln.findings.map(f => f.findingId));
+  assert.ok(saved.vuln.findings.some(f => f.advisory?.limitations.includes('report_budget')));
+  assert.deepEqual(saved.secret, secret); assert.deepEqual(saved.sbom, sbom);
+}));
+
 test('embedded aggregate metadata limit is enforced both before write and on stored read', () => fixture((ledger, file) => {
   const value = advisoryReport(300), excessive = structuredClone(value);
   if (value.vuln?.outcome !== 'checked' || excessive.vuln?.outcome !== 'checked') throw new Error('fixture');
   for (const f of excessive.vuln.findings) f.advisory = normalizeAdvisory({ Title: 'Title', Description: 'x'.repeat(4096) }, f.provenanceRef, f.cveId);
   assert.ok(jsonBytes(excessive) < 2_000_000);
   const id = ledger.enqueue(target).scanId, job = ledger.claim()!;
-  assert.throws(() => ledger.finishArchive(id, job.attempts, excessive), /Invalid vulnerability advisory/);
+  assert.throws(() => ledger.finishArchive(id, job.attempts, excessive, undefined, job.leaseToken), /Invalid vulnerability advisory/);
   assert.equal(ledger.state(id, 'alice'), 'running');
-  assert.equal(ledger.finishArchive(id, job.attempts, value), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, value, undefined, job.leaseToken), true);
   const raw = new Database(file);
   raw.prepare('UPDATE scan_archive_results SET report=? WHERE scan_id=?').run(JSON.stringify(excessive), id);
   assert.throws(() => ledger.archiveResult(id, 'alice'), /Invalid vulnerability advisory/);

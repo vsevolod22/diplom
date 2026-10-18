@@ -5,9 +5,25 @@ import { createVerifier } from '../image-config/verified-input.js';
 import { loadPinnedConfig, admittedConfigTarget, type ConfigLoader } from '../oci/pinned-image-config.js';
 import { LedgerStore } from '../ledger/ledger-store.js';
 import type { Job } from '../ledger/ledger.js';
-import { canonical, type Capture, type ImageLink, type Outcome } from '../../../runtime/src/contract.js';
+import {
+  canonical,
+  link,
+  timestamp,
+  type Capture,
+  type ImageLink,
+  type Outcome,
+} from '../../../runtime/src/contract.js';
 import { fault } from './runtime-store.js';
 export type OwnerImageJobPort = (subject: string, scanId: string) => Job | undefined;
+function imageCheckedAt(value: unknown): string {
+  // SQLite CURRENT_TIMESTAMP is UTC with second precision; never parse it in the host timezone.
+  // Preserve the observed instant, not the link time. All other inputs must already be canonical ISO.
+  const normalized =
+    typeof value === 'string' && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value)
+      ? `${value.replace(' ', 'T')}.000Z`
+      : value;
+  return timestamp(normalized);
+}
 // New read-only adapter; shared ledger migrator/schema/worker remain exclusively peer-owned.
 export function ownerImageJob(path: string | undefined): OwnerImageJobPort {
   return (subject, scanId) => {
@@ -89,13 +105,13 @@ export class RuntimeImageLinkAdapter {
           value?.outcome === 'checked' ? 'checked' : value?.outcome === 'failed' ? 'failed' : 'unsupported',
         reason: value?.outcome === 'checked' ? 'READY' : 'IMAGE_RESULT_UNAVAILABLE',
         scannerVersion: value?.outcome === 'checked' ? (value.scannerVersion ?? null) : null,
-        checkedAt: value?.outcome === 'checked' ? (value.checkedAt ?? null) : null,
+        checkedAt: value?.outcome === 'checked' ? imageCheckedAt(value.checkedAt) : null,
         dbEvidenceHash:
           value?.outcome === 'checked' && value.dbEvidence
             ? createHash('sha256').update(canonical(value.dbEvidence)).digest('hex')
             : null,
       });
-      return {
+      return link({
         imageScanId,
         manifestDigest: checked.manifestDigest,
         configDigest: checked.configDigest,
@@ -105,7 +121,7 @@ export class RuntimeImageLinkAdapter {
         linkedAt: new Date().toISOString(),
         sbom: outcome(sbom),
         vuln: outcome(vuln),
-      };
+      });
     } catch (e) {
       if (e instanceof Error && ['IMAGE_IDENTITY_MISMATCH', 'IMAGE_LINK_UNAVAILABLE'].includes(e.message))
         throw e;

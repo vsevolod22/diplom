@@ -46,7 +46,7 @@ test('fresh v0 initializes once and enforces foreign keys on every ledger connec
     assert.equal(second.state(created.scanId, target.subject), 'queued');
     const db = new Database(file);
     try {
-      assert.equal(db.pragma('user_version', { simple: true }), 14);
+      assert.equal(db.pragma('user_version', { simple: true }), 15);
       assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
       assert.deepEqual(db.pragma('foreign_key_check'), []);
       // An external connection must opt in separately; the ledger opts in at construction.
@@ -71,7 +71,7 @@ test('v1 and v2 fixtures retain rows, defaults, uniqueness, FK and version after
       reopened.close();
       const db = new Database(file);
       try {
-        assert.equal(db.pragma('user_version', { simple: true }), 14);
+        assert.equal(db.pragma('user_version', { simple: true }), 15);
         assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
         assert.deepEqual(db.pragma('foreign_key_check'), []);
         assert.equal((db.prepare('SELECT count(*) AS n FROM scans').get() as { n: number }).n, 1);
@@ -106,7 +106,7 @@ test('v3 result upgrades to bounded findings, event and audit tables without los
     assert.equal(ledger.events('existing','alice',null)?.[0]?.state, 'queued');
     ledger.close();
     const db = new Database(file);
-    assert.equal(db.pragma('user_version', { simple: true }), 14);
+    assert.equal(db.pragma('user_version', { simple: true }), 15);
     assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -125,7 +125,7 @@ test('failed upgrade rolls back DDL and version; future and ambiguous v0 fail cl
     assert.equal(after.pragma('user_version', { simple: true }), 1);
     assert.equal((after.prepare('SELECT count(*) AS n FROM scans').get() as { n: number }).n, 1);
     assert.equal((after.prepare("SELECT count(*) AS n FROM pragma_table_info('scans') WHERE name = 'checks'").get() as { n: number }).n, 0);
-    after.pragma('user_version = 15');
+    after.pragma('user_version = 16');
     after.close();
     assert.throws(() => new ScanLedger(file), /Unsupported ledger version/);
     const unversioned = join(dir, 'ambiguous.sqlite');
@@ -174,8 +174,9 @@ test('two connections serialize keys and claims; expired owner cannot retry or a
   const dir = mkdtempSync(join(tmpdir(), 'ledger-connections-'));
   try {
     const file = join(dir, 'ledger.sqlite');
-    const a = new ScanLedger(file);
-    const b = new ScanLedger(file);
+    let now = 1000;
+    const a = new ScanLedger(file, () => now);
+    const b = new ScanLedger(file, () => now);
     try {
       const created = a.enqueue(target);
       assert.deepEqual(b.enqueue(target), { scanId: created.scanId, created: false });
@@ -185,17 +186,20 @@ test('two connections serialize keys and claims; expired owner cannot retry or a
       const first = a.claim(1000, 100);
       assert.equal(first?.attempts, 1);
       assert.equal(b.claim(1099), undefined);
-      const second = b.claim(1100, 100);
+      now = 1100;
+      const second = b.claim(now, 100);
       assert.equal(second?.scanId, created.scanId);
       assert.equal(second?.attempts, 2);
-      assert.equal(a.retry(created.scanId, 1, 3000), false);
-      assert.equal(a.finish(created.scanId, 1, 'failed'), false);
-      assert.equal(b.retry(created.scanId, 2, 2000), true);
+      assert.equal(a.retry(created.scanId, 1, 3000, first?.leaseToken), false);
+      assert.equal(a.finish(created.scanId, 1, 'failed', undefined, first?.leaseToken), false);
+      assert.equal(b.retry(created.scanId, 2, 2000, second?.leaseToken), true);
       assert.equal(a.claim(1999), undefined);
-      assert.equal(a.claim(2000)?.attempts, 3);
-      assert.equal(b.finish(created.scanId, 2, 'failed'), false);
-      assert.equal(a.finish(created.scanId, 3, 'failed'), true);
-      assert.equal(b.finish(created.scanId, 3, 'failed'), false);
+      now = 2000;
+      const third = a.claim(now);
+      assert.equal(third?.attempts, 3);
+      assert.equal(b.finish(created.scanId, 2, 'failed', undefined, second?.leaseToken), false);
+      assert.equal(a.finish(created.scanId, 3, 'failed', undefined, third?.leaseToken), true);
+      assert.equal(b.finish(created.scanId, 3, 'failed', undefined, third?.leaseToken), false);
       assert.equal(b.state(created.scanId, 'alice'), 'failed');
     } finally { a.close(); b.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }

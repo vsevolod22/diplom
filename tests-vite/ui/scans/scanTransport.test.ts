@@ -4,6 +4,16 @@ import { parseCurrentList, parseCurrentResults, parseCurrentSbom, parseCurrentVu
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('scan transport boundary', () => {
+  it('keeps a null cancelled report absent, distinct from a completed checked-zero result', () => {
+    const empty = { findings: [], nextCursor: null, coverage: null };
+    expect(parseCurrentResults(empty)).toEqual({ findings: [], nextCursor: null, coverage: [] });
+    expect(() => parseCurrentResults({ ...empty, nextCursor: 1 })).toThrow();
+    expect(() => parseCurrentResults({ ...empty, findings: [{ findingId: 'secret-0', ruleId: 'rule', line: 0, evidenceRef: 'redacted' }] })).toThrow();
+    const checked = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, errorCode: null, scannerVersion: '0.69.3' };
+    expect(parseCurrentResults({ ...empty, coverage: checked }).coverage[0]).toMatchObject({ status: 'checked', findingCount: 0 });
+    expect(parseCurrentStatus({ scanId: 'x', state: 'cancelled', checks: ['secret', 'sbom'], perCheck: { secret: checked, sbom: null }, result: null }))
+      .toMatchObject({ state: 'cancelled', perCheck: { secret: checked, sbom: null }, percent: null });
+  });
   it('TASK35 validates bounded matching Retry-After without timed retries for auth errors', async () => {
     for (const [seconds, header, reason, expected] of [[5, '5', 'rate', 5], [1, '1', 'concurrency', 1], [60, '60', 'capacity', 60],
       [0, '0', 'rate', 60], [61, '61', 'rate', 60], [3.5, '3.5', 'rate', 60], [2, null, 'rate', 60], [2, '3', 'rate', 60], [2, '2', 'unknown', 60]] as const) {

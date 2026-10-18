@@ -32,7 +32,7 @@ async function apiChild() {
   let app;
   let stop;
   const stopped = new Promise(resolveStop => { stop = resolveStop; });
-  process.once('message', message => { if (message === 'stop') stop(); });
+  process.on('message', message => { if (message === 'stop') stop(); });
   process.once('disconnect', stop);
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
@@ -71,7 +71,7 @@ async function apiChild() {
         cveId, ecosystem: 'apk', provenanceRef, packageName, installedVersion: '1.2-r0', fixedVersion: null,
         severity: i < 31 ? 'LOW' : 'HIGH', severitySources: ['nvd'], advisory };
     });
-    assert.equal(ledger.finishCombined(scanId, job.attempts, [
+    const outcomes = [
       { check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: Array.from({ length: count }, (_, i) => ({
         findingId: `secret-${i}-0`, ruleId: i < 31 ? 'rule-known' : 'rule-unknown', line: i < 31 ? i : null,
         evidenceRef: `result-${i}-secret-0` })) },
@@ -79,8 +79,73 @@ async function apiChild() {
         os: { name: 'alpine', version: '3.20' }, components: Array.from({ length: count }, (_, i) => ({
           ecosystem: i < 31 ? 'apk' : 'npm', name: `pkg-${String(i).padStart(2, '0')}`, version: '1' })) } },
       { check: 'vuln', outcome: 'checked', scannerVersion: '0.69.3', image, findings },
-    ]), true);
-    process.send({ apiOrigin, scanId, count });
+    ];
+    assert.equal(ledger.finishCombined(scanId, job.attempts, outcomes, undefined, job.leaseToken), true);
+    const { NGINX_ARCHIVE_TARGET } = await import(source('server/api/src/oci/bounded-image-archive.ts'));
+    const seedCancellation = async mode => {
+      const target = mode === 'archive' || mode === 'storage-error' ? NGINX_ARCHIVE_TARGET : {
+        registry: 'registry-1.docker.io', repository: 'library/alpine', digest, platform: 'linux/amd64' };
+      const id = ledger.enqueue({ ...target, subject: owner.id, idempotencyKey: `cancel-${mode}`,
+        checks: '["secret","sbom","vuln"]', scope: 'image' }).scanId;
+      if (mode === 'storage-error') {
+        const { default: Database } = await import(apiRequire.resolve('better-sqlite3'));
+        const { consumeOne } = await import(source('server/api/src/worker/outbox-consumer.ts'));
+        // This connection and trigger touch only the freshly created disposable ledger.
+        const raw = new Database(process.env.SCAN_LEDGER_PATH);
+        try {
+          raw.exec(`CREATE TRIGGER reject_browser_checkpoint BEFORE INSERT ON scan_checkpoints
+            WHEN NEW.scan_id = '${id}' AND NEW.check_name = 'sbom'
+            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_STORAGE_CANARY'); END`);
+          const envelope = { receipt: { ...target, layerDigests: [`sha256:${'a'.repeat(64)}`], diffIds: [`sha256:${'b'.repeat(64)}`],
+            archiveSha256: `sha256:${'c'.repeat(64)}`, profileVersion: 'nginx-alpine-amd64-v1',
+            resourcePolicyVersion: 'nginx-archive-resources-v1', checksVersion: 'trivy-0.69.3-archive-v1' },
+            scannerVersion: '0.69.3', checkedAt: Date.now(), metrics: { wireBytes: 100, requests: 5, compressedBytes: 50,
+              expandedBytes: 2048, entries: 1, archiveBytes: 4096, reservationPeak: 4096, scratchPeak: 4096 } };
+          const neverScan = async () => { throw new Error('Unexpected real scanner invocation'); };
+          await assert.rejects(consumeOne(ledger, { timeoutMs: 1000, dbDir: dirname(process.env.SCAN_LEDGER_PATH), archivePolicy: 'proof' },
+            neverScan, Date.now(), neverScan, neverScan, async (_checks, options) => {
+              assert.equal(options.onCheckpoint('secret', { ...envelope, secret: { outcome: 'checked', findings: outcomes[0].findings } }), true);
+              options.onCheckpoint('sbom', { ...envelope, sbom: { outcome: 'checked', sbom: {
+                ...outcomes[1].sbom, image: `${target.registry}/${target.repository}@${target.digest}` } } });
+              throw new Error('Checkpoint storage failure was swallowed');
+            }), error => error.code === 'SQLITE_CONSTRAINT_TRIGGER' && error.message === 'SYNTHETIC_STORAGE_CANARY');
+          assert.equal(ledger.state(id, owner.id), 'running');
+          assert.equal(ledger.archiveResult(id, owner.id), undefined);
+          assert.equal(ledger.result(id, owner.id), undefined);
+          assert.deepEqual(ledger.events(id, owner.id, null).map(event => event.state), ['queued', 'running']);
+          assert.deepEqual(raw.prepare('SELECT check_name FROM scan_checkpoints WHERE scan_id = ?').all(id), [{ check_name: 'secret' }]);
+        } finally {
+          raw.exec('DROP TRIGGER IF EXISTS reject_browser_checkpoint');
+          raw.close();
+        }
+        return { id, mode };
+      }
+      const claim = ledger.claim();
+      assert.equal(claim.scanId, id);
+      if (mode === 'ordinary') {
+        assert.equal(ledger.checkpointCombined(claim, outcomes[0]), true);
+        assert.equal(ledger.checkpointCombined(claim, outcomes[2]), true);
+      } else if (mode === 'archive') {
+        assert.equal(ledger.checkpointArchive(claim, 'sbom', {
+          receipt: { ...target, layerDigests: [`sha256:${'a'.repeat(64)}`], diffIds: [`sha256:${'b'.repeat(64)}`],
+            archiveSha256: `sha256:${'c'.repeat(64)}`, profileVersion: 'nginx-alpine-amd64-v1',
+            resourcePolicyVersion: 'nginx-archive-resources-v1', checksVersion: 'trivy-0.69.3-archive-v1' },
+          scannerVersion: '0.69.3', checkedAt: Date.now(), metrics: { wireBytes: 100, requests: 5, compressedBytes: 50,
+            expandedBytes: 2048, entries: 1, archiveBytes: 4096, reservationPeak: 4096, scratchPeak: 4096 },
+          sbom: { outcome: 'checked', sbom: { ...outcomes[1].sbom, image: `${target.registry}/${target.repository}@${target.digest}` } },
+        }), true);
+      }
+      return { id, mode };
+    };
+    const cancellations = [];
+    for (const mode of ['ordinary', 'archive', 'empty']) cancellations.push(await seedCancellation(mode));
+    // Respect the real per-owner active-scan cap: seed the fourth case only after browser cancellations.
+    process.on('message', async message => {
+      if (message !== 'seed-storage-error') return;
+      try { process.send({ cancellation: await seedCancellation('storage-error') }); }
+      catch (error) { process.send({ fixtureError: String(error) }); }
+    });
+    process.send({ apiOrigin, scanId, count, cancellations });
     await stopped;
   } finally {
     clearTimeout(timer);
@@ -244,6 +309,45 @@ async function managed() {
       assert.equal(value.page.matchedCount, 30);
       await change(secret, () => secretSection.getByLabel('Сортировка · Secrets').selectOption('line:desc'), { sort: 'line:desc', ruleId: 'rule-unknown' });
       checks.push('Global severity, ecosystem + normalized ASCII name, ruleId + unknown-line filters; all three sort controls; normalized advisory decoded/rendered');
+      value = await change(cve, () => cveSection.getByLabel('Уровень опасности (severity) · CVE').selectOption('UNKNOWN'), { severity: 'UNKNOWN' });
+      assert.equal(value.page.matchedCount, 0); assert.equal(value.nextCursor, null);
+      await expect(cveSection.getByText(/Нет совпадений глобального фильтра CVE/)).toBeVisible();
+      await expect(cveSection.getByRole('navigation')).toHaveCount(0);
+      value = await change(cve, () => cveSection.getByLabel('Уровень опасности (severity) · CVE').selectOption(''), { sort: 'severity:asc' });
+      assert.equal(value.page.offset, 0); assert.equal(value.page.matchedCount, count);
+      await sbomSection.getByLabel('Имя пакета · SBOM', { exact: true }).fill('no-such-package');
+      value = await change(sbom, () => sbomSection.getByRole('button', { name: 'Применить имя · SBOM', exact: true }).click(), { name: 'no-such-package', ecosystem: 'npm' });
+      assert.equal(value.page.matchedCount, 0); assert.equal(value.nextCursor, null);
+      await expect(sbomSection.getByText(/Нет совпадений глобального фильтра SBOM/)).toBeVisible();
+      await expect(sbomSection.getByRole('navigation')).toHaveCount(0);
+      value = await change(sbom, () => sbomSection.getByRole('button', { name: 'Сбросить имя · SBOM', exact: true }).click(), { ecosystem: 'npm' });
+      assert.equal(value.page.offset, 0); assert.equal(value.page.matchedCount, 30); assert.equal(value.page.filters.name, null);
+      await expect(sbomSection.getByLabel('Имя пакета · SBOM', { exact: true })).toHaveValue('');
+      await secretSection.getByLabel('Rule ID · Secrets', { exact: true }).fill('no-such-rule');
+      value = await change(secret, () => secretSection.getByRole('button', { name: 'Применить Rule ID', exact: true }).click(), { ruleId: 'no-such-rule', linePresence: 'unknown' });
+      assert.equal(value.page.matchedCount, 0); assert.equal(value.nextCursor, null);
+      await expect(secretSection.getByText(/Нет совпадений глобального фильтра Secrets/)).toBeVisible();
+      await expect(secretSection.getByRole('navigation')).toHaveCount(0);
+      value = await change(secret, () => secretSection.getByRole('button', { name: 'Сбросить Rule ID', exact: true }).click(), { linePresence: 'unknown' });
+      assert.equal(value.page.offset, 0); assert.equal(value.page.matchedCount, 30); assert.equal(value.page.filters.ruleId, null);
+      await expect(secretSection.getByLabel('Rule ID · Secrets', { exact: true })).toHaveValue('');
+      checks.push('All categories: global zero matches retain whole totals, hide empty pagers and recover first pages through real filter reset controls');
+      value = await change(secret, () => secretSection.getByLabel('Номер строки · Secrets').selectOption('known'), { linePresence: 'known', sort: 'line:desc' });
+      assert.equal(value.page.matchedCount, 31);
+      assert.deepEqual(value.findings.map(row => row.line), Array.from({ length: 31 }, (_, i) => 30 - i));
+      await expect(secretSection.getByText('secret · Строка 0', { exact: true })).toBeVisible();
+      value = await change(secret, () => secretSection.getByLabel('Сортировка · Secrets').selectOption('line:asc'), { linePresence: 'known', sort: 'line:asc' });
+      assert.deepEqual(value.findings.map(row => row.line), Array.from({ length: 31 }, (_, i) => i));
+      for (const sort of ['line:asc', 'line:desc']) {
+        value = await change(secret, () => sort === 'line:asc'
+          ? secretSection.getByLabel('Номер строки · Secrets').selectOption('')
+          : secretSection.getByLabel('Сортировка · Secrets').selectOption(sort), { sort });
+        assert.equal(value.page.matchedCount, count); assert.equal(value.page.filters.linePresence, null);
+        assert.deepEqual(value.findings.slice(0, 31).map(row => row.line), Array.from({ length: 31 }, (_, i) => sort === 'line:asc' ? i : 30 - i));
+        assert.ok(value.findings.slice(31).length > 0);
+        assert.ok(value.findings.slice(31).every(row => row.line === null));
+      }
+      checks.push('Secrets: line zero is known and rendered; numeric ascending/descending order keeps unknown lines last');
       const reloadReplies = specs.map(spec => page.waitForResponse(r => new URL(r.url()).pathname === `${scanPath}/${spec.kind}` && new URL(r.url()).searchParams.get('view') === 'report-v1'));
       await page.reload();
       for (const [index, response] of (await Promise.all(reloadReplies)).entries()) {
@@ -273,6 +377,77 @@ async function managed() {
       await expect(foreignPage.getByRole('alert')).toContainText('Не удалось получить данные скана');
       await expect(foreignPage.locator('.scan-vuln-row')).toHaveCount(0);
       checks.push('Foreign enrolled account: status + all report endpoints 404 (including malformed cursor); no owner rows in UI');
+      for (const scenario of [...ready.cancellations, { mode: 'storage-error' }]) {
+        const mode = scenario.mode;
+        let id = scenario.id;
+        if (mode === 'storage-error') {
+          const seeded = once(api, 'message');
+          api.send('seed-storage-error');
+          const [reply] = await seeded;
+          assert.equal(reply.fixtureError, undefined);
+          assert.equal(reply.cancellation.mode, mode);
+          id = reply.cancellation.id;
+        }
+        const path = `/api/v1/browser/scans/${id}`;
+        const saved = mode === 'ordinary' ? ['secret', 'vuln'] : mode === 'archive' ? ['sbom'] : mode === 'storage-error' ? ['secret'] : [];
+        await page.goto(`${origin}/scans/${id}`);
+        await expect(page.getByRole('button', { name: 'Отменить скан', exact: true })).toBeVisible();
+        await expect(page.locator('.scan-vuln-row')).toHaveCount(0);
+        if (mode === 'storage-error') {
+          const response = await context.request.get(`${origin}${path}`);
+          assert.equal(response.status(), 200);
+          const snapshot = await response.json();
+          assert.equal(snapshot.state, 'running');
+          assert.ok(Object.values(snapshot.perCheck).every(value => value === null));
+          for (const spec of specs) {
+            const section = page.getByRole('region', { name: spec.region, exact: true });
+            await expect(section.locator(spec.rows)).toHaveCount(0);
+            await expect(section.getByText(/Полный итог.*: 0|SCAN_FAILED/)).toHaveCount(0);
+          }
+          await expect(page.locator('body')).not.toContainText('SYNTHETIC_STORAGE_CANARY');
+        }
+        page.once('dialog', dialog => dialog.accept());
+        const cancelled = page.waitForResponse(r => new URL(r.url()).pathname === `${path}/cancel`);
+        await page.getByRole('button', { name: 'Отменить скан', exact: true }).click();
+        assert.equal((await cancelled).status(), 200);
+        await expect(page.getByText(saved.length ? /Сканирование отменено\. Сохранены результаты завершённых проверок/ : /Сканирование отменено\. Сохранённых результатов завершённых проверок нет/)).toBeVisible();
+        await expect(page.getByText('Скан отменён; realtime остановлен')).toBeVisible();
+        await expect(page.getByText(/завершённый результат не сохранён/)).toHaveCount(3 - saved.length);
+        const beforeReload = await (await context.request.get(`${origin}${path}`)).json();
+        assert.equal(beforeReload.state, 'cancelled');
+        assert.deepEqual(Object.keys(beforeReload.perCheck).filter(key => beforeReload.perCheck[key] !== null), saved);
+        for (const spec of specs.filter(spec => saved.includes(spec.kind === 'results' ? 'secret' : spec.kind))) {
+          const section = page.getByRole('region', { name: spec.region, exact: true });
+          await expect(section.locator(spec.rows)).toHaveCount(25);
+          await section.getByRole('button', { name: `Далее · ${spec.label} · сверху`, exact: true }).click();
+          await expect(section.getByText('Строки 26–50', { exact: true })).toBeVisible();
+          await section.getByRole('button', { name: `Далее · ${spec.label} · сверху`, exact: true }).click();
+          await expect(section.locator(spec.rows)).toHaveCount(11);
+          await expect(section.getByText(`Полный итог ${spec.label}: 61`, { exact: true })).toBeVisible();
+        }
+        const events = await (await context.request.get(`${origin}${path}/events`)).text();
+        assert.equal([...events.matchAll(/"state":"cancelled"/g)].length, 1);
+        assert.doesNotMatch(events, /"state":"completed"|"state":"failed"|SYNTHETIC_STORAGE_CANARY/);
+        await page.reload();
+        await expect(page.getByText('Скан отменён; realtime остановлен')).toBeVisible();
+        assert.deepEqual(await (await context.request.get(`${origin}${path}`)).json(), beforeReload);
+        for (const spec of specs.filter(spec => saved.includes(spec.kind === 'results' ? 'secret' : spec.kind))) {
+          await expect(page.getByRole('region', { name: spec.region, exact: true }).locator(spec.rows)).toHaveCount(25);
+        }
+        for (const suffix of ['', '/results?view=report-v1', '/sbom?view=report-v1', '/vuln?view=report-v1', '/events']) {
+          assert.equal((await foreign.request.get(`${origin}${path}${suffix}`)).status(), 404);
+          assert.equal((await anonymous.request.get(`${origin}${path}${suffix}`)).status(), 401);
+        }
+        await foreignPage.goto(`${origin}/scans/${id}`);
+        await expect(foreignPage.getByRole('alert')).toContainText('Не удалось получить данные скана');
+        await expect(foreignPage.locator('.scan-report-sections')).toHaveCount(0);
+        await anonymousPage.goto(`${origin}/scans/${id}`);
+        await expect(anonymousPage.getByRole('link', { name: 'войдите', exact: true })).toBeVisible();
+        await expect(anonymousPage.locator('.scan-report-sections')).toHaveCount(0);
+        await expect(page.locator('body')).not.toContainText('SYNTHETIC_STORAGE_CANARY');
+        checks.push(`Cancellation ${mode}: real button/POST + GET, saved subset ${saved.join(',') || 'none'}, all saved pages, unknown siblings, SSE, reload and HTTP/UI owner fences`);
+        if (mode === 'storage-error') checks.push('Storage error: real consumer propagates SQLite failure after Secrets checkpoint; running/unknown before cancel, retained Secrets only afterwards, no fabricated failed/zero outcome or raw error in UI');
+      }
       await page.goto(`${origin}/account`);
       await page.getByRole('button', { name: 'Выйти из аккаунта', exact: true }).click();
       await expect(page).toHaveURL(/\/login$/);

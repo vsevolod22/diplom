@@ -137,7 +137,7 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
         platform: 'linux/amd64', os: { name: 'alpine', version: '3.20' },
         components: [{ ecosystem: 'apk', name: 'busybox', version: '1.2-r0' }] } },
       { check: 'vuln', outcome: 'checked', image, scannerVersion: '0.69.3', findings: [finding], dbEvidence },
-    ]), true);
+    ], undefined, job.leaseToken), true);
     const status = await (await fetch(`${path}/${scanId}`, { headers: auth('alice') })).json() as StatusResponse;
     assert.equal(status.state, 'partial');
     assert.equal(status.perCheck.secret.outcome, 'failed');
@@ -173,7 +173,7 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
     const browserId = ledger.enqueue({ subject: owner.id, idempotencyKey: 'browser-vuln', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest: digest as `sha256:${string}`, platform: 'linux/amd64', checks: '["vuln"]', scope: 'image' }).scanId;
     const browserJob = ledger.claim()!;
-    assert.equal(ledger.finishWithVuln(browserId, browserJob.attempts, image, [finding], '0.69.3'), true);
+    assert.equal(ledger.finishWithVuln(browserId, browserJob.attempts, image, [finding], '0.69.3', browserJob.leaseToken), true);
     const browserPath = `${base}/browser/scans/${browserId}/vuln`;
     assert.equal((await fetch(browserPath)).status, 401);
     assert.equal((await fetch(browserPath, { headers: { cookie: other.cookie } })).status, 404);

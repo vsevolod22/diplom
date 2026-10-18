@@ -1,0 +1,164 @@
+{
+  "format": "dip-local-continuation-evidence-v1",
+  "observedAt": "2026-10-16T14:20:04.963Z",
+  "projectId": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "baselineCommitShort": "f2853f5",
+  "branch": "feat/dip-task-30-21st-components",
+  "workingTree": "uncommitted; prior work preserved; no stage, commit or branch creation",
+  "scope": "Local source hardening, inert security regressions and disposable saved-report HTTP/browser acceptance; not whole task acceptance",
+  "tracker": {
+    "availability": "get_project_policy returned server shut down",
+    "currentPolicyKnown": false,
+    "currentTestingListKnown": false,
+    "remoteWritesPerformed": false,
+    "closedTasks": [],
+    "specDeltasApplied": [],
+    "noSpecImpactDeclarations": [],
+    "apiBypassUsed": false,
+    "automaticExecution": false
+  },
+  "changes": [
+    "Delay scheduled status publication until shared updater lock acquisition, preserving prior HOLD bytes/inode on refusal",
+    "Reject dangling public-status symlinks",
+    "Verify schedule lock device/inode before status publication and removal",
+    "Validate full actual runtime profiles before fencing, during recreated service readiness and final census",
+    "Share exact namespace mount validation and bind readiness to intended candidate before worker READY_PROBE and API startup",
+    "Add six synthetic positive Secrets/publication/cancellation/reopen regressions",
+    "Add real HTTP/browser zero-match/reset/line-zero/null-last coverage and one UI line-zero/evidence-redaction regression"
+  ],
+  "sourceSha256": {
+    "scripts/local-stand.mjs": "8d1591e621dc63bdf25f228e920002da05e74607e33622b30b1f9169fe44e0d8",
+    "scripts/refresh-local-cve.mjs": "21d7a435a4e9f434d9dd28acb55bc3621050aee2c1eb7406b8afc4b46790e34e",
+    "scripts/schedule-local-cve.mjs": "5aa5b4bcb4486ad6a5805a2b1e81d3b626188a3bdc40c5dc3c465c2e064c60ce",
+    "scripts/test_refresh_local_cve.mjs": "648ca6e98b7ae1c1ede44f1f7070f8a513bb658619ce2dfbeb3e2410e1ea40ff",
+    "scripts/test_schedule_local_cve.mjs": "8dd86730c92d01f2b0a74e8bf6f96162079c7f61f9a6b57f1dca53135d1da302",
+    "server/api/src/worker/secrets-publication-boundary.test.ts": "1e81cf25f00fba8bdedf9b448bd76ae5b4a0cf1033c2a086aad2481ab486938b",
+    "tests-e2e/report-live-api.mjs": "634ae0daf76c1dabf2e68370cbf1f804415b697d8e9595c134dbbb1b4be818d6",
+    "tests-vite/ui/scans/reportViewControls.test.tsx": "ce724227d71d7d9b5d511da9470751147d5f60616915920ae1311ec830f713f1",
+    "docs/report-view-task-41.spec.md": "5f183975f6868248add2571f98d44a62ba5f27f55b0f620fda2a862b7ea8ec8a"
+  },
+  "sourceHashLimit": "Selected current public files only; sequential observations, not an atomic repository freeze or R10 closure. Historical hashes were not repinned.",
+  "validation": [
+    {
+      "command": "node --test scripts/test_local_stand.mjs scripts/test_setup_local_cve.mjs scripts/test_refresh_local_cve.mjs scripts/test_schedule_local_cve.mjs",
+      "result": "PASS",
+      "passed": 191,
+      "attribution": "host implementation agent, final mount-order correction",
+      "limit": "inert temporary fixtures and fake Docker; no real refresh activation"
+    },
+    {
+      "command": "node --test --test-name-pattern='^recreated worker mount drift retains HOLD before any worker readiness exec or API up$' scripts/test_refresh_local_cve.mjs",
+      "result": "PASS",
+      "passed": 8,
+      "attribution": "independent reviewer",
+      "limit": "seven variants plus enclosing test; subset of 191, not additive"
+    },
+    {
+      "command": "pnpm test:api",
+      "result": "PASS",
+      "passed": 645,
+      "durationMs": 24051.666958,
+      "attribution": "coordinator",
+      "limit": "API suite; not isolated Engine, actual positive Trivy, provider or deployment qualification"
+    },
+    {
+      "command": "pnpm exec vitest run --reporter=default --reporter=json --outputFile=test-results/continuation-ui-20261016.json",
+      "result": "PASS",
+      "passed": 554,
+      "files": 25,
+      "durationMs": 43820,
+      "attribution": "coordinator",
+      "limit": "isolated full UI rerun without source/timeout changes; prior concurrent run failed 4 tests"
+    },
+    {
+      "command": "pnpm test:report-integration",
+      "result": "PASS",
+      "checkGroups": 19,
+      "confirmedReportPages": 121,
+      "durationMs": 12987,
+      "browserVersion": "147.0.7727.15",
+      "browserErrors": 0,
+      "externalBrowserRequests": 0,
+      "llmCalls": 0,
+      "mockedHttp": false,
+      "syntheticDataset": true,
+      "actualTrivy": false,
+      "cleanup": "PASS: browser closed, API exit0, listeners closed, temporary SQLite/cache removed",
+      "attribution": "coordinator"
+    },
+    {
+      "command": "pnpm lint && pnpm typecheck",
+      "result": "PASS",
+      "attribution": "coordinator",
+      "note": "Final host-only mount correction subsequently passed scoped ESLint; API typecheck separately passed by scanner agent"
+    },
+    {
+      "command": "git diff --check",
+      "result": "PASS",
+      "attribution": "coordinator",
+      "limit": "tracked unstaged diff; no staging"
+    }
+  ],
+  "disclosedIntermediateFailures": [
+    "First full UI run concurrent with host/API suites: 550 passed, 4 failed across 3 files. Separate unchanged-source run: 554 passed. Cause not established; contention is a hypothesis, not a verified fix.",
+    "Expanded report browser test first failed a new exact text locator at its original 7s assertion timeout. Locator corrected to actual full text; full 121-page rerun then passed without extending timeout.",
+    "Initial new worker tests expected pending() to be numeric zero instead of an empty array; only fixture assertions corrected, no production changes.",
+    "Independent source review rejected first runtime-profile hardening because exact mounts were checked too late; corrected and independently re-reviewed ACCEPT for that scoped source boundary."
+  ],
+  "localStand": {
+    "origin": "http://127.0.0.1:8080",
+    "services": { "api": "running", "worker": "running", "web": "running", "egress": "running", "scan-volume-init": "exited", "auth-volume-init": "exited" },
+    "webHttpStatus": 200,
+    "scheduleLoaded": true,
+    "scheduleLabel": "io.diplom.local-full.cve-refresh",
+    "lastScheduleReceipt": {
+      "startedAt": "2026-10-16T11:36:07.117Z",
+      "finishedAt": "2026-10-16T11:36:12.831Z",
+      "outcome": "unchanged",
+      "attribution": "previous run displayed by fresh status command, NOT executed in this continuation"
+    },
+    "refreshRunInThisContinuation": false,
+    "dockerLifecycleInThisContinuation": false,
+    "recoveryInThisContinuation": false,
+    "oldEnvironmentTouched": false,
+    "freshActualScannerE2e": false
+  },
+  "reviewDraftsNotPosted": [
+    {
+      "task": "DIP-TASK-2",
+      "criteriaSource": "local docs; current tracker AC unavailable",
+      "body": "[review] PASS (synthetic only): six new adapter/parser→SQLite/reopen and cancellation regressions cover positive sanitized Secrets, truncated/nonzero output, raw-canary absence in temporary DB/WAL/SHM, late successful completion and cancellation between checks. Full API645/645 PASS. BLOCKED: actual positive Trivy detection, all-sink/retention/security qualification and original partial-preservation contract are not established. Current atomic-only behavior is characterized, not accepted as a waiver. No done or spec-impact declaration."
+    },
+    {
+      "task": "DIP-TASK-39",
+      "criteriaSource": "local DOC10 drafts; current tracker AC and source39 delta history unavailable",
+      "body": "[review] PASS (saved-report scope): current real ephemeral Nest/auth/SQLite/browser integration confirms121 pages/19 groups, including zero-match totals/reset, Secrets line0 known and null-last sorts; cleanup PASS, no browser errors/external requests/LLM calls. Full UI554/554 passed on separate rerun; initial concurrent run had4 failures, cause unresolved. BLOCKED: live DOC10/source39/source41 reconciliation and actual AC reread. No whole-product or manual-SR acceptance."
+    },
+    {
+      "task": "DIP-TASK-40",
+      "criteriaSource": "local historical addendum and newly inspected public predecessor evidence, NOT full packet331",
+      "body": "[review] PASS (offline byte audit only): retained R10 runner and two predecessor packets match locally recorded hashes. Earlier85-path Stage2 map has55 unchanged/30 changed/0 missing current paths; this is NOT post-R10 drift. BLOCKED: sanitized packet331, complete reviews330/332 and original244-path R10 source map/historical changed bytes are unavailable in inspected public roots. No rerun/repin, no R10 equivalence or task closure. See docs/scanner-source-audit-20261016.md."
+    },
+    {
+      "task": "DIP-TASK-41",
+      "criteriaSource": "local report-view-task-41.spec.md; current tracker AC/deltas unavailable",
+      "body": "[review] PASS (synthetic saved-report HTTP/UI scope):121 confirmed pages/19 groups with server-global filters/sort/reset and owner-auth boundaries, no HTTP mock, browser errors or external/provider calls. New zero-match and line0/null-last regressions passed. BLOCKED: live DOC10 reread, source39/source41 dedup/rebase, validate/propose/apply required full spec and final AC verification. Local draft SHA2565f183975…ec8a unchanged, not applied. No no-spec-impact shortcut and no done."
+    }
+  ],
+  "ownerDecision": {
+    "topic": "Cancellation partial-result preservation",
+    "question": "Сохраняем ли требование ТЗ о частичных результатах при отмене?",
+    "selectedOption": null,
+    "ifRetained": "Separately approved durable sanitized per-check checkpoints and atomic cancel snapshot, with owner/attempt/lease/restart/evidence/redaction tests; design in scanner-source-audit-20261016.md",
+    "ifNarrowed": "Explicit product decision, current applied-history reconciliation and task-sourced full spec/TZ delta before any closure",
+    "rawPartialPublicationAllowed": false
+  },
+  "remainingExternalGates": [
+    "Restore Flownix MCP; reread policy, actual task AC/comments/parents/components and deltas before any remote write",
+    "Obtain public historical R10 packet/reviews/source map through restored MCP or owner-provided sanitized export",
+    "Human VoiceOver/native-select/touch checks and agreed device/FPS thresholds",
+    "Isolated Linux Engine API1.47/controller/enrollment qualification",
+    "Separately authorized native history/provider/ingress acceptance; historical history STOP remains",
+    "Owner decision on cancellation contract"
+  ]
+}

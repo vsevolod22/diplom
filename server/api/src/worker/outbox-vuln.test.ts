@@ -22,7 +22,7 @@ const noSecret = async (): Promise<never> => { throw Error('secret called'); };
 const noSbom = async (): Promise<never> => { throw Error('sbom called'); };
 async function fixture(run: (db: ScanLedger, id: string) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-vuln-'));
-  const db = new ScanLedger(join(dir, 'ledger.sqlite'));
+  const db = new ScanLedger(join(dir, 'ledger.sqlite'), () => 1000);
   try {
     const id = db.enqueue({ subject: 'alice', idempotencyKey: 'vuln', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest, platform: 'linux/amd64', checks: '["vuln"]', scope: 'image' }).scanId;

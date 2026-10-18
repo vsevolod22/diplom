@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Header, HttpCode, HttpException, Inject, Param, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, HttpException, Inject, Optional, Param, Post, Query, Req, Res } from '@nestjs/common';
 import type { ServerResponse } from 'node:http';
 import { AuthStore } from '../auth/auth.store.js';
-import { browserIdentity, type BrowserRequest } from '../llm/browser-identity.js';
+import { browserIdentity, BROWSER_SCAN_LOCAL_ORIGIN, type BrowserRequest, type BrowserScanLocalOrigin } from '../llm/browser-identity.js';
 import { ScansService } from './scans.service.js';
 import type { Identity } from '../security/identity.js';
 import { ImageSearchSessions } from './image-search.js';
@@ -12,12 +12,13 @@ import { ImageSearchSessions } from './image-search.js';
 @Controller('api/v1/browser/scans')
 export class BrowserScansController {
   private readonly imageSearch: ImageSearchSessions;
-  constructor(@Inject(AuthStore) private readonly store: AuthStore, @Inject(ScansService) private readonly scans: ScansService) {
+  constructor(@Inject(AuthStore) private readonly store: AuthStore, @Inject(ScansService) private readonly scans: ScansService,
+    @Optional() @Inject(BROWSER_SCAN_LOCAL_ORIGIN) private readonly localOrigin: BrowserScanLocalOrigin = 'http://127.0.0.1:8080') {
     this.imageSearch = new ImageSearchSessions(undefined, undefined, item => this.scans.imageSuggestion(item));
   }
 
   private identity(req: BrowserRequest, mutation = false): Identity {
-    return browserIdentity(this.store, req, mutation);
+    return browserIdentity(this.store, req, mutation, this.localOrigin);
   }
 
   @Get('images')

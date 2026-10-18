@@ -1,0 +1,49 @@
+{
+  "recordedAt": "2026-10-16T21:51:56.715Z",
+  "candidateInvestigations": 1,
+  "metadataRequests": 3,
+  "compressedEnvelopeFits": true,
+  "allCapsVerified": false,
+  "acquisitionAttempts": 0,
+  "nativeScannerAttempts": 0,
+  "stoppedFor": [
+    "exact-nginx-only-receipt",
+    "truthful-EOL-and-npm-outcome-contract",
+    "inflated-and-other-byte-caps-unverified"
+  ],
+  "compatibility": {
+    "callsUpdated": 2,
+    "onlyChangeAgainstHistoricalRunner": true,
+    "historicalRunnerHash": "375a7633c624540792752fe44b31504fc9c7710aaa30ba7759b901657fc8d5bb",
+    "currentRunnerHash": "7e331d90d1f8b14df23a5781e62da1a81686b68e9e351fc7af9dd099dba66243",
+    "historicalProofRerun": false
+  },
+  "tests": {
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "durationMs": 459.502958,
+    "tempLedgerOnly": true
+  },
+  "historicalEvidencePreserved": [
+    "server/deploy/proof/task2-qualification-results.json",
+    "server/deploy/proof/task2-npm-remote-candidate.json",
+    "server/deploy/proof/task2-small-node-metadata.json",
+    "server/deploy/proof/task2-small-node-tests.tap"
+  ],
+  "hashesSampledAfterTests": {
+    "scripts/task2-qualification-run.ts": "7e331d90d1f8b14df23a5781e62da1a81686b68e9e351fc7af9dd099dba66243",
+    "scripts/task2-qualification-node12-metadata.mjs": "d387dbbfc9be25681a46d0e22c63b56e4cdc27c3961dc665aed843523b7399ed",
+    "scripts/task2-qualification-node12.test.ts": "fc7642a435ce61b11e945e54fc10946458e8f483ecd690e9e74c30a2bf188be0",
+    "server/deploy/proof/task2-node12-metadata.json": "88bf88a5f78878980b3fe600c893c9bb7fd66a88f62a14c1eb4c784b7e6e16e6",
+    "server/deploy/proof/task2-node12-tests.tap": "4341616943fa351727e191ac3d5f488e859588db2d7a769ed1a1950c62853944",
+    "server/api/src/oci/layer-tar-validator.ts": "4c7fe95da18edfd2d1d7081de0a69fcf97a00494e478a494c25e585ef3954170",
+    "server/api/src/oci/archive-budget.ts": "7af4a8466173d027aaf02d8b8f8e22c4df40c7091611945da244ac0201a5ceed",
+    "server/api/src/oci/bounded-image-archive.ts": "19a9fc5a525fcc4a1988cc791146b06177cf31df813dae07cf57192f61f681d1",
+    "server/api/src/oci/archive-identity.ts": "380d3542bd6d772b657c93fe80345cc50c009ca206070a0b5555319797f295f0",
+    "server/api/src/worker/archive-scan-worker.ts": "d33bb619c963aa9adab68f5734f9ca1a5ad7717bec0ce5b28065fa302959ef17",
+    "server/api/src/worker/archive-result-contract.ts": "50b52e2cbdb6f1b14298dc8e6b8c62832ca65403e990da07e12cb587bcba3886",
+    "server/api/src/worker/vuln-findings.ts": "af7b14fc11f3974bd133b09aea1a314f27b9f82c1852a16e96a96824407fc968",
+    "server/api/src/ledger/ledger.ts": "e5d30ab9a40964908e53a7c8fa375993198714ad1f7393146ad9887fb68bf858"
+  }
+}

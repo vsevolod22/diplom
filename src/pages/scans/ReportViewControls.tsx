@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { REPORT_ECOSYSTEMS, reportEcosystem } from '@/shared/api/scans/publicImageProfile';
 import type { ReactNode } from 'react';
 import { REPORT_LIMITS, REPORT_RULE_ID_PATTERN, REPORT_SEVERITIES } from '@/shared/api/scans/reportView';
 import type { ReportLimit, SbomReportQuery, SecretReportQuery, VulnReportQuery } from '@/shared/api/scans/reportView';
@@ -46,11 +47,11 @@ function Controls({ label, limit, sort, sorts, disabled, onLimit, onSort, childr
 export function UnsupportedReportControls() {
   return <p className="scan-a1__muted">Демо: размер страницы, глобальные фильтры и сортировка report-v1 не поддерживаются. Показаны исходные демонстрационные данные.</p>;
 }
-export function VulnReportControls({ query, onChange, disabled }: { query: VulnReportQuery; onChange: (query: VulnReportQuery) => void; disabled: boolean }) {
+export function VulnReportControls({ query, onChange, disabled, label = 'CVE' }: { query: VulnReportQuery; onChange: (query: VulnReportQuery) => void; disabled: boolean; label?: string }) {
   const selected = query.severity?.join(',') ?? '';
-  return <Controls label="CVE" limit={query.limit ?? 25} sort={query.sort ?? 'severity:desc'} sorts={['severity:desc', 'severity:asc']} disabled={disabled}
+  return <Controls label={label} limit={query.limit ?? 25} sort={query.sort ?? 'severity:desc'} sorts={['severity:desc', 'severity:asc']} disabled={disabled}
     onLimit={limit => onChange({ ...query, limit })} onSort={sort => onChange({ ...query, sort: sort as VulnReportQuery['sort'] })}>
-    <label>Уровень опасности (severity) · CVE
+    <label>Уровень опасности (severity) · {label}
       <select value={selected} onChange={event => onChange({ ...query, severity: event.target.value ? REPORT_SEVERITIES.filter(item => event.target.value.split(',').includes(item)) : null })}>
         <option value="">Все уровни опасности</option>
         <option value="HIGH,CRITICAL">Высокие и критические (HIGH + CRITICAL)</option>
@@ -66,13 +67,13 @@ export function SbomReportControls({ query, onChange, disabled }: { query: SbomR
   return <Controls label="SBOM" limit={query.limit ?? 25} sort={query.sort ?? 'name:asc'} sorts={['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc']} disabled={disabled}
     onLimit={limit => onChange({ ...query, limit })} onSort={sort => onChange({ ...query, sort: sort as SbomReportQuery['sort'] })}>
     <label>Экосистема · SBOM
-      <select value={query.ecosystem ?? ''} onChange={event => onChange({ ...query, ecosystem: event.target.value === 'apk' || event.target.value === 'npm' ? event.target.value : null })}>
-        <option value="">Все экосистемы</option><option value="apk">apk</option><option value="npm">npm</option>
+      <select value={query.ecosystem ?? ''} onChange={event => onChange({ ...query, ecosystem: reportEcosystem.safeParse(event.target.value).data ?? null })}>
+        <option value="">Все экосистемы</option>{REPORT_ECOSYSTEMS.map(ecosystem => <option key={ecosystem} value={ecosystem}>{ecosystem}</option>)}
       </select>
     </label>
     <form onSubmit={event => { event.preventDefault(); onChange({ ...query, name: name || null }); }}>
       <label>Имя пакета · SBOM
-        <input value={name} maxLength={128} pattern={'[A-Za-z0-9@._+\\/\\-]{1,128}'} onChange={event => setName(event.target.value)} placeholder="Например, openssl" />
+        <input value={name} maxLength={128} pattern={'[A-Za-z0-9@._+:\\/\\-]{1,128}'} onChange={event => setName(event.target.value)} placeholder="Например, openssl" />
       </label>
       <button type="submit">Применить имя · SBOM</button>
       <button type="button" onClick={() => { setName(''); onChange({ ...query, name: null }); }}>Сбросить имя · SBOM</button>

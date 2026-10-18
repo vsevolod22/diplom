@@ -1,0 +1,152 @@
+// One exact acquisition + one isolated native vulnerability scan. No production receipt.
+import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { docker, publicField, IMAGE, CONTEXT } from './task2-qualification-native.mjs';
+import { PIN, requireSafe, hash } from './task2-qualification-node12-acquire.ts';
+import { ARCHIVE_LIMITS as L } from '../server/api/src/oci/layer-tar-validator.ts';
+import { preflightVulnDbBundle } from '../server/api/src/worker/vuln-db-bundle.ts';
+import { CURRENT_DB_POLICY } from '../server/api/src/worker/cve-db-policy.mjs';
+import { normalizeAdvisory } from '../server/api/src/worker/vuln-advisory.ts';
+
+const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
+const output = join(root, 'server/deploy/proof/task2-node12-native-results.json');
+requireSafe(!existsSync(output), 'native-successor-exists-no-rerun');
+const id = randomUUID();
+const prefix = 'task2-qualification-' + id;
+const names = { gateway: prefix + '-gateway', acquire: prefix + '-acquire', scanner: prefix + '-scanner' };
+const nets = { internal: prefix + '-internal', uplink: prefix + '-uplink' };
+const evidence: any = { startedAt: new Date().toISOString(), scope: 'standalone remote-origin native observation only; NOT production chain acceptance',
+  exactTarget: PIN, success: false, acquisitionAttempts: 0, nativeScanAttempts: 0, networks: [], containers: [], checks: [],
+  noIdentityProjection: true, productionReceiptCreated: false, rawReportPersisted: false, configEnvPersistedOutsideMemory: false };
+const sourcePaths = ['scripts/task2-qualification-node12-acquire.ts', 'scripts/task2-qualification-node12-native.ts',
+  'scripts/task2-qualification-native.mjs', 'server/api/src/oci/gateway-transport.ts', 'server/api/src/oci/registry-resolver.ts',
+  'server/api/src/oci/bounded-image-archive.ts', 'server/api/src/oci/nginx-candidate.ts', 'server/api/src/oci/layer-tar-validator.ts',
+  'server/api/src/oci/archive-budget.ts', 'server/deploy/gateway/proxy.py', 'server/api/src/worker/vuln-advisory.ts',
+  'server/api/src/worker/vuln-db-bundle.ts', 'server/api/src/worker/cve-db-policy.mjs'];
+const hashes = () => Object.fromEntries(sourcePaths.map(p => [p, hash(readFileSync(join(root, p)))]));
+evidence.sourcesBefore = hashes();
+const createdContainers: string[] = [], createdNets: string[] = [];
+let staging: string | undefined;
+let phase = 'public-fields';
+const safeDocker = (args: string[], timeout = 10000, max = 8_000_000) => {
+  const r = docker(args, timeout, max);
+  requireSafe(!r.error && r.signal === null && r.status === 0, 'docker-operation-failed');
+  return r.stdout.trim();
+};
+const baseArgs = (name: string, image: string, memory = '1g', cpu = '1') => ['create', '--name', name,
+  '--label', 'dip.task2.node12-native=true', '--pull', 'never', '--read-only', '--cap-drop', 'ALL',
+  '--security-opt', 'no-new-privileges:true', '--user', '65532:65532', '--pids-limit', '64',
+  '--cpus', cpu, '--memory', memory, '--memory-swap', memory, '--log-driver', 'none'];
+function createContainer(args: string[], name: string, expectedImage: string, expectedNetwork: string, binds: number) {
+  createdContainers.push(name); // Even a timed-out create may have created our name.
+  safeDocker(args);
+  const g = JSON.parse(publicField(['inspect', '--format', '{"image":{{json .Image}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"network":{{json .HostConfig.NetworkMode}},"privileged":{{json .HostConfig.Privileged}},"caps":{{json .HostConfig.CapDrop}},"security":{{json .HostConfig.SecurityOpt}},"user":{{json .Config.User}},"memory":{{json .HostConfig.Memory}},"swap":{{json .HostConfig.MemorySwap}},"cpu":{{json .HostConfig.NanoCpus}},"pids":{{json .HostConfig.PidsLimit}},"log":{{json .HostConfig.LogConfig.Type}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}', name]));
+  requireSafe(g.image === expectedImage && g.readonly && !g.privileged && g.network === expectedNetwork &&
+    g.user === '65532:65532' && g.caps.includes('ALL') && g.security.includes('no-new-privileges:true') &&
+    g.memory > 0 && g.memory <= 1024 ** 3 && g.swap === g.memory && g.cpu > 0 && g.cpu <= 1_000_000_000 &&
+    g.pids === 64 && g.log === 'none' && g.mounts.filter((m: any) => m.Type === 'bind').length === binds &&
+    g.mounts.filter((m: any) => m.Type === 'bind').every((m: any) => !m.RW), 'container-guard');
+  evidence.containers.push({ name, image: g.image, readonly: g.readonly, network: g.network, privileged: false,
+    capDrop: ['ALL'], noNewPrivileges: true, user: g.user, memoryBytes: g.memory, memorySwapBytes: g.swap,
+    nanoCpus: g.cpu, pids: g.pids, logDriver: g.log, readOnlyBinds: binds, tmpfs: g.tmpfs });
+}
+try {
+  // Narrow public identity/mount fields only, no running process or Env inspection.
+  const workerImage = publicField(['inspect', '--format', '{{.Image}}', 'dip-local-full-worker-1']);
+  const gatewayImage = publicField(['inspect', '--format', '{{.Image}}', 'dip-local-full-egress-1']);
+  requireSafe(/^sha256:[a-f0-9]{64}$/.test(workerImage) && /^sha256:[a-f0-9]{64}$/.test(gatewayImage), 'image-identities');
+  const release = publicField(['inspect', '--format', '{{range .Mounts}}{{if and (eq .Destination "/opt/release") (not .RW)}}{{.Source}}{{end}}{{end}}', 'dip-local-full-worker-1']);
+  const dbDir = publicField(['inspect', '--format', '{{range .Mounts}}{{if and (eq .Destination "/tmp/trivy/db") (not .RW)}}{{.Source}}{{end}}{{end}}', 'dip-local-full-worker-1']);
+  const publicKey = publicField(['inspect', '--format', '{{range .Mounts}}{{if and (eq .Destination "/opt/local-db-trust/public.pem") (not .RW)}}{{.Source}}{{end}}{{end}}', 'dip-local-full-worker-1']);
+  requireSafe(release.startsWith(root + '/.local-stand/db-releases/') && /^[a-f0-9]{64}$/.test(release.slice(release.lastIndexOf('/') + 1)) &&
+    dbDir === join(release, 'db') && publicKey === join(root, '.local-stand/trust/db-signing-key.pub.pem'), 'public-db-locations');
+  const descriptor = JSON.parse(readFileSync(join(release, 'descriptor.json'), 'utf8'));
+  const dbOptions = { directory: release, trustedPublicKeyPem: readFileSync(publicKey, 'utf8'), expectedSigner: 'local-db-operator-v1',
+    expectedSource: descriptor.source, expectedSchemaVersion: 2, expectedArtifactSha256: descriptor.artifactSha256,
+    expectedManifestDigest: descriptor.manifestDigest, policy: CURRENT_DB_POLICY };
+  phase = 'public-db-preflight';
+  const verifiedDb = await preflightVulnDbBundle(dbOptions);
+  evidence.db = verifiedDb.identity;
+  evidence.dbTrustScope = 'current LOCAL public key and read-only DB; not production/publisher trust';
+  staging = mkdtempSync(join(tmpdir(), 'task2-qualification-node12-source-')); chmodSync(staging, 0o755);
+  for (const dir of ['scripts', 'server/api/src/oci']) mkdirSync(join(staging, dir), { recursive: true, mode: 0o755 });
+  writeFileSync(join(staging, 'package.json'), '{"type":"module"}\n', { mode: 0o444 });
+  for (const p of sourcePaths.filter(p => p.startsWith('server/api/src/oci/') || p === 'scripts/task2-qualification-node12-acquire.ts')) {
+    copyFileSync(join(root, p), join(staging, p)); chmodSync(join(staging, p), 0o444);
+  }
+  copyFileSync(join(root, 'server/deploy/gateway/proxy.py'), join(staging, 'proxy.py')); chmodSync(join(staging, 'proxy.py'), 0o444);
+  phase = 'own-networks';
+  for (const [key, network] of Object.entries(nets)) {
+    createdNets.push(network);
+    safeDocker(['network', 'create', '--label', 'dip.task2.node12-native=true', ...(key === 'internal' ? ['--internal'] : []), network]);
+    const internal = publicField(['network', 'inspect', '--format', '{{.Internal}}', network]);
+    requireSafe(internal === String(key === 'internal'), 'network-guard');
+    evidence.networks.push({ name: network, internal: key === 'internal' });
+  }
+  phase = 'own-gateway';
+  createContainer([...baseArgs(names.gateway, gatewayImage, '256m', '0.25'), '--network', nets.uplink,
+    '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=4m,mode=1777', '--mount', `type=bind,src=${join(staging, 'proxy.py')},dst=/opt/gateway/proxy.py,readonly`,
+    '--entrypoint', 'python', gatewayImage, '-I', '-c', 'import signal,runpy; signal.alarm(300); runpy.run_path("/opt/gateway/proxy.py",run_name="__main__")'],
+    names.gateway, gatewayImage, nets.uplink, 1);
+  safeDocker(['network', 'connect', '--alias', 'task2-gateway', nets.internal, names.gateway]);
+  safeDocker(['start', names.gateway]);
+  phase = 'exact-acquisition';
+  createContainer([...baseArgs(names.acquire, workerImage), '--network', nets.internal,
+    '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777',
+    '--tmpfs', '/work:rw,noexec,nosuid,nodev,size=432m,uid=65532,gid=65532,mode=0700',
+    '--mount', `type=bind,src=${staging},dst=/qualification,readonly`, '--workdir', '/app/server/api',
+    '--env', 'TSX_DISABLE_CACHE=1', '--env', 'UV_THREADPOOL_SIZE=1',
+    '--entrypoint', 'node', workerImage, '-e', 'setTimeout(()=>{},300000)'], names.acquire, workerImage, nets.internal, 1);
+  safeDocker(['start', names.acquire]);
+  evidence.acquisitionAttempts = 1;
+  const acquired = docker(['exec', names.acquire, 'node', '--max-old-space-size=512', '--import', 'tsx', '/qualification/scripts/task2-qualification-node12-acquire.ts'], 200000, 32768);
+  requireSafe(!acquired.error && acquired.signal === null, 'acquisition-deadline');
+  const acquisitionResult = JSON.parse(acquired.stdout);
+  evidence.acquisition = acquisitionResult;
+  requireSafe(acquired.status === 0 && acquisitionResult.ok, 'exact-acquisition-rejected');
+  const a = acquisitionResult.acquisition;
+  requireSafe(a.manifestDigest === PIN.digest && a.configDigest === PIN.configDigest && a.archiveBytes <= L.archiveBytes, 'acquisition-summary');
+  const workMiB = Math.ceil(a.archiveBytes / 1024 ** 2) + 1;
+  // While transferring, both archives exist. Bound the aggregate data scratch too.
+  requireSafe((2 * workMiB + 128 + 16 + 16 + 4) * 1024 ** 2 <= L.scratchBytes, 'combined-scratch-reservation');
+  evidence.combinedScratchReservationBytes = (2 * workMiB + 128 + 16 + 16 + 4) * 1024 ** 2;
+  phase = 'offline-scanner-create';
+  createContainer([...baseArgs(names.scanner, IMAGE), '--network', 'none',
+    '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777',
+    '--tmpfs', `/work:rw,noexec,nosuid,nodev,size=${workMiB}m,uid=65532,gid=65532,mode=0700`,
+    '--tmpfs', '/tmp/cache:rw,noexec,nosuid,nodev,size=128m,uid=65532,gid=65532',
+    '--mount', `type=bind,src=${dbDir},dst=/tmp/cache/db,readonly`, '--entrypoint', '/bin/sh', IMAGE, '-c', 'sleep 180'],
+    names.scanner, IMAGE, 'none', 1);
+  safeDocker(['start', names.scanner]);
+  const version = safeDocker(['exec', names.scanner, '/usr/local/bin/trivy', '--version'], 10000, 4096);
+  requireSafe(version === 'Version: 0.69.3', 'native-version'); evidence.scannerVersion = '0.69.3';
+  phase = 'memory-only-archive-transfer';
+  const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
+  const source = spawn('docker', ['--context', CONTEXT, 'exec', names.acquire, 'cat', '/work/image.tar'], { env: childEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+  const destination = spawn('docker', ['--context', CONTEXT, 'exec', '-i', names.scanner, '/bin/sh', '-c', 'cat > /work/image.tar && chmod 444 /work/image.tar'], { env: childEnv, stdio: ['pipe', 'ignore', 'ignore'] });
+  let transferBytes = 0; const transferHash = createHash('sha256');
+  const streamBound = new Transform({ transform(chunk, _encoding, cb) {
+    transferBytes += chunk.length;
+    if (transferBytes > a.archiveBytes) cb(new Error('archive-transfer-bound'));
+    else { transferHash.update(chunk); cb(null, chunk); }
+  } });
+  const exit = (child: typeof source) => new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code)); });
+  const sourceExit = exit(source), destinationExit = exit(destination);
+  const killTimer = setTimeout(() => { source.kill('SIGKILL'); destination.kill('SIGKILL'); }, 30000);
+  try {
+    await pipeline(source.stdout!, streamBound, destination.stdin!);
+    requireSafe(await sourceExit === 0 && await destinationExit === 0 && transferBytes === a.archiveBytes &&
+      'sha256:' + transferHash.digest('hex') === a.archiveSha256, 'archive-transfer-hash');
+  } finally { clearTimeout(killTimer); if (source.exitCode === null) source.kill('SIGKILL'); if (destination.exitCode === null) destination.kill('SIGKILL'); }
+  const storedHash = safeDocker(['exec', names.scanner, 'sha256sum', '/work/image.tar'], 10000, 4096).split(/\s/)[0];
+  requireSafe('sha256:' + storedHash === a.archiveSha256, 'scanner-archive-hash');
+  evidence.checks.push('verified-exact-remote-manifest-config-layers-diffids', 'tmpfs-only-original-config-no-identity-projection', 'bounded-memory-stream-archive-transfer');
+  // Remove all acquisition-side data/network processes before native scanning.
+  safeDocker(['rm', '--force', names.acquire]); safeDocker(['rm', '--force', names.gateway]);
+  phase = 'native-vulnerability

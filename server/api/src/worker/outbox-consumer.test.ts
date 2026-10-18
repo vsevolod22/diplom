@@ -20,7 +20,7 @@ test('consumer claims persisted digest only; unsupported coverage fails closed',
       assert.equal(job.platform, 'linux/amd64');
       assert.equal(job.registry, 'registry.example.com');
       return { ok: true, findings: [], scannerVersion: '0.69.3' };
-    }, 1000), true);
+    }), true);
     assert.equal(ledger.state(scanId, 'alice'), 'failed');
     assert.equal(await consumeOne(ledger, { timeoutMs: 1000, dbDir: '/db' }, async () => {
       throw Error('should not run');

@@ -20,3 +20,6 @@ test-results/
 # Temporary patch-generation inputs; published historical evidence stays versioned.
 /docs/task16-r4-baseline.json
 /docs/task16-r5-baseline.json
+
+# Private credentials and operation receipts for the isolated public-image stand.
+.local-public-images/

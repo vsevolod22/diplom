@@ -7,7 +7,8 @@ const disappeared = (error: unknown): boolean => !!error && typeof error === 'ob
 
 // Never follow scanner-created links. Only our exact cache/db RO link is exempt.
 export async function auditArchiveScratch(directory: string, dbTarget?: string,
-  filesystem: typeof scratchFilesystem = scratchFilesystem): Promise<number> {
+  filesystem: typeof scratchFilesystem = scratchFilesystem,
+    limits: Readonly<{ scratchBytes: number; entries: number }> = ARCHIVE_LIMITS): Promise<number> {
   let entries = 0, bytes = 0;
   const fail = (): never => { throw new Error('Invalid archive scratch'); };
   const walk = async (path: string, depth: number): Promise<void> => {
@@ -24,7 +25,7 @@ export async function auditArchiveScratch(directory: string, dbTarget?: string,
       throw error;
     }
     for (const entry of children) {
-      if (++entries > 50_000) fail();
+      if (++entries > limits.entries) fail();
       const child = `${path}/${entry.name}`;
       if (entry.isSymbolicLink() && (!dbTarget || child !== `${directory}/cache/db`)) fail();
       let info;
@@ -37,7 +38,7 @@ export async function auditArchiveScratch(directory: string, dbTarget?: string,
       } else if (info.isDirectory()) await walk(child, depth + 1);
       else if (info.isFile()) {
         bytes += info.size;
-        if (!Number.isSafeInteger(bytes) || bytes > ARCHIVE_LIMITS.scratchBytes) fail();
+        if (!Number.isSafeInteger(bytes) || bytes > limits.scratchBytes) fail();
       } else fail();
     }
     try {

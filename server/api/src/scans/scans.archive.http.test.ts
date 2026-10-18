@@ -52,7 +52,7 @@ test('real browser HTTP failed/partial archive SBOM roundtrips through the actua
           scannerVersion: '0.69.3', checkedAt: Date.now(), metrics: { wireBytes: 100, requests: 5, compressedBytes: 50,
             expandedBytes: 2048, entries: 1, archiveBytes: 4096, reservationPeak: 4096, scratchPeak: 4096 },
           ...(partial ? { secret: { outcome: 'checked' as const, findings: [] } } : {}), sbom: { outcome: 'failed', reason } };
-        assert.equal(ledger.finishArchive(id, job.attempts, report), true);
+        assert.equal(ledger.finishArchive(id, job.attempts, report, undefined, job.leaseToken), true);
         const path = `${base}/browser/scans/${id}`;
         const status = parseCurrentStatus(await (await fetch(path, { headers: { cookie: owner.cookie } })).json());
         assert.equal(status.state, partial ? 'partial' : 'failed');
@@ -90,7 +90,7 @@ test('real browser HTTP failed/partial archive SBOM roundtrips through the actua
         scannerVersion: '0.69.3', checkedAt: Date.now(), metrics: { wireBytes: 100, requests: 5, compressedBytes: 50, expandedBytes: 2048, entries: 1, archiveBytes: 4096, reservationPeak: 4096, scratchPeak: 4096 },
         secret: secretChecked ? { outcome: 'checked', findings: [] } : { outcome: 'failed', reason: 'SCAN_FAILED' },
         vuln: { outcome: 'checked', findings: [finding], db, os: { outcome: 'checked' }, node: { outcome: 'unsupported', reason: 'NODE_INVENTORY_ABSENT' } } };
-      assert.equal(ledger.finishArchive(id, job.attempts, report), true);
+      assert.equal(ledger.finishArchive(id, job.attempts, report, undefined, job.leaseToken), true);
       const path = `${base}/browser/scans/${id}`;
       const get = (suffix: string) => fetch(path + suffix, { headers: { cookie: owner.cookie } });
       const snapshot = parseCurrentStatus(await (await get('')).json());

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { reportEcosystem, reportSeveritySource } from './publicImageProfile';
 import { advisorySeverity, advisorySource, serializedBytes, utf8Bytes } from './vulnAdvisory';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -53,11 +54,11 @@ const vulnBase = {
   findingId: z.string().regex(/^vuln-[a-f0-9]{64}$/),
   severity: advisorySeverity,
   cveId: z.string().regex(/^CVE-\d{4}-\d{4,12}$/),
-  ecosystem: z.enum(['apk', 'npm']),
+  ecosystem: reportEcosystem,
   severitySources: z
-    .array(advisorySource)
+    .array(reportSeveritySource)
     .min(1)
-    .max(22)
+    .max(32)
     .refine((v) => new Set(v).size === v.length),
   provenanceRef: z.string().regex(/^target-[a-f0-9]{64}$/),
   fixedVersionReported: z.boolean(),

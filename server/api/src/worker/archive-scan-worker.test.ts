@@ -9,6 +9,7 @@ import { scanNginxArchive } from './archive-scan-worker.js';
 import { auditArchiveScratch } from './archive-scratch.js';
 import type { VulnScanOptions } from './vuln-worker.js';
 import { CURRENT_DB_POLICY } from './cve-db-policy.mjs';
+import { consumeOne } from './outbox-consumer.js';
 
 const target = NGINX_SUPPORTED_CANDIDATE;
 const diffId = `sha256:${'b'.repeat(64)}`;
@@ -53,10 +54,51 @@ function persist(ledger: ScanLedger, checks: string[], report: Awaited<ReturnTyp
   const id = ledger.enqueue({ ...target, digest: target.digest as `sha256:${string}`, subject: 'alice',
     idempotencyKey: randomUUID(), checks: JSON.stringify(checks), scope: 'image' }).scanId;
   const job = ledger.claim()!;
-  assert.equal(ledger.finishArchive(id, job.attempts, report), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, report, undefined, job.leaseToken), true);
   assert.deepEqual(ledger.archiveResult(id, 'alice'), report);
   return ledger.state(id, 'alice');
 }
+
+test('archive consumer checkpoints audited positive Secrets before blocked CVE; cancel/reopen never publishes late output', { timeout: 5000 }, async () => fixture(async (directory, ledger) => {
+  const id = ledger.enqueue({ ...target, digest: target.digest as `sha256:${string}`, subject: 'alice', idempotencyKey: 'cancel',
+    checks: '["secret","vuln","config"]' }).scanId;
+  let ready!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { ready = resolve; });
+  const late = new Promise<void>(resolve => { release = resolve; });
+  const deps = lifecycle(directory, async check => {
+    if (check === 'secret') return { ...raw(), Results: [{ Target: '/PRIVATE_PATH_CANARY', Secrets: [{ RuleID: 'PRIVATE_RULE_CANARY',
+      Match: 'PRIVATE_MATCH_CANARY', StartLine: 3, Code: { Lines: [{ Content: 'PRIVATE_CODE_CANARY' }] } }] }] };
+    ready(); await late;
+    return { ...raw(), Results: [{ Class: 'os-pkgs', Type: 'alpine', Target: 'alpine', Packages: [{ Name: 'busybox', Version: '1' }] }] };
+  });
+  let archiveWork: ReturnType<typeof scanNginxArchive> | undefined;
+  const work = consumeOne(ledger, { timeoutMs: 1000, dbDir: '/unused', archivePolicy: 'proof', vuln: vulnOptions,
+    configLoader: async () => { throw Error('PRIVATE_CONFIG_CANARY'); } }, undefined, Date.now(), undefined, undefined,
+    (checks, options) => { archiveWork = scanNginxArchive(checks, options, deps); return archiveWork; });
+  try {
+    await started;
+    assert.equal(ledger.archiveResult(id, 'alice'), undefined);
+    assert.equal(ledger.cancel(id, 'bob'), 'not_found');
+    assert.equal(ledger.cancel(id, 'alice'), 'cancelled');
+    await work;
+    const saved = ledger.archiveResult(id, 'alice')!;
+    assert.equal(saved.secret?.outcome, 'checked');
+    if (saved.secret?.outcome !== 'checked') throw Error('fixture');
+    assert.equal(saved.secret.findings.length, 1);
+    assert.equal(saved.vuln, undefined);
+    assert.equal(ledger.configResult(id, 'alice')?.config.outcome, 'failed');
+    assert.equal(JSON.stringify([saved, ledger.configResult(id, 'alice')]).includes('PRIVATE_'), false);
+    release(); await assert.rejects(archiveWork!, /Archive interrupted after accepted checkpoint/);
+    assert.deepEqual(ledger.archiveResult(id, 'alice'), saved);
+    const reopened = new ScanLedger(`${directory}/ledger.sqlite`);
+    try {
+      assert.deepEqual(reopened.archiveResult(id, 'alice'), saved);
+      assert.equal(reopened.archiveResult(id, 'bob'), undefined);
+      assert.equal(reopened.state(id, 'alice'), 'cancelled');
+      assert.deepEqual(reopened.events(id, 'alice', null)?.map(e => e.state), ['queued', 'running', 'cancelled']);
+    } finally { reopened.close(); }
+  } finally { release(); await archiveWork?.catch(() => {}); await work; }
+}));
 
 test('empty/omitted/meaningless Secrets without layer inspection fail at runner -> durable ledger', async () => {
   for (const Results of [undefined, [], [{}], [{ Secrets: [] }], [null], [[]], [{ Secrets: 'invalid' }]]) {
@@ -136,7 +178,7 @@ test('v2 archive runner retains overdue3day data, exact policy receipt and indep
   const id = ledger.enqueue({ ...target, digest: target.digest as `sha256:${string}`, subject: 'alice',
     idempotencyKey: randomUUID(), checks: '["sbom","vuln"]', scope: 'image', cvePolicy: CURRENT_DB_POLICY }).scanId;
   const job = ledger.claim()!;
-  assert.equal(ledger.finishArchive(id, job.attempts, report), true);
+  assert.equal(ledger.finishArchive(id, job.attempts, report, undefined, job.leaseToken), true);
   assert.equal(ledger.archiveResult(id, 'alice')?.vuln?.outcome, 'checked');
   assert.equal(ledger.archiveResult(id, 'alice')?.sbom?.outcome, 'checked');
   assert.equal(ledger.archiveResult(id, 'alice')?.checkedAt, report.checkedAt);

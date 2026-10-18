@@ -1,0 +1,38 @@
+{
+  "checkedAt": "2026-10-16T21:17:58.799Z",
+  "candidate": "registry-1.docker.io/library/node:22.14.0-alpine3.21",
+  "scope": "anonymous public index and child-manifest metadata only; NOT npm detection or executed qualification",
+  "success": true,
+  "indexDigest": "sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944",
+  "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+  "configDigest": "sha256:33544e83793ca080b49f5a30fb7dbe8a678765973de6ea301572a0ef53e76333",
+  "platform": "linux/amd64",
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:f18232174bc91741fdf3da96d85011092101a032a93a388b79e99e69c2d5c870",
+      "size": 3642247
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:cb2bde55f71f84688f9eb7197e0f69aa7c4457499bdf39f34989ab16455c3369",
+      "size": 50342238
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:9d0e0719fbe047cc0770ba9ed1cb150a4ee9bc8a55480eeb8a84a736c8037dbc",
+      "size": 1260633
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:6f063dbd7a5db7835273c913fc420b1082dcda3b5972d75d7478b619da284053",
+      "size": 446
+    }
+  ],
+  "compressedBytes": 55245564,
+  "exceedsCurrent32MiBLayerCap": true,
+  "exceedsCurrent96MiBTotalCap": false,
+  "npmPositive": "NOT TESTED; exact package inventory requires separately authorized bounded layer acquisition",
+  "currentPolicy": "ordinary Alpine only; archive identity/receipt/local qualification nginx only",
+  "next": "Do not widen generic repository/platform/guards. Review an exact Node candidate profile and per-candidate resource envelope, or select a smaller npm-bearing fixture. Verify config, layers/diffIDs, tar budgets, OS support, npm inventory/CVEs, then exact admission/receipt binding in a separate change."
+}

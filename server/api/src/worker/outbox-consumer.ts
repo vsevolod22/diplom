@@ -5,13 +5,14 @@ import { scanVulnPinned, type VulnScanOptions, type VulnScanResult } from './vul
 import { scannerFailure } from './scanner-errors.js';
 import { assertArchiveDbFreshness } from './archive-result-contract.js';
 import { LEGACY_DB_POLICY, CURRENT_DB_POLICY, DbPolicyContractError, DbUsabilityError } from './cve-db-policy.mjs';
-import { scanNginxArchive } from './archive-scan-worker.js';
+import { scanNginxArchive, scanPublicImageArchive } from './archive-scan-worker.js';
+import { validPublicTarget } from '../oci/public-image-policy.js';
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 import { runImageConfig } from './image-config-runner.js';
 import type { ConfigLoader } from '../oci/pinned-image-config.js';
 import { exactLocalTarget, localChecksAllowed, validLocalBinding } from '../oci/nginx-local-policy.js';
 
-type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal; configLoader?: ConfigLoader; archivePolicy?: 'local' | 'proof';
+type Options = { timeoutMs: number; dbDir: string; signal?: AbortSignal; configLoader?: ConfigLoader; archivePolicy?: 'local' | 'proof'; publicImagePolicy?: boolean;
   vuln?: Omit<VulnScanOptions, 'timeoutMs' | 'signal'> };
 type Check = CombinedOutcome['check'] | 'config';
 const order: Check[] = ['secret', 'sbom', 'vuln', 'config'];
@@ -33,25 +34,32 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   now = Date.now(),
   sbomRunner: (job: Job, options: { timeoutMs: number; cacheDir: string; signal?: AbortSignal }) => Promise<SbomScanResult> = scanSbomPinned,
   vulnRunner: (job: Job, options: VulnScanOptions) => Promise<VulnScanResult> = scanVulnPinned,
-  archiveRunner: typeof scanNginxArchive = scanNginxArchive): Promise<boolean> {
+  archiveRunner: typeof scanNginxArchive = scanNginxArchive,
+  publicArchiveRunner: typeof scanPublicImageArchive = scanPublicImageArchive): Promise<boolean> {
   // Reserve the legacy sequential budget. claim adds the bounded config budget
   // only when config is selected, preserving existing lease timing for old jobs.
   if (options.signal?.aborted) return false;
   const job = ledger.claim(now, 3 * options.timeoutMs + 27_000, 627_000);
   if (!job) return false;
   const canonical = checks(job.checks);
+  // Only this process's explicit composition can opt generic jobs into archives.
+  // A stored executionProfile is never public-image authority; Alpine stays legacy.
+  const publicArchive = options.publicImagePolicy === true && !job.executionProfile &&
+    job.repository !== 'library/alpine' && validPublicTarget(job) && !!canonical &&
+    !(job.repository === 'library/nginx' && options.archivePolicy);
   // Composition policy precedes config loading, archive acquisition and every scanner.
-  if ((job.executionProfile || job.repository === 'library/nginx') && !(options.archivePolicy === 'local'
+  if ((!publicArchive && (job.executionProfile || job.repository === 'library/nginx') && !(options.archivePolicy === 'local'
     ? exactLocalTarget(job) && validLocalBinding(job.executionProfile) && !!canonical && localChecksAllowed(canonical)
     : options.archivePolicy === 'proof' && !job.executionProfile && !!canonical && NGINX_ARCHIVE_CANDIDATES.some(target =>
-      target.registry === job.registry && target.repository === job.repository && target.digest === job.digest && target.platform === job.platform))) {
-    ledger.finish(job.scanId, job.attempts, 'failed'); return true;
+      target.registry === job.registry && target.repository === job.repository && target.digest === job.digest && target.platform === job.platform))) ||
+      options.publicImagePolicy === true && job.repository !== 'library/alpine' && !publicArchive && !options.archivePolicy) {
+    ledger.finish(job.scanId, job.attempts, 'failed', undefined, job.leaseToken); return true;
   }
   // Preserve legacy single-runner injection for unsupported check sets, but
   // never attribute its output to verified coverage.
   const requested = (canonical ?? ['secret']).filter((check): check is CombinedOutcome['check'] => check !== 'config');
   if (job.scope !== 'image') {
-    ledger.finish(job.scanId, job.attempts, 'failed');
+    ledger.finish(job.scanId, job.attempts, 'failed', undefined, job.leaseToken);
     return true;
   }
   const controller = new AbortController();
@@ -59,7 +67,7 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   options.signal?.addEventListener('abort', callerAbort, { once: true });
   if (options.signal?.aborted) controller.abort();
   const poll = () => {
-    try { if (!ledger.configAttemptContext(job.scanId, job.attempts)) controller.abort(); }
+    try { if (!ledger.checkpointActive(job)) controller.abort(); }
     catch { controller.abort(); }
   };
   poll();
@@ -76,45 +84,72 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   const outcomes: CombinedOutcome[] = [];
   const image = `${job.registry}/${job.repository}@${job.digest}`;
   try {
-    const config = await runImageConfig(ledger, job, controller.signal, options.configLoader);
+    const config = await runImageConfig(ledger, job, controller.signal, options.configLoader, options.publicImagePolicy === true);
     poll();
     if (controller.signal.aborted) return true;
-    if (job.repository === 'library/nginx' && requested.length) {
-      const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => Object.entries(candidate).every(([key, value]) => key === 'configDigest' || job[key as keyof Job] === value));
+    if (canonical?.includes('config') && !ledger.checkpointConfig(job, config)) return true;
+    if ((publicArchive || job.repository === 'library/nginx') && requested.length) {
+      const legacyTarget = publicArchive ? undefined : NGINX_ARCHIVE_CANDIDATES.find(candidate =>
+        Object.entries(candidate).every(([key, value]) => key === 'configDigest' || job[key as keyof Job] === value));
+      const target = publicArchive ? { registry: job.registry, repository: job.repository, digest: job.digest, platform: job.platform } : legacyTarget;
       if (!canonical || !target) {
-        ledger.finish(job.scanId, job.attempts, 'failed'); return true;
+        ledger.finish(job.scanId, job.attempts, 'failed', undefined, job.leaseToken); return true;
       }
       // Only the selected exact LOCAL composition or explicit isolated proof
       // reaches this path; the default API and worker remain closed.
+      let report: Awaited<ReturnType<typeof archiveRunner>> | null;
+      let checkpointFailure: { error: unknown } | undefined;
+      let checkpointCommitted = false;
       try {
-        const report = await Promise.race([archiveRunner(requested, { signal: controller.signal, target,
-          vuln: options.vuln ? { ...options.vuln, policy: job.cvePolicy ?? LEGACY_DB_POLICY, timeoutMs: 120_000, signal: controller.signal } : undefined }), aborted]);
-        if (report === null) return true;
-        poll();
-        if (!controller.signal.aborted) {
-          try { assertArchiveDbFreshness(report, Date.now(), job.cvePolicy ?? LEGACY_DB_POLICY); }
-          catch (error) {
-            if (!(error instanceof DbUsabilityError)) throw error;
-            report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
-          }
-          try { ledger.finishArchive(job.scanId, job.attempts, report, config); }
-          catch (error) {
-            // A NextUpdate crossing inside BEGIN IMMEDIATE must not erase independent checks.
-            if (error instanceof TypeError) throw error;
-            try { assertArchiveDbFreshness(report, Date.now(), job.cvePolicy ?? LEGACY_DB_POLICY); }
-            catch (expiry) {
-              if (!(expiry instanceof DbUsabilityError)) throw expiry;
-              report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
-              ledger.finishArchive(job.scanId, job.attempts, report, config); return true;
+        const selectedRunner = (options: Omit<Parameters<typeof scanNginxArchive>[1], 'target'>) => {
+                  if (publicArchive) return publicArchiveRunner(requested, { ...options, target });
+                  if (!legacyTarget) throw new TypeError('Missing exact archive target');
+                  return archiveRunner(requested, { ...options, target: legacyTarget });
+                };
+                report = await Promise.race([selectedRunner({ signal: controller.signal,
+          onCheckpoint: (check, completed) => {
+            if (controller.signal.aborted) return false;
+            try {
+              const accepted = ledger.checkpointArchive(job, check, completed);
+              if (!accepted) controller.abort();
+              else checkpointCommitted = true;
+              return accepted;
+            } catch (error) {
+              // Keep the original storage/contract error even when abort wins the race,
+              // cleanup throws, or an injected runner swallows callback exceptions.
+              checkpointFailure = { error };
+              controller.abort();
+              throw error;
             }
-            throw error;
-          }
-        }
+          },
+          vuln: options.vuln ? { ...options.vuln, policy: job.cvePolicy ?? LEGACY_DB_POLICY, timeoutMs: 120_000, signal: controller.signal } : undefined }), aborted]);
+        if (checkpointFailure) throw checkpointFailure.error;
       } catch (error) {
-        if (error instanceof DbPolicyContractError || error instanceof TypeError) throw error;
+        if (checkpointFailure) throw checkpointFailure.error;
+        // A runner/cleanup failure after a commit cannot invent failures for completed
+        // siblings or make their checkpoints inaccessible to cancellation/recovery.
+        if (checkpointCommitted || error instanceof DbPolicyContractError || error instanceof TypeError) throw error;
         poll();
         if (!controller.signal.aborted) ledger.finishCombined(job.scanId, job.attempts,
-          requested.map(check => ({ check, outcome: 'failed', errorCode: 'SCAN_FAILED' })), config);
+          requested.map(check => ({ check, outcome: 'failed', errorCode: 'SCAN_FAILED' })), config, job.leaseToken);
+        return true;
+      }
+      if (report === null) return true;
+      poll();
+      if (!controller.signal.aborted) {
+        try { assertArchiveDbFreshness(report, Date.now(), job.cvePolicy ?? LEGACY_DB_POLICY); }
+        catch (error) {
+          if (!(error instanceof DbUsabilityError)) throw error;
+          report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
+        }
+        // Persistence is outside the scanner fallback. Only a genuine DB freshness
+        // crossing is converted to the existing CVE outcome; SQLite errors propagate.
+        try { ledger.finishArchive(job.scanId, job.attempts, report, config, job.leaseToken); }
+        catch (error) {
+          if (!(error instanceof DbUsabilityError)) throw error;
+          report.vuln = { outcome: 'failed', reason: 'DB_UNAVAILABLE' };
+          ledger.finishArchive(job.scanId, job.attempts, report, config, job.leaseToken);
+        }
       }
       return true;
     }
@@ -151,9 +186,10 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
                   ...(job.cvePolicy === CURRENT_DB_POLICY ? { dbEvidence: result.dbEvidence } : {}) } :
           { check, outcome: 'failed', errorCode: result.errorCode });
       }
+      if (canonical && !ledger.checkpointCombined(job, outcomes[outcomes.length - 1])) return true;
     }
     poll();
-    if (!controller.signal.aborted && canonical) ledger.finishCombined(job.scanId, job.attempts, outcomes, config);
+    if (!controller.signal.aborted && canonical) ledger.finishCombined(job.scanId, job.attempts, outcomes, config, job.leaseToken);
   } finally {
     clearInterval(interval);
     controller.signal.removeEventListener('abort', onAbort);
@@ -161,7 +197,7 @@ export async function consumeOne(ledger: ScanLedger, options: Options,
   }
   poll();
   if (controller.signal.aborted) return true;
-  if (!canonical) ledger.finish(job.scanId, job.attempts, 'failed');
+  if (!canonical) ledger.finish(job.scanId, job.attempts, 'failed', undefined, job.leaseToken);
 
   return true;
 }

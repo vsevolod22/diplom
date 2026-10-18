@@ -36,7 +36,7 @@ test('v8 to v9 migration preserves rows, FKs, events, outbox and legacy secret r
   let ledger = new ScanLedger(file);
   const oldId = ledger.enqueue({ ...target, idempotencyKey: 'old', checks: '["secret"]' }).scanId;
   const oldJob = ledger.claim()!;
-  assert.equal(ledger.finishWithResult(oldId, oldJob.attempts, secret.outcome === 'checked' ? secret.findings : [], '0.69.3'), true);
+  assert.equal(ledger.finishWithResult(oldId, oldJob.attempts, secret.outcome === 'checked' ? secret.findings : [], '0.69.3', oldJob.leaseToken), true);
   const queued = ledger.enqueue({ ...target, idempotencyKey: 'queued' }).scanId;
   ledger.close();
   const raw = new Database(file);
@@ -53,7 +53,7 @@ test('v8 to v9 migration preserves rows, FKs, events, outbox and legacy secret r
     );
     INSERT INTO scans_v8 SELECT * FROM scans;
     DROP TABLE scans; ALTER TABLE scans_v8 RENAME TO scans;
-    DROP TABLE scan_cve_evidence;
+    DROP TABLE scan_checkpoints; ALTER TABLE outbox DROP COLUMN lease_token; DROP TABLE scan_cve_evidence;
     DROP TABLE scan_cve_policy;
     DROP TABLE scan_check_results;
     DROP TABLE scan_execution_profiles;
@@ -69,7 +69,7 @@ test('v8 to v9 migration preserves rows, FKs, events, outbox and legacy secret r
   assert.equal(ledger.state(queued, 'alice'), 'queued');
   const job = ledger.claim()!;
   assert.equal(job.scanId, queued);
-  assert.equal(ledger.finishCombined(queued, job.attempts, [secret, sbom, fail('vuln')]), true);
+  assert.equal(ledger.finishCombined(queued, job.attempts, [secret, sbom, fail('vuln')], undefined, job.leaseToken), true);
   assert.equal(ledger.state(queued, 'alice'), 'partial');
   ledger.close(); ledger = new ScanLedger(file);
   assert.equal(ledger.state(queued, 'alice'), 'partial');
@@ -83,7 +83,7 @@ test('v8 to v9 migration preserves rows, FKs, events, outbox and legacy secret r
   assert.equal(ledger.vuln(queued, 'bob'), undefined);
   ledger.close();
   const db = new Database(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 14);
+  assert.equal(db.pragma('user_version', { simple: true }), 15);
   db.pragma('foreign_keys = ON');
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
   assert.deepEqual(db.pragma('foreign_key_check'), []);
@@ -107,8 +107,8 @@ test('all checked, all failed, mixed secret failure, two-check and single-check 
     const scanId = ledger.enqueue({ ...target, idempotencyKey: `case-${i}`, checks }).scanId;
     const job = ledger.claim()!;
     assert.equal(job.scanId, scanId);
-    assert.equal(ledger.finishCombined(scanId, job.attempts, outcomes), true);
-    assert.equal(ledger.finishCombined(scanId, job.attempts, outcomes), false);
+    assert.equal(ledger.finishCombined(scanId, job.attempts, outcomes, undefined, job.leaseToken), true);
+    assert.equal(ledger.finishCombined(scanId, job.attempts, outcomes, undefined, job.leaseToken), false);
     assert.equal(ledger.state(scanId, 'alice'), expected);
     assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued','running',expected]);
     assert.equal(ledger.result(scanId, 'alice')?.outcome, checks.includes('secret') ? outcomes[0].outcome : undefined);
@@ -142,12 +142,12 @@ test('invalid sets, unbound images, malformed payloads and duplicate findings ca
   ];
   const scanId = ledger.enqueue(target).scanId;
   const job = ledger.claim()!;
-  for (const value of invalid) assert.throws(() => ledger.finishCombined(scanId, job.attempts, value as CombinedOutcome[]));
+  for (const value of invalid) assert.throws(() => ledger.finishCombined(scanId, job.attempts, value as CombinedOutcome[], undefined, job.leaseToken));
   assert.equal(ledger.state(scanId, 'alice'), 'running');
   const db = new Database(file);
   for (const table of ['scan_results','scan_sbom_results','scan_vuln_results']) assert.equal(count(db, table, scanId), 0);
   assert.deepEqual(ledger.events(scanId, 'alice', null)?.map(e => e.state), ['queued','running']);
-  assert.equal(ledger.finishCombined(scanId, job.attempts, [secret, sbom, vuln]), true);
+  assert.equal(ledger.finishCombined(scanId, job.attempts, [secret, sbom, vuln], undefined, job.leaseToken), true);
   db.close(); ledger.close();
 }));
 
@@ -155,22 +155,22 @@ test('stale and cancelled attempts cannot publish; write failure rolls back ever
   const a = new ScanLedger(file); const b = new ScanLedger(file);
   const staleId = a.enqueue({ ...target, idempotencyKey: 'stale' }).scanId;
   const first = a.claim(1000, 100)!; const second = b.claim(1100, 100)!;
-  assert.equal(a.finishCombined(staleId, first.attempts, [secret, sbom, vuln]), false);
+  assert.equal(a.finishCombined(staleId, first.attempts, [secret, sbom, vuln], undefined, first.leaseToken), false);
   assert.equal(a.cancel(staleId, 'alice'), 'cancelled');
-  assert.equal(b.finishCombined(staleId, second.attempts, [secret, sbom, vuln]), false);
+  assert.equal(b.finishCombined(staleId, second.attempts, [secret, sbom, vuln], undefined, second.leaseToken), false);
   const scanId = a.enqueue({ ...target, idempotencyKey: 'rollback' }).scanId;
   const job = a.claim()!;
   const db = new Database(file);
   db.exec(`CREATE TRIGGER reject_vuln BEFORE INSERT ON scan_vuln_results
     BEGIN SELECT RAISE(ABORT, 'vuln unavailable'); END`);
-  assert.throws(() => a.finishCombined(scanId, job.attempts, [secret, sbom, fail('vuln')]), /vuln unavailable/);
+  assert.throws(() => a.finishCombined(scanId, job.attempts, [secret, sbom, fail('vuln')], undefined, job.leaseToken), /vuln unavailable/);
   assert.equal(a.state(scanId, 'alice'), 'running');
   for (const table of ['scan_results','scan_findings','scan_sbom_results','scan_sbom_components','scan_vuln_results'])
     assert.equal(count(db, table, scanId), 0);
   assert.equal((db.prepare('SELECT delivered_at FROM outbox WHERE scan_id = ?').get(scanId) as { delivered_at: string | null }).delivered_at, null);
   assert.deepEqual(a.events(scanId, 'alice', null)?.map(e => e.state), ['queued','running']);
   db.exec('DROP TRIGGER reject_vuln');
-  assert.equal(a.finishCombined(scanId, job.attempts, [secret, sbom, fail('vuln')]), true);
+  assert.equal(a.finishCombined(scanId, job.attempts, [secret, sbom, fail('vuln')], undefined, job.leaseToken), true);
   db.close(); a.close(); b.close();
 }));
 

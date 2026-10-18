@@ -145,7 +145,7 @@ export function loadCveActivation(root = ROOT) {
 }
 
 export function childEnvironment() {
-  return { PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', TZ: 'UTC' };
+  return { PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', TZ: 'UTC' };
 }
 export function runChild(executable, args, { cwd, env, timeout }) {
   return new Promise((resolveOutput, reject) => {
@@ -155,6 +155,35 @@ export function runChild(executable, args, { cwd, env, timeout }) {
     });
   });
 }
+// Shared by setup, refresh and launcher lifecycle operations. Never steal a stale
+// lock: a killed controller may have left a partially switched stand.
+export function acquireStandLock(root = ROOT) {
+  requireSafe(resolve(root) === root && fs.realpathSync(root) === root);
+  const stand = join(root, '.local-stand');
+  directory(stand, 0o700, true);
+  const path = join(stand, '.stand-operation.lock');
+  fs.mkdirSync(path, { mode: 0o700 });
+  const identity = fs.lstatSync(path);
+  syncDirectory(stand);
+  return () => {
+    const current = fs.lstatSync(path);
+    requireSafe(current.dev === identity.dev && current.ino === identity.ino && !current.isSymbolicLink());
+    fs.rmdirSync(path); // A refresh journal deliberately keeps an uncertain operation locked.
+    syncDirectory(stand);
+  };
+}
+
+export function existingLocalCveKeyPair(root, expected) {
+  const paths = localPaths(root);
+  directory(paths.trust, 0o700);
+  const keys = keyPair(paths.trust, () => { throw failure(); });
+  requireSafe(keys.publicKeySha256 === expected);
+  return keys;
+}
+
+// These bounded filesystem primitives are shared only with the host updater.
+export { directory, layout, readBounded, writeExclusive, syncDirectory, localPaths };
+
 function publish(paths, value) {
   const temporary = join(paths.stand, '.cve.json.pending');
   writeExclusive(temporary, JSON.stringify(value), 0o600);
@@ -165,11 +194,17 @@ function publish(paths, value) {
   syncDirectory(paths.stand);
 }
 
+function releaseSetupLock(path) {
+  try { fs.rmdirSync(path); } catch { throw failure(); }
+}
+
 export async function setupLocalCve(argv, { root = ROOT, run = runChild,
   generatePair = () => generateKeyPairSync('ed25519'), log = console.log } = {}) {
-  let lock;
+  let lock, unlock;
   try {
-    const args = parseSetupArguments(argv), paths = localPaths(root);
+    const args = parseSetupArguments(argv);
+    unlock = acquireStandLock(root);
+    const paths = localPaths(root);
     requireSafe(!exists(paths.config) && !exists(join(paths.stand, '.cve.json.pending')));
     directory(paths.releases, 0o700);
     const release = join(paths.releases, args.id);
@@ -208,9 +243,8 @@ export async function setupLocalCve(argv, { root = ROOT, run = runChild,
     return activation;
   } catch { throw failure(); }
   finally {
-    if (lock) {
-      try { fs.rmdirSync(lock); } catch { throw failure(); }
-    }
+    if (lock) releaseSetupLock(lock);
+    if (unlock) unlock();
   }
 }
 

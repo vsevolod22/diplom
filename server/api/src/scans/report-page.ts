@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ReportViewError, type ReportQuery, type VulnQuery, type SbomQuery, type SecretQuery,
-  type ReportLimit, type Severity } from './report-query.js';
+  type ReportLimit, type Severity, type ReportEcosystem } from './report-query.js';
 
 export type ReportPage = {
   version: 1; limit: ReportLimit; offset: number; returnedCount: number;
@@ -9,7 +9,7 @@ export type ReportPage = {
 };
 export type ReportContext = { subject: string; scanId: string };
 type VulnRow = { findingId: string; severity: Severity };
-type SbomRow = { ecosystem: 'apk' | 'npm'; name: string; version: string };
+type SbomRow = { ecosystem: ReportEcosystem; name: string; version: string };
 type SecretRow = { findingId: string; ruleId: string; line: number | null };
 const ascii = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 const rank: Record<Severity, number> = { UNKNOWN: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };

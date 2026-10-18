@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { validateArchiveJson, type ArchiveBinding } from '../oci/archive-identity.js';
+import { PUBLIC_IMAGE_LIMITS, isPublicReceipt } from '../oci/public-image-policy.js';
 
 export type SecretFinding = { findingId: string; ruleId: string; line: number | null; evidenceRef: string };
 export const MAX_FINDINGS = 1000;
@@ -7,7 +9,9 @@ const digest = (value: unknown): value is string => typeof value === 'string' &&
 
 // Scanner strings are untrusted, and can contain the matched secret itself. Keep only
 // bounded rule identifiers and numeric positions; never persist source text or paths.
-export function parseSecretFindings(value: unknown): SecretFinding[] {
+export function parseSecretFindings(value: unknown, binding?: ArchiveBinding): SecretFinding[] {
+  if (binding) validateArchiveJson(value, binding);
+  const maxLayers = binding && isPublicReceipt(binding.receipt) ? PUBLIC_IMAGE_LIMITS.maxLayers : 32;
   if (!object(value)) throw new Error('Invalid scanner output');
   const report = value as { Results?: unknown; SchemaVersion?: unknown; ArtifactType?: unknown;
     Metadata?: { Layers?: unknown; DiffIDs?: unknown; ImageConfig?: unknown } };
@@ -15,7 +19,7 @@ export function parseSecretFindings(value: unknown): SecretFinding[] {
   // need the same positive inspection evidence; identity alone is not coverage.
   const layers = report.Metadata?.Layers, diffIds = report.Metadata?.DiffIDs;
   const cleanImage = report.SchemaVersion === 2 && report.ArtifactType === 'container_image' &&
-    Array.isArray(layers) && layers.length > 0 && layers.length <= 32 && Array.isArray(diffIds) &&
+    Array.isArray(layers) && layers.length > 0 && layers.length <= maxLayers && Array.isArray(diffIds) &&
     diffIds.length === layers.length && diffIds.every(digest) && object(report.Metadata?.ImageConfig) &&
     layers.every((layer, index) => object(layer) && layer.DiffID === diffIds[index] &&
       (layer.Size === undefined || Number.isSafeInteger(layer.Size) && (layer.Size as number) >= 0));

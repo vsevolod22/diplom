@@ -40,7 +40,7 @@ test('HTTP JWT and enrolled browser SSE replay, isolate foreign scans and reject
     const scanId = enqueue(subject, 'alice-key');
     const first = ledger.events(scanId, subject, null)![0].id;
     const job = ledger.claim()!;
-    assert.equal(ledger.finishWithResult(scanId, job.attempts, [], '0.69.3'), true);
+    assert.equal(ledger.finishWithResult(scanId, job.attempts, [], '0.69.3', job.leaseToken), true);
     const last = ledger.events(scanId, subject, first)!.at(-1)!.id;
     const foreignId = enqueue('bob', 'bob-key');
     const payload = `${Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')}.${Buffer.from(JSON.stringify({

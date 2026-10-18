@@ -6,7 +6,9 @@ export type VulnSort = 'severity:asc' | 'severity:desc';
 export type SbomSort = 'name:asc' | 'name:desc' | 'ecosystem:asc' | 'ecosystem:desc';
 export type SecretSort = 'ruleId:asc' | 'ruleId:desc' | 'line:asc' | 'line:desc';
 export type VulnFilters = { severity: Severity[] | null };
-export type SbomFilters = { ecosystem: 'apk' | 'npm' | null; name: string | null };
+export const REPORT_ECOSYSTEMS = ['apk', 'deb', 'rpm', 'npm', 'pypi', 'gem', 'gomod', 'cargo', 'maven', 'composer', 'nuget'] as const;
+export type ReportEcosystem = typeof REPORT_ECOSYSTEMS[number];
+export type SbomFilters = { ecosystem: ReportEcosystem | null; name: string | null };
 export type SecretFilters = { ruleId: string | null; linePresence: 'known' | 'unknown' | null };
 type CommonQuery = { limit: ReportLimit; cursor: unknown };
 export type VulnQuery = CommonQuery & { kind: 'vuln'; sort: VulnSort; filters: VulnFilters };
@@ -70,10 +72,10 @@ export function parseReportQuery(kind: ReportKind, value: unknown): ReportQuery 
   }
   if (kind === 'sbom') {
     const ecosystem = scalar(query, 'ecosystem'), name = scalar(query, 'name');
-    if (ecosystem !== undefined && ecosystem !== 'apk' && ecosystem !== 'npm' ||
-        name !== undefined && !/^[A-Za-z0-9@._+/-]{1,128}$/.test(name)) return invalid();
+    if (ecosystem !== undefined && !(REPORT_ECOSYSTEMS as readonly string[]).includes(ecosystem) ||
+        name !== undefined && !/^[A-Za-z0-9@._+:/-]{1,128}$/.test(name)) return invalid();
     return { ...common, kind, sort: choice(scalar(query, 'sort'), ['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc'], 'name:asc'),
-      filters: { ecosystem: ecosystem ?? null, name: name?.toLowerCase() ?? null } };
+      filters: { ecosystem: ecosystem as ReportEcosystem | undefined ?? null, name: name?.toLowerCase() ?? null } };
   }
   const ruleId = scalar(query, 'ruleId'), linePresence = scalar(query, 'linePresence');
   if (ruleId !== undefined && !/^[A-Za-z0-9._-]{1,80}$/.test(ruleId) ||

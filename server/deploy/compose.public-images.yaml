@@ -1,0 +1,101 @@
+{
+  "name": "dip-public-images",
+  "services": {
+    "auth-volume-init": {
+      "image": "busybox:1.37.0",
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "command": ["chown", "65532:65532", "/data"],
+      "network_mode": "none",
+      "volumes": [{ "type": "volume", "source": "auth_accounts", "target": "/data" }],
+      "read_only": true, "user": "0:0", "cap_drop": ["ALL"], "cap_add": ["CHOWN"],
+      "security_opt": ["no-new-privileges:true"], "restart": "no",
+      "mem_limit": "67108864", "memswap_limit": "67108864", "cpus": 0.25, "pids_limit": 16
+    },
+    "scan-volume-init": {
+      "image": "busybox:1.37.0",
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "command": ["chown", "65532:65532", "/data"],
+      "network_mode": "none",
+      "volumes": [{ "type": "volume", "source": "scan_ledger", "target": "/data" }],
+      "read_only": true, "user": "0:0", "cap_drop": ["ALL"], "cap_add": ["CHOWN"],
+      "security_opt": ["no-new-privileges:true"], "restart": "no",
+      "mem_limit": "67108864", "memswap_limit": "67108864", "cpus": 0.25, "pids_limit": 16
+    },
+    "egress": {
+      "image": "dip-public-images-egress:local",
+      "build": { "context": "../..", "dockerfile": "server/deploy/gateway/Dockerfile",
+        "labels": { "org.diplom.public-image-stand": "v1", "org.diplom.public-image-project": "dip-public-images" } },
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "command": ["python", "-I", "proxy.py"],
+      "networks": { "scan_internal": null, "registry_uplink": null },
+      "read_only": true, "user": "65532:65532", "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"], "restart": "unless-stopped",
+      "mem_limit": "268435456", "memswap_limit": "268435456", "cpus": 1, "pids_limit": 128
+    },
+    "worker": {
+      "image": "dip-public-images-worker:local",
+      "build": { "context": "../..", "dockerfile": "server/deploy/worker.Dockerfile",
+        "labels": { "org.diplom.public-image-stand": "v1", "org.diplom.public-image-project": "dip-public-images" } },
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "command": ["node", "--import", "tsx", "src/worker/public-image-worker.main.ts"],
+      "environment": { "SCAN_LEDGER_PATH": "/data/ledger.sqlite", "SCAN_WORKER_READY_PATH": "/data/worker.ready",
+        "TRIVY_CACHE_DIR": "/tmp/trivy", "SCAN_VULN_ENABLED": "false" },
+      "volumes": [{ "type": "volume", "source": "scan_ledger", "target": "/data" }],
+      "networks": { "scan_internal": null },
+      "depends_on": { "egress": { "condition": "service_started" }, "scan-volume-init": { "condition": "service_completed_successfully" } },
+      "read_only": true, "user": "65532:65532", "cap_drop": ["ALL"],
+      "tmpfs": ["/tmp:rw,noexec,nosuid,uid=65532,gid=65532,size=16m", "/tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=2304m"],
+      "security_opt": ["no-new-privileges:true"], "restart": "unless-stopped",
+      "mem_limit": "4294967296", "memswap_limit": "4294967296", "cpus": 1, "pids_limit": 128
+    },
+    "api": {
+      "image": "dip-public-images-api:local",
+      "build": { "context": "../..", "dockerfile": "server/deploy/api.Dockerfile",
+        "labels": { "org.diplom.public-image-stand": "v1", "org.diplom.public-image-project": "dip-public-images" } },
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "command": ["node", "--import", "tsx", "src/oci/public-image.main.ts"],
+      "environment": {
+        "SCAN_BIND_ADDRESS": "0.0.0.0", "PORT": "3001", "SCAN_JWT_SECRET": "${SCAN_JWT_SECRET:?Use scripts/public-image-stand.mjs}",
+        "SCAN_JWT_ISSUER": "dip-public-images", "SCAN_JWT_AUDIENCE": "dip-public-images",
+        "AUTH_DB_PATH": "/auth/auth.sqlite", "AUTH_ORIGIN": "http://127.0.0.1:8081",
+        "AUTH_ALLOW_INSECURE_LOCAL_HTTP": "true", "SCAN_BROWSER_ALLOWED_USER_IDS": "", "SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS": "true",
+        "SCAN_LEDGER_PATH": "/data/ledger.sqlite", "SCAN_WORKER_READY_PATH": "/data/worker.ready", "SCAN_VULN_ENABLED": "false",
+        "LLM_ENABLED": "false", "LLM_ROUTING_APPROVED": "false", "LLM_QUOTA_ENABLED": "false", "LLM_HISTORY_ENABLED": "false"
+      },
+      "volumes": [{ "type": "volume", "source": "auth_accounts", "target": "/auth" }, { "type": "volume", "source": "scan_ledger", "target": "/data" }],
+      "networks": { "auth_internal": null, "scan_internal": null },
+      "depends_on": { "auth-volume-init": { "condition": "service_completed_successfully" }, "scan-volume-init": { "condition": "service_completed_successfully" },
+        "egress": { "condition": "service_started" }, "worker": { "condition": "service_started" } },
+      "healthcheck": { "test": ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/v1/auth/me').then(r=>process.exit(r.status===401?0:1)).catch(()=>process.exit(1))"],
+        "interval": "5s", "timeout": "3s", "retries": 12 },
+      "read_only": true, "user": "65532:65532", "cap_drop": ["ALL"],
+      "tmpfs": ["/tmp:rw,noexec,nosuid,uid=65532,gid=65532,size=16m"],
+      "security_opt": ["no-new-privileges:true"], "restart": "unless-stopped",
+      "mem_limit": "536870912", "memswap_limit": "536870912", "cpus": 1, "pids_limit": 128
+    },
+    "web": {
+      "image": "dip-public-images-web:local",
+      "command": ["nginx", "-g", "daemon off;"],
+      "build": { "context": "../..", "dockerfile": "server/deploy/stand.Dockerfile",
+        "labels": { "org.diplom.public-image-stand": "v1", "org.diplom.public-image-project": "dip-public-images" } },
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "networks": { "auth_internal": null, "web_edge": null },
+      "depends_on": { "api": { "condition": "service_healthy" } },
+      "ports": [{ "host_ip": "127.0.0.1", "published": "8081", "target": 8080, "protocol": "tcp" }],
+      "read_only": true, "user": "101:101", "cap_drop": ["ALL"],
+      "tmpfs": ["/tmp:rw,noexec,nosuid,uid=101,gid=101,size=16m"],
+      "security_opt": ["no-new-privileges:true"], "restart": "unless-stopped",
+      "mem_limit": "268435456", "memswap_limit": "268435456", "cpus": 1, "pids_limit": 128
+    }
+  },
+  "volumes": {
+    "auth_accounts": { "name": "dip-public-images_auth_accounts", "labels": { "org.diplom.public-image-stand": "v1" } },
+    "scan_ledger": { "name": "dip-public-images_scan_ledger", "labels": { "org.diplom.public-image-stand": "v1" } }
+  },
+  "networks": {
+    "auth_internal": { "name": "dip-public-images_auth_internal", "labels": { "org.diplom.public-image-stand": "v1" }, "internal": true },
+    "scan_internal": { "name": "dip-public-images_scan_internal", "labels": { "org.diplom.public-image-stand": "v1" }, "internal": true },
+    "registry_uplink": { "name": "dip-public-images_registry_uplink", "labels": { "org.diplom.public-image-stand": "v1" } },
+    "web_edge": { "name": "dip-public-images_web_edge", "labels": { "org.diplom.public-image-stand": "v1" } }
+  }
+}

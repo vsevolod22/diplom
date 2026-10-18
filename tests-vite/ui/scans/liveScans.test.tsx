@@ -1160,6 +1160,73 @@ describe('cookie-session live scans', () => {
   });
 });
 
+describe('durable cancellation detail', () => {
+  it.each(['button', 'SSE'] as const)('refreshes the authoritative snapshot after %s, preserves checkpoints and stops realtime', async mode => {
+    let cancelled = false;
+    let emit: (value: unknown) => void = () => {};
+    const close = vi.fn();
+    vi.stubGlobal('EventSource', class {
+      close = close;
+      addEventListener(name: string, handler: (event: { data: string }) => void) {
+        if (name === 'scan') emit = value => handler({ data: JSON.stringify(value) });
+      }
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const secret = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 1, errorCode: null, scannerVersion: '0.69.3' };
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      calls.push(path);
+      if (path === '/api/v1/auth/me') return json({ id: 'cancel-owner', email: 'cancel@example.com' });
+      if (path.endsWith('/cancel')) {
+        expect(init?.method).toBe('POST'); expect(init?.body).toBe('{}');
+        cancelled = true;
+        return json({ scanId: id, state: 'cancelled' });
+      }
+      if (path.includes('/results?')) return json(reportPage(path, { findings: [{ findingId: 'saved-secret', ruleId: 'saved-rule', line: 0, evidenceRef: 'redacted-ref' }], coverage: secret, nextCursor: null }));
+      if (path === `/api/v1/browser/scans/${id}`) return json({ scanId: id, state: cancelled ? 'cancelled' : 'running',
+        digest, platform: 'linux/amd64', checks: ['secret', 'sbom', 'vuln'],
+        perCheck: { secret: cancelled ? secret : null, sbom: null, vuln: null }, result: null });
+      return new Response('{}', { status: 404 });
+    }));
+    let client = mount(`/scans/${id}`);
+    await screen.findByRole('button', { name: 'Отменить скан' });
+    if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Отменить скан' }));
+    else {
+      // An event is only a hint: a false terminal hint cannot publish coverage.
+      act(() => emit({ scanId: id, state: 'cancelled', percent: null }));
+      expect(screen.queryByText('ID: saved-secret')).toBeNull();
+      cancelled = true;
+      act(() => emit({ scanId: id, state: 'cancelled', percent: null }));
+    }
+    await screen.findByText('ID: saved-secret', {}, { timeout: 3000 });
+    expect(screen.getByText(/Сканирование отменено\. Сохранены результаты завершённых проверок/)).toBeTruthy();
+    expect(screen.getByText('Скан отменён; realtime остановлен')).toBeTruthy();
+    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(2);
+    expect(screen.queryByText(/без публикации промежуточных результатов/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+    expect(calls.some(path => /\/(sbom|vuln)\?/.test(path))).toBe(false);
+    cleanup(); client.clear();
+    client = mount(`/scans/${id}`);
+    await screen.findByText('ID: saved-secret');
+    expect(screen.getByText(/Сканирование отменено\. Сохранены результаты/)).toBeTruthy();
+    cleanup(); client.clear();
+  });
+  it('states honestly that cancellation without checkpoints saved no completed results', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'cancel-owner', email: 'cancel@example.com' });
+      if (path === `/api/v1/browser/scans/${id}`) return json({ scanId: id, state: 'cancelled', checks: ['secret', 'sbom', 'vuln'],
+        perCheck: { secret: null, sbom: null, vuln: null }, result: null });
+      return new Response('{}', { status: 404 });
+    }));
+    const client = mount(`/scans/${id}`);
+    await screen.findByText(/Сканирование отменено\. Сохранённых результатов завершённых проверок нет/);
+    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(3);
+    expect(screen.queryByText(/Полный итог|0 CVE|0 находок/)).toBeNull();
+    cleanup(); client.clear();
+  });
+});
+
 describe('Stage2 unified Findings detail', () => {
   const image = `registry-1.docker.io/library/alpine@${digest}`;
   const checkedAt = '2026-10-07T08:00:00.000Z';

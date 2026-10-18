@@ -1,16 +1,20 @@
 import { NGINX_ARCHIVE_CANDIDATES, archiveProfileVersion, type ArchiveReceipt } from './bounded-image-archive.js';
 import { ArchiveRejected } from './layer-tar-validator.js';
+import { isPublicReceipt } from './public-image-policy.js';
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const same = (value: unknown, expected: string[]) => Array.isArray(value) && value.length === expected.length &&
-  value.every((item, index) => item === expected[index]);
+  [...value].every((item, index) => item === expected[index]);
 export type ArchiveBinding = { receipt: ArchiveReceipt; archivePath: string };
 export function validArchiveBinding(binding: ArchiveBinding): boolean {
-  const { receipt, archivePath } = binding;
+  if (!object(binding) || !object(binding.receipt) || typeof binding.archivePath !== 'string' ||
+      !/^\/tmp\/trivy\/jobs\/[a-f0-9-]{36}\/image\.tar$/.test(binding.archivePath)) return false;
+  const { receipt } = binding;
+  if (isPublicReceipt(receipt)) return true;
   const target = NGINX_ARCHIVE_CANDIDATES.find(candidate => Object.entries(candidate).every(([key, value]) => receipt[key as keyof typeof candidate] === value));
   return !!target &&
-    /^\/tmp\/trivy\/jobs\/[a-f0-9-]{36}\/image\.tar$/.test(archivePath) &&
     receipt.profileVersion === archiveProfileVersion(target) && receipt.resourcePolicyVersion === 'nginx-archive-resources-v1' &&
     receipt.checksVersion === 'trivy-0.69.3-archive-v1' && /^sha256:[a-f0-9]{64}$/.test(receipt.archiveSha256) &&
+    Array.isArray(receipt.diffIds) && Array.isArray(receipt.layerDigests) &&
     receipt.diffIds.length > 0 && receipt.diffIds.length <= 32 && receipt.layerDigests.length === receipt.diffIds.length &&
     [...receipt.diffIds, ...receipt.layerDigests].every(value => /^sha256:[a-f0-9]{64}$/.test(value));
 }

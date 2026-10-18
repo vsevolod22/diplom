@@ -14,6 +14,8 @@ import { CursorReportPager, ReportIdentityError } from './CursorReportPager';
 import { fingerprintReportRows } from './reportRowFingerprint';
 import type { PageDescription } from './CursorReportPager';
 import { VulnAdvisoryCard } from './VulnAdvisoryCard';
+import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
+import { identifierCountLabel, isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 
 type Props = {
   status: ScanStatus;
@@ -23,7 +25,7 @@ type Props = {
   filter: string;
   onResetFilter: () => void;
 };
-const terminal = ['completed', 'partial', 'failed'];
+const terminal = ['completed', 'partial', 'failed', 'cancelled'];
 const outcomes = {
   checked: 'Выполнено (не гарантия безопасности)',
   failed: 'Сбой · не проверено',
@@ -75,7 +77,7 @@ export function ScanReportSections(props: Props) {
   return (
     <div key={identity} className="scan-report-sections">
       <p className="scan-a1__muted">
-        CVE, Secrets и SBOM — независимые наборы данных и итоги. Категория только переключает видимость; не
+        {status.profile ? 'Уязвимости' : 'CVE'}, Secrets и SBOM — независимые наборы данных и итоги. Категория только переключает видимость; не
         сортирует и не фильтрует весь отчёт.
       </p>
       {checks.includes('vuln') ? (
@@ -114,6 +116,8 @@ function viewRowFingerprint(rows: Parameters<typeof fingerprintReportRows>[0], r
   catch (error) { if (reportView) throw new ReportViewContractError(); throw error; }
 }
 function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
+  const publicReport = status.profile === PUBLIC_IMAGE_PROFILE;
+  const label = publicReport ? 'Уязвимости' : 'CVE';
   const [query, setQuery, revision] = useReportSelection<VulnReportQuery>({ view: 'report-v1', limit: 25, sort: 'severity:desc', severity: null });
   const supported = !demo && transport.kind === 'live';
   const load = useCallback(
@@ -140,6 +144,7 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
         };
       if (!matchesTarget(status, page)) throw new ReportIdentityError();
       checkVersion(status, 'vuln', page, page.findingCount);
+      if (page.profile !== status.profile || JSON.stringify(page.identifierCounts) !== JSON.stringify(status.identifierCounts)) throw new ReportIdentityError();
       return {
         checked: true,
         identity: JSON.stringify([
@@ -147,6 +152,7 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
           page.platform,
           page.checkedAt,
           page.scannerVersion,
+          page.identifierCounts,
           page.os,
           page.node,
           page.db,
@@ -163,25 +169,25 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
     [status, supported],
   );
   return (
-    <section aria-label="Результаты CVE" className="scan-report-section">
+    <section aria-label={`Результаты ${label}`} className="scan-report-section">
       <h4>
-        CVE <span className="scan-report-section__scope">registry IMAGE</span>
+        {label} <span className="scan-report-section__scope">registry IMAGE</span>
       </h4>
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
-        controls={pending => supported ? <VulnReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
-        label="CVE"
+        controls={pending => supported ? <VulnReportControls query={query} onChange={setQuery} disabled={pending} label={label} /> : <UnsupportedReportControls />}
+        label={label}
         load={load}
         describe={describe}
         enabled={terminal.includes(status.state) && !!status.perCheck?.vuln}
-        waiting="Ожидаем результат CVE. Нулевое число не подтверждено."
+        waiting={status.state === 'cancelled' ? `${label}: завершённый результат не сохранён. Число уязвимостей неизвестно.` : `Ожидаем результат ${label}. Нулевое число не подтверждено.`}
       >
         {(page) =>
           page.outcome === 'failed' ? (
-            <p>CVE не проверены: {page.reason ?? page.errorCode}. Число уязвимостей неизвестно.</p>
+            <p>{label} не проверены: {page.reason ?? page.errorCode}. Число уязвимостей неизвестно.</p>
           ) : page.outcome === 'unsupported' ? (
             <>
-              <p>CVE не поддерживаются: {page.reason}. Это не нулевое число находок.</p>
+              <p>{label} не поддерживаются: {page.reason}. Это не нулевое число находок.</p>
               <CveDbFacts page={page} />
             </>
           ) : (
@@ -190,17 +196,21 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
                 Находок в проверенной области: {page.findingCount}. Это не гарантия безопасности; другие
                 области не проверялись.
               </p>
+              {page.identifierCounts ? <p>Весь сохранённый отчёт (до фильтров): {identifierCountLabel(page.identifierCounts)}.
+                {' '}На этой странице: {identifierCountLabel({ cve: page.findings.filter(row => !isDebianTempId(row.cveId)).length, debianTemp: page.findings.filter(row => isDebianTempId(row.cveId)).length })}.
+              </p> : null}
               <div className="scan-report-section__coverage">
                 {page.os ? (
                   <p>
-                    OS CVE: {outcomes[page.os.outcome]}
+                    OS {label}: {outcomes[page.os.outcome]}
                     {page.os.outcome === 'unsupported' ? ` · ${page.os.reason}` : ''}
                   </p>
                 ) : null}
                 {page.node ? (
                   <p>
-                    Node/npm CVE: {outcomes[page.node.outcome]}
+                    Node/npm {label}: {outcomes[page.node.outcome]}
                     {page.node.outcome === 'unsupported' ? ` · ${page.node.reason}` : ''}
+                                        {page.node.outcome === 'unsupported' && page.node.reason === 'NODE_INVENTORY_UNKNOWN' ? ' · Инвентарь не установлен; отсутствие Node-пакетов не доказано.' : ''}
                   </p>
                 ) : null}
                 {!page.os || !page.node ? <p>Часть сведений о покрытии OS/Node не предоставлена.</p> : null}
@@ -210,10 +220,10 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
                 {status.perCheck?.vuln?.checksVersion ? ` · checks ${status.perCheck.vuln.checksVersion}` : ''}
               </p>
               {page.findingCount === 0 ? (
-                <p>0 CVE в выполненной проверенной области; это не гарантия безопасности.</p>
+                <p>{publicReport ? '0 уязвимостей' : '0 CVE'} в выполненной проверенной области; это не гарантия безопасности.</p>
               ) : null}
-              {page.page?.matchedCount === 0 && page.findingCount > 0 ? <p>Нет совпадений глобального фильтра CVE. Полный отчёт содержит {page.findingCount} находок.</p> : null}
-              <ul className="scan-vuln-list" aria-label="Находки CVE">
+              {page.page?.matchedCount === 0 && page.findingCount > 0 ? <p>Нет совпадений глобального фильтра {label}. Полный отчёт содержит {page.findingCount} находок.</p> : null}
+              <ul className="scan-vuln-list" aria-label={`Находки ${label}`}>
                 {page.findings.map((finding) => (
                   <VulnAdvisoryCard key={finding.findingId} finding={finding} />
                 ))}
@@ -300,7 +310,7 @@ function SbomReport({ status, transport, reportKey, demo }: SectionProps) {
         load={load}
         describe={describe}
         enabled={terminal.includes(status.state) && !!status.perCheck?.sbom}
-        waiting="SBOM не подтверждён; число пакетов неизвестно."
+        waiting={status.state === 'cancelled' ? 'SBOM: завершённый результат не сохранён. Число пакетов неизвестно.' : 'SBOM не подтверждён; число пакетов неизвестно.'}
       >
         {(page) =>
           page.outcome === 'failed' ? (
@@ -381,7 +391,7 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
         load={load}
         describe={describe}
         enabled={demo || !!status.perCheck?.secret}
-        waiting="Результат Secrets не подтверждён; число находок неизвестно."
+        waiting={status.state === 'cancelled' ? 'Secrets: завершённый результат не сохранён. Число находок неизвестно.' : 'Результат Secrets не подтверждён; число находок неизвестно.'}
       >
         {(page) => {
           const coverage = page.coverage.find((item) => item.check === 'Secrets');

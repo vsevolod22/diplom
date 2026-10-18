@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
 import { allocateAdvisoryBudget, normalizeAdvisory, plainObject, type AdvisoryV1 } from './vuln-advisory.js';
 import { validateArchiveJson, type ArchiveBinding } from '../oci/archive-identity.js';
+import { isPublicReceipt } from '../oci/public-image-policy.js';
+import { publicOs, publicPackageName, publicPackageVersion, publicResultEcosystem, publicDebianVersion, publicVulnerabilityId, type PackageEcosystem } from './public-image-evidence.js';
 
 // Data-only normalizer. The caller must separately enforce a successful Trivy 0.69.3
 // subprocess, bounded JSON input bytes, and an isolated, pinned scan invocation.
 export type VulnFinding = {
   findingId: string;
   cveId: string;
-  ecosystem: 'apk' | 'npm';
+  ecosystem: PackageEcosystem;
   packageName: string;
   installedVersion: string;
   severity: 'UNKNOWN' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -29,6 +31,9 @@ const sources = new Set([
   'azure', 'rocky', 'cbl-mariner', 'bitnami', 'ruby-advisory-db', 'bottlerocket',
 ]);
 
+const publicSources = new Set(['debian', 'pypi', 'pip', 'go-vulndb', 'rustsec', 'cargo', 'maven', 'nuget', 'composer', 'php-security-advisories']);
+export const PUBLIC_VULN_SOURCES: readonly string[] = Object.freeze(['unknown', ...sources, ...publicSources]);
+
 const object = (value: unknown): value is Record<string, unknown> =>
   plainObject(value);
 function validSource(value: unknown): value is string {
@@ -45,6 +50,7 @@ function validPackagePath(value: unknown): value is string {
 }
 
 export function parseVulnFindings(value: unknown, image: string, platform: string, binding?: ArchiveBinding): VulnFinding[] {
+  const publicImage = !!binding && isPublicReceipt(binding.receipt);
   if (binding) {
     validateArchiveJson(value, binding);
     if (image !== `${binding.receipt.registry}/${binding.receipt.repository}@${binding.receipt.digest}` || platform !== binding.receipt.platform)
@@ -56,8 +62,8 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
       value.Metadata.RepoDigests.length !== 1 || value.Metadata.RepoDigests[0] !== image)) ||
       !object(value.Metadata.ImageConfig) || value.Metadata.ImageConfig.os !== 'linux' ||
       value.Metadata.ImageConfig.architecture !== 'amd64' ||
-      !object(value.Metadata.OS) || value.Metadata.OS.Family !== 'alpine' ||
-      !validVersion(value.Metadata.OS.Name) || !Array.isArray(value.Results) ||
+      !object(value.Metadata.OS) || (publicImage ? !publicOs(value.Metadata.OS) :
+        value.Metadata.OS.Family !== 'alpine' || !validVersion(value.Metadata.OS.Name)) || !Array.isArray(value.Results) ||
       value.Results.length > MAX_VULN_FINDINGS) throw new Error('Invalid or unbound vulnerability report');
 
   const findings: VulnFinding[] = [];
@@ -72,26 +78,29 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
         // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in scanner target names.
         result.Target.length > 512 || /[\x00-\x1f\x7f]/.test(result.Target) ||
         /(?:https?:\/\/|[?#])/.test(result.Target) ||
-        !((result.Class === 'os-pkgs' && result.Type === 'alpine') ||
-        (result.Class === 'lang-pkgs' && result.Type === 'node-pkg')) ||
+        (!publicImage && !((result.Class === 'os-pkgs' && result.Type === 'alpine') ||
+        (result.Class === 'lang-pkgs' && result.Type === 'node-pkg'))) ||
         (result.Secrets !== undefined && (!Array.isArray(result.Secrets) || result.Secrets.length !== 0)) ||
         (result.Vulnerabilities !== undefined && !Array.isArray(result.Vulnerabilities)) ||
         (Array.isArray(result.Vulnerabilities) && result.Vulnerabilities.length > MAX_VULN_FINDINGS))
       throw new Error('Invalid vulnerability result');
-    const ecosystem = result.Type === 'alpine' ? 'apk' : 'npm';
+    const ecosystem = publicImage ? publicResultEcosystem(result, value.Metadata.OS.Family as string) : result.Type === 'alpine' ? 'apk' : 'npm';
+        const validName = (name: unknown): name is string => publicImage ? publicPackageName(name, ecosystem) :
+          typeof name === 'string' && name.length <= 128 && (ecosystem === 'apk' ? apkNamePattern : npmNamePattern).test(name);
+        const version = publicImage ? publicPackageVersion : validVersion;
     if (result.Packages !== undefined) {
       if (!Array.isArray(result.Packages) ||
           (packageCount += result.Packages.length) > MAX_VULN_FINDINGS)
         throw new Error('Invalid package inventory');
       for (const pkg of result.Packages as unknown[]) {
-        if (!object(pkg) || typeof pkg.Name !== 'string' || pkg.Name.length > 128 ||
-            !(ecosystem === 'apk' ? apkNamePattern : npmNamePattern).test(pkg.Name) ||
-            !validVersion(pkg.Version)) throw new Error('Invalid package inventory');
+        if (!object(pkg) || !validName(pkg.Name) || !version(pkg.Version) ||
+                    publicImage && ecosystem === 'deb' && publicDebianVersion(pkg.Version, pkg.Epoch, pkg.Release) === undefined)
+                  throw new Error('Invalid package inventory');
       }
     }
-    if (ecosystem === 'apk' &&
+    if ((publicImage ? result.Class === 'os-pkgs' : ecosystem === 'apk') &&
         ((Array.isArray(result.Packages) && result.Packages.length > 0) ||
-         (Array.isArray(result.Vulnerabilities) && result.Vulnerabilities.length > 0)))
+         (!publicImage && Array.isArray(result.Vulnerabilities) && result.Vulnerabilities.length > 0)))
       verifiedOsCoverage = true;
     // An empty/missing Vulnerabilities list is not proof of a scan without inventory.
     if ((!Array.isArray(result.Vulnerabilities) || result.Vulnerabilities.length === 0) &&
@@ -102,22 +111,35 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
     for (const raw of (result.Vulnerabilities ?? []) as unknown[]) {
       if (++count > MAX_VULN_FINDINGS) throw new Error('Too many vulnerabilities');
       if (!object(raw) || typeof raw.VulnerabilityID !== 'string' ||
-          !/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(raw.VulnerabilityID) ||
-          typeof raw.PkgName !== 'string' || raw.PkgName.length > 128 ||
-          !(ecosystem === 'apk' ? apkNamePattern : npmNamePattern).test(raw.PkgName) ||
-          !validVersion(raw.InstalledVersion) ||
+          (publicImage ? !publicVulnerabilityId(raw.VulnerabilityID, ecosystem) ||
+                      raw.VulnerabilityID.startsWith('TEMP-') && value.Metadata.OS.Family !== 'debian' :
+                      !/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(raw.VulnerabilityID)) ||
+          !validName(raw.PkgName) || !version(raw.InstalledVersion) ||
           typeof raw.Severity !== 'string' || !severities.includes(raw.Severity as typeof severities[number]) ||
-          (ecosystem === 'npm' && !validPackagePath(raw.PkgPath))) throw new Error('Invalid vulnerability');
+          (ecosystem === 'npm' && !validPackagePath(raw.PkgPath)) ||
+                    (publicImage && raw.PkgPath !== undefined && !validPackagePath(raw.PkgPath))) throw new Error('Invalid vulnerability');
+                if (publicImage) {
+                  const validPublicSource = (source: unknown) => validSource(source) || typeof source === 'string' && publicSources.has(source);
+                  if (raw.SeveritySource !== undefined && raw.SeveritySource !== null && !validPublicSource(raw.SeveritySource) ||
+                      raw.VendorSeverity !== undefined && (!object(raw.VendorSeverity) || Object.entries(raw.VendorSeverity).some(([source, level]) =>
+                        !validPublicSource(source) || !Number.isInteger(level) || (level as number) < 0 || (level as number) > 4)))
+                    throw new Error('Invalid public severity source');
+                  if (!Array.isArray(result.Packages) || !result.Packages.some(pkg => object(pkg) && pkg.Name === raw.PkgName &&
+                                      (ecosystem === 'deb' ? publicDebianVersion(pkg.Version, pkg.Epoch, pkg.Release) : pkg.Version) === raw.InstalledVersion))
+                    throw new Error('Vulnerability missing package inventory');
+                }
       // Missing/null source is not evidence that Alpine (or any vendor) supplied the severity.
-      const severitySources = new Set<string>([validSource(raw.SeveritySource) ? raw.SeveritySource : 'unknown']);
+      const sourceAllowed = (source: unknown): source is string => validSource(source) ||
+              publicImage && typeof source === 'string' && publicSources.has(source);
+            const severitySources = new Set<string>([sourceAllowed(raw.SeveritySource) ? raw.SeveritySource : 'unknown']);
       if (object(raw.VendorSeverity)) {
         for (const [source, level] of Object.entries(raw.VendorSeverity)) {
-          if (validSource(source) && Number.isInteger(level) && (level as number) >= 0 && (level as number) <= 4)
+          if (sourceAllowed(source) && Number.isInteger(level) && (level as number) >= 0 && (level as number) <= 4)
             severitySources.add(source);
         }
       }
-      const fixedVersion = validVersion(raw.FixedVersion) ? raw.FixedVersion : null;
-      const provenanceRef = ecosystem === 'npm'
+      const fixedVersion = version(raw.FixedVersion) ? raw.FixedVersion : null;
+      const provenanceRef = ecosystem === 'npm' || publicImage && raw.PkgPath !== undefined
         ? `target-${createHash('sha256').update(JSON.stringify([result.Target, raw.PkgPath])).digest('hex')}`
         : targetRef;
       const key = JSON.stringify([...(binding ? [image, platform, 'vuln'] : []), ecosystem, provenanceRef, raw.VulnerabilityID, raw.PkgName, raw.InstalledVersion]);

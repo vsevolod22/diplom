@@ -15,7 +15,7 @@ const sbom: ImageSbom = { image, platform: 'linux/amd64', os: { name: 'alpine', 
 
 async function fixture(run: (db: ScanLedger, scanId: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-sbom-'));
-  const db = new ScanLedger(join(dir, 'ledger.sqlite'));
+  const db = new ScanLedger(join(dir, 'ledger.sqlite'), () => 1000);
   try {
     const { scanId } = db.enqueue({ subject: 'alice', idempotencyKey: 'sbom', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest, platform: 'linux/amd64', checks: '["sbom"]', scope: 'image' });
@@ -71,8 +71,8 @@ test('stale SBOM attempt cannot publish after a replacement claim', async () => 
   assert.equal(second.attempts, 2);
   assert.equal(await first, true);
   assert.equal(db.sbom(scanId, 'alice'), undefined);
-  assert.equal(db.attemptActive(scanId, second.attempts), true);
-  assert.equal(db.finishWithSbom(scanId, second.attempts, sbom, '0.69.3'), true);
+  assert.equal(db.attemptActive(scanId, second.attempts, second.leaseToken), true);
+  assert.equal(db.finishWithSbom(scanId, second.attempts, sbom, '0.69.3', second.leaseToken), true);
   assert.equal(db.state(scanId, 'alice'), 'completed');
 }));
 

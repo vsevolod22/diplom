@@ -19,7 +19,7 @@ const vuln: Omit<VulnScanOptions, 'timeoutMs' | 'signal'> = { cacheDir: '/tmp/ca
 const options = { timeoutMs: 1000, dbDir: '/tmp/cache', vuln };
 async function fixture(checks: string, run: (db: ScanLedger, id: string) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-combined-'));
-  const db = new ScanLedger(join(dir, 'ledger.sqlite'));
+  const db = new ScanLedger(join(dir, 'ledger.sqlite'), () => 1000);
   try {
     const id = db.enqueue({ subject: 'alice', idempotencyKey: 'combined', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest, platform: 'linux/amd64', checks, scope: 'image' }).scanId;
@@ -72,7 +72,7 @@ test('missing vuln configuration fails that check, not preceding successful chec
     assert.equal(db.vuln(id, 'alice')?.outcome, 'failed');
   }));
 
-test('abort mid-combination skips subsequent checks and commits nothing', async () =>
+test('abort mid-combination preserves completed checkpoint and skips subsequent checks', async () =>
   fixture('["secret","sbom","vuln"]', async (db, id) => {
     let started!: () => void;
     const ready = new Promise<void>(resolve => { started = resolve; });
@@ -87,7 +87,7 @@ test('abort mid-combination skips subsequent checks and commits nothing', async 
     db.cancel(id, 'alice');
     assert.equal(await work, true);
     assert.equal(called, false);
-    assert.equal(db.result(id, 'alice'), undefined);
+    assert.equal(db.result(id, 'alice')?.outcome, 'checked');
     assert.equal(db.sbom(id, 'alice'), undefined);
     assert.equal(db.state(id, 'alice'), 'cancelled');
   }));
@@ -123,5 +123,5 @@ test('replacement claim fences old combined attempt before final write', async (
     assert.equal(await first, true);
     assert.equal(db.result(id, 'alice'), undefined);
     assert.equal(db.sbom(id, 'alice'), undefined);
-    assert.equal(db.attemptActive(id, second.attempts), true);
+    assert.equal(db.attemptActive(id, second.attempts, second.leaseToken), true);
   }));

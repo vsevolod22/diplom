@@ -68,7 +68,7 @@ test('actual Nest owner usage GET, no context mutation, precall quota and public
     const scan = (key: string) => {
       const id = scans.enqueue({ subject: owner.id, idempotencyKey: key, registry: 'registry-1.docker.io', repository: 'library/alpine', digest: digest as `sha256:${string}`, platform: 'linux/amd64', scope: 'image', checks: '["secret"]' }).scanId;
       const job = scans.claim()!;
-      assert.equal(scans.finishCombined(id, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [{ findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }]), true);
+      assert.equal(scans.finishCombined(id, job.attempts, [{ check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [{ findingId: 'secret-0-1', ruleId: 'rule-0123456789abcdef', line: 1, evidenceRef: 'result-0-secret-1' }] }], undefined, job.leaseToken), true);
       return id;
     };
     const id = scan('normal');

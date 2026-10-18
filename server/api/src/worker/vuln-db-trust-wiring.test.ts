@@ -181,12 +181,14 @@ test('LOCAL Nest factory selects the compiled env anchor explicitly and rejects 
   assert.deepEqual(selected(factory(store, resolver)), PRODUCTION_DB_TRUST_ANCHOR);
 });
 
-test('only the compiled LOCAL worker entrypoint reads LOCAL env; runWorker receives its explicit anchor', async () => {
+test('only explicit LOCAL/public worker entrypoints select LOCAL trust; runtime receives its explicit anchor', async () => {
   const main = await readFile(new URL('./nginx-local-worker.main.ts', import.meta.url), 'utf8');
   assert.match(main, /runWorker\('local', localDbTrustAnchorFromEnv\(\)\)/);
   const worker = await readFile(new URL('./worker.main.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(worker, /localDbTrustAnchorFromEnv|LOCAL_CVE_TRUST/);
   const runtime = await readFile(new URL('./worker-runtime.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(runtime, /localDbTrustAnchorFromEnv|LOCAL_CVE_TRUST/);
-  assert.match(runtime, /buildVulnConfig\(archivePolicy, anchor\)/);
+  assert.match(runtime, /buildVulnConfig\(archivePolicy, anchor, publicImagePolicy\)/);
+    const publicWorker = await readFile(new URL('./public-image-worker.main.ts', import.meta.url), 'utf8');
+    assert.match(publicWorker, /runWorker\(undefined, localDbTrustAnchorFromEnv\(\), true\)/);
 });

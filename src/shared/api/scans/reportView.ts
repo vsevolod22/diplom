@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { advisorySeverity, assertPlainWire } from './vulnAdvisory';
+import { reportEcosystem, type ReportEcosystem } from './publicImageProfile';
 
 export const REPORT_LIMITS = [5, 10, 25, 50] as const;
 export const REPORT_SEVERITIES = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
@@ -7,16 +8,16 @@ export type ReportKind = 'vuln' | 'sbom' | 'secret';
 export type Severity = typeof REPORT_SEVERITIES[number];
 export type ReportLimit = typeof REPORT_LIMITS[number];
 export type VulnReportQuery = { view: 'report-v1'; limit?: ReportLimit; severity?: Severity[] | null; sort?: 'severity:asc' | 'severity:desc' };
-export type SbomReportQuery = { view: 'report-v1'; limit?: ReportLimit; ecosystem?: 'apk' | 'npm' | null; name?: string | null; sort?: 'name:asc' | 'name:desc' | 'ecosystem:asc' | 'ecosystem:desc' };
+export type SbomReportQuery = { view: 'report-v1'; limit?: ReportLimit; ecosystem?: ReportEcosystem | null; name?: string | null; sort?: 'name:asc' | 'name:desc' | 'ecosystem:asc' | 'ecosystem:desc' };
 export type SecretReportQuery = { view: 'report-v1'; limit?: ReportLimit; ruleId?: string | null; linePresence?: 'known' | 'unknown' | null; sort?: 'ruleId:asc' | 'ruleId:desc' | 'line:asc' | 'line:desc' };
 export type ReportQueries = { vuln: VulnReportQuery; sbom: SbomReportQuery; secret: SecretReportQuery };
 const limit = z.union([z.literal(5), z.literal(10), z.literal(25), z.literal(50)]);
-const literalName = z.string().regex(/^[A-Za-z0-9@._+/-]{1,128}$/);
+const literalName = z.string().regex(/^[A-Za-z0-9@._+:/-]{1,128}$/);
 export const REPORT_RULE_ID_PATTERN = /^[A-Za-z0-9._-]{1,80}$/;
 const ruleId = z.string().regex(REPORT_RULE_ID_PATTERN);
 const filters = {
   vuln: z.strictObject({ severity: z.array(advisorySeverity).min(1).max(5).nullable() }),
-  sbom: z.strictObject({ ecosystem: z.enum(['apk', 'npm']).nullable(), name: literalName.nullable() }),
+  sbom: z.strictObject({ ecosystem: reportEcosystem.nullable(), name: literalName.nullable() }),
   secret: z.strictObject({ ruleId: ruleId.nullable(), linePresence: z.enum(['known', 'unknown']).nullable() }),
 };
 const sorts = {

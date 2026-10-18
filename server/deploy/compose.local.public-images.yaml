@@ -1,0 +1,17 @@
+# SOURCE ONLY: activation is blocked in scripts/local-stand.mjs.
+# Reviewed rollout, drained writers and a consistent verified backup are mandatory.
+# Always LAST: compose.stand + compose.local.full + optional compose.local.cve + this.
+# Compose >= 2.24.4 is required for !override. Never apply to an existing live DB.
+services:
+  api:
+    command: [node, --import, tsx, src/oci/public-image.main.ts]
+  worker:
+    command: [node, --import, tsx, src/worker/public-image-worker.main.ts]
+    # MemorySwap is memory + swap: equal limits mean zero additional swap.
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 1
+    pids_limit: 128
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,uid=65532,gid=65532,size=16m
+      - /tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=2304m

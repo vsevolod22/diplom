@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { BadRequestException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { dockerHubSearch, hubSearchUrl, type HubSearchResponse } from '../oci/gateway-transport.js';
 
-export type ImageSuggestion = { label: string; reference: string; scannable: boolean; kind: 'tag' | 'repository'; tagConfirmed: boolean; eligibility: 'alpine-only' | 'isolated-exact-profile' | 'qualified-exact-profile' | 'unsupported'; allowedCheckSets?: readonly (readonly string[])[]; qualificationId?: string; reason: string; checks: { secret: boolean; sbom: boolean; vuln: 'conditional' | 'unsupported' } };
+export type ImageSuggestion = { label: string; reference: string; scannable: boolean; kind: 'tag' | 'repository'; tagConfirmed: boolean; eligibility: 'alpine-only' | 'isolated-exact-profile' | 'qualified-exact-profile' | 'public-hub-profile' | 'unsupported'; allowedCheckSets?: readonly (readonly string[])[]; qualificationId?: string; reason: string; checks: { secret: boolean; sbom: boolean; vuln: 'conditional' | 'unsupported' } };
 export const searchPolicy = Object.freeze({ pageSize: 12, maxPages: 5, maxCandidates: 60, maxPageBytes: 128_000, maxBytes: 640_000, idleMs: 300_000, maxFetchMs: 5000, maxTotalMs: 25_000, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' as const });
 export type ImageSearchPage = { items: ImageSuggestion[]; nextCursor: string | null; state: 'more-available' | 'terminal' | 'quota-exhausted'; loaded: number; pages: number; policy: typeof searchPolicy };
 const repoName = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;

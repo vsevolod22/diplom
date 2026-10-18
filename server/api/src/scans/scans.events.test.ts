@@ -39,7 +39,7 @@ test('durable replay is exclusive; terminal is last and reconnect after terminal
   try {
     const queued = ledger.events(scanId, 'alice', null)![0];
     const job = ledger.claim()!;
-    assert.equal(ledger.finishWithResult(scanId, job.attempts, [], '0.69.3'), true);
+    assert.equal(ledger.finishWithResult(scanId, job.attempts, [], '0.69.3', job.leaseToken), true);
     const later = ledger.events(scanId, 'alice', queued.id)!;
     assert.deepEqual(later.map(e => e.state), ['running', 'completed']);
     assert.ok(later[0].id > queued.id && later[1].id > later[0].id);
@@ -69,7 +69,7 @@ test('partial terminal event closes SSE on replay and after its final cursor', (
     assert.equal(ledger.finishCombined(scanId, job.attempts, [
       { check: 'secret', outcome: 'checked', scannerVersion: '0.69.3', findings: [] },
       { check: 'sbom', outcome: 'failed', errorCode: 'SCAN_FAILED' },
-    ]), true);
+    ], undefined, job.leaseToken), true);
     const terminal = ledger.events(scanId, 'alice', queued.id)!.at(-1)!;
     assert.equal(terminal.state, 'partial');
     const replay = new Response();
@@ -106,7 +106,7 @@ test('rechecks ledger after attachment and continues through a terminal transiti
       const result = original(...args);
       if (++reads === 1) {
         const job = ledger.claim()!;
-        ledger.finishWithResult(scanId, job.attempts, [], '0.69.3');
+        ledger.finishWithResult(scanId, job.attempts, [], '0.69.3', job.leaseToken);
       }
       return result;
     }) as ScanLedger['events'];
@@ -263,7 +263,7 @@ test('terminal response releases both quota counters', async () => {
     }
     const closed = Promise.all(open.map(response => new Promise<void>(resolve => response.once('close', resolve))));
     const job = ledger.claim()!;
-    ledger.finishWithResult(scanId, job.attempts, [], '0.69.3');
+    ledger.finishWithResult(scanId, job.attempts, [], '0.69.3', job.leaseToken);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([closed, new Promise<never>((_, reject) => {

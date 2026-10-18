@@ -1,0 +1,80 @@
+{
+  "status": "PASS_READONLY_PERSISTED_AGGREGATES",
+  "verifiedContainerId": "6c54d59258246b25efa6ba762b78f49f4feed5992d5b9e3e6e64cfee7b1078f4",
+  "verifiedImageId": "sha256:d8f5ee471875bfed6821cd4ff8f5c4527a1f179ffc8b2b69cda3925afa6689f9",
+  "readOnly": true,
+  "schemaVersion": 15,
+  "dbIdentity": {
+    "envelopeVersion": 1,
+    "signer": "local-db-operator-v1",
+    "source": "ghcr.io/aquasecurity/trivy-db@sha256:9dd4076bb4c826ace2a305983a2285de1044fbf99d27eb619b91abc4dfc1b43c",
+    "schemaVersion": 2,
+    "manifestDigest": "sha256:9dd4076bb4c826ace2a305983a2285de1044fbf99d27eb619b91abc4dfc1b43c",
+    "artifactSha256": "79f9dd6dc3e6fd12c9aee927b1eb671615f63a9eec03060b3dca97772b2e3053",
+    "metadataSha256": "a8959db48b46270ecc35f6cbadf2fbbfe31f5939fbc5a99539e350fc6f06b142",
+    "dbSha256": "bf1f1b29d76cae9ff085d418cb4bfdb3906b6069f837abdef06558b8102dd1db",
+    "updatedAt": "2026-10-16T01:13:54.947090392Z",
+    "downloadedAt": "2026-10-16T10:47:56.065968Z",
+    "nextUpdate": "2026-10-17T01:13:54.947090202Z"
+  },
+  "scans": [
+    {
+      "scanId": "b2c8f335-f1e8-4c0e-be33-561bd0cda1a6",
+      "state": "completed",
+      "ledgerCompletedAt": "2026-10-18 14:04:17",
+      "checks": {
+        "secret": { "outcome": "checked", "findingCount": 0 },
+        "sbom": {
+          "outcome": "checked",
+          "componentCount": 88,
+          "ecosystems": { "deb": 88 }
+        },
+        "vuln": {
+          "outcome": "checked",
+          "findingCount": 241,
+          "identifiers": { "cve": 236, "debianTemp": 5 },
+          "ecosystems": { "deb": 241 },
+          "node": { "outcome": "unsupported", "reason": "NODE_INVENTORY_UNKNOWN" }
+        },
+        "config": { "outcome": "checked", "findingCount": 1 }
+      },
+      "dbEvaluation": {
+        "workerCheckedAt": 1792332257792,
+        "version": 2,
+        "policy": "cve-db-updated-at-14d-v2",
+        "evaluatedAt": 1792332257852,
+        "status": "stale-but-usable",
+        "warnings": ["DB_DATA_OLDER_THAN_24H", "DB_PUBLICATION_OVERDUE"]
+      }
+    },
+    {
+      "scanId": "4dfdcc89-c78f-415f-b73b-74cde4798a4d",
+      "state": "completed",
+      "ledgerCompletedAt": "2026-10-18 14:06:09",
+      "checks": {
+        "secret": { "outcome": "checked", "findingCount": 0 },
+        "sbom": {
+          "outcome": "checked",
+          "componentCount": 217,
+          "ecosystems": { "apk": 17, "npm": 200 }
+        },
+        "vuln": {
+          "outcome": "checked",
+          "findingCount": 158,
+          "identifiers": { "cve": 158, "debianTemp": 0 },
+          "ecosystems": { "apk": 97, "npm": 61 },
+          "node": { "outcome": "checked" }
+        },
+        "config": { "outcome": "checked", "findingCount": 1 }
+      },
+      "dbEvaluation": {
+        "workerCheckedAt": 1792332369864,
+        "version": 2,
+        "policy": "cve-db-updated-at-14d-v2",
+        "evaluatedAt": 1792332369916,
+        "status": "stale-but-usable",
+        "warnings": ["DB_DATA_OLDER_THAN_24H", "DB_PUBLICATION_OVERDUE"]
+      }
+    }
+  ]
+}

@@ -34,7 +34,7 @@ test('consumer aborts active attempt on cancel and does not wait for an uncooper
 test('old attempt cannot overwrite a replacement claim', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cancel-attempt-'));
   try {
-    const db = new ScanLedger(join(dir, 'ledger.sqlite'));
+    const db = new ScanLedger(join(dir, 'ledger.sqlite'), () => 1000);
     const id = db.enqueue({ subject: 'alice', idempotencyKey: 'key', registry: 'registry-1.docker.io',
       repository: 'library/alpine', digest: `sha256:${'a'.repeat(64)}`, platform: 'linux/amd64', checks: '["secret"]' }).scanId;
     let started!: () => void;
@@ -48,8 +48,8 @@ test('old attempt cannot overwrite a replacement claim', async () => {
     const second = db.claim(32_000, 1000)!;
     assert.equal(second.attempts, 2);
     assert.equal(await first, true);
-    assert.equal(db.attemptActive(id, second.attempts), true);
-    assert.equal(db.finishWithResult(id, second.attempts, [], '0.69.3'), true);
+    assert.equal(db.attemptActive(id, second.attempts, second.leaseToken), true);
+    assert.equal(db.finishWithResult(id, second.attempts, [], '0.69.3', second.leaseToken), true);
     assert.equal(db.state(id, 'alice'), 'completed');
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }

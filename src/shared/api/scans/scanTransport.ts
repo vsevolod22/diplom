@@ -4,6 +4,9 @@ import type { ReportPages, SecretReportQuery, SbomReportQuery, VulnReportQuery }
 import { CveReportContractError, cveMetadataFields, hasCveMetadata, validateCveMetadata } from './cveDbMetadata';
 import { advisoryV1, advisorySource, advisorySeverity, provenanceRef, assertPlainWire, serializedBytes, validAdvisoryReferences } from './vulnAdvisory';
 import { imageConfigReport, wireConfigCoverage } from './imageConfigReport';
+import { pinnedPublicImage, publicProfile, validReportImage, reportEcosystem, reportOs, reportSeveritySource } from './publicImageProfile';
+
+import { identifierCounts, isCveId, isDebianTempId, validVulnerabilityId, validateIdentifierCounts } from './publicVulnerabilityIdentifiers';
 
 const state = z.enum(['queued', 'running', 'cancelling', 'completed', 'partial', 'failed', 'cancelled']);
 const coverageState = z.enum(['checked', 'unsupported', 'not_authorized', 'failed', 'skipped']);
@@ -14,7 +17,7 @@ export type ScanCheck = typeof scanChecks[number];
 const checkName = z.enum(scanChecks);
 const failureCode = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']);
 const archiveFailureReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE']);
-const archiveReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT']);
+const archiveReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN']);
 const subCoverage = z.discriminatedUnion('outcome', [z.strictObject({ outcome: z.literal('checked') }),
   z.strictObject({ outcome: z.literal('unsupported'), reason: archiveReason })]);
 const dbTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/);
@@ -24,10 +27,8 @@ const dbIdentity = z.strictObject({ envelopeVersion: z.literal(1), signer: z.lit
   metadataSha256: z.string().regex(/^[a-f0-9]{64}$/), dbSha256: z.string().regex(/^[a-f0-9]{64}$/),
   updatedAt: dbTime, downloadedAt: dbTime, nextUpdate: dbTime }).refine(db => db.source === `ghcr.io/aquasecurity/trivy-db@${db.manifestDigest}`);
 const archiveEvidence = { os: subCoverage.optional(), node: subCoverage.optional(), db: dbIdentity.optional() };
-const reportImage = z.union([z.string().regex(/^registry-1\.docker\.io\/library\/alpine@sha256:[a-f0-9]{64}$/),
-  z.literal('registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3'),
-    z.literal('registry-1.docker.io/library/nginx@sha256:b17b00f7ef0038aeb11362157f49006a130628ee711cefcced871405d046f114')]);
-const status = z.object({ config: imageConfigReport.optional(), scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().nullable().optional(), componentCount: z.number().int().nonnegative().optional(), reason: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'CHECK_DISABLED', 'USER_NOT_RESOLVABLE', 'OCI_IDENTITY_REJECTED', 'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG']).optional(), ...archiveEvidence, resultContractVersion: cveMetadataFields.resultContractVersion.optional(), dbPolicy: cveMetadataFields.dbPolicy.optional(), usableUntil: cveMetadataFields.usableUntil.optional(), workerCheckedAt: cveMetadataFields.workerCheckedAt.optional(), checksVersion: z.string().max(80).optional(), resourcePolicyVersion: z.string().max(80).optional(), supportedRuleIds: z.array(z.string()).optional(), completedRuleIds: z.array(z.string()).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
+const reportImage = pinnedPublicImage;
+const status = z.object({ identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), config: imageConfigReport.optional(), scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().nullable().optional(), componentCount: z.number().int().nonnegative().optional(), reason: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN', 'CHECK_DISABLED', 'USER_NOT_RESOLVABLE', 'OCI_IDENTITY_REJECTED', 'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG']).optional(), ...archiveEvidence, resultContractVersion: cveMetadataFields.resultContractVersion.optional(), dbPolicy: cveMetadataFields.dbPolicy.optional(), usableUntil: cveMetadataFields.usableUntil.optional(), workerCheckedAt: cveMetadataFields.workerCheckedAt.optional(), checksVersion: z.string().max(80).optional(), resourcePolicyVersion: z.string().max(80).optional(), supportedRuleIds: z.array(z.string()).optional(), completedRuleIds: z.array(z.string()).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
 const results = z.object({ findings: z.array(finding), nextCursor: z.string().nullable(), coverage: z.array(coverage) });
 // Receipt URLs may refer to the internal API. Only the ID crosses into browser navigation.
 const receipt = z.object({ scanId: z.string().uuid() });
@@ -41,9 +42,7 @@ export type ScanIntent = { imageReference: string; scope: 'image'; checks: ScanC
 type BrowserCursor<T> = T extends unknown ? Omit<T, 'nextCursor'> & { nextCursor: string | null } : never;
 export type ScanVuln = BrowserCursor<z.infer<typeof wireVuln>> & { page?: ReportPages['vuln'] };
 export type VulnFinding = z.infer<typeof wireVulnFinding>;
-export type ScanSbom = (
-  | { outcome: 'checked'; coverage: 'image'; image: string; platform: 'linux/amd64'; os: { name: 'alpine'; version: string }; componentCount: number; scannerVersion: string; checkedAt: string; components: { ecosystem: 'apk' | 'npm'; name: string; version: string }[]; nextCursor: string | null }
-  | { outcome: 'failed'; coverage: 'image'; errorCode: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE'; reason?: z.infer<typeof archiveFailureReason>; components: []; nextCursor: null }) & { page?: ReportPages['sbom'] };
+export type ScanSbom = BrowserCursor<z.infer<typeof wireSbom>> & { page?: ReportPages['sbom'] };
 export type ScanCapabilities = { list: boolean; create: boolean; cancel: boolean; events: boolean };
 export type ScanTransport = {
   kind: 'fixture' | 'live';
@@ -71,6 +70,7 @@ export const parseScanStatus = (value: unknown): ScanStatus => {
     if (key === 'config') wireConfigCoverage.parse(item);
     else if (item.reason !== undefined) archiveReason.parse(item.reason);
   }
+  validateIdentifierCounts(parsed.profile, parsed.identifierCounts, parsed.perCheck?.vuln?.findingCount, parsed.perCheck?.vuln?.outcome === 'checked');
   return parsed;
 };
 export const parseScanResults = (value: unknown): ScanResults => results.parse(value);
@@ -106,18 +106,20 @@ const wirePerCheck = z.unknown().transform((value, context) => {
   return parsed.data;
 });
 const wireChecks = z.array(checkName).min(1).max(4).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
-const wireStatus = z.object({ config: imageConfigReport.optional(), imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.string().regex(/^linux\/[a-z0-9]+(?:\/[a-z0-9]+)?$/).optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
-const sbomComponent = z.strictObject({ ecosystem: z.enum(['apk', 'npm']), name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
+const wireStatus = z.object({ identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), config: imageConfigReport.optional(), imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.literal('linux/amd64').optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
+const sbomComponent = z.strictObject({ ecosystem: reportEcosystem, name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
 const wireSbom = z.discriminatedUnion('outcome', [
-  z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), os: z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) }), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
+  z.strictObject({ profile: publicProfile.optional(), outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), os: z.union([reportOs, z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) })]), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
   z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode,
     reason: archiveFailureReason.optional(), components: z.tuple([]), nextCursor: z.null() })
     .refine(page => page.reason === undefined || page.errorCode === (page.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED'), 'Несогласованная причина отказа SBOM'),
 ]);
 export function parseCurrentSbom(value: unknown, query?: SbomReportQuery, cursor?: string): ScanSbom {
   if (query) return parseReportView(value, 'sbom', query, cursor, parseCurrentSbom);
+  assertPlainWire(value);
   const page = wireSbom.parse(value);
   if (page.outcome === 'failed') return page;
+  if (!validReportImage(page.image, page.profile) || page.profile && !reportOs.safeParse(page.os).success || !page.profile && (page.os.name !== 'alpine' || page.components.some(row => row.ecosystem !== 'apk' && row.ecosystem !== 'npm'))) throw new Error('Недопустимый профиль SBOM');
   if (page.components.length > page.componentCount || (page.nextCursor !== null && (page.components.length === 0 || page.nextCursor > page.componentCount))) throw new Error('Недопустимая страница SBOM');
   return { ...page, nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };
 }
@@ -126,6 +128,8 @@ const wireResults = z.object({ findings: z.array(z.object({ findingId: z.string(
 export function parseCurrentStatus(value: unknown): ScanStatus {
   assertPlainWire(value);
   const current = wireStatus.parse(value);
+  if (current.profile && (!current.imageReference || !current.digest || current.platform !== 'linux/amd64')) throw new Error('Нет закреплённой public-цели');
+  if (current.imageReference && (!validReportImage(current.imageReference, current.profile) || current.digest && !current.imageReference.endsWith(`@${current.digest}`) || current.profile && (!current.digest || current.platform !== 'linux/amd64'))) throw new Error('Несогласованная закреплённая цель');
   const checks = current.checks ?? (current.check || current.result ? [current.check ?? current.result!.check] : undefined);
   const perCheck = current.perCheck ?? (checks?.length === 1 ? { [checks[0]]: current.result ?? null } : undefined);
   if (checks && perCheck && (Object.keys(perCheck).some(key => !checks.includes(key as ScanCheck) || (perCheck[key as ScanCheck] != null && perCheck[key as ScanCheck]?.check !== key)) || checks.some(key => !(key in perCheck)))) throw new Error('Недопустимый статус проверок');
@@ -135,6 +139,8 @@ export function parseCurrentStatus(value: unknown): ScanStatus {
     if (JSON.stringify(actual) !== JSON.stringify(expected))
       throw new Error('Inconsistent CVE result and perCheck');
   }
+  const vulnCheck = perCheck?.vuln;
+  validateIdentifierCounts(current.profile, current.identifierCounts, vulnCheck && 'findingCount' in vulnCheck ? vulnCheck.findingCount : undefined, vulnCheck?.outcome === 'checked');
   if (current.config) {
     if ((current.config.config.outcome === 'skipped') === (checks?.includes('config') === true) ||
         current.config.findings.some(finding => finding.manifestDigest !== current.digest || current.platform !== 'linux/amd64')) throw new Error('Недопустимая цель config');
@@ -147,6 +153,8 @@ export function parseCurrentStatus(value: unknown): ScanStatus {
     }
   } else if (perCheck?.config != null) throw new Error('Нет config evidence');
   return { scanId: current.scanId, state: current.state, percent: null,
+    ...(current.profile ? { profile: current.profile } : {}),
+    ...(current.identifierCounts ? { identifierCounts: current.identifierCounts } : {}),
     ...(current.config ? { config: current.config } : {}),
     ...(checks ? { checks, perCheck, ...(checks.length === 1 ? { check: checks[0] } : {}) } : {}),
     ...(current.digest && current.platform ? { digest: current.digest, platform: current.platform } : {}),
@@ -174,6 +182,11 @@ export function parseCurrentResults(value: unknown, query?: SecretReportQuery, c
   assertPlainWire(value);
   const current = wireResults.parse(value);
   const secret = current.coverage;
+  // An empty legacy page without coverage is absence, not a completed zero or a skipped check.
+  if (secret === null) {
+    if (current.findings.length || current.nextCursor !== null) throw new Error('Находки без подтверждённого покрытия');
+    return { findings: [], nextCursor: null, coverage: [] };
+  }
   return {
     findings: current.findings.map(({ findingId, ruleId }) => ({ findingId, ruleId, category: 'secret', severity: 'unknown' })),
     nextCursor: current.nextCursor === null ? null : String(current.nextCursor),
@@ -184,19 +197,19 @@ export function parseCurrentResults(value: unknown, query?: SecretReportQuery, c
     ],
   };
 }
-const wireVulnFinding = z.strictObject({ findingId: z.string().min(1).max(69), cveId: z.string().min(1).max(21), ecosystem: z.enum(['apk', 'npm']), packageName: z.string().min(1).max(128), installedVersion: z.string().min(1).max(80), severity: advisorySeverity, fixedVersion: z.string().max(80).nullable(),
-  severitySources: z.array(advisorySource).min(1).max(22).refine(items => items.every((source, index) => index === 0 || items[index - 1] < source)).optional(), provenanceRef: provenanceRef.optional(), advisory: advisoryV1.nullable().optional(),
-}).refine(item => item.advisory == null || (serializedBytes(item) <= 16384 && /^CVE-[0-9]{4}-[0-9]{4,12}$/.test(item.cveId) && validAdvisoryReferences(item.advisory, item.cveId)));
+const wireVulnFinding = z.strictObject({ findingId: z.string().min(1).max(69), cveId: z.string().min(1).max(21), ecosystem: reportEcosystem, packageName: z.string().min(1).max(128), installedVersion: z.string().min(1).max(80), severity: advisorySeverity, fixedVersion: z.string().max(80).nullable(),
+  severitySources: z.array(reportSeveritySource).min(1).max(32).refine(items => items.every((source, index) => index === 0 || items[index - 1] < source)).optional(), provenanceRef: provenanceRef.optional(), advisory: advisoryV1.nullable().optional(),
+}).refine(item => item.advisory == null || (serializedBytes(item) <= 16384 && (isCveId(item.cveId) || isDebianTempId(item.cveId)) && validAdvisoryReferences(item.advisory, item.cveId)));
 const wireLegacyVuln = z.discriminatedUnion('outcome', [
-  z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, ...archiveEvidence, platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
+  z.strictObject({ identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, ...archiveEvidence, platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
   z.strictObject({ outcome: z.literal('failed'), coverage: z.literal('image'), errorCode: failureCode,
       reason: archiveFailureReason.optional(), findings: z.tuple([]), nextCursor: z.null() })
       .refine(page => page.reason === undefined || page.errorCode === (page.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED'), 'Несогласованная причина отказа CVE'),
-  z.strictObject({ outcome: z.literal('unsupported'), coverage: z.literal('image'), reason: archiveReason, ...archiveEvidence, findings: z.tuple([]), nextCursor: z.null() }),
+  z.strictObject({ profile: publicProfile.optional(), outcome: z.literal('unsupported'), coverage: z.literal('image'), reason: archiveReason, ...archiveEvidence, findings: z.tuple([]), nextCursor: z.null() }),
 ]);
 const wireV2Vuln = z.union([
-  z.strictObject({ outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string(), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable(), db: dbIdentity, os: subCoverage.optional(), node: subCoverage.optional(), ...cveMetadataFields }),
-  z.strictObject({ outcome: z.literal('unsupported'), coverage: z.literal('image'), reason: archiveReason, checkedAt: z.string(), findings: z.tuple([]), nextCursor: z.null(), db: dbIdentity, os: subCoverage.optional(), node: subCoverage.optional(), ...cveMetadataFields }),
+  z.strictObject({ identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), findingCount: z.number().int().nonnegative(), scannerVersion: z.string().min(1), checkedAt: z.string(), findings: z.array(wireVulnFinding).max(100), nextCursor: z.number().int().nonnegative().nullable(), db: dbIdentity, os: subCoverage.optional(), node: subCoverage.optional(), ...cveMetadataFields }),
+  z.strictObject({ profile: publicProfile.optional(), outcome: z.literal('unsupported'), coverage: z.literal('image'), reason: archiveReason, checkedAt: z.string(), findings: z.tuple([]), nextCursor: z.null(), db: dbIdentity, os: subCoverage.optional(), node: subCoverage.optional(), ...cveMetadataFields }),
 ]).refine(validateCveMetadata, 'Invalid saved CVE metadata');
 const wireVuln = z.unknown().transform<z.infer<typeof wireLegacyVuln> | z.infer<typeof wireV2Vuln>>((value, context) => {
   const parsed = (hasCveMetadata(value) ? wireV2Vuln : wireLegacyVuln).safeParse(value);
@@ -209,6 +222,16 @@ export function parseCurrentVuln(value: unknown, query?: VulnReportQuery, cursor
     assertPlainWire(value);
     const page = wireVuln.parse(value);
     if (page.outcome !== 'checked') return page;
+    validateIdentifierCounts(page.profile, page.identifierCounts, page.findingCount, true);
+    // Preserve historical unmarked rows; only the public contract gains TEMP.
+    if (page.findings.some(row => page.profile ? !validVulnerabilityId(row.cveId, row.ecosystem, page.profile) : row.cveId.startsWith('TEMP-'))) throw new CveReportContractError();
+    if (page.identifierCounts) {
+      const debianTemp = page.findings.filter(row => isDebianTempId(row.cveId)).length;
+      const cve = page.findings.length - debianTemp;
+      if (debianTemp > page.identifierCounts.debianTemp || cve > page.identifierCounts.cve ||
+          page.findings.length === page.findingCount && (cve !== page.identifierCounts.cve || debianTemp !== page.identifierCounts.debianTemp)) throw new CveReportContractError();
+    }
+    if (!validReportImage(page.image, page.profile) || !page.profile && page.findings.some(row => row.ecosystem !== 'apk' && row.ecosystem !== 'npm' || row.severitySources?.some(source => !advisorySource.safeParse(source).success))) throw new CveReportContractError();
     if (page.findings.length > page.findingCount || (page.nextCursor !== null && (page.findings.length === 0 || page.nextCursor > page.findingCount))) throw new CveReportContractError();
     if (page.findings.reduce((bytes, item) => bytes + (item.advisory == null ? 0 : serializedBytes(item.advisory)), 2 + Math.max(0, page.findings.length - 1)) > 1048576) throw new CveReportContractError();
     return { ...page, nextCursor: page.nextCursor === null ? null : String(page.nextCursor) };

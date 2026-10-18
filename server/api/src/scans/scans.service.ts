@@ -54,6 +54,7 @@ export class ScansService {
   protected acceptsReference(reference: ImageReference): boolean {
     return reference.registry === 'registry-1.docker.io' && reference.repository === 'library/alpine';
   }
+  protected acceptsReferenceInput(_input: unknown, reference: ImageReference): boolean { return this.acceptsReference(reference); }
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Keep the proof subclass hook signature; production accepts any parsed check set.
   protected acceptsChecks(_reference: ImageReference, _checks: readonly string[]): boolean { return true; }
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Proof subclasses bind the reference; production has no archive binding.
@@ -67,6 +68,10 @@ export class ScansService {
     return pinned.registry === 'registry-1.docker.io' && pinned.repository === 'library/alpine' && pinned.platform === 'linux/amd64';
   }
   imageSuggestion(suggestion: ImageSuggestion): ImageSuggestion { return suggestion; }
+  protected eligibilityProfile(reference: ImageReference): ImageSuggestion['eligibility'] {
+    return this.executionBinding(reference) ? 'qualified-exact-profile' : this.acceptsReference(reference)
+      ? reference.repository === 'library/alpine' ? 'alpine-only' : 'isolated-exact-profile' : 'unsupported';
+  }
 
   protected dbTrustAnchor(): DbTrustAnchor { return PRODUCTION_DB_TRUST_ANCHOR; }
 
@@ -98,7 +103,7 @@ export class ScansService {
     try { request = parseScanRequest(body, allowed); }
     catch { reject('INVALID_REQUEST'); throw new BadRequestException({ errorCode: 'INVALID_SCAN_REQUEST' }); }
     // Check policy before replay too: a seeded closed candidate cannot gain public admission.
-    if (!this.acceptsReference(request.reference) || !this.acceptsChecks(request.reference, request.checks)) {
+    if (!this.acceptsReferenceInput((body as Record<string, unknown>).imageReference, request.reference) || !this.acceptsChecks(request.reference, request.checks)) {
       reject('UNSUPPORTED');
       throw new BadRequestException({ errorCode: 'UNSUPPORTED_SCAN' });
     }
@@ -181,11 +186,11 @@ export class ScansService {
     if (rate.until <= now) { rate.until = now + 60_000; rate.count = 0; }
     if (++rate.count > 30) throw limited('rate', Math.max(1, Math.min(60, Math.ceil((rate.until - now) / 1000))));
     if (rate.active >= 2 || this.eligibilityActive >= 8) throw limited('concurrency', 1);
-    const allowedReference = this.acceptsReference(request.reference);
+    const allowedReference = this.acceptsReferenceInput((body as Record<string, unknown>).imageReference, request.reference);
     const sets = allowedReference ? this.allowedCheckSets(request.reference) : [];
     const binding = allowedReference ? this.executionBinding(request.reference) : undefined;
     const result = (eligible: boolean, reason: string) => ({ imageReference: request.reference.canonical, eligible,
-      eligibility: binding ? 'qualified-exact-profile' : allowedReference ? request.reference.repository === 'library/alpine' ? 'alpine-only' : 'isolated-exact-profile' : 'unsupported',
+      eligibility: this.eligibilityProfile(request.reference),
       allowedCheckSets: sets, ...(binding ? { qualificationId: binding.qualificationId } : {}), reason });
     if (!allowedReference || !this.acceptsChecks(request.reference, request.checks)) return result(false, 'UNSUPPORTED_SCAN');
     rate.active++; this.eligibilityActive++;

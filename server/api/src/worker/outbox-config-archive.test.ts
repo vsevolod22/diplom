@@ -16,7 +16,7 @@ for (const target of NGINX_ARCHIVE_CANDIDATES) for (const selected of [false, tr
     try {
       const checks = ['secret', 'sbom', 'vuln', ...(selected ? ['config'] : [])];
       const id = ledger.enqueue({ ...target, digest: target.digest as `sha256:${string}`, subject: 'alice', idempotencyKey: 'config-archive', checks: JSON.stringify(checks) }).scanId;
-      const nextUpdate = now + 3_600_000;
+      const nextUpdate = now + 10_000; // Cross DB expiry inside the still-live attempt lease.
       const report: ArchiveScanReport = { receipt: { ...target, layerDigests: [`sha256:${'a'.repeat(64)}`], diffIds: [`sha256:${'b'.repeat(64)}`],
         archiveSha256: `sha256:${'c'.repeat(64)}`, profileVersion: archiveProfileVersion(target), resourcePolicyVersion: 'nginx-archive-resources-v1', checksVersion: 'trivy-0.69.3-archive-v1' },
         scannerVersion: '0.69.3', checkedAt: now, metrics: { wireBytes: 100, requests: 5, compressedBytes: 50, expandedBytes: 2048,

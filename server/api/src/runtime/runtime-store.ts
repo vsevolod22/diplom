@@ -12,7 +12,6 @@ import {
   link,
   one,
   report,
-
   str,
   target,
   type Capture,
@@ -66,44 +65,59 @@ type CaptureRow = {
   report: string;
   created_at: number;
 };
-export function checkedPath(path: string, otherPaths: string[], exists: boolean): string {
-  if (!isAbsolute(path) || resolve(path) !== path || path.startsWith('file:'))
-    fault('RUNTIME_UNAVAILABLE', 503);
+const SQLITE_FILE_SUFFIXES = ['', '-journal', '-wal', '-shm', '.writer'] as const;
+function databaseFamily(path: string) {
+  if (!isAbsolute(path) || resolve(path) !== path || path.includes('\0')) fault('RUNTIME_UNAVAILABLE', 503);
+  // Missing leaves are allowed, missing/aliased parents are not. Never follow a dangling leaf
+  // or normalize an operator's alias into a different write target.
   const parent = dirname(path);
-  const root = lstatSync(parent);
-  if (
-    realpathSync(parent) !== parent ||
-    !root.isDirectory() ||
-    root.uid !== process.getuid?.() ||
-    (root.mode & 0o777) !== 0o700
-  )
-    fault('RUNTIME_UNAVAILABLE', 503);
-  let stat;
+  if (realpathSync(parent) !== parent || !lstatSync(parent).isDirectory()) fault('RUNTIME_UNAVAILABLE', 503);
+  return SQLITE_FILE_SUFFIXES.map((suffix) => {
+    const member = path + suffix;
+    const stat = lstatSync(member, { throwIfNoEntry: false });
+    if (stat && (!stat.isFile() || stat.isSymbolicLink() || realpathSync(member) !== member))
+      fault('RUNTIME_UNAVAILABLE', 503);
+    return { path: member, stat };
+  });
+}
+export function checkedPath(path: string, otherPaths: string[], exists: boolean): string {
   try {
-    stat = lstatSync(path);
-  } catch {
-    if (exists) fault('RUNTIME_UNAVAILABLE', 503);
-  }
-  if (
-    stat &&
-    (!stat.isFile() ||
-      stat.isSymbolicLink() ||
-      stat.uid !== root.uid ||
-      (stat.mode & 0o777) !== 0o600 ||
-      stat.nlink !== 1 ||
-      realpathSync(path) !== path)
-  )
-    fault('RUNTIME_UNAVAILABLE', 503);
-  for (const other of otherPaths.filter(Boolean)) {
-    if (resolve(other) === path) fault('RUNTIME_UNAVAILABLE', 503);
-    try {
-      const s = lstatSync(other);
-      if (stat && s.dev === stat.dev && s.ino === stat.ino) fault('RUNTIME_UNAVAILABLE', 503);
-    } catch (e) {
-      if (e instanceof RuntimeFault) throw e;
+    const own = databaseFamily(path);
+    const root = lstatSync(dirname(path));
+    if (root.uid !== process.getuid?.() || (root.mode & 0o777) !== 0o700) fault('RUNTIME_UNAVAILABLE', 503);
+    if (exists && !own[0].stat) fault('RUNTIME_UNAVAILABLE', 503);
+    for (const member of own) {
+      if (!member.stat) continue;
+      // Init requires the entire namespace to be empty. Reopen may recover SQLite-owned
+      // sidecars, but never adopt a lock or a shared/aliased/non-private sidecar.
+      if (
+        !exists ||
+        member.path === `${path}.writer` ||
+        member.stat.uid !== root.uid ||
+        (member.stat.mode & 0o777) !== 0o600 ||
+        member.stat.nlink !== 1
+      )
+        fault('RUNTIME_UNAVAILABLE', 503);
     }
+    const names = new Set<string>();
+    const inodes = new Set<string>();
+    for (const family of [own, ...otherPaths.filter(Boolean).map(databaseFamily)]) {
+      for (const member of family) {
+        if (names.has(member.path)) fault('RUNTIME_UNAVAILABLE', 503);
+        names.add(member.path);
+        if (member.stat) {
+          const identity = `${member.stat.dev}:${member.stat.ino}`;
+          if (inodes.has(identity)) fault('RUNTIME_UNAVAILABLE', 503);
+          inodes.add(identity);
+        }
+      }
+    }
+    return path;
+  } catch {
+    // ENOENT is tolerated only for a leaf via lstat's explicit option above. Permission,
+    // missing parent, symlink-loop and other identity failures are not absence evidence.
+    return fault('RUNTIME_UNAVAILABLE', 503);
   }
-  return path;
 }
 const schema = `
 CREATE TABLE runtime_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL);

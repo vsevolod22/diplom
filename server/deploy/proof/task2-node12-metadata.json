@@ -1,0 +1,73 @@
+{
+  "startedAt": "2026-10-16T21:49:28.336Z",
+  "candidate": "registry-1.docker.io/library/node:12.22.12-alpine3.15",
+  "candidateInvestigations": 1,
+  "scope": "anonymous metadata only; not native detection or admission",
+  "discoveryCompleted": true,
+  "limits": {
+    "requests": 3,
+    "wireBytes": 8032768,
+    "objectBytes": 4000000,
+    "configBytes": 1000000,
+    "tokenBytes": 32768,
+    "deadlineMs": 45000,
+    "requestMs": 15000,
+    "maxLayers": 32,
+    "compressedLayer": 33554432,
+    "compressedTotal": 100663296
+  },
+  "requests": 3,
+  "wireBytes": 8076,
+  "layerAcquisitionAttempted": false,
+  "scannerAttempted": false,
+  "indexDigest": "sha256:d4b15b3d48f42059a15bd659be60afe21762aae9d6cbea6f124440895c27db68",
+  "manifestDigest": "sha256:4517380049fc3c9aacceae7764fcf3500354b0ac8a47e4afb35b5bbeb75b9498",
+  "manifestBytes": 1158,
+  "platform": "linux/amd64",
+  "config": {
+    "digest": "sha256:bb6d28039b8cec9aa8d9032f9aa640a792a60c2cb1644691627bf046aab27c8b",
+    "size": 6584,
+    "mediaType": "application/vnd.docker.container.image.v1+json"
+  },
+  "layers": [
+    {
+      "digest": "sha256:df9b9388f04ad6279a7410b85cedfdcb2208c0a003da7ab5613af71079148139",
+      "size": 2814559,
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"
+    },
+    {
+      "digest": "sha256:3bf6d738020517f4622814e8c21db4b4aaa78ae7cab4e4f872c11696886c6285",
+      "size": 24910721,
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"
+    },
+    {
+      "digest": "sha256:7939e601ee5e4737cf7fdb6d1dfe31ca4c2697109290462f694710761450aef0",
+      "size": 2358237,
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"
+    },
+    {
+      "digest": "sha256:31f0fb9de071269230cb0f786012ae4e81d26e489b1fe922e57b5201e6bc9ab0",
+      "size": 451,
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"
+    }
+  ],
+  "largestCompressedLayer": 24910721,
+  "compressedTotal": 30083968,
+  "compressedEnvelopeFits": true,
+  "allCapsVerified": false,
+  "unverifiedCaps": [
+    "128MiB-inflated-layer",
+    "256MiB-inflated-total",
+    "64MiB-file",
+    "50000-entries",
+    "1024-PAX-records",
+    "272MiB-archive",
+    "448MiB-scratch",
+    "180s-acquisition",
+    "112MiB-acquisition-wire"
+  ],
+  "actualOsAndEol": "not inspected; tag is not scanner OS evidence",
+  "npmPositive": "not tested",
+  "receipt": "none; exact Node receipt is not currently accepted; no nginx identity substituted",
+  "finishedAt": "2026-10-16T21:49:29.994Z"
+}

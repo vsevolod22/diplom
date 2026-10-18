@@ -1,0 +1,22 @@
+{
+  "validation": "executed native run and new qualification-only tests",
+  "nativeChecks": 16,
+  "nodeTests": {
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "durationMs": 39.049458
+  },
+  "startedAt": "2026-10-16T21:19:41.977Z",
+  "finishedAt": "2026-10-16T21:19:47.176Z",
+  "sourceDriftDuringRun": false,
+  "tempStoreRemoved": true,
+  "hashes": {
+    "scripts/task2-qualification-native.mjs": "21b842a6490de3e44aae43162110cfd0fba351c63af704039848981066ca5b76",
+    "scripts/task2-qualification-run.ts": "375a7633c624540792752fe44b31504fc9c7710aaa30ba7759b901657fc8d5bb",
+    "scripts/task2-qualification-candidate.mjs": "6e3280528446b2fde7d01b07e85c7643582532b6f1a1c3a3f85ce7cdecfc3e8a",
+    "scripts/task2-qualification.test.mjs": "bc8adf3d7c9580eb0320688dcd4cdc4e44d125edf8b68d21dc054e286551feb9",
+    "server/deploy/proof/task2-qualification-results.json": "cdfecf912e1dccb64fe588f1ee1101709ad8697995dd02fc49dc18f031b8daf6",
+    "server/deploy/proof/task2-npm-remote-candidate.json": "5f44f8f1e4e8d1020f7f12f242a341152e986801f7ac1e1b3354d506b2d1ae75"
+  }
+}

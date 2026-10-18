@@ -55,7 +55,7 @@ test('browser cancel requires enrolled live session, origin and empty JSON; JWT 
     const completed = enqueue(alice.id, 'terminal');
     const job = ledger.claim()!;
     assert.equal(job.scanId, completed);
-    assert.equal(ledger.finishWithResult(completed, job.attempts, [], '0.69.3'), true);
+    assert.equal(ledger.finishWithResult(completed, job.attempts, [], '0.69.3', job.leaseToken), true);
     assert.equal((await post(`${base}/browser/scans/${completed}/cancel`, alice.cookie)).status, 409);
     const logout = await post(`${base}/auth/logout`, alice.cookie);
     assert.equal(logout.status, 204);

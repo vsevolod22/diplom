@@ -48,9 +48,10 @@ test('image adapter uses same verifier instance, no root finding, exact owner/co
       configBytes,
     };
   };
+  let checkedAt = '2026-10-08T00:00:00.000Z';
   const images = {
     ledger: {
-      sbom: () => ({ outcome: 'checked', scannerVersion: '0.69.3', checkedAt: '2026-10-08T00:00:00.000Z' }),
+      sbom: () => ({ outcome: 'checked', scannerVersion: '0.69.3', checkedAt }),
       vuln: () => ({ outcome: 'failed' }),
     },
   } as unknown as LedgerStore;
@@ -93,4 +94,16 @@ test('image adapter uses same verifier instance, no root finding, exact owner/co
     }),
   );
   await assert.rejects(bad.resolve('owner', job.scanId, c), /IMAGE_LINK_UNAVAILABLE/);
+  checkedAt = '2026-10-08 12:34:56';
+  assert.equal((await adapter.resolve('owner', job.scanId, c)).sbom.checkedAt, '2026-10-08T12:34:56.000Z');
+  for (const invalid of [
+    '2026-02-30 12:34:56',
+    '2026-10-08T12:34:56',
+    '2026-10-08T12:34:56+02:00',
+    '',
+    'PRIVATE_DATE_CANARY',
+  ]) {
+    checkedAt = invalid;
+    await assert.rejects(adapter.resolve('owner', job.scanId, c), /^Error: IMAGE_LINK_UNAVAILABLE$/);
+  }
 });

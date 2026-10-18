@@ -53,6 +53,23 @@ it('strict check discriminator does not misattribute config versions to Trivy; r
   expect(parseCurrentStatus({ scanId: id, state: 'completed', result: null }).config).toBeUndefined();
 });
 
+it.each([true, false])('cancelled config checkpoint saved=%s remains independent of missing Secrets', async saved => {
+  const report = configReport();
+  const snapshot = { ...wire(report), state: 'cancelled', checks: ['secret', 'config'], result: null,
+    config: saved ? report : undefined, perCheck: { secret: null, config: saved ? wire(report).perCheck.config : null } };
+  vi.stubGlobal('fetch', vi.fn(async (path: string) => path === '/api/v1/auth/me'
+    ? json({ id: 'alice', email: 'alice@example.com' }) : json(snapshot)));
+  const client = mount(`/scans/${id}`);
+  await screen.findByText(saved ? /Сканирование отменено\. Сохранены результаты/ : /Сканирование отменено\. Сохранённых результатов/);
+  if (saved) {
+    expect(screen.getByRole('heading', { name: /Image config · только/ })).toBeTruthy();
+    expect(screen.getByText(/Правила: выполнено/).textContent).toContain('1 /');
+  } else expect(screen.queryByRole('heading', { name: /Image config · только/ })).toBeNull();
+  expect(screen.getByText(/Secrets: завершённый результат не сохранён/)).toBeTruthy();
+  expect(vi.mocked(fetch).mock.calls.some(([path]) => /\/(results|sbom|vuln)\?/.test(String(path)))).toBe(false);
+  cleanup(); client.clear();
+});
+
 it('generic status parser keeps legacy reason guards and validates config coverage separately', () => {
   expect(parseScanStatus(wire()).perCheck?.config?.checksVersion).toBe('image-config-user-v1');
   const legacy = { scanId: id, state: 'partial', perCheck: { vuln: {

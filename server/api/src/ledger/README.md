@@ -1,4 +1,16 @@
-# Scan ledger (SQLite user_version 11)
+# Scan ledger (SQLite user_version 15 — source, not deployed)
+
+## Current cancellation and deployment boundary
+
+v15 adds `outbox.lease_token` and bounded `scan_checkpoints`. A completed, validated, sanitized check may be checkpointed under its original current claim. Cancellation atomically publishes only these committed checks, acknowledges/revokes the outbox and emits one terminal event; the state remains **cancelled**, even with retained findings. Unfinished checks remain absent/unknown, never checked zero. No raw or in-memory fragments are published. Prior CVE DB evidence/timestamps remain historical; cancellation does not refresh them.
+
+All terminal writers and retry require the original claim token as well as a current attempt and live lease. Replacement/retry revoke older checkpoints. Migrated running rows receive no invented token and must be reclaimed. Checkpoint storage exceptions propagate rather than becoming fabricated scanner failures; a previously committed sibling can still be retained by subsequent cancellation. Ordinary/config/archive paths and owner HTTP/browser reads are covered by disposable tests and a separate ledger/worker re-review.
+
+**Do not deploy this migration alongside old writers.** Existing live volumes were not migrated. Stop admissions and all old writers, make and verify a consistent compatible backup, then coordinate the v15 API/worker rollout. Rollback requires a compatible binary or verified pre-migration restore, never an old binary against v15. See `docs/partial-cancel-implementation-20261016.md`, `docs/partial-cancel-independent-review-20261016.md` and `docs/partial-cancel-http-ui-20261016.md`.
+
+## Historical schema/proof notes
+
+The following v1–v11 notes and dated proof descriptions explain their original behavior; statements about discarded in-memory intermediate checks are historical, not the v15 checkpoint contract.
 
 `ledger.ts` is the **only** schema migrator; `schema.ts` maps the unchanged scans/outbox tables for Drizzle queries, not for `drizzle-kit push`. Do not run `push` on a populated volume or initialize Drizzle's migration journal separately. This is single-instance durable storage, not a replacement for worker/egress readiness.
 

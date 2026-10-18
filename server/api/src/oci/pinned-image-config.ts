@@ -3,6 +3,7 @@ import type { AuthorizedImageInput } from '../image-config/contract.js';
 import { isObject, parseBoundedJson } from '../image-config/bounded-json.js';
 import { fail, POLICY } from '../image-config/policy.js';
 import { NGINX_ARCHIVE_CANDIDATES } from './bounded-image-archive.js';
+import { validPublicTarget } from './public-image-policy.js';
 import { dockerHubManifestFetch, gatewayGet } from './gateway-transport.js';
 import type { Job } from '../ledger/ledger.js';
 
@@ -10,7 +11,9 @@ export const CONFIG_LOAD_MS = 30_000;
 export const CONFIG_LOAD_REQUESTS = 8;
 export type ConfigLoader = (job: Readonly<Job>, signal: AbortSignal) => Promise<AuthorizedImageInput>;
 
-export function admittedConfigTarget(job: Pick<Job, 'registry' | 'repository' | 'digest' | 'platform' | 'scope'>): boolean {
+export function admittedConfigTarget(job: Pick<Job, 'registry' | 'repository' | 'digest' | 'platform' | 'scope'>,
+  publicImagePolicy = false): boolean {
+  if (publicImagePolicy === true) return job.scope === 'image' && validPublicTarget(job);
   return job.scope === 'image' && job.registry === 'registry-1.docker.io' && job.platform === 'linux/amd64' &&
     /^sha256:[a-f0-9]{64}$/.test(job.digest) && (job.repository === 'library/alpine' ||
       NGINX_ARCHIVE_CANDIDATES.some(candidate => candidate.registry === job.registry && candidate.repository === job.repository &&
@@ -18,9 +21,9 @@ export function admittedConfigTarget(job: Pick<Job, 'registry' | 'repository' | 
 }
 
 /** Bootstrap transport injection; production always uses the existing HTTPS gateway path. */
-export function createPinnedConfigLoader(request: typeof gatewayGet = gatewayGet): ConfigLoader {
+export function createPinnedConfigLoader(request: typeof gatewayGet = gatewayGet, publicImagePolicy = false): ConfigLoader {
   return async (job, signal) => {
-    if (!admittedConfigTarget(job)) return fail('OCI_IDENTITY_REJECTED');
+    if (!admittedConfigTarget(job, publicImagePolicy)) return fail('OCI_IDENTITY_REJECTED');
     const deadline = Date.now() + CONFIG_LOAD_MS;
     let requests = 0;
     let cap = POLICY.manifestBytes;
@@ -52,7 +55,8 @@ export function createPinnedConfigLoader(request: typeof gatewayGet = gatewayGet
     const configBytes = Buffer.from(config.body);
     const mediaType = config.headers['content-type'];
     if (typeof mediaType !== 'string' || ![descriptor.mediaType, 'application/octet-stream'].includes(mediaType.split(';')[0]) ||
-        configBytes.length !== descriptor.size) return fail('OCI_IDENTITY_REJECTED');
+        configBytes.length !== descriptor.size ||
+        `sha256:${createHash('sha256').update(configBytes).digest('hex')}` !== descriptor.digest) return fail('OCI_IDENTITY_REJECTED');
     const manifestType = manifest.headers['content-type'];
     if (typeof manifestType !== 'string' || manifestType.split(';')[0] !== decoded.mediaType) return fail('OCI_IDENTITY_REJECTED');
     const [os, architecture, variant] = job.platform.split('/');

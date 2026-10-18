@@ -25,9 +25,9 @@ class FixtureService extends NginxLocalScansService {
   protected override async vulnDbReady() { return this.dbAvailable; }
   protected override async resolveTarget() { this.resolutions++; return p; }
 }
-function fixture() {
+function fixture(clock = Date.now) {
   const directory = mkdtempSync(join(tmpdir(), 'local-policy-')), file = join(directory, 'db.sqlite');
-  const ledger = new ScanLedger(file), store = { ledger } as LedgerStore;
+  const ledger = new ScanLedger(file, clock), store = { ledger } as LedgerStore;
   const resolver = {} as OciResolver;
   return { directory, file, ledger, service: new FixtureService(store, resolver), defaultService: new ScansService(store, resolver),
     close: () => { ledger.close(); rmSync(directory, { recursive: true, force: true }); } };
@@ -117,7 +117,8 @@ test('default/prequeued/missing-binding worker rejects BEFORE config/archive/sca
 });
 
 test('v12 binding is atomic, legacy remains unqualified, reopen/fences/retention/rollback preserve rows', () => {
-  const f = fixture();
+  let now = Date.now();
+  const f = fixture(() => now);
   try {
     const input = { ...p, subject: 'owner', scope: 'image', idempotencyKey: 'binding-atomic', checks: '["secret"]', executionProfile: binding };
     const raw = new Database(f.file);
@@ -125,13 +126,14 @@ test('v12 binding is atomic, legacy remains unqualified, reopen/fences/retention
     assert.throws(() => f.ledger.enqueue(input)); assert.equal(f.ledger.pending().length, 0);
     raw.exec('DROP TRIGGER reject_profile');
     const id = f.ledger.enqueue(input).scanId;
-    const first = f.ledger.claim(1000, 1000, 627000)!;
-    const second = f.ledger.claim(628000, 1000, 627000)!;
-    assert.equal(f.ledger.finishArchive(id, first.attempts, report()), false);
+    const first = f.ledger.claim(now, 1000, 627000)!;
+    now += 627000;
+    const second = f.ledger.claim(now, 1000, 627000)!;
+    assert.equal(f.ledger.finishArchive(id, first.attempts, report(), undefined, first.leaseToken), false);
     const mismatched = report(); mismatched.receipt.resourcePolicyVersion = 'other';
-    assert.throws(() => f.ledger.finishArchive(id, second.attempts, mismatched));
+    assert.throws(() => f.ledger.finishArchive(id, second.attempts, mismatched, undefined, second.leaseToken));
     assert.equal(f.ledger.state(id, 'owner'), 'running');
-    assert.equal(f.ledger.finishArchive(id, second.attempts, report()), true);
+    assert.equal(f.ledger.finishArchive(id, second.attempts, report(), undefined, second.leaseToken), true);
     const reopened = new ScanLedger(f.file); assert.deepEqual(reopened.executionProfile(id), binding); reopened.close();
     raw.prepare("UPDATE scans SET terminal_at=datetime('now','-40 days') WHERE id=?").run(id);
     assert.equal(f.ledger.prune(30), 1); assert.equal(f.ledger.executionProfile(id), undefined);
@@ -145,7 +147,9 @@ test('v11 forward upgrade never promotes legacy rows and conflicting v12 DDL rol
     try {
       const id = f.ledger.enqueue({ ...p, subject: 'owner', scope: 'image', idempotencyKey: 'legacy-v11', checks: '["secret"]' }).scanId;
       const raw = new Database(f.file);
-      raw.exec(`DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy;
+      raw.exec(`DROP TABLE scan_checkpoints;
+              ALTER TABLE outbox DROP COLUMN lease_token;
+              DROP TABLE scan_cve_evidence; DROP TABLE scan_cve_policy;
         ALTER TABLE scan_vuln_findings DROP COLUMN advisory;
         DROP TABLE scan_execution_profiles; PRAGMA user_version=11;`);
       if (corrupt) raw.exec('CREATE TABLE scan_execution_profiles(sentinel TEXT);');
@@ -156,7 +160,7 @@ test('v11 forward upgrade never promotes legacy rows and conflicting v12 DDL rol
       } else {
         const upgraded = new ScanLedger(f.file);
         assert.equal(upgraded.executionProfile(id), undefined);
-        assert.equal(raw.pragma('user_version', { simple: true }), 14);
+        assert.equal(raw.pragma('user_version', { simple: true }), 15);
         upgraded.close();
       }
       assert.deepEqual(raw.prepare('SELECT * FROM scans').all(), before);

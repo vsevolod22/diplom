@@ -23,6 +23,8 @@ import type { ScanCheck, ScanCoverage, ScanStatus } from '@/shared/api/scans/sca
 import { Alert, Badge, Button } from '@/shared/ui/scan-primitives';
 import { ScanReportSections } from './ScanReportSections';
 import './scan-detail-a1.css';
+import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
+import { identifierCountLabel } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 
 const unavailableScope = ['live-scans', 'unavailable'] as const;
 
@@ -147,11 +149,12 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
     }
     return () => { mounted = false; clearTimeout(refreshTimer); clearTimeout(reconnectTimer); close(); };
   }, [demo, active, transport, queryClient, scanId, streamKey, scope]);
+  const publicReport = scan.data?.profile === PUBLIC_IMAGE_PROFILE;
   const reportData = demo && scan.isSuccess && report.isSuccess ? report.data : undefined;
   const pendingChecks = demo ? [] : requested.filter(check => !scan.data?.perCheck?.[check]);
   const liveCoverage = demo ? undefined : scan.data?.checks?.filter(check => !!scan.data?.perCheck?.[check]).map((check: ScanCheck): ScanCoverage => {
     const outcome = scan.data?.perCheck?.[check];
-    return { check: { secret: 'Secrets', sbom: 'SBOM', vuln: 'CVE', config: 'Image config' }[check], status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined, checksVersion: outcome?.checksVersion, resourcePolicyVersion: outcome?.resourcePolicyVersion };
+    return { check: { secret: 'Secrets', sbom: 'SBOM', vuln: publicReport ? 'Уязвимости' : 'CVE', config: 'Image config' }[check], status: outcome?.outcome ?? 'skipped', reason: outcome?.reason ?? outcome?.errorCode ?? (outcome ? undefined : 'Результат ещё не получен'), scannerVersion: outcome?.scannerVersion ?? undefined, checksVersion: outcome?.checksVersion, resourcePolicyVersion: outcome?.resourcePolicyVersion };
   });
   const changeFilter = setFilter;
 
@@ -188,7 +191,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 connected: 'SSE: подключён; этап подтверждается GET',
                 reconnecting: 'SSE: переподключение; статус обновляется через GET',
                 polling: 'SSE: недоступен; статус обновляется через GET',
-              }[realtime] : 'Скан завершён; realtime остановлен'}</span> : null}
+              }[realtime] : scan.data.state === 'cancelled' ? 'Скан отменён; realtime остановлен' : 'Скан завершён; realtime остановлен'}</span> : null}
             </div>
           ) : null}
         </div>
@@ -256,6 +259,14 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                   </div>
                 </dl>
                 <ScanStatusAnnouncement scan={scan.data} />
+                {!demo && scan.data.state === 'cancelled' ? (
+                  <Alert tone="neutral">
+                    {liveCoverage?.length
+                      ? 'Сканирование отменено. Сохранены результаты завершённых проверок. Это не означает, что все запрошенные проверки выполнены.'
+                      : 'Сканирование отменено. Сохранённых результатов завершённых проверок нет.'}
+                    {' '}Проверки без сохранённого результата не подтверждены как завершённые; число находок в них неизвестно.
+                  </Alert>
+                ) : null}
               </div>
               <div className="scan-a1__state-aside">
                 <p>
@@ -269,7 +280,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                     type="button"
                     disabled={cancellation.isPending}
                     onClick={() => {
-                      if (window.confirm('Отменить скан? Незавершённые результаты не будут опубликованы.')) {
+                      if (window.confirm('Отменить скан? Сохранённые результаты завершённых проверок останутся доступны. Остальные проверки не будут завершены.')) {
                         cancellation.mutate(scanId);
                       }
                     }}
@@ -279,7 +290,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 ) : (
                   <p>Отмена недоступна в текущем состоянии.</p>
                 )}
-                <p>{demo ? 'Демо не отправляет серверную отмену.' : 'Отмена завершает скан без публикации промежуточных результатов. Статус подтверждается GET snapshot.'}</p>
+                <p>{demo ? 'Демо не отправляет серверную отмену.' : 'При отмене сохраняются уже записанные результаты завершённых проверок. Незавершённые проверки не получают результат; статус подтверждается GET snapshot.'}</p>
                 {cancellation.isError ? (
                   <Alert role="alert" tone="danger">
                     Не удалось отменить скан: он недоступен или отмена невозможна в текущем состоянии. Обновите статус.
@@ -295,8 +306,9 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 <p className="scan-a1__eyebrow">02 / ПОКРЫТИЕ</p>
                 <h3 id="scan-a1-coverage">Покрытие проверок</h3>
                 <p className="scan-a1__muted">Исход каждой проверки отдельно от статуса скана.</p>
+                {scan.data.identifierCounts ? <p>Уязвимости · весь сохранённый отчёт: {identifierCountLabel(scan.data.identifierCounts)}. Не гарантия безопасности.</p> : null}
                 {pendingChecks.length ? <ul aria-label="Проверки без подтверждённого результата">{pendingChecks.map(check => <li key={check}>
-                  {check}: {active ? `ожидаем подтверждённый результат; ${scan.data.stage ? 'текущий этап указан сервером выше' : 'внутренний этап не предоставлен сервером'}` : 'результат не предоставлен сервером'}
+                  {check}: {active ? `ожидаем подтверждённый результат; ${scan.data.stage ? 'текущий этап указан сервером выше' : 'внутренний этап не предоставлен сервером'}` : scan.data.state === 'cancelled' ? 'завершение не подтверждено; сохранённого результата нет' : 'результат не предоставлен сервером'}
                 </li>)}</ul> : null}
                 {(liveCoverage ?? reportData?.coverage) ? (
                   <ul className="scan-a1__coverage">
@@ -360,11 +372,11 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
               <section className="scan-a1__panel scan-a1__findings-panel" aria-labelledby="scan-a1-findings">
                 <p className="scan-a1__eyebrow">03 / РЕЗУЛЬТАТЫ</p>
                 <h3 id="scan-a1-findings">Результаты проверок</h3>
-                <ScanFilterSheet filter={filter} onFilterChange={changeFilter} cveValue={demo ? "vulnerability" : "cve"} />
-                <div className="scan-a1__desktop-filter">
+                {!publicReport ? <ScanFilterSheet filter={filter} onFilterChange={changeFilter} cveValue={demo ? "vulnerability" : "cve"} /> : null}
+                <div className={publicReport ? undefined : 'scan-a1__desktop-filter'}>
                   <label htmlFor="finding-filter">Категория</label>
                   <select id="finding-filter" className={controlClass} value={filter} onChange={event => changeFilter(event.target.value)}>
-                    <option value="all">Все категории</option><option value={demo ? "vulnerability" : "cve"}>CVE</option><option value="secret">Secrets</option>
+                    <option value="all">Все категории</option><option value={demo ? "vulnerability" : "cve"}>{publicReport ? 'Уязвимости' : 'CVE'}</option><option value="secret">Secrets</option>
                   </select>
                 </div>
                 <ScanReportSections status={scan.data} transport={transport} scope={scope} demo={demo} filter={filter} onResetFilter={() => changeFilter("all")} />

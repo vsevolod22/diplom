@@ -65,7 +65,7 @@ test('report-v1 HTTP: both authenticated routes preserve global filters, cursor 
       } },
       { check: 'vuln', outcome: 'checked', scannerVersion: '0.69.3',
         image: `${target.registry}/${target.repository}@${target.digest}`, findings },
-    ]), true);
+    ], undefined, job.leaseToken), true);
     for (const ingress of ['scans', 'browser/scans']) {
       const headers: Record<string, string> = ingress === 'scans' ? { authorization: `Bearer ${token(owner.id)}` } : { cookie: owner.cookie };
       const foreign: Record<string, string> = ingress === 'scans' ? { authorization: `Bearer ${token(other.id)}` } : { cookie: other.cookie };

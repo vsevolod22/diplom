@@ -5,8 +5,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { refreshLocalCve } from './refresh-local-cve.mjs';
 import { PROJECT, LABEL, ORIGIN, composeArguments, dockerEnvironment, expectedEnvironment,
-  validateConfig, inspectNamespace, checkIgnores, loadSecret, loadCveActivation, localStand } from './local-stand.mjs';
+  validateConfig, inspectNamespace, checkIgnores, loadSecret, loadCveActivation, localStand,
+    validateDefaultInspectedProfile } from './local-stand.mjs';
+  import { PUBLIC_IMAGE_COMMANDS, PUBLIC_IMAGE_TMPFS, PUBLIC_IMAGE_MEMORY,
+    publicImageCveConfig } from './public-image-stand-profile.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const FIXTURE_SECRET = 'ab'.repeat(48);
@@ -60,8 +64,10 @@ function container(service = 'api', extra = {}) {
   return { Id: `fixture-${service}`, Name: `/${PROJECT}-${service}-1`,
     Config: { Labels: { ...ownership, 'com.docker.compose.service': service },
       Image: service.endsWith('volume-init') ? 'busybox:1.37.0' : `${PROJECT}-${service}:local`,
+      Cmd: fixtureConfig().services[service].command,
       Env: Object.entries(expectedEnvironment(service)).map(([key, value]) => `${key}=${value}`) },
-    HostConfig: { Mounts: fixtureConfig().services[service].volumes.map(mount => ({ Type: 'volume',
+    HostConfig: { ...(service === 'worker' ? { Memory: 1073741824, MemorySwap: 1073741824,
+      NanoCpus: 1000000000, PidsLimit: 128 } : {}), Mounts: fixtureConfig().services[service].volumes.map(mount => ({ Type: 'volume',
       Source: `${PROJECT}_${mount.source}`, Target: mount.target })) },
     Mounts: fixtureConfig().services[service].volumes.map(mount => ({ Type: 'volume',
       Name: `${PROJECT}_${mount.source}`, Destination: mount.target, RW: true })),  NetworkSettings: { Networks: Object.fromEntries((links[service].length ? links[service].map(n => `${PROJECT}_${n}`) : ['none']).map(n => [n, {}])) },
@@ -105,6 +111,14 @@ test('fixed Docker environment and explicit Compose project/files exclude ambien
   { PATH: '/fixture/bin', HOME: '/fixture', DOCKER_CONTEXT: 'desktop-linux', COMPOSE_DISABLE_ENV_FILE: 'true' });
   assert.deepEqual(composeArguments(ROOT, ['up', '--build', '-d']), ['compose', '--env-file', '/dev/null', '-p', PROJECT,
     '-f', join(ROOT, 'server/deploy/compose.stand.yaml'), '-f', join(ROOT, 'server/deploy/compose.local.full.yaml'), 'up', '--build', '-d']);
+});
+
+test('Docker default clean PATH includes Apple Silicon Homebrew without inherited PATH', () => {
+  assert.deepEqual(dockerEnvironment({ HOME: '/fixture' }), {
+    PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    HOME: '/fixture', COMPOSE_DISABLE_ENV_FILE: 'true',
+  });
+  assert.equal(dockerEnvironment({}).PATH, '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
 });
 
 test('merged full stack config accepts only exact LOCAL topology and environment', () => {
@@ -253,6 +267,7 @@ test('status and stop do not read/create signing secret and stop only inspected 
     if (command === 'stop') assert.deepEqual(stops[0].args, ['container', 'stop', '--time', '30', 'fixture-api']);
     assert(!docker.calls.some(call => call.args.includes('down') || call.args.includes('rm') || call.args.includes('prune') || call.args.includes('up')));
     assert(output.length > 0);
+    assert(!fs.existsSync(join(root, '.local-stand/.stand-operation.lock')));
   }
 });
 
@@ -279,6 +294,54 @@ test('failed up preserves signing secret and never attempts destructive cleanup'
   assert.equal(fs.readFileSync(join(root, '.local-stand/scan-jwt'), 'utf8'), FIXTURE_SECRET);
   assert(docker.calls.at(-1).args.includes('up'));
   assert(!docker.calls.some(call => call.args.some(arg => ['down', 'rm', 'prune', '--force-recreate', '--remove-orphans'].includes(arg))));
+});
+
+test('up/stop client errors and timeouts retain durable uncertainty marker and exclude retries/refresh', async t => {
+  for (const command of ['up', 'stop']) for (const failure of ['error', 'timeout']) {
+    await t.test(`${command}-${failure}`, async t => {
+      const root = tempRoot(t), docker = fakeDocker({ config: fixtureConfig(root), containers: [container()] });
+      const lock = join(root, '.local-stand/.stand-operation.lock'), marker = join(lock, 'launcher.json');
+      const run = async (args, options) => {
+        if (args.includes('up') || args[1] === 'stop') {
+          assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), { version: 1, command,
+            phase: 'mutation-intent-outcome-unconfirmed', uncertain: true });
+          assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
+          const error = new Error('SYNTHETIC-PRIVATE-CLIENT-OUTPUT');
+          if (failure === 'timeout') { error.killed = true; error.code = 'ETIMEDOUT'; }
+          throw error;
+        }
+        return docker.run(args, options);
+      };
+      await assert.rejects(localStand([command], { root, run, log: () => {}, getSecret: () => FIXTURE_SECRET }), error =>
+        /uncertain\/HOLD/.test(error.message) && !error.message.includes('SYNTHETIC-PRIVATE'));
+      assert(fs.existsSync(marker));
+      for (const retry of ['up', 'stop']) await assert.rejects(localStand([retry], { root,
+        run: () => assert.fail('locked retry must not contact Docker'), log: () => {} }));
+      await assert.rejects(refreshLocalCve([], { root,
+        run: () => assert.fail('locked refresh must not start child'), docker: () => assert.fail('locked refresh must not contact Docker') }));
+      assert(fs.existsSync(marker));
+      assert(!fs.readFileSync(marker, 'utf8').includes(FIXTURE_SECRET));
+    });
+  }
+});
+
+test('read-only preflight errors/timeouts release launcher lock without an uncertainty marker', async t => {
+  for (const command of ['up', 'stop']) {
+    const root = tempRoot(t), lock = join(root, '.local-stand/.stand-operation.lock');
+    await assert.rejects(localStand([command], { root, run: async args => {
+      assert(args.includes('config')); throw Object.assign(new Error('preflight timeout'), { killed: true });
+    }, log: () => {} }));
+    assert(!fs.existsSync(lock));
+    const docker = fakeDocker({ config: fixtureConfig(root) });
+    await localStand(['stop'], { root, run: docker.run, log: () => {} });
+    assert(!fs.existsSync(lock));
+  }
+});
+
+test('acknowledged up clears mutation marker and releases shared lock', async t => {
+  const root = tempRoot(t), docker = fakeDocker({ config: fixtureConfig(root) });
+  await localStand(['up'], { root, run: docker.run, log: () => {}, getSecret: () => FIXTURE_SECRET });
+  assert(!fs.existsSync(join(root, '.local-stand/.stand-operation.lock')));
 });
 
 test('invalid CLI flags reject before any Docker or filesystem activity', async () => {
@@ -641,6 +704,207 @@ test('Desktop enabled status and simulated up restart retain exact pins/JWT for 
       } else assert(!docker.calls.some(call => call.args.includes('up')));
       assert(!docker.calls.some(call => call.args.some(arg => ['stop', 'down', 'rm', 'prune', '--force-recreate'].includes(arg))));
     }
+  }
+});
+
+function publicImageFixture(cve = null) {
+  const config = fixtureConfig(ROOT, cve);
+  for (const name of ['auth-volume-init', 'scan-volume-init']) Object.assign(config.services[name], {
+    cap_drop: ['ALL'], cap_add: ['CHOWN'], security_opt: ['no-new-privileges:true'],
+  });
+  for (const name of ['api', 'worker', 'web', 'egress']) {
+    Object.assign(config.services[name], { read_only: true, user: name === 'web' ? '101:101' : '65532:65532',
+      cap_drop: ['ALL'], security_opt: ['no-new-privileges:true'], pids_limit: 128,
+      mem_limit: { api: 536870912, worker: PUBLIC_IMAGE_MEMORY, web: 268435456, egress: 268435456 }[name] });
+    if (['api', 'web'].includes(name)) config.services[name].tmpfs = ['/tmp'];
+  }
+  config.services.egress.cpus = 1;
+  config.services.api.command = [...PUBLIC_IMAGE_COMMANDS.api];
+  Object.assign(config.services.worker, { command: [...PUBLIC_IMAGE_COMMANDS.worker],
+    memswap_limit: PUBLIC_IMAGE_MEMORY, tmpfs: [...PUBLIC_IMAGE_TMPFS] });
+  return config;
+}
+const publicCveMetadata = { version: 1, release: 'db-releases/fixture', manifestDigest: `sha256:${'a'.repeat(64)}`,
+  artifactSha256: 'b'.repeat(64), publicKeySha256: 'c'.repeat(64) };
+const publicCve = () => publicImageCveConfig(ROOT, publicCveMetadata);
+
+test('public profile is explicit and accepts only its exact commands/resources with CVE on or off', () => {
+  for (const cve of [null, publicCve()]) {
+    const config = publicImageFixture(cve);
+    validateConfig(config, ROOT, cve, 'public-images');
+    assert.throws(() => validateConfig(config, ROOT, cve), /entrypoint/);
+    assert.throws(() => validateConfig(fixtureConfig(ROOT, cve), ROOT, cve, 'public-images'));
+    for (const name of ['api', 'worker']) {
+      const mixed = structuredClone(config);
+      mixed.services[name].command = fixtureConfig().services[name].command;
+      assert.throws(() => validateConfig(mixed, ROOT, cve, 'public-images'), /entrypoint/);
+    }
+  }
+  assert.throws(() => validateConfig(publicImageFixture(), ROOT, null, true), /profile/);
+  assert.throws(() => composeArguments(ROOT, [], null, 'PUBLIC_IMAGES'), /profile/);
+  for (const args of [['up', '-d'], ['stop'], ['config', '--env-file', 'private']]) {
+    assert.throws(() => composeArguments(ROOT, args, null, 'public-images'), /activation BLOCKED/);
+  }
+});
+
+test('public override is LAST after CVE; default file order and resource contract remain closed', () => {
+  for (const cve of [null, publicCve()]) {
+    const args = composeArguments(ROOT, ['config', '--format', 'json'], cve, 'public-images');
+    const files = args.filter((_, i) => args[i - 1] === '-f');
+    assert.deepEqual(files, ['compose.stand.yaml', 'compose.local.full.yaml',
+      ...(cve ? ['compose.local.cve.yaml'] : []), 'compose.local.public-images.yaml'].map(file => join(ROOT, 'server/deploy', file)));
+    assert(!composeArguments(ROOT, [], cve).some(arg => arg.includes('public-images.yaml')));
+  }
+  validateConfig(fixtureConfig(), ROOT);
+  const wrongDefault = fixtureConfig();
+  wrongDefault.services.worker.mem_limit = PUBLIC_IMAGE_MEMORY;
+  assert.throws(() => validateConfig(wrongDefault, ROOT), /memory/);
+  const text = fs.readFileSync(join(ROOT, 'server/deploy/compose.local.public-images.yaml'), 'utf8');
+  for (const command of Object.values(PUBLIC_IMAGE_COMMANDS)) assert(text.includes(command.at(-1)));
+  for (const tmpfs of PUBLIC_IMAGE_TMPFS) assert(text.includes(`- ${tmpfs}`));
+  assert(text.includes('tmpfs: !override'));
+  assert(text.includes('mem_limit: 4g')); assert(text.includes('memswap_limit: 4g'));
+  assert(text.includes('cpus: 1')); assert(text.includes('pids_limit: 128'));
+  assert(!/environment:|volumes:|build:|ports:|networks:|\$\{/.test(text));
+});
+
+test('public validation rejects malicious envelopes, authority, mounts, admission and reversed CVE merge', () => {
+  const mutations = [
+    c => { c.services.worker.mem_limit = 1073741824; },
+    c => { c.services.worker.memswap_limit = 8589934592; },
+    c => { c.services.worker.memswap_limit = 0; },
+    c => { c.services.worker.cpus = 2; },
+    c => { c.services.worker.pids_limit = -1; },
+    c => { c.services.worker.tmpfs = ['/tmp:size=512m']; },
+    c => { c.services.worker.tmpfs[1] = '/tmp/trivy:rw,noexec,nosuid,uid=65532,gid=65532,size=512m'; },
+    c => { c.services.worker.tmpfs[0] = '/tmp:rw,noexec,nosuid,size=16m'; },
+    c => { c.services.worker.tmpfs[1] = c.services.worker.tmpfs[1].replace('noexec,', ''); },
+    c => { c.services.worker.tmpfs.push('/host:rw,size=1g'); },
+    c => { c.services.worker.tmpfs.push(c.services.worker.tmpfs[1]); },
+    c => { c.services.api.command = 'node --import tsx src/oci/public-image.main.ts'; },
+    c => { c.services.worker.command.push('--unsafe'); },
+    c => { c.services.web.command = ['sh', '-c', 'foreign']; },
+    c => { c.services.egress.command = ['sh', '-c', 'foreign']; },
+    c => { c.services.worker.entrypoint = ['sh', '-c']; },
+    c => { c.services.worker.environment.PUBLIC_IMAGES = 'true'; },
+    c => { c.services.api.environment.SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS = 'false'; },
+    c => { c.services.api.environment.SCAN_JWT_SECRET = FIXTURE_SECRET; },
+    c => { c.services.api.ports = [{ host_ip: '0.0.0.0', published: '3001', target: 3001, protocol: 'tcp' }]; },
+    c => { c.services['auth-volume-init'].cap_add = ['SYS_ADMIN']; },
+    c => { c.services['scan-volume-init'].mem_limit = PUBLIC_IMAGE_MEMORY; },
+    c => { c.services.worker.user = '0:0'; },
+    c => { c.services.worker.read_only = false; },
+    c => { c.services.worker.cap_add = ['SYS_ADMIN']; },
+    c => { c.services.worker.security_opt = ['seccomp:unconfined']; },
+    c => { c.services.worker.deploy = { resources: { limits: { memory: 1073741824 } } }; },
+    c => { c.services.worker.cpu_quota = -1; },
+    c => { c.services.worker.mem_reservation = PUBLIC_IMAGE_MEMORY; },
+    c => { c.services.worker.oom_kill_disable = true; },
+    c => { c.services.worker.volumes[0].source = 'old_reports'; },
+    c => { c.services.api.volumes[0].source = 'old_accounts'; },
+    c => { c.services.worker.volumes.push({ type: 'bind', source: '/private', target: '/tmp/trivy' }); },
+  ];
+  for (const cve of [null, publicCve()]) for (const change of mutations) {
+    const config = publicImageFixture(cve); change(config);
+    assert.throws(() => validateConfig(config, ROOT, cve, 'public-images'));
+  }
+  for (const change of [
+    c => { c.services.worker.volumes.find(m => m.target === '/tmp/trivy/db').read_only = false; },
+    c => { c.services.api.volumes.find(m => m.target === '/opt/local-db-trust/public.pem').source = '/private/key'; },
+    c => { c.services.worker.environment.SCAN_VULN_ARTIFACT_SHA256 = 'f'.repeat(64); },
+  ]) {
+    const cve = publicCve(), config = publicImageFixture(cve); change(config);
+    assert.throws(() => validateConfig(config, ROOT, cve, 'public-images'));
+  }
+  const cve = publicCve();
+  assert.throws(() => validateConfig(publicImageFixture(cve), ROOT, null, 'public-images'));
+  assert.throws(() => validateConfig(publicImageFixture(), ROOT, cve, 'public-images'));
+  assert.throws(() => validateConfig(publicImageFixture(cve), ROOT, { ...cve, releaseHostDir: '/foreign' }, 'public-images'));
+});
+
+test('offline public CVE metadata cannot select private, parent, malformed or extra paths/pins', () => {
+  assert.equal(publicImageCveConfig(ROOT, null), null);
+  for (const value of [undefined, false, {}, { ...publicCveMetadata, release: '../private' },
+    { ...publicCveMetadata, release: 'db-releases/a/../../private' },
+    { ...publicCveMetadata, release: '/absolute' }, { ...publicCveMetadata, extra: 'private' },
+    { ...publicCveMetadata, publicKeySha256: 'bad' }, { ...publicCveMetadata, version: 2 },
+    { ...publicCveMetadata, manifestDigest: 'a'.repeat(64) }]) {
+    assert.throws(() => publicImageCveConfig(ROOT, value));
+  }
+});
+
+test('public plan and static validation never access live state, Docker or JWT; output is not activation', async () => {
+  const root = '/nonexistent/public-profile-planning-root', log = [];
+  const options = { root, log: text => log.push(text),
+    run: () => assert.fail('no Docker'), getSecret: () => assert.fail('no JWT') };
+  for (const argv of [['plan', '--public-images'], ['plan', '--public-images', '--cve']]) {
+    const plan = await localStand(argv, options);
+    assert.equal(plan.activation, 'blocked'); assert.equal(plan.cve, argv.includes('--cve'));
+    assert(plan.composeFiles.at(-1).endsWith('compose.local.public-images.yaml'));
+    assert(plan.requiredBeforeActivation.some(s => s.includes('backup')));
+  }
+  for (const cve of [null, publicCve()]) {
+    const result = await localStand(['validate', '--public-images'], { ...options, root: ROOT,
+      readPublicConfig: () => JSON.stringify({ config: publicImageFixture(cve), cve: cve ? publicCveMetadata : null }) });
+    assert.deepEqual(result, { profile: 'public-images', validation: 'static-only', activation: 'blocked' });
+  }
+  assert(!fs.existsSync(root));
+  assert(!log.join('\n').includes(FIXTURE_SECRET));
+});
+
+test('public activation and unsupported lifecycle refuse before filesystem/Docker even with acknowledgement', async () => {
+  const root = '/nonexistent/public-profile-blocked-root';
+  for (const argv of [['up', '--public-images'], ['up', '--build', '--public-images'],
+    ['up', '--public-images', '--ack-reviewed-rollout'], ['status', '--public-images'], ['stop', '--public-images']]) {
+    await assert.rejects(localStand(argv, { root, run: () => assert.fail('no Docker'),
+      getSecret: () => assert.fail('no JWT') }), /activation BLOCKED.*drained writers.*backup/);
+  }
+  for (const argv of [['plan'], ['plan', '--public-images', '--build'], ['plan', '--public-images', '--cve', '--cve'],
+    ['validate', '--public-images', '--cve'], ['validate', '--public-images', '--ack-reviewed-rollout']]) {
+    await assert.rejects(localStand(argv, { root, readPublicConfig: () => assert.fail('no input read'),
+      run: () => assert.fail('no Docker') }), /Usage:/);
+  }
+  assert(!fs.existsSync(root));
+});
+
+test('static validation rejects missing/malicious input without echoing public fixture contents', async () => {
+  for (const value of ['CANARY-not-json', '{}', JSON.stringify({ config: publicImageFixture(), cve: null, ack: true }),
+    JSON.stringify({ config: publicImageFixture() }), JSON.stringify({ config: fixtureConfig(), cve: null })]) {
+    const output = [];
+    await assert.rejects(localStand(['validate', '--public-images'], { root: ROOT,
+      readPublicConfig: () => value, log: text => output.push(text), run: () => assert.fail('no Docker') }));
+    assert.equal(output.length, 0);
+  }
+});
+
+test('shared inventory is default-closed for public/mixed commands and broad resources, including refresh callers', async () => {
+  for (const name of ['api', 'worker']) for (const command of [PUBLIC_IMAGE_COMMANDS[name], ['node', 'foreign.ts'], undefined]) {
+    const item = container(name); item.Config.Cmd = command;
+    assert.throws(() => validateDefaultInspectedProfile(item, name), /profile\/command/);
+    const docker = fakeDocker({ containers: [item] });
+    await assert.rejects(inspectNamespace(docker.run, { root: ROOT, env: {} }), /profile\/command/);
+    assert(docker.calls.every(call => !call.args.includes('up') && !call.args.includes('stop')));
+  }
+  for (const change of [
+    h => { h.Memory = PUBLIC_IMAGE_MEMORY; h.MemorySwap = PUBLIC_IMAGE_MEMORY; },
+    h => { h.Memory = PUBLIC_IMAGE_MEMORY; }, h => { h.MemorySwap = PUBLIC_IMAGE_MEMORY; },
+    h => { h.Memory = 2 * PUBLIC_IMAGE_MEMORY; },
+  ]) {
+    const item = container('worker'); change(item.HostConfig);
+    assert.throws(() => validateDefaultInspectedProfile(item, 'worker'), /resource profile/);
+  }
+});
+
+test('legacy up/status/stop cannot silently adopt an externally deployed public namespace', async t => {
+  const root = tempRoot(t);
+  for (const name of ['api', 'worker']) for (const command of ['up', 'status', 'stop']) {
+    const item = container(name); item.Config.Cmd = PUBLIC_IMAGE_COMMANDS[name];
+    const docker = fakeDocker({ config: fixtureConfig(root), containers: [item] });
+    await assert.rejects(localStand([command], { root, run: docker.run,
+      getSecret: () => assert.fail('no JWT'), log: () => {} }), /profile\/command/);
+    assert(!docker.calls.some(call => call.args.includes('up') || call.args.includes('stop')));
+    assert(!fs.existsSync(join(root, '.local-stand/scan-jwt')));
+    assert(!fs.existsSync(join(root, '.local-stand/.stand-operation.lock')));
   }
 });
 
