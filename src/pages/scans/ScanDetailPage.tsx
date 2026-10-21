@@ -227,6 +227,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
               <a href="#scan-a1-ai">
                 04 <span>Помощник</span>
               </a>
+              {!demo && live && !active ? <a href="#scan-report-chat">05 <span>Чат по отчёту</span></a> : null}
             </nav>
             <div className="scan-a1__chapter scan-a1__chapter--section" id="scan-a1-state">
               01 / СОСТОЯНИЕ И ЦЕЛЬ

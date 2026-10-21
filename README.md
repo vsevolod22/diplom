@@ -2,7 +2,13 @@
 
 Веб-приложение для запуска разрешённых проверок образов, просмотра CVE, SBOM и Secrets, событий задания и доказательной ИИ-сводки/чата. React 19 + TypeScript + Vite, NestJS, SQLite ledger/outbox и изолированный worker с Trivy. Демонстрационные данные явно отделены от реального сканирования.
 
-## Текущее состояние
+## Текущее состояние — 21.10.2026
+
+**Public scanner http://127.0.0.1:8081 сейчас недоступен (HTTP000): новый LLM maintenance HOLD на `initialize`. Продукт не принят как работающий.** Единственный reviewed continuation выполнил original-backup comparison и candidate builds, но остановился до старта initializer. Причина — Docker omission `ReadOnly:false`; validator исправлен и проверен, однако live-операция не повторялась. Созданный API candidate уже предшествует последнему sanitizer fix. Старые checker tokens/команды больше неприменимы. Нельзя удалять lock, вручную стартовать helper или повторять redeploy. [Актуальное состояние и точная граница продолжения](docs/public-product-status-20261021.md).
+
+**8080 остаётся защищённым старым окружением**, HTTP200 перепроверен; команды его lifecycle ниже — историческая документация, не указание запускать их на этой машине. Public CVE v2 migration/fresh activation выполнены ранее; public scheduler и настоящий post-LLM refresh ещё не квалифицированы. Public provider key отсутствует; реальная генерация не проверена. Скрытый ввод владельцем: `python3 scripts/public-llm-config.py --set-key`; ввод не активирует provider и не снимает HOLD. Не передавайте ключ в чат.
+
+### Исторический LOCAL профиль (не управлять при текущем public HOLD)
 
 Полный локальный стенд запускается через `pnpm stand:local` на **http://127.0.0.1:8080**: собранный frontend/nginx, Nest API, постоянные SQLite-базы, worker и gateway. Проверен настоящий UI-запуск Secrets/SBOM/CVE/Image config с отчётом, reload и повторным входом. Это отдельный project `dip-local-full` с новыми данными, не восстановление старого окружения. **Развёртывание на сохранённых пользовательских данных не завершено.** Старый Docker-стенд находится под HOLD после прерванной сохранительной миграции; не запускайте на нём `stand:auth`, refresh/recreate helpers, удаление контейнеров или volumes без отдельной проверки восстановления. См. [итоговую матрицу](docs/release-readiness-20261015.md) и [операционный HOLD](docs/deployment/hold-handoff-20261015.md).
 
@@ -26,9 +32,9 @@ pnpm stand:local:stop    # остановить без удаления акка
 
 ## Новый расширенный image-only профиль
 
-**Актуально на 18.10.2026, после 14:06 UTC:** отдельный стенд `dip-public-images` **работает на http://127.0.0.1:8081**. Координатор завершил guarded recovery/redeploy с проверенными quiescent SQLite backups и сохранением аккаунтов, истории, JWT и volumes этого public-стенда; исходный public HOLD архивирован. Старый **8080 остаётся отдельным legacy-профилем**, не изменён, HTTP 200 подтверждён координатором. Это не снятие иных исторических HOLD и не перенос данных между стендами.
+**Историческая приёмка 18.10.2026, не текущий runtime:** отдельный стенд `dip-public-images` тогда работал на http://127.0.0.1:8081; сейчас он под новым `initialize` HOLD, см. актуальное состояние выше. Координатор завершил guarded recovery/redeploy с проверенными quiescent SQLite backups и сохранением аккаунтов, истории, JWT и volumes этого public-стенда; исходный public HOLD архивирован. Старый **8080 остаётся отдельным legacy-профилем**, не изменён, HTTP 200 подтверждён координатором. Это не снятие иных исторических HOLD и не перенос данных между стендами.
 
-Для использования уже работающего 8081 не нужно повторять launcher/recovery. Откройте **отдельный browser profile или выделенный incognito context**, перейдите на http://127.0.0.1:8081/register и создайте **новый аккаунт** с паролем от 12 символов. Cookies одного hostname не разделяются номером порта: не используйте в этом же context сессию 8080. Затем откройте http://127.0.0.1:8081/scans/new, вручную введите один из canonical references:
+После отдельно проверенного восстановления 8081 не нужно повторять launcher/recovery для обычного использования. Откройте **отдельный browser profile или выделенный incognito context**, перейдите на http://127.0.0.1:8081/register и создайте **новый аккаунт** с паролем от 12 символов. Cookies одного hostname не разделяются номером порта: не используйте в этом же context сессию 8080. Затем откройте http://127.0.0.1:8081/scans/new, вручную введите один из canonical references:
 
 ```text
 registry-1.docker.io/library/debian:bookworm-slim
@@ -37,7 +43,7 @@ registry-1.docker.io/library/node:22.14.0-alpine3.21
 
 Выберите Secrets, SBOM, CVE и Image config, дождитесь свежего серверного допуска, подтвердите цель/область и отправьте один запуск. Отчёт доступен в `/scans`, включая reload и повторный вход **на 8081**. Поиск — только подсказка; новый scan заново проверяет target, readiness и DB. POST 202 ещё не означает завершённую проверку.
 
-**Настоящие native browser/API/UI proofs прошли на развёрнутой revision:**
+**Исторические native browser/API/UI proofs от 18.10.2026 (не повторялись на нынешнем LLM candidate):**
 
 | Запуск 18.10.2026, UTC | Secrets | SBOM | Уязвимости | Image config |
 | --- | --- | --- | --- | --- |
@@ -48,7 +54,7 @@ registry-1.docker.io/library/node:22.14.0-alpine3.21
 
 Профиль `public-hub-amd64-v1` допускает **только публичные official/namespaced Docker Hub images, IMAGE и linux/amd64** поддерживаемого формата и размера — **не буквально любой образ/registry/OS**. Worker ограничен **4 GiB RAM без дополнительного swap**, CPU 1, PIDs 128 и tmpfs 2304 MiB; acquisition/archive/report limits конечны. Неподдерживаемые форматы/экосистемы, EOL, неизвестный inventory и превышение ресурсов не считаются checked/0. Entry point исследуемого образа не запускается; Docker socket worker не получает. Runtime/host/LLM этим профилем не включаются.
 
-CVE DB на 8081 **закреплена, автообновление не подключено**: UpdatedAt `2026-10-16T01:13:54.947090392Z`, usableUntil `2026-10-30T01:13:54.947090392Z`. На время proof сохранены предупреждения `DB_DATA_OLDER_THAN_24H` и `DB_PUBLICATION_OVERDUE`; подпись `local-db-operator-v1` — аттестация **локального оператора, не Aqua**. Истёкшая DB не разрешает новый CVE scan. Старый LOCAL updater/scheduler не управляет 8081; pins вручную не менять.
+Public CVE уже переведена на собственные v2 state/trust; ранее выполнена настоящая fresh upstream activation. Последняя подтверждённая UpdatedAt `2026-10-20T19:12:26.430296739Z`, manifest `sha256:5903d201b3dc68dda334b9a9397ed51bd7956d834f43ab4edae6844a18912ced`. Freshness перепроверять при использовании; usable не означает fresh. Public scheduler ещё не установлен/не квалифицирован, post-LLM four-store refresh не выполнен. Подпись `local-db-operator-v1` — аттестация **локального оператора, не Aqua**. Старый LOCAL updater/scheduler не управляет 8081; pins вручную не менять.
 
 [Как пользоваться 8081 и читать ограничения](docs/public-image-ready-20261018.md). Два native PASS снимают прежнее утверждение «native NOT_RUN», но **не закрывают всю TASK2, полную OS/ecosystem/negative-матрицу или production acceptance**. Исторические source-only и HOLD-этапы сохраняют свои даты и доказательства.
 

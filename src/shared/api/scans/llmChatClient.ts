@@ -8,6 +8,7 @@ import {
   chatBindingSchema,
   chatContextSchema,
   chatHistorySchema,
+  chatReadinessSchema,
   chatResultSchema,
   duplicateSchema,
   sameChatBinding,
@@ -24,7 +25,10 @@ export class ChatError extends Error {
 }
 export function chatErrorMessage(error: unknown) {
   const code = error instanceof ChatError ? error.code : '';
-  if (code === 'SESSION') return 'Сессия изменилась. История и согласие скрыты; откройте чат заново.';
+  if (code === 'SESSION')
+    return 'Сессия изменилась или истекла. История и согласие скрыты; войдите и откройте чат заново.';
+  if (code === 'ACCESS')
+    return 'Доступ к чату этого отчёта не подтверждён. История скрыта; проверьте аккаунт и разрешение на отчёт.';
   if (['STALE', 'LLM_STALE_REPORT', 'LLM_STALE_POLICY', 'LLM_HISTORY_CONFLICT'].includes(code))
     return 'Отчёт, политика или ревизия истории изменились. Обновите историю и подтвердите согласие заново.';
   if (['TIMEOUT', 'ABORTED', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
@@ -33,8 +37,16 @@ export function chatErrorMessage(error: unknown) {
     return 'Достигнут лимит запросов или квоты. Исходные findings и coverage остаются в отчёте.';
   if (['LLM_CONTEXT_LIMIT', 'LLM_HISTORY_CAPACITY'].includes(code))
     return 'Обязательный контекст или история не помещаются. Подтверждённые решения не удалены; запрос не повторяется автоматически.';
-  if (['LLM_HISTORY_UNAVAILABLE', 'LLM_CONFIGURATION_UNAVAILABLE'].includes(code))
-    return 'Чат выключен или хранилище недоступно. Доступность провайдера не подтверждена; исходный отчёт сохранён.';
+  if (code === 'LLM_CONFIGURATION_UNAVAILABLE')
+    return 'Серверный ключ или политика провайдера не настроены либо чат выключен. Точная причина не раскрывается; не вводите API-ключ в вопрос. Исходный отчёт сохранён.';
+  if (['LLM_PROVIDER_UNAVAILABLE', 'LLM_UNAVAILABLE'].includes(code))
+    return 'Провайдер недоступен или не вернул проверенный полный ответ. Сначала обновите историю: запрос уже мог быть учтён. Автоматического повтора нет; исходный отчёт сохранён.';
+  if (code === 'LLM_HISTORY_UNAVAILABLE')
+    return 'Хранилище истории недоступно. Доступность провайдера не подтверждена; исходный отчёт сохранён.';
+  if (['LLM_REPORT_UNAVAILABLE', 'REPORT_UNAVAILABLE'].includes(code))
+    return 'Контекст этого отчёта недоступен или не поддерживается чатом. Это не означает отсутствие находок; исходный отчёт остаётся отдельно.';
+  if (code === 'LLM_NO_EVIDENCE')
+    return 'Нет подтверждённых источников для ответа. Непроверенное покрытие не означает ноль проблем; запрос не повторяется автоматически.';
   if (code === 'DUPLICATE')
     return 'Запрос уже зарегистрирован. Ответ не переотправлен; обновите историю вручную. Новая генерация и возврат квоты не заявлены.';
   if (code === 'INPUT')
@@ -91,6 +103,24 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
+      if (
+        !current() ||
+        controller.signal.aborted ||
+        response.status === 401 ||
+        response.status === 403 ||
+        response.status === 404
+      ) {
+        void response.body?.cancel().catch(() => {});
+        throw new ChatError(
+          !current() || response.status === 401
+            ? 'SESSION'
+            : controller.signal.aborted
+              ? 'ABORTED'
+              : response.status === 403
+                ? 'ACCESS'
+                : 'REPORT_UNAVAILABLE',
+        );
+      }
       const length = response.headers.get('content-length');
       const framed = !!framing && response.ok;
       const cap = response.ok ? limit : 8192;
@@ -176,6 +206,11 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
   };
   return {
     current,
+    async readiness(scanId: string, signal: AbortSignal) {
+      const value = chatReadinessSchema.parse(await request(scanId, 'readiness', 8192, signal));
+      if (value.scanId !== scanId) throw new ChatError('STALE');
+      return value;
+    },
     async context(scanId: string, signal: AbortSignal) {
       const value = chatContextSchema.parse(await request(scanId, 'chat/context', 8192, signal));
       if (value.scanId !== scanId) throw new ChatError('STALE');

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LiveScanSession } from '@/features/scans/LiveScanSession';
 import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { transitionScanSession } from '@/shared/api/auth/scanSession';
+import { context as chatContext, history as chatHistory } from './llmChatFixtures';
 
 const id = '00000000-0000-4000-8000-000000000038';
 const other = '00000000-0000-4000-8000-000000000039';
@@ -145,12 +146,34 @@ it('terminal ScanDetail replaces placeholder; hidden current category and late-p
   expect(requests.some((request) => request.path.includes('/results?limit=50&cursor=1'))).toBe(true);
   expect(screen.getByRole('heading', { name: 'Покрытие проверок' })).toBeTruthy();
 });
+it('owner report navigation reaches the existing chat independently of a failed summary, without provider calls', async () => {
+  mockApi('completed', undefined, { invalid: true });
+  const scannerFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+    if (path.endsWith('/llm/chat/context')) return json({ ...chatContext, ...tuple });
+    if (path.endsWith('/llm/history')) return json({ ...chatHistory, ...tuple });
+    if (path.endsWith('/llm/chat/usage')) return json({ ...tuple, available: false, admission: { status: 'unavailable' } });
+    return scannerFetch(path, init);
+  }));
+  mount();
+  const entry = await screen.findByRole('link', { name: /Чат по отчёту/ });
+  expect(entry.getAttribute('href')).toBe('#scan-report-chat');
+  const target = document.getElementById('scan-report-chat');
+  expect(target?.getAttribute('tabindex')).toBe('-1');
+  expect(screen.getByRole('region', { name: 'Чат по отчёту' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+  await screen.findByLabelText('Вопрос чату');
+  expect(screen.getByRole('status', { name: 'Состояние подключения чата' }).textContent).toContain('История подключена');
+  expect(requests.some(request => request.init?.method === 'POST')).toBe(false);
+  expect(screen.getByRole('heading', { name: 'Покрытие проверок' })).toBeTruthy();
+});
 it('queued ScanDetail has no context request or summary POST', async () => {
   mockApi('queued');
   mount();
   await screen.findByText(/ИИ-сводка доступна только/);
   expect(requests.some((request) => request.path.includes('/llm/'))).toBe(false);
   expect(screen.queryByRole('checkbox')).toBeNull();
+  expect(screen.queryByRole('link', { name: /Чат по отчёту/ })).toBeNull();
 });
 it('malformed/offline summary context leaves original status, coverage and findings visible', async () => {
   mockApi('completed', undefined, { secret: 'PRIVATE_CANARY' });

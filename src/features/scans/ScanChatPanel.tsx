@@ -13,6 +13,7 @@ import {
   verifiedChatSources,
   type ChatContext,
   type ChatHistory,
+  type ChatReadiness,
   type ChatResult,
   type ChatSource,
 } from '@/shared/api/scans/llmChatContract';
@@ -20,6 +21,8 @@ import { collectSummarySources, type SummarySource } from '@/shared/api/scans/ll
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import type { LlmUsage } from '@/shared/api/scans/llmUsageClient';
 import { utf8Bytes } from '@/shared/api/scans/vulnAdvisory';
+import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
+import { identifierCountLabel, isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
 
@@ -30,6 +33,25 @@ type Snapshot = {
   usage: LlmUsage | null;
   sources: SummarySource[];
 };
+const readinessMessages = {
+  'configuration-required': 'Требуется настройка политики генерации оператором.',
+  'public-key-required':
+    'Серверный ключ не настроен или отсутствует. Настройка — только оператором; не вводите ключ в чат.',
+  'public-key-unsafe': 'Метаданные серверного ключа не прошли проверку безопасности. Обратитесь к оператору.',
+  'quota-store-unavailable': 'Хранилище квоты недоступно. Это не нулевой расход и не разрешение на отправку.',
+  'history-store-unavailable': 'Хранилище истории недоступно; генерация заблокирована.',
+  'provider-profile-unavailable':
+    'Профиль провайдера недоступен в проверенном каталоге. Автоматической замены модели нет.',
+};
+function readinessMatchesContext(ready: ChatReadiness, context: ChatContext) {
+  if (!sameChatBinding(ready, context)) return false;
+  if (!context.enabled) return ready.provider.status === 'unverified-profile';
+  return (
+    'model' in ready.provider &&
+    ready.provider.model === context.disclosure?.model &&
+    ready.provider.endpoint === context.disclosure?.providers[0]
+  );
+}
 const sessionKey = () => JSON.stringify(scanSession());
 const policyFence = (v: ChatContext) =>
   JSON.stringify({
@@ -40,6 +62,10 @@ const policyFence = (v: ChatContext) =>
     policyVersion: v.policyVersion,
     disclosure: v.disclosure,
     enabled: v.enabled,
+    findingCount: v.findingCount,
+    findingCounts: v.findingCounts,
+    identifierCounts: v.identifierCounts,
+    coverage: v.coverage,
   });
 export function ScanChatPanel(props: Props) {
   const session = useSyncExternalStore(subscribeScanSession, sessionKey, sessionKey);
@@ -72,6 +98,12 @@ function SourceList({
               {source.finding.check} · {source.finding.severity}
             </strong>{' '}
             · {source.finding.findingId}
+            {source.finding.check === 'vuln' ? (
+              <p>
+                {source.finding.cveId} ·{' '}
+                {isDebianTempId(source.finding.cveId) ? 'Debian advisory (не CVE)' : 'CVE'}
+              </p>
+            ) : null}
             <p>
               {sameChatBinding(source, current)
                 ? 'Источник текущего отчёта, проверен по scanner results.'
@@ -90,6 +122,8 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   const client = useMemo(() => providedClient ?? createChatClient(scanSession()), [providedClient]);
   const [opened, setOpened] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [readiness, setReadiness] = useState<ChatReadiness | null>(null);
+  const publicReport = status.profile === PUBLIC_IMAGE_PROFILE;
   const [question, setQuestion] = useState('');
   const [decision, setDecision] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -99,6 +133,8 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   const [receipt, setReceipt] = useState<Extract<ChatResult, { reply: unknown }>['usage'] | null>(null);
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
+  const questionInput = useRef<HTMLTextAreaElement | null>(null);
+  const [operation, setOperation] = useState<'read' | 'chat' | 'decision'>('read');
 
   function invalidate() {
     generation.current++;
@@ -112,6 +148,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     setSnapshot(null);
     setReceipt(null);
     setSelectedIds([]);
+    setReadiness(null);
     setMessage(chatErrorMessage(new ChatError('ABORTED')));
   }
   function checkStatus(context: ChatContext) {
@@ -121,6 +158,33 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       context.platform !== status.platform
     )
       throw new ChatError('STALE');
+    if (
+      publicReport &&
+      (context.findingCount === undefined ||
+        context.identifierCounts?.cve !== status.identifierCounts?.cve ||
+        context.identifierCounts?.debianTemp !== status.identifierCounts?.debianTemp)
+    )
+      throw new ChatError('STALE');
+  }
+  async function readReadiness(signal: AbortSignal) {
+    try {
+      const value = await client.readiness(status.scanId, signal);
+      if (
+        value.scanId !== status.scanId ||
+        value.digest !== status.digest ||
+        value.platform !== status.platform
+      )
+        throw new ChatError('STALE');
+      return value;
+    } catch (error) {
+      if (
+        error instanceof ChatError &&
+        ['SESSION', 'ACCESS', 'REPORT_UNAVAILABLE', 'STALE', 'ABORTED', 'TIMEOUT'].includes(error.code)
+      )
+        throw error;
+      // A malformed/offline readiness is unknown, never a generation permission; history may still work.
+      return null;
+    }
   }
   async function readSnapshot(signal: AbortSignal): Promise<Snapshot> {
     const context = await client.context(status.scanId, signal);
@@ -128,11 +192,16 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     const [history, usage, sources] = await Promise.all([
       client.history(context, signal),
       client.usage(context, signal).catch((error) => {
-        if (error instanceof ChatError && ['SESSION', 'ABORTED', 'TIMEOUT'].includes(error.code)) throw error;
+        if (
+          error instanceof ChatError &&
+          ['SESSION', 'ACCESS', 'REPORT_UNAVAILABLE', 'ABORTED', 'TIMEOUT'].includes(error.code)
+        )
+          throw error;
         return null;
       }),
       collectSummarySources(transport, status, signal),
     ]);
+    if (publicReport && sources.length !== context.findingCount) throw new ChatError('STALE');
     if (
       history.epoch !== context.epoch ||
       history.revision !== context.revision ||
@@ -210,11 +279,20 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   }
 
   function refresh() {
+    if (request.current || !client.current()) return;
+    setOperation('read');
+    setReadiness(null);
     setOpened(true);
     setSnapshot(null);
     setSelectedIds([]);
     void operate(async (signal, publish) => {
+      const ready = publicReport ? await readReadiness(signal) : null;
+      publish(() => setReadiness(ready));
       const next = await readSnapshot(signal);
+      if (ready && !readinessMatchesContext(ready, next.context)) {
+        publish(() => setReadiness(null));
+        throw new ChatError('STALE');
+      }
       publish(() => setSnapshot(next));
     });
   }
@@ -222,6 +300,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     const unsubscribe = subscribeScanSession(() => {
       invalidate();
       setSnapshot(null);
+      setReadiness(null);
       setConsent(false);
       setReceipt(null);
       setSelectedIds([]);
@@ -241,7 +320,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       pending ||
       accepted.context.pending ||
       !client.current() ||
-      (kind === 'chat' && (!consent || !accepted.context.enabled))
+      (kind === 'chat' && (!consent || !accepted.context.enabled || (publicReport && !readiness?.localReady)))
     )
       return;
     const value = kind === 'chat' ? question : decision;
@@ -249,9 +328,17 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       setMessage(chatErrorMessage(new ChatError('INPUT')));
       return;
     }
+    if (request.current) return;
+    setOperation(kind);
     const mutationId = crypto.randomUUID();
     const ids = [...selectedIds];
     void operate(async (signal, publish) => {
+      if (kind === 'chat' && publicReport) {
+        const ready = await readReadiness(signal);
+        publish(() => setReadiness(ready));
+        if (!ready?.localReady) throw new ChatError('LLM_CONFIGURATION_UNAVAILABLE');
+        if (!readinessMatchesContext(ready, accepted.context)) throw new ChatError('STALE');
+      }
       const before = await client.context(status.scanId, signal);
       checkStatus(before);
       if (
@@ -307,13 +394,37 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   }
   const context = snapshot?.context;
   const available = !!snapshot && !pending && !context?.pending && client.current();
+  const generationAllowed = !!context?.enabled && (!publicReport || readiness?.localReady === true);
+  const connection = pending
+    ? operation === 'read'
+      ? 'Подключение: читаем условия, источники и историю отчёта…'
+      : operation === 'chat'
+        ? 'Ожидаем проверенный полный ответ. Частичный текст не показывается.'
+        : 'Сохраняем решение без вызова провайдера…'
+    : snapshot
+      ? context?.pending
+        ? 'На сервере уже выполняется запрос. Новая отправка заблокирована; обновите историю вручную позже.'
+        : publicReport && !readiness?.localReady
+          ? 'История подключена. Готовность генерации не подтверждена; проверьте настройку ниже.'
+          : context?.enabled
+            ? 'История подключена. Чат разрешён сервером; доступность провайдера проверяется только при отправке.'
+            : 'История подключена. Генерация выключена сервером; историю и решения можно читать без модели.'
+      : opened
+        ? 'Подключение не подтверждено. Повторите чтение истории перед новым запросом.'
+        : 'Чат не подключён. Открытие читает условия и историю, но не вызывает провайдера.';
   return (
     <section
+      id="scan-report-chat"
+      className="scan-a1__chat"
+      tabIndex={-1}
       aria-label="Чат по отчёту"
       aria-busy={pending}
       style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}
     >
       <h3>Чат по отчёту · только вручную</h3>
+      <p role="status" aria-label="Состояние подключения чата" aria-live="polite">
+        {connection}
+      </p>
       <p>
         ИИ предлагает гипотезы, не факты сканирования. Findings и coverage основного отчёта остаются
         доступными при любой ошибке или квоте.
@@ -328,11 +439,42 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       </Button>
       {pending ? (
         <>
-          <p role="status">Проверяем историю и условия или ожидаем полный ответ…</p>
+          <p>
+            Отмена останавливает только ожидание в браузере, не гарантирует отмену на сервере или возврат
+            квоты.
+          </p>
           <Button type="button" variant="secondary" onClick={cancel}>
             Отменить ожидание чата
           </Button>
         </>
+      ) : null}
+      {publicReport && opened ? (
+        <section aria-label="Готовность генерации">
+          <h4>Готовность генерации</h4>
+          {readiness ? (
+            <>
+              <p>
+                {readiness.localReady
+                  ? 'Локальная настройка подтверждена, не доступность провайдера.'
+                  : 'Для генерации требуется настройка оператора.'}
+              </p>
+              <ul>
+                {readiness.blockers.map((blocker) => (
+                  <li key={blocker}>{readinessMessages[blocker]}</li>
+                ))}
+              </ul>
+              <p>
+                Генерация не проверена (generationVerified: false). Каталог не подтверждает успешный вызов.
+                Согласие требуется отдельно; ключи в интерфейсе не принимаются.
+              </p>
+            </>
+          ) : (
+            <p>
+              Готовность генерации неизвестна. Историю можно читать независимо; новая отправка запрещена до
+              подтверждения настроек.
+            </p>
+          )}
+        </section>
       ) : null}
       {message ? (
         <Alert role="alert" tone="warning">
@@ -341,6 +483,26 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       ) : null}
       {snapshot && context ? (
         <>
+          {status.profile === PUBLIC_IMAGE_PROFILE ? (
+            <div aria-label="Границы public отчёта в чате">
+              <p>
+                Весь сохранённый отчёт:{' '}
+                {status.identifierCounts
+                  ? identifierCountLabel(status.identifierCounts)
+                  : 'число CVE и Debian advisories неизвестно'}
+                . Debian TEMP — не CVE.
+              </p>
+              <p>
+                Покрытие уязвимостей: {status.perCheck?.vuln?.outcome ?? 'неизвестно'}; OS:{' '}
+                {status.perCheck?.vuln?.os?.outcome ?? 'неизвестно'}; Node:{' '}
+                {status.perCheck?.vuln?.node?.outcome ?? 'неизвестно'}
+                {status.perCheck?.vuln?.node?.outcome === 'unsupported'
+                  ? ` · ${status.perCheck.vuln.node.reason}`
+                  : ''}
+                . Непроверенное не означает ноль; checked не гарантирует безопасность.
+              </p>
+            </div>
+          ) : null}
           <dl className="scan-a1__facts">
             <div>
               <dt>Привязка</dt>
@@ -426,37 +588,55 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
               </p>
             ) : null}
           </section>
-          <label>
-            Вопрос чату
-            <textarea
-              value={question}
-              disabled={pending}
-              rows={3}
-              onChange={(e) => {
-                setQuestion(e.target.value);
-                setConsent(false);
-              }}
-              style={{ width: '100%' }}
-            />
-          </label>
-          <small>{utf8Bytes(question)} / 2048 UTF-8 байт. Без URL, секретов и raw evidence.</small>
-          <label>
-            <input
-              type="checkbox"
-              checked={consent}
-              disabled={!available || !context.enabled}
-              onChange={(e) => setConsent(e.target.checked)}
-            />{' '}
-            Разрешаю один запрос чата: отправить этот вопрос, очищенную историю, решения, findings и coverage
-            по указанной политике текущего отчёта.
-          </label>
-          <Button
-            type="button"
-            disabled={!available || !consent || !context.enabled || !validChatText(question)}
-            onClick={() => mutate('chat')}
+          {snapshot.history.turns.length ? (
+            <p>
+              Продолжите чат новым вопросом. История входит в следующий запрос только после нового согласия.
+            </p>
+          ) : null}
+          <form
+            className="scan-a1__compose"
+            aria-label="Отправка вопроса по отчёту"
+            onSubmit={(event) => {
+              event.preventDefault();
+              mutate('chat');
+            }}
           >
-            Отправить вопрос
-          </Button>
+            <label>
+              Вопрос чату
+              <textarea
+                ref={questionInput}
+                aria-describedby="scan-chat-input-help"
+                aria-invalid={question.length > 0 && !validChatText(question)}
+                value={question}
+                disabled={pending}
+                rows={3}
+                onChange={(e) => {
+                  setQuestion(e.target.value);
+                  setConsent(false);
+                }}
+                style={{ width: '100%' }}
+              />
+            </label>
+            <small id="scan-chat-input-help">
+              {utf8Bytes(question)} / 2048 UTF-8 байт. Без URL, секретов и raw evidence.
+            </small>
+            <label>
+              <input
+                type="checkbox"
+                checked={consent}
+                disabled={!available || !generationAllowed}
+                onChange={(e) => setConsent(e.target.checked)}
+              />{' '}
+              Разрешаю один запрос чата: отправить этот вопрос, очищенную историю, решения, findings и
+              coverage по указанной политике текущего отчёта.
+            </label>
+            <Button
+              type="submit"
+              disabled={!available || !consent || !generationAllowed || !validChatText(question)}
+            >
+              Отправить вопрос
+            </Button>
+          </form>
           <h4>Подтверждённая история</h4>
           {!snapshot.history.turns.length && !snapshot.history.decisions.length ? (
             <p>История пока пуста. Это не означает, что отчёт безопасен.</p>
@@ -472,7 +652,23 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                   <SourceList sources={turn.reply.sources} current={context} prefix={`chat-${turn.id}`} />
                 </>
               ) : (
-                <p>Полного подтверждённого ответа нет. Автоматический повтор не выполняется.</p>
+                <>
+                  <p>Полного подтверждённого ответа нет. Автоматический повтор не выполняется.</p>
+                  {turn.state !== 'pending' ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={!available || !generationAllowed}
+                      onClick={() => {
+                        setQuestion(turn.question);
+                        setConsent(false);
+                        questionInput.current?.focus();
+                      }}
+                    >
+                      Подготовить повтор вопроса
+                    </Button>
+                  ) : null}
+                </>
               )}
             </article>
           ))}
@@ -483,7 +679,11 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
               <SourceList sources={entry.sources} current={context} prefix={`decision-${entry.id}`} />
             </article>
           ))}
-          <fieldset disabled={!available} style={{ minWidth: 0, maxWidth: '100%' }}>
+          <fieldset
+            className="scan-a1__compose"
+            disabled={!available}
+            style={{ minWidth: 0, maxWidth: '100%' }}
+          >
             <legend>Сохранить решение без вызова модели</legend>
             <label>
               Текст решения

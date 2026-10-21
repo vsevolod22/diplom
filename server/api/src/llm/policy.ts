@@ -5,6 +5,14 @@ export const CEILINGS = Object.freeze({ timeoutMs: 30_000, requestBytes: 262_144
 // Fixed profile from the parent-reported 2026-10-08 synthetic compatibility probe.
 export const FREE_MODEL = 'apodex/apodex-1.1-mini:free';
 export const FREE_PROVIDER = 'novita/bf16';
+// Explicit operator selection, never an automatic fallback. Official model/endpoints
+// and endpoints/zdr catalog intersection checked 2026-10-21; generation unprobed.
+export const PUBLIC_FREE_MODEL = 'xingchen-agi/xing4.0-29b-a4b:free';
+export const PUBLIC_FREE_PROVIDER = 'phala';
+export function supportedFreeProfile(model: string, providers: readonly string[]): boolean {
+  return providers.length === 1 && (model === FREE_MODEL && providers[0] === FREE_PROVIDER ||
+    model === PUBLIC_FREE_MODEL && providers[0] === PUBLIC_FREE_PROVIDER);
+}
 export type LlmPolicy = Readonly<{
   version: string; model: string; providers: readonly string[]; region: 'global'; retention: 'no-training' | 'no-storage';
   timeoutMs: number; requestBytes: number; responseBytes: number; findings: number; outputTokens: number;
@@ -32,7 +40,7 @@ export function policyFromEnvironment(env: NodeJS.ProcessEnv = process.env): Llm
     const model = env.LLM_MODEL;
     const providers = env.LLM_PROVIDER_ALLOWLIST?.split(',');
     const revision = env.LLM_POLICY_REVISION;
-    if (!model || (freeOnly ? model !== FREE_MODEL || env.LLM_PROVIDER_ALLOWLIST !== FREE_PROVIDER || env.LLM_RETENTION !== 'no-storage' :
+    if (!model || (freeOnly ? !supportedFreeProfile(model, providers ?? []) || env.LLM_RETENTION !== 'no-storage' :
         !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(model) || ['openrouter/auto', 'openrouter/free'].includes(model)) || model.length > 160 ||
         !providers?.length || providers.length > 8 || new Set(providers).size !== providers.length ||
         !freeOnly && providers.some(p => !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(p)) ||

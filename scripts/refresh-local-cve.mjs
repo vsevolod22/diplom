@@ -85,11 +85,11 @@ export function validateStorageContinuity(before, after) {
     dataEqual(records(before.networks, withoutEndpoints), records(after.networks, withoutEndpoints)));
 }
 
-export function validateNetworkMembership(resources) {
+export function validateNetworkMembership(resources, project = PROJECT) {
   requireSafe(resources.networks.length === Object.keys(NETWORK_MEMBERS).length &&
-    dataEqual(sort(resources.volumes.map(v => v.Name)), [`${PROJECT}_auth_accounts`, `${PROJECT}_scan_ledger`]));
+    dataEqual(sort(resources.volumes.map(v => v.Name)), [`${project}_auth_accounts`, `${project}_scan_ledger`]));
   for (const [suffix, members] of Object.entries(NETWORK_MEMBERS)) {
-    const found = resources.networks.filter(n => n.Name === `${PROJECT}_${suffix}`);
+    const found = resources.networks.filter(n => n.Name === `${project}_${suffix}`);
     requireSafe(found.length === 1);
     const network = found[0], endpoints = network.Containers;
     requireSafe(HEX.test(network.Id) && endpoints && typeof endpoints === 'object' && !Array.isArray(endpoints));
@@ -97,7 +97,7 @@ export function validateNetworkMembership(resources) {
     requireSafe(dataEqual(sort(Object.keys(endpoints)), sort(expected.map(c => c.Id))));
     for (const item of expected) {
       const endpoint = endpoints[item.Id], attachment = item.NetworkSettings.Networks[network.Name];
-      requireSafe(active(item) && endpoint?.Name === `${PROJECT}-${service(item)}-1` && attachment?.NetworkID === network.Id &&
+      requireSafe(active(item) && endpoint?.Name === `${project}-${service(item)}-1` && attachment?.NetworkID === network.Id &&
         HEX.test(endpoint.EndpointID) && endpoint.EndpointID === attachment.EndpointID &&
         endpoint.MacAddress === attachment.MacAddress &&
         endpoint.IPv4Address === (attachment.IPAddress ? `${attachment.IPAddress}/${attachment.IPPrefixLen}` : '') &&
@@ -129,12 +129,12 @@ export function checkDisk(paths) {
   requireSafe(disk.bavail * disk.bsize >= DISK_POLICY.reserveBytes);
 }
 
-function verifierArguments(root, release, keys, pins) {
+export function verifierArguments(root, release, keys, pins) {
   return ['--import', join(root, 'server/api/node_modules/tsx/dist/loader.mjs'), join(root, 'scripts/verify-local-cve.mjs'),
     '--release-dir', release, '--public-key', keys.publicPath, '--public-key-sha256', keys.publicKeySha256,
     '--manifest', pins.manifestDigest, '--bundle', pins.artifactSha256, '--db', pins.dbSha256];
 }
-function verifiedOutput(output, pins) {
+export function verifiedOutput(output, pins) {
   const result = JSON.parse(output);
   requireSafe(result.kind === 'authenticated-release-usability-only' && result.scannerChecked === false &&
     result.admissionChecked === false && result.db?.manifestDigest === pins.manifestDigest &&
@@ -558,6 +558,74 @@ export async function verifyLocalCveHold({ root = ROOT, run = runChild, docker =
   } catch { throw fail(acceptCurrent ? 'hold-acceptance' : 'hold-verification', checkpoint); }
 }
 
+// Filesystem/transport/signature primitives only: no LOCAL paths, activation,
+// Docker, key generation or lifecycle authority. Public refresh supplies its own
+// paths, existing-key provider, verifier and candidate binding validator.
+export async function prepareFrozenCandidate({ root, paths, current, oldDescriptor, manifest, child, verify,
+  getKeys, validateCandidate, diskCheck = checkDisk, mark = () => {} }) {
+  mark('staging', 'candidate-layout');
+  const releaseName = manifest.slice(7), release = join(paths.releases, releaseName);
+  requireSafe(DIGEST.test(manifest));
+  let pins;
+  if (exists(release)) {
+    layout(release, true, true);
+    const descriptor = json(join(release, 'descriptor.json'));
+    requireSafe(HEX.test(descriptor.artifactSha256) && HEX.test(descriptor.dbSha256));
+    pins = { manifestDigest: manifest, artifactSha256: descriptor.artifactSha256, dbSha256: descriptor.dbSha256 };
+  } else {
+    mark('staging', 'disk-budget'); diskCheck(paths);
+    mark('staging', 'workspace');
+    const scratch = join(paths.stand, '.cve-refresh-work');
+    fs.mkdirSync(scratch, { mode: 0o700 });
+    const download = join(scratch, 'download');
+    mark('download', 'fetch');
+    await child(process.execPath, [join(root, 'server/deploy/trust/fetch-db-layer.mjs'), manifest, download], 240_000);
+    mark('download', 'receipt');
+    directory(scratch, 0o700); directory(download, 0o700);
+    const layer = manifestDescriptor(Buffer.from(readBounded(join(download, 'manifest.json'), 65536, 0o600)), manifest, manifest);
+    mark('prepare', 'convert');
+    const output = await child('python3', [join(root, 'server/deploy/trust/prepare-db-release.py'), download, release,
+      manifest, layer.digest], 240_000);
+    mark('prepare', 'receipt');
+    const lines = output.trimEnd().split('\n');
+    requireSafe(lines.length === 2 && lines[1] === 'Unsigned release: independently review pins, then use operator-only signer.');
+    const prepared = JSON.parse(lines[0]);
+    requireSafe(prepared.manifest === manifest && prepared.layer === layer.digest && HEX.test(prepared.bundle) && HEX.test(prepared.db));
+    pins = { manifestDigest: manifest, artifactSha256: prepared.bundle, dbSha256: prepared.db };
+    mark('prepare', 'layout'); layout(release, false);
+    mark('sign', 'key-pair'); const keys = getKeys();
+    mark('sign', 'attestation');
+    await child(process.execPath, [join(root, 'server/deploy/trust/sign-offline-db.mjs'), release,
+      keys.privatePath, keys.publicPath, manifest, pins.artifactSha256, pins.dbSha256], 120_000);
+    mark('sign', 'envelope'); layout(release, true);
+    mark('verify', 'candidate-usability'); await verify(release, pins);
+    mark('staging', 'freeze');
+    for (const path of layout(release, true)) {
+      const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try { fs.fchmodSync(fd, 0o444); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    }
+    fs.chmodSync(join(release, 'db'), 0o555); fs.chmodSync(release, 0o555);
+    syncDirectory(join(release, 'db')); syncDirectory(release); syncDirectory(paths.releases);
+    mark('staging', 'cleanup-download');
+    directory(scratch, 0o700); directory(download, 0o700);
+    requireSafe(equal(sort(fs.readdirSync(download)), ['layer.tar.gz', 'manifest.json']));
+    readBounded(join(download, 'manifest.json'), 65536, 0o600);
+    const layerStat = fs.lstatSync(join(download, 'layer.tar.gz'));
+    requireSafe(layerStat.isFile() && !layerStat.isSymbolicLink() && layerStat.nlink === 1 && layerStat.uid === process.getuid());
+    fs.unlinkSync(join(download, 'manifest.json')); fs.unlinkSync(join(download, 'layer.tar.gz'));
+    fs.rmdirSync(download); fs.rmdirSync(scratch);
+  }
+  mark('staging', 'frozen-layout');
+  const candidate = { version: 1, release: `db-releases/${releaseName}`, manifestDigest: manifest,
+    artifactSha256: pins.artifactSha256, publicKeySha256: current.publicKeySha256 };
+  const next = validateCandidate(candidate);
+  mark('verify', 'frozen-usability'); const receipt = await verify(release, pins);
+  mark('verify', 'monotonic-freshness');
+  requireSafe(Number.isFinite(Date.parse(oldDescriptor.updatedAt)) &&
+    Date.parse(receipt.db.updatedAt) >= Date.parse(oldDescriptor.updatedAt));
+  return { candidate, next, pins, receipt, release };
+}
+
 export async function refreshLocalCve(argv = [], { root = ROOT, run = runChild, docker = runDocker,
   ambient = process.env, log = console.log, sleep = ms => new Promise(r => setTimeout(r, ms)),
   now = () => performance.now(), drainMs = 120_000, diskCheck = checkDisk, platform = process.platform, acceptanceIo,
@@ -566,7 +634,7 @@ export async function refreshLocalCve(argv = [], { root = ROOT, run = runChild, 
     return verifyLocalCveHold({ root, run, docker, ambient, log, now, platform, acceptanceIo }, argv[0] === '--accept-current-hold');
   let phase = 'preflight', checkpoint = 'arguments';
   const mark = (nextPhase, nextCheckpoint) => { phase = nextPhase; checkpoint = nextCheckpoint; };
-  let unlock, journalPath, scratch, hold = false;
+  let unlock, journalPath, hold = false;
   const releaseLock = () => {
     if (unlock && !hold) {
       try { unlock(); } catch { throw fail('cleanup', 'unlock'); }
@@ -611,76 +679,9 @@ export async function refreshLocalCve(argv = [], { root = ROOT, run = runChild, 
       log('LOCAL CVE unchanged; current signature, hashes and real-time usability authenticated. No signing or Docker calls.');
       return { outcome: 'unchanged', manifest };
     }
-    mark('staging', 'candidate-layout');
-    const releaseName = manifest.slice(7), release = join(paths.releases, releaseName);
-    let candidate, pins;
-    if (exists(release)) {
-      // A successful --stage-only can be reused, but is always reauthenticated.
-      layout(release, true, true);
-      const descriptor = json(join(release, 'descriptor.json'));
-      requireSafe(HEX.test(descriptor.artifactSha256) && HEX.test(descriptor.dbSha256));
-      pins = { manifestDigest: manifest, artifactSha256: descriptor.artifactSha256, dbSha256: descriptor.dbSha256 };
-    } else {
-      mark('staging', 'disk-budget');
-      diskCheck(paths);
-      mark('staging', 'workspace');
-      scratch = join(paths.stand, '.cve-refresh-work');
-      fs.mkdirSync(scratch, { mode: 0o700 });
-      const download = join(scratch, 'download');
-      mark('download', 'fetch');
-      await child(process.execPath, [join(root, 'server/deploy/trust/fetch-db-layer.mjs'), manifest, download], 240_000);
-      mark('download', 'receipt');
-      directory(scratch, 0o700); directory(download, 0o700);
-      const manifestBytes = readBounded(join(download, 'manifest.json'), 65536, 0o600);
-      const layer = manifestDescriptor(Buffer.from(manifestBytes), manifest, manifest);
-      mark('prepare', 'convert');
-      const output = await child('python3', [join(root, 'server/deploy/trust/prepare-db-release.py'), download, release,
-        manifest, layer.digest], 240_000);
-      mark('prepare', 'receipt');
-      const lines = output.trimEnd().split('\n');
-      requireSafe(lines.length === 2 && lines[1] === 'Unsigned release: independently review pins, then use operator-only signer.');
-      const prepared = JSON.parse(lines[0]);
-      requireSafe(prepared.manifest === manifest && prepared.layer === layer.digest &&
-        HEX.test(prepared.bundle) && HEX.test(prepared.db));
-      pins = { manifestDigest: manifest, artifactSha256: prepared.bundle, dbSha256: prepared.db };
-      mark('prepare', 'layout');
-      layout(release, false);
-      mark('sign', 'key-pair');
-      const keys = existingLocalCveKeyPair(root, current.publicKeySha256);
-      mark('sign', 'attestation');
-      await child(process.execPath, [join(root, 'server/deploy/trust/sign-offline-db.mjs'), release,
-        keys.privatePath, keys.publicPath, manifest, pins.artifactSha256, pins.dbSha256], 120_000);
-      mark('sign', 'envelope');
-      layout(release, true);
-      mark('verify', 'candidate-usability');
-      await verify(release, pins);
-      mark('staging', 'freeze');
-      for (const path of layout(release, true)) {
-        const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-        try { fs.fchmodSync(fd, 0o444); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      }
-      fs.chmodSync(join(release, 'db'), 0o555); fs.chmodSync(release, 0o555);
-      syncDirectory(join(release, 'db')); syncDirectory(release); syncDirectory(paths.releases);
-      // Only our exact two transport outputs, never a recursive release/prune.
-      mark('staging', 'cleanup-download');
-      directory(scratch, 0o700); directory(download, 0o700);
-      requireSafe(equal(sort(fs.readdirSync(download)), ['layer.tar.gz', 'manifest.json']));
-      readBounded(join(download, 'manifest.json'), 65536, 0o600);
-      const layerStat = fs.lstatSync(join(download, 'layer.tar.gz'));
-      requireSafe(layerStat.isFile() && !layerStat.isSymbolicLink() && layerStat.nlink === 1 && layerStat.uid === process.getuid());
-      fs.unlinkSync(join(download, 'manifest.json')); fs.unlinkSync(join(download, 'layer.tar.gz'));
-      fs.rmdirSync(download); fs.rmdirSync(scratch); scratch = undefined;
-    }
-    mark('staging', 'frozen-layout');
-    candidate = { version: 1, release: `db-releases/${releaseName}`, manifestDigest: manifest,
-      artifactSha256: pins.artifactSha256, publicKeySha256: current.publicKeySha256 };
-    const next = validateCveRelease(root, candidate);
-    mark('verify', 'frozen-usability');
-    const receipt = await verify(release, pins);
-    // Refuse upstream rollback; never rewrite UpdatedAt/NextUpdate to make it fresh.
-    mark('verify', 'monotonic-freshness');
-    requireSafe(Number.isFinite(Date.parse(oldDescriptor.updatedAt)) &&
-      Date.parse(receipt.db.updatedAt) >= Date.parse(oldDescriptor.updatedAt));
+    const { candidate, next, pins, release } = await prepareFrozenCandidate({ root, paths, current, oldDescriptor,
+      manifest, child, verify, mark, diskCheck, getKeys: () => existingLocalCveKeyPair(root, current.publicKeySha256),
+      validateCandidate: value => validateCveRelease(root, value) });
     mark('staging', 'activation-cas');
     const cas = () => requireSafe(readBounded(paths.config, 4096, 0o600) === original && equal(loadCveActivation(root), current));
     cas();

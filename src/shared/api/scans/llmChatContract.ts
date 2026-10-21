@@ -1,5 +1,14 @@
 import { z } from 'zod';
+import {
+  chatContextSelectionSchema,
+  freeProfileSchema,
+  publicChatMetadataShape,
+  publicReadinessShape,
+  validPublicChatMetadata,
+  validPublicReadiness,
+} from './llmPublicContract';
 import { reportEcosystem, reportSeveritySource } from './publicImageProfile';
+import { isCveId, isDebianTempId } from './publicVulnerabilityIdentifiers';
 import { advisorySeverity, advisorySource, serializedBytes, utf8Bytes } from './vulnAdvisory';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -53,7 +62,8 @@ const vulnBase = {
   check: z.literal('vuln'),
   findingId: z.string().regex(/^vuln-[a-f0-9]{64}$/),
   severity: advisorySeverity,
-  cveId: z.string().regex(/^CVE-\d{4}-\d{4,12}$/),
+  cveId: z.string().refine((id) => isCveId(id) || isDebianTempId(id)),
+  identifierKind: z.enum(['cve', 'debian-temp']).optional(),
   ecosystem: reportEcosystem,
   severitySources: z
     .array(reportSeveritySource)
@@ -116,6 +126,13 @@ const finding = z.union([
 ]);
 export const chatSourceSchema = z
   .strictObject({ ...chatBindingSchema.shape, finding })
+  .refine(
+    ({ finding: f }) =>
+      f.check !== 'vuln' ||
+      (isDebianTempId(f.cveId)
+        ? f.identifierKind === 'debian-temp' && f.ecosystem === 'deb'
+        : f.identifierKind === undefined || f.identifierKind === 'cve'),
+  )
   .refine((v) => serializedBytes(v) <= 2048);
 const sources = z
   .array(chatSourceSchema)
@@ -183,25 +200,27 @@ export const chatHistorySchema = z
       ) <= 4096
     );
   });
-const disclosure = z.strictObject({
-  provider: z.literal('OpenRouter'),
-  model: z.literal('apodex/apodex-1.1-mini:free'),
-  providers: z.tuple([z.literal('novita/bf16')]),
-  region: z.literal('global'),
-  retention: z.literal('no-storage'),
-  operatorApprovedRouting: z.literal(true),
-  providerComplianceNotProvenByDeclaration: z.literal(true),
-  requestBudgetUsd: z.literal(0),
-  freeOnly: z.literal(true),
-  maxPrice: z.strictObject({ prompt: z.literal(0), completion: z.literal(0), request: z.literal(0) }),
-  data: z.literal('Sanitized scanner findings and coverage; no raw evidence or credentials.'),
-  sentData: z.literal(
-    'Cleaned question, all user history/accepted decisions and selected findings with complete coverage.',
-  ),
-  localRetention: z.literal(
-    'Durable owner+scan history until separately authorized operator lifecycle; capacity can refuse; context cache only, not output cache.',
-  ),
-});
+const disclosure = z
+  .strictObject({
+    provider: z.literal('OpenRouter'),
+    model: z.enum(['apodex/apodex-1.1-mini:free', 'xingchen-agi/xing4.0-29b-a4b:free']),
+    providers: z.tuple([z.enum(['novita/bf16', 'phala'])]),
+    region: z.literal('global'),
+    retention: z.literal('no-storage'),
+    operatorApprovedRouting: z.literal(true),
+    providerComplianceNotProvenByDeclaration: z.literal(true),
+    requestBudgetUsd: z.literal(0),
+    freeOnly: z.literal(true),
+    maxPrice: z.strictObject({ prompt: z.literal(0), completion: z.literal(0), request: z.literal(0) }),
+    data: z.literal('Sanitized scanner findings and coverage; no raw evidence or credentials.'),
+    sentData: z.literal(
+      'Cleaned question, all user history/accepted decisions and selected findings with complete coverage.',
+    ),
+    localRetention: z.literal(
+      'Durable owner+scan history until separately authorized operator lifecycle; capacity can refuse; context cache only, not output cache.',
+    ),
+  })
+  .refine((v) => freeProfileSchema.safeParse({ model: v.model, providers: v.providers }).success);
 export const chatContextSchema = z
   .strictObject({
     ...chatBindingSchema.shape,
@@ -213,7 +232,9 @@ export const chatContextSchema = z
     limits: z.strictObject({ questionBytes: z.literal(2048), bodyBytes: z.literal(8192) }),
     deliveryMode: z.literal('completed-response'),
     pending: z.boolean(),
+    ...publicChatMetadataShape,
   })
+  .refine(validPublicChatMetadata)
   .refine((v) =>
     v.enabled ? !!v.policyVersion && !!v.disclosure : v.policyVersion === null && v.disclosure === null,
   );
@@ -241,9 +262,33 @@ export const chatResultSchema = z.union([
       deliveryMode: z.enum(['completed-response', 'validated-completed-reply']),
       reply: chatReplySchema,
       usage: chatReceiptSchema,
+      ...publicChatMetadataShape,
+      contextSelection: chatContextSelectionSchema.optional(),
     })
+    .refine(validPublicChatMetadata)
+    .refine(
+      (v) =>
+        v.deliveryMode !== 'completed-response' ||
+        !v.reply.sources.some(
+          (source) => source.finding.check === 'vuln' && source.finding.identifierKind !== undefined,
+        ) ||
+        v.findingCount !== undefined,
+    )
+    .refine((v) =>
+      v.findingCount === undefined
+        ? v.contextSelection === undefined
+        : !!v.contextSelection &&
+          v.contextSelection.findings + v.contextSelection.selectedFindingIds.length === v.findingCount &&
+          v.reply.sources.every((source) =>
+            v.contextSelection!.selectedFindingIds.includes(source.finding.findingId),
+          ),
+    )
     .refine((v) => sameChatBinding(v.reply, v)),
 ]);
+export const chatReadinessSchema = z
+  .strictObject({ ...chatBindingSchema.shape, ...publicReadinessShape })
+  .refine(validPublicReadiness);
+export type ChatReadiness = z.infer<typeof chatReadinessSchema>;
 export type ChatContext = z.infer<typeof chatContextSchema>;
 export type ChatHistory = z.infer<typeof chatHistorySchema>;
 export type ChatSource = z.infer<typeof chatSourceSchema>;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isCveId, isDebianTempId } from './publicVulnerabilityIdentifiers';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { BROWSER_SCANS_PATH, type ScanStatus, type ScanTransport } from './scanTransport';
 
@@ -254,6 +255,8 @@ export async function collectSummarySources(
     let cursor: string | undefined;
     let total = 0;
     let expected: number | null | undefined;
+    let cve = 0;
+    let debianTemp = 0;
     for (let index = 0; index < 21; index++) {
       const page =
         check === 'secret'
@@ -269,18 +272,40 @@ export async function collectSummarySources(
       if (count == null || count > 1000 || (expected !== undefined && expected !== count))
         throw new SummaryError('INVALID');
       expected = count;
+      if (
+        check === 'vuln' &&
+        'outcome' in page &&
+        page.outcome === 'checked' &&
+        (page.profile !== status.profile ||
+          page.identifierCounts?.cve !== status.identifierCounts?.cve ||
+          page.identifierCounts?.debianTemp !== status.identifierCounts?.debianTemp)
+      )
+        throw new SummaryError('STALE');
       if ('image' in page && (!page.image.endsWith(`@${status.digest}`) || page.platform !== status.platform))
         throw new SummaryError('STALE');
-      for (const finding of page.findings)
+      for (const finding of page.findings) {
+        if ('cveId' in finding) {
+          if (isCveId(finding.cveId)) cve++;
+          else if (isDebianTempId(finding.cveId)) debianTemp++;
+        }
         add({
           findingId: finding.findingId,
           check,
           label:
-            'cveId' in finding ? `${finding.cveId} · ${finding.severity}` : `${finding.ruleId} · Secrets`,
+            'cveId' in finding
+              ? `${finding.cveId}${isDebianTempId(finding.cveId) ? ' · Debian advisory (не CVE)' : ''} · ${finding.severity}`
+              : `${finding.ruleId} · Secrets`,
         });
+      }
       total += page.findings.length;
       if (page.nextCursor === null) {
-        if (total !== expected || status.perCheck?.[check]?.findingCount !== expected)
+        if (
+          total !== expected ||
+          status.perCheck?.[check]?.findingCount !== expected ||
+          (check === 'vuln' &&
+            status.identifierCounts &&
+            (cve !== status.identifierCounts.cve || debianTemp !== status.identifierCounts.debianTemp))
+        )
           throw new SummaryError('INVALID');
         break;
       }

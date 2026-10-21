@@ -19,6 +19,8 @@ export const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value)
 export const isId = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 export function cleanText(value: unknown, ceiling: number = HISTORY.questionBytes): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > ceiling ||
+      // Bounded labelled-text rejection, including pasted quoted KV; not general DLP or JSON escape decoding.
+      /\b(?:Bearer|Basic)\s+[A-Za-z0-9_+/=.-]+|(?:\b|_)(?:authorization|credentials?|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|token|secret)\s*(?:\\?["']\s*)?(?:[:=]|\bis\b)|["'](?:Results|Vulnerabilities|Secrets|RegistryConfig|InstalledVersion|SecretAccessKey|Env)["']\s*:/iu.test(value) ||
     // eslint-disable-next-line no-control-regex -- Intentionally reject control characters in untrusted chat text.
     /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff<>]|CANARY|[a-z][a-z0-9+.-]*:\/\/|javascript:|data:|file:|www\.|[A-Za-z0-9_+/=-]{40,}|\b(?:Bearer|password|api[_-]?key|token|secret)\s*[:=]|\b(?:sk-|sk-or-|AKIA)[A-Za-z0-9_-]+/iu.test(value)) return invalidHistoryRequest();
   return value;

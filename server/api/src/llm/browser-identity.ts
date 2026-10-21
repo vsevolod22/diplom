@@ -1,4 +1,4 @@
-import { ForbiddenException, HttpException, HttpStatus, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, HttpException, HttpStatus, Inject, Injectable, Optional, UnauthorizedException } from '@nestjs/common';
 import { AuthStore } from '../auth/auth.store.js';
 import { originForRequest, tokenFrom } from '../auth/auth.controller.js';
 import type { Identity } from '../security/identity.js';
@@ -38,9 +38,10 @@ export function browserIdentity(store: AuthStore, req: BrowserRequest, mutation 
 
 @Injectable()
 export class BrowserIdentity {
-  constructor(@Inject(AuthStore) private readonly store: AuthStore) {}
+  constructor(@Inject(AuthStore) private readonly store: AuthStore,
+    @Optional() @Inject(BROWSER_SCAN_LOCAL_ORIGIN) private readonly localOrigin: BrowserScanLocalOrigin = 'http://127.0.0.1:8080') {}
   resolve(req: BrowserRequest, mutation = false): Identity {
-    const identity = browserIdentity(this.store, req, mutation);
+    const identity = browserIdentity(this.store, req, mutation, this.localOrigin);
     return { subject: identity.subject, scope: [...identity.scope, 'scan:read'] };
   }
 }

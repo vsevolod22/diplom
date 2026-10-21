@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, HttpException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { ScansService } from '../scans/scans.service.js';
@@ -6,18 +6,25 @@ import type { Identity } from '../security/identity.js';
 import { validateConfigReport } from '../image-config/report-contract.js';
 import { ADVISORY_SOURCES, validateAdvisory } from '../worker/vuln-advisory.js';
 import { CEILINGS } from './policy.js';
-import { object } from './response.js';
+import { exact, object } from './response.js';
+import { validateDbEvidence, CURRENT_DB_POLICY } from '../worker/cve-db-evidence.js';
+import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
+import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, type PackageEcosystem } from '../worker/public-image-evidence.js';
+
+export const PUBLIC_LLM_REPORTS = Symbol('PUBLIC_LLM_REPORTS');
 
 type Check = 'secret' | 'sbom' | 'vuln' | 'config';
 const checks: Check[] = ['secret', 'sbom', 'vuln', 'config'];
 const severities = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const reasons = ['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN',
-  'NODE_INVENTORY_ABSENT', 'CHECK_DISABLED', 'INVALID_CHECK_FLAG', 'INVALID_RESOURCE_POLICY', 'OCI_IDENTITY_REJECTED',
+  'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN', 'OS_UNSUPPORTED', 'CHECK_DISABLED', 'INVALID_CHECK_FLAG', 'INVALID_RESOURCE_POLICY', 'OCI_IDENTITY_REJECTED',
   'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG', 'USER_NOT_RESOLVABLE', 'RULE_NOT_IMPLEMENTED', 'SOURCE_NOT_PROVIDED', 'SOURCE_ANALYZER_UNSUPPORTED'];
 export type SafeFinding = { findingId: string; check: Check; severity: string; [key: string]: unknown };
 export type ReportContext = { scanId: string; digest: string; platform: string; reportVersion: string;
   state: string; attempt: number; requestedChecks: Check[]; coverage: Record<Check, unknown>; findings: SafeFinding[];
-  findingCount: number; checkedIsNotSafe: true; omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' };
+  findingCount: number; findingCounts?: { byCheck: Record<string, number | null>; bySeverity: Record<string, number> }; profile?: typeof PUBLIC_IMAGE_PROFILE; identifierCounts?: { cve: number; debianTemp: number };
+    contextSelection?: { totalFindings: number; selectedFindings: number; omittedFindings: number; strategy: string; selectedFindingIds: string[] };
+    checkedIsNotSafe: true; omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' };
 const invalid = (): never => { throw new ConflictException({ errorCode: 'LLM_REPORT_UNAVAILABLE' }); };
 const overflow = (): never => { throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' }); };
 const record = (v: unknown): Record<string, unknown> => object(v) ? v : invalid();
@@ -78,9 +85,16 @@ function coverage(v: unknown, sbomInventory = false): Record<string, unknown> {
       downloadedAt: match(db.downloadedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z$/),
       nextUpdate: match(db.nextUpdate, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z$/) };
   }
+  if (item.resultContractVersion !== undefined) {
+    if (item.resultContractVersion !== 2) return invalid();
+    validateDbEvidence({ db: item.db, checkedAt: item.workerCheckedAt, dbPolicy: item.dbPolicy }, CURRENT_DB_POLICY);
+    const receipt = record(item.dbPolicy);
+    safe.dbPolicy = { version: receipt.version, policy: receipt.policy, evaluatedAt: receipt.evaluatedAt,
+      status: receipt.status, warnings: receipt.warnings };
+  }
   return safe;
 }
-function finding(v: unknown, check: 'secret' | 'vuln'): SafeFinding {
+function finding(v: unknown, check: 'secret' | 'vuln', publicProfile = false): SafeFinding {
   const f = record(v);
   if (check === 'secret') {
     if (f.line !== null && (!Number.isSafeInteger(f.line) || (f.line as number) < 0 || (f.line as number) > 10_000_000)) return invalid();
@@ -88,10 +102,12 @@ function finding(v: unknown, check: 'secret' | 'vuln'): SafeFinding {
       ruleId: match(f.ruleId, /^rule-[a-f0-9]{16}$/), line: f.line, evidenceRef: match(f.evidenceRef, /^result-\d{1,6}-secret-\d{1,6}$/) };
   }
   const severity = nullableEnum(f.severity, severities);
-  if (!severity || !['apk', 'npm'].includes(String(f.ecosystem)) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
+  if (!severity || !(publicProfile ? PUBLIC_ECOSYSTEMS : ['apk', 'npm']).includes(f.ecosystem as PackageEcosystem) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
       f.severitySources.some(source => !ADVISORY_SOURCES.includes(source))) return invalid();
-  const safe: SafeFinding = { check, findingId: match(f.findingId, /^vuln-[a-f0-9]{64}$/), severity,
-    cveId: match(f.cveId, /^CVE-\d{4}-\d{4,12}$/), ecosystem: f.ecosystem, severitySources: [...f.severitySources],
+  if (publicProfile ? !publicVulnerabilityId(f.cveId, f.ecosystem as PackageEcosystem) :
+      typeof f.cveId !== 'string' || !/^CVE-\d{4}-\d{4,12}$/.test(f.cveId)) return invalid();
+    const safe: SafeFinding = { check, findingId: match(f.findingId, /^vuln-[a-f0-9]{64}$/), severity,
+    cveId: f.cveId, ...(publicProfile ? { identifierKind: String(f.cveId).startsWith('TEMP-') ? 'debian-temp' : 'cve' } : {}), ecosystem: f.ecosystem, severitySources: [...f.severitySources],
     provenanceRef: match(f.provenanceRef, /^target-[a-f0-9]{64}$/), fixedVersionReported: f.fixedVersion !== null };
   if (f.advisory != null) {
     validateAdvisory(f.advisory, safe.cveId as string);
@@ -113,7 +129,8 @@ function finding(v: unknown, check: 'secret' | 'vuln'): SafeFinding {
 
 @Injectable()
 export class ReportReader {
-  constructor(@Inject(ScansService) private readonly scans: ScansService) {}
+  constructor(@Inject(ScansService) private readonly scans: ScansService,
+      @Optional() @Inject(PUBLIC_LLM_REPORTS) private readonly publicReports = false) {}
   read(identity: Identity, scanId: string, busyMs = 1000): ReportContext {
     if (!identity.scope.includes('scan:read')) throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });
     if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
@@ -143,6 +160,7 @@ export class ReportReader {
     if (!Array.isArray(status.checks) || !status.checks.length || status.checks.some(c => !checks.includes(c)) ||
         new Set(status.checks).size !== status.checks.length || status.scanId !== scanId) return invalid();
     const requestedChecks = status.checks as Check[];
+        const publicProfile = this.publicReports && status.profile === PUBLIC_IMAGE_PROFILE;
     const perCheck = record(status.perCheck);
     if (Object.keys(perCheck).sort().join(',') !== [...requestedChecks].sort().join(',')) return invalid();
     // Additional owner-scoped read ONLY: projections omit attempt/scope/terminal fencing.
@@ -197,13 +215,13 @@ export class ReportReader {
         if (current.outcome !== expected.outcome || current.reason !== expected.reason ||
             current.errorCode !== expected.errorCode || current.scannerVersion !== expected.scannerVersion ||
             current.checkedAt !== expected.checkedAt ||
-            JSON.stringify([current.os, current.node, current.db]) !== JSON.stringify([expected.os, expected.node, expected.db]) ||
+            JSON.stringify([current.os, current.node, current.db, current.dbPolicy]) !== JSON.stringify([expected.os, expected.node, expected.db, expected.dbPolicy]) ||
             (check === 'sbom' ? current.componentCount !== expected.componentCount : current.findingCount !== expected.findingCount)) return invalid();
         if (check !== 'secret' && (page.image !== undefined && (typeof page.image !== 'string' || !page.image.endsWith(`@${digest}`) ||
             current.outcome === 'checked' && page.platform !== platform) || page.platform !== undefined && page.platform !== platform)) return invalid();
         const entries = check === 'sbom' ? page.components : page.findings;
         if (!Array.isArray(entries) || entries.length > 100 || current.outcome !== 'checked' && entries.length) return invalid();
-        for (const f of entries) if (check !== 'sbom') append(finding(f, check));
+        for (const f of entries) if (check !== 'sbom') append(finding(f, check, publicProfile));
         total += entries.length;
         if (total > 1000) return overflow();
         const next = page.nextCursor;
@@ -217,11 +235,23 @@ export class ReportReader {
     }
     findings.sort((a, b) => a.findingId < b.findingId ? -1 : a.findingId > b.findingId ? 1 : 0);
     const reportVersion = hash({ subject: identity.subject, scanId, digest, platform, raw });
+    const identifierCounts = { cve: 0, debianTemp: 0 };
+    if (publicProfile && record(allCoverage.vuln).outcome === 'checked') {
+      for (const f of findings.filter(f => f.check === 'vuln')) identifierCounts[f.identifierKind === 'debian-temp' ? 'debianTemp' : 'cve']++;
+      if (!exact(status.identifierCounts, ['cve', 'debianTemp']) ||
+        status.identifierCounts.cve !== identifierCounts.cve || status.identifierCounts.debianTemp !== identifierCounts.debianTemp) return invalid();
+    }
     const report: ReportContext = { scanId, digest, platform, reportVersion, state: status.state as string,
+      ...(publicProfile ? { profile: PUBLIC_IMAGE_PROFILE,
+        findingCounts: { byCheck: Object.fromEntries(checks.map(c => [c, record(allCoverage[c]).outcome === 'checked' ? findings.filter(f => f.check === c).length : null])),
+          bySeverity: Object.fromEntries(severities.map(s => [s, findings.filter(f => f.severity === s).length])) },
+        ...(record(allCoverage.vuln).outcome === 'checked' ? { identifierCounts } : {}) } : {}),
       attempt: binding.attempt as number, requestedChecks: [...requestedChecks], coverage: allCoverage,
       findings, findingCount: findings.length, checkedIsNotSafe: true,
       omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' };
-    if (Buffer.byteLength(JSON.stringify(report)) > CEILINGS.requestBytes) return overflow();
+    // Public selection bounds the actual wire later; a complete local dataset is
+    // required first to compute whole counts and preserve late mandatory evidence.
+    if (Buffer.byteLength(JSON.stringify(report)) > (publicProfile ? 4_000_000 : CEILINGS.requestBytes)) return overflow();
     return freeze(report);
   }
 }

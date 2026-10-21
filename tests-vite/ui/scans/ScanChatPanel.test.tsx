@@ -151,6 +151,11 @@ for (const code of [
   'LLM_CONTEXT_LIMIT',
   'LLM_QUOTA_EXCEEDED',
   'LLM_HISTORY_UNAVAILABLE',
+  'LLM_CONFIGURATION_UNAVAILABLE',
+  'LLM_PROVIDER_UNAVAILABLE',
+  'LLM_UNAVAILABLE',
+  'LLM_NO_EVIDENCE',
+  'LLM_REPORT_UNAVAILABLE',
 ]) {
   it(`${code} does not retry, echo diagnostics, remove findings or optimistically confirm anything`, async () => {
     const api = chatApi();
@@ -164,7 +169,7 @@ for (const code of [
     send();
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).not.toContain('PRIVATE_CANARY');
-    expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
+    expect(screen.getByText('Исходный отчёт · UNKNOWN coverage · findings сохранны')).toBeTruthy();
     expect(api.head.turns).toHaveLength(0);
     expect(
       (fetcher as ReturnType<typeof vi.fn>).mock.calls.filter(

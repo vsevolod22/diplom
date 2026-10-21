@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dockerEnvironment, loadCveActivation, validateCveRelease, declaredBindMatches } from './local-stand.mjs';
 import { writeExclusive, syncDirectory } from './setup-local-cve.mjs';
-import { PUBLIC_IMAGE_COMMANDS, PUBLIC_IMAGE_TMPFS, publicImageCveConfig } from './public-image-stand-profile.mjs';
+import { PUBLIC_IMAGE_COMMANDS, PUBLIC_IMAGE_TMPFS, publicImageCveConfig, validatePublicImageCveRelease } from './public-image-stand-profile.mjs';
 
 export const PROJECT = 'dip-public-images';
 export const LABEL = 'org.diplom.public-image-stand';
@@ -269,17 +269,22 @@ export function checkIgnores(root) {
       'Before launch, coordinator must append .local-public-images/ to BOTH .gitignore and .dockerignore (after any negations).');
   }
 }
-function readProfile(root) {
+export function readProfile(root) {
   const dir = join(root, STATE);
   if (!exists(dir)) return undefined;
   privateDirectory(dir);
   const path = join(dir, 'profile.json');
   if (!exists(path)) return undefined;
   const bytes = privateRead(path), value = JSON.parse(bytes);
-  safe(keys(value, ['version', 'project', 'cve']) && value.version === 1 && value.project === PROJECT && equal(value, { version: 1, project: PROJECT, cve: value.cve }));
-  const cve = publicImageCveConfig(root, value.cve);
-  safe(bytes === JSON.stringify({ version: 1, project: PROJECT, cve: metadata(cve) }), 'Noncanonical isolated profile state.');
-  return { cve };
+  safe(keys(value, ['version', 'project', 'cve']) && [1, 2].includes(value.version) && value.project === PROJECT);
+  const cve = publicImageCveConfig(root, value.cve, value.version);
+  safe(bytes === JSON.stringify({ version: value.version, project: PROJECT, cve: metadata(cve) }), 'Noncanonical isolated profile state.');
+  safe(!['.profile.pending', '.compose.cve.pending', '.compose.images.pending'].some(n => exists(join(dir, n))), 'Interrupted public binding publication/HOLD.');
+  if (value.version === 2) {
+    safe(cve !== null && privateRead(join(dir, 'compose.cve.json')) === JSON.stringify(cveOverlay(cve)), 'Mixed public v2 binding/overlay/HOLD.');
+    validatePublicImageCveRelease(root, value.cve);
+  }
+  return { version: value.version, cve };
 }
 export function loadSecret(root, mustExist, random = randomBytes) {
   const dir = join(root, STATE); privateDirectory(dir);
@@ -292,7 +297,7 @@ export function loadSecret(root, mustExist, random = randomBytes) {
   safe(/^[a-f0-9]{96}$/.test(secret), 'Invalid isolated JWT; refusing rotation.');
   return secret;
 }
-function acquireLock(root) {
+export function acquireLock(root) {
   const dir = join(root, STATE), path = join(dir, '.operation.lock');
   privateDirectory(dir);
   safe(!exists(path) && RECOVERY_GUARDS.every(name => !exists(join(dir, name))), 'Isolated operation locked/HOLD. Never remove a stale lock or uncertainty marker automatically; reviewed reconciliation required.');
@@ -520,7 +525,7 @@ function captureFile(path, max = 16384, publicSource = false) {
     safe(equal(stamp, fileStamp(at)) && privateRead(at, max, publicSource) === bytes, 'Isolated file identity/content changed/HOLD.');
   } };
 }
-function validateReconciliationSource(bytes, root) {
+export function validateReconciliationSource(bytes, root) {
   // This shipped file is JSON-compatible YAML. Reject env_file/extends or other
   // indirection before asking Compose to parse it or open any referenced file.
   const source = JSON.parse(bytes);
@@ -761,7 +766,7 @@ function validateRunningReceipt(ack, name, root, futureBuild = false) {
       equal(n.containers, sorted(SERVICES.filter(role => CONNECTIONS[role].includes(key)).map(role => r.containers[role].id))));
   }
 }
-function assertReconciliationHistory(root, pendingRedeploy = null) {
+export function assertReconciliationHistory(root, pendingRedeploy = null) {
   redeployHistory(root, pendingRedeploy);
   const dir = join(root, STATE, HISTORY);
   if (!exists(dir)) return;
@@ -901,7 +906,7 @@ async function reconcileHeldOperation(kind, root, run, ambient, verifyRelease, l
     safe(cveFile ? cveFile.bytes === JSON.stringify(cveOverlay(profile.cve)) : !exists(join(dir, 'compose.cve.json')));
     const publicStamps = [];
     if (profile.cve) {
-      verifyRelease(root, metadata(profile.cve));
+      (profile.version === 2 ? validatePublicImageCveRelease : verifyRelease)(root, metadata(profile.cve));
       for (const path of [profile.cve.releaseHostDir, join(profile.cve.releaseHostDir, 'db'), profile.cve.publicKeyPath,
         ...['descriptor.json', 'descriptor.sig', 'bundle.bin', 'db/metadata.json', 'db/trivy.db'].map(p => join(profile.cve.releaseHostDir, p))]) {
         publicStamps.push([path, fileStamp(path)]); // Metadata only for DB/bundle; no large/unbounded reads.
@@ -917,7 +922,7 @@ async function reconcileHeldOperation(kind, root, run, ambient, verifyRelease, l
         ...(!archived ? ['.operation.lock'] : []), ...(profile.cve ? ['compose.cve.json'] : []), ...(historyIdentity ? [HISTORY] : [])])),
       'Unexpected isolated state, image pins or pending files are not eligible for build-only reconciliation.');
       if (historyIdentity) verifyDirectory(historyPath, historyIdentity); else safe(!exists(historyPath));
-      if (profile.cve) verifyRelease(root, metadata(profile.cve));
+      if (profile.cve) (profile.version === 2 ? validatePublicImageCveRelease : verifyRelease)(root, metadata(profile.cve));
       safe(publicStamps.every(([path, stamp]) => equal(stamp, fileStamp(path))), 'Pinned public CVE assets changed during reconciliation.');
       guardCheck(); originalCheck(archived ? join(archivePath, 'original-operation.lock') : operation);
     };
@@ -1184,7 +1189,7 @@ export function backupExportOperation(io,crypto,request,paths={backup:'/backup',
     return {version:1,role:request.role,offset:request.offset,data:b.toString('base64')};},true);
 }
 export const BACKUP_EXPORT_PROGRAM="const fs=require('node:fs'),crypto=require('node:crypto');const exportBackup="+backupExportOperation.toString()+";try{process.stdout.write(JSON.stringify(exportBackup(fs,crypto,JSON.parse(process.argv[1]))));}catch{process.exit(72);}";
-function validateExportManifest(m){
+export function validateExportManifest(m){
   recoverySafe(keys(m,['version','receipt','files','sources'])&&m.version===1&&keys(m.receipt,['auth','ledger'])&&keys(m.files,['auth','ledger'])&&keys(m.sources,['auth','ledger']),'BACKUP_EXPORT_MANIFEST_SCHEMA');
   const validateStamp=(s,allowEmpty=false)=>{recoverySafe(keys(s,['dev','ino','uid','mode','nlink','size','mtimeNs','ctimeNs'])&&Object.values(s).every(v=>typeof v==='string'&&/^\d{1,32}$/.test(v))&&s.nlink==='1'&&s.uid==='65532'&&(BigInt(s.size)>0n||allowEmpty&&BigInt(s.size)===0n)&&BigInt(s.size)<=256n*1024n**2n,'BACKUP_EXPORT_FILE_IDENTITY');};
   for(const r of ['auth','ledger']){const b=m.receipt[r];recoverySafe(keys(b,['logicalSha256','sha256','bytes','integrity'])&&HEX_SHA.test(b.logicalSha256)&&HEX_SHA.test(b.sha256)&&Number.isSafeInteger(b.bytes)&&b.bytes>0&&b.bytes<=256*1024**2&&b.integrity==='ok','BACKUP_RECEIPT_INTEGRITY_BOUNDS');validateStamp(m.files[r]);
@@ -1285,7 +1290,7 @@ function priorContinuity(before,after,stopped){
     recoverySafe(a.process.startedAt===b.process.startedAt&&a.process.restartCount===b.process.restartCount,'CONTINUITY_PROCESS_IDENTITY');
     if(!stopped.includes(role)||a.running===false)recoverySafe(equal(a,b),'CONTINUITY_PROCESS_NETWORK_STATE');}
 }
-function backupArguments(name, image, purpose = 'backup') {
+export function backupArguments(name, image, purpose = 'backup') {
   safe(['backup','drain'].includes(purpose));
   return ['create', '--pull', 'never', '--name', name, '--label', `${LABEL}=v1`, '--label', `com.docker.compose.project=${PROJECT}`,
     '--label', 'org.diplom.recovery-helper=v1', '--label', 'org.diplom.recovery-purpose='+purpose, '--network', 'none', '--read-only', '--user', '65532:65532', '--cap-drop', 'ALL',
@@ -1593,7 +1598,7 @@ async function recoverBuildAndRedeploy(root, run, ambient, verifyRelease, log, p
           const path=join(root,n);safe(fs.realpathSync(path)===path);return [n,captureFile(path,131072,true)];}));
     const cveFile = profile.cve ? captureFile(join(dir,'compose.cve.json')) : null;
     safe(cveFile ? cveFile.bytes === JSON.stringify(cveOverlay(profile.cve)) : !exists(join(dir,'compose.cve.json')));
-    if (profile.cve) verifyRelease(root,metadata(profile.cve));
+    if (profile.cve) (profile.version === 2 ? validatePublicImageCveRelease : verifyRelease)(root,metadata(profile.cve));
     const publicStamps=profile.cve ? [profile.cve.releaseHostDir,join(profile.cve.releaseHostDir,'db'),profile.cve.publicKeyPath,
       ...['descriptor.json','descriptor.sig','bundle.bin','db/metadata.json','db/trivy.db'].map(n=>join(profile.cve.releaseHostDir,n))].map(p=>[p,fileStamp(p)]) : [];
     const allowedState=['.operation.lock','profile.json','scan-jwt','compose.images.json',...(profile.cve?['compose.cve.json']:[]),...(exists(join(dir,HISTORY))?[HISTORY]:[]),
@@ -1605,7 +1610,7 @@ async function recoverBuildAndRedeploy(root, run, ambient, verifyRelease, log, p
       recoverySync('FENCE_PROFILE_IDENTITY',()=>profileFile.verify());recoverySync('FENCE_JWT_IDENTITY',()=>jwt.verify());
       recoverySync('FENCE_COMPOSE_SOURCE_IDENTITY',()=>source.verify());recoverySync('FENCE_CVE_OVERLAY_IDENTITY',()=>cveFile?.verify());
       recoverySync('FENCE_ACTIVE_PINS_IDENTITY',()=>activePins.verify());recoverySync('FENCE_BUILD_IGNORES',()=>checkIgnores(root));
-      if(profile.cve)recoverySync('FENCE_PUBLIC_CVE_VALIDATION',()=>verifyRelease(root,metadata(profile.cve)));
+      if(profile.cve)recoverySync('FENCE_PUBLIC_CVE_VALIDATION',()=>(profile.version === 2 ? validatePublicImageCveRelease : verifyRelease)(root,metadata(profile.cve)));
       recoverySafe(publicStamps.every(([p,s])=>equal(fileStamp(p),s)),'FENCE_PUBLIC_CVE_FILE_IDENTITY');
       safe(equal(sorted(fs.readdirSync(dir)),sorted([...allowedState.filter(n=>n!=='.operation.lock'||originalAt===original),
         ...(exists(join(dir,REDEPLOYS))&&!allowedState.includes(REDEPLOYS)?[REDEPLOYS]:[]),...(guardId&&!guardMoved?[REDEPLOY_GUARD]:[])])));
@@ -1884,7 +1889,8 @@ function buildBaseline(inventory) {return {containers:inventory.containers.map(c
 
 export async function publicImageStand(argv, { root = ROOT, run = runIsolatedDocker, ambient = process.env, log = console.log,
   random = randomBytes, loadActivation = loadCveActivation, verifyRelease = validateCveRelease, platform = process.platform,
-  onReconcileCheckpoint = () => {}, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), request = fetch } = {}) {
+  onReconcileCheckpoint = () => {}, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), request = fetch,
+  llmOptions = {}, llmStand } = {}) {
   const [command, ...flags] = argv;
   const backupCommand=['check-recover-backup-copy','continue-recover-backup-copy'].includes(command),startedCommand=['check-recover-started-drain','continue-recover-started-drain'].includes(command);
   const createdCommand=backupCommand||startedCommand||['check-recover-created-drain','continue-recover-created-drain'].includes(command),checkOnly=['check-recover-created-drain','check-recover-started-drain','check-recover-backup-copy'].includes(command),ack=backupCommand?'--ack-quiescent-backup-transfer':startedCommand?'--ack-started-drain-only':'--ack-created-drain-only';
@@ -1899,6 +1905,16 @@ export async function publicImageStand(argv, { root = ROOT, run = runIsolatedDoc
     if (command === 'recover-build-and-redeploy' || resumeName) return recoverBuildAndRedeploy(root,run,ambient,verifyRelease,log,platform,sleep,request,onReconcileCheckpoint,resumeName,continuation);
   if (command.startsWith('reconcile-')) return reconcileHeldOperation(command.slice('reconcile-'.length), root, run, ambient, verifyRelease, log, onReconcileCheckpoint, platform);
   let profile = readProfile(root);
+  if (profile && ['up','status','stop'].includes(command)) {
+    const module = await import('./public-llm-stand.mjs');
+    if (module.readPublicLlmBinding(root)) {
+      try {
+        if (command === 'up') return await (llmStand ?? module.publicLlmStand)(['up', ...(flags.includes('--build') ? ['--build'] : []), '--ack-public-maintenance'],
+          { ...llmOptions, root, run, ambient, log, sleep, request });
+        return await (await import('./public-cve-bridge-runtime.mjs')).publicLlmMainOperation(command, { root, run, ambient, log, platform });
+      } catch { throw new IsolatedError('Public LLM operation refused/HOLD; no overlay fallback, automatic recovery or secret rotation. Inspect only public operation state.'); }
+    }
+  }
   safe(command !== 'up' || profile !== undefined || flags.includes('--isolated'), 'First up requires --isolated: NEW accounts and databases on port 8081; no copy or migration of existing data.');
   const dir = join(root, STATE), lockPath = join(dir, '.operation.lock');
   let options = { root, env: dockerEnvironment(ambient) };
@@ -1914,7 +1930,7 @@ export async function publicImageStand(argv, { root = ROOT, run = runIsolatedDoc
     try { assertReconciliationHistory(root); } catch { log('HOLD: incomplete or unsafe reconciliation history; ordinary lifecycle cannot finish it.'); }
     options = await requireLocalEngine(run, options);
     const inventory = await inspectNamespace(run, options, expectedConfig(root, profile.cve), { platform });
-    log(`dip-public-images isolated qualification only; CVE ${profile.cve ? 'pinned' : 'disabled'}; no updater integration.`);
+    log(`dip-public-images isolated qualification only; CVE ${profile.cve ? 'pinned' : 'disabled'}; ${profile.version === 2 ? 'public v2 refresh integration' : 'no updater integration'}.`);
     for (const c of inventory.containers) log(`${serviceOf(c)}: ${c.State.Status}`);
     return inventory;
   }
@@ -1945,7 +1961,7 @@ export async function publicImageStand(argv, { root = ROOT, run = runIsolatedDoc
       const after = await inspectNamespace(run, options, config, { platform });
       safe(after.containers.every(c => !c.State.Running) && equal(sorted(after.containers.map(c => c.Id)), sorted(before.containers.map(c => c.Id))));
     } else {
-      if (cve) verifyRelease(root, metadata(cve));
+      if (cve) (profile?.version === 2 ? validatePublicImageCveRelease : verifyRelease)(root, metadata(cve));
       const secret = loadSecret(root, Boolean(profile) || before.containers.length > 0 || before.volumes.length > 0, random);
       for (const c of before.containers.filter(c => serviceOf(c) === 'api')) safe(environment(c.Config.Env).SCAN_JWT_SECRET === secret, 'Isolated API JWT does not match its own state; refusing rotation/recreation.');
       if (!profile) { writeExclusive(join(dir, 'profile.json'), JSON.stringify({ version: 1, project: PROJECT, cve: metadata(cve) }), 0o600); syncDirectory(dir); }

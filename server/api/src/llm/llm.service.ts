@@ -1,31 +1,45 @@
-import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, Optional, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { AuthStore } from '../auth/auth.store.js';
 import { HistoryService } from './history.service.js';
 import { historyUnavailable } from './history-contract.js';
 import type { Identity } from '../security/identity.js';
-import { ReportReader, type ReportContext } from './report-context.js';
+import { PUBLIC_LLM_REPORTS, ReportReader, type ReportContext } from './report-context.js';
 import { policyFromEnvironment, disclosure, type LlmPolicy } from './policy.js';
 import { productionProvider, configError, type LlmProvider } from './openrouter-provider.js';
 import { exact, validateReply } from './response.js';
 import { LlmQuotaRuntime } from './quota-runtime.js';
 import { quotaUnavailable, type Vector } from './quota-policy.js';
 import { prepareSummary } from './prepared-request.js';
+import { BROWSER_SCAN_LOCAL_ORIGIN, type BrowserScanLocalOrigin } from './browser-identity.js';
+import { selectSummaryReport } from './summary-context.js';
 import type { QuotaLedger } from './quota-ledger.js';
+import { publicCredentialStatus, publicReadiness } from './public-readiness.js';
+import { PUBLIC_OPENROUTER_KEY_FILE } from './public-key-file.js';
 
 @Injectable()
 export class LlmRuntime {
-  policy(): LlmPolicy | null { return policyFromEnvironment(); }
-  provider(): LlmProvider { return productionProvider(); }
+  constructor(@Optional() @Inject(PUBLIC_LLM_REPORTS) private readonly publicReports = false) {}
+  policy(env: NodeJS.ProcessEnv = process.env): LlmPolicy | null {
+    const policy = policyFromEnvironment(env);
+    return this.publicReports && !policy?.freeOnly ? null : policy;
+  }
+  provider(env: NodeJS.ProcessEnv = process.env): LlmProvider {
+    if (this.publicReports && (env.OPENROUTER_API_KEY_FILE !== PUBLIC_OPENROUTER_KEY_FILE || env.OPENROUTER_API_KEY !== undefined))
+      throw configError();
+    return productionProvider(env);
+  }
+  credentialStatus() { return publicCredentialStatus(); }
 }
 @Injectable()
 export class LlmService {
   private readonly active = new Set<string>();
   private historyService?: HistoryService;
   constructor(@Inject(ReportReader) private readonly reports: ReportReader, @Inject(LlmRuntime) private readonly runtime: LlmRuntime,
-      @Inject(LlmQuotaRuntime) private readonly quotas: LlmQuotaRuntime, @Optional() @Inject(AuthStore) private readonly auth?: AuthStore) {}
+      @Inject(LlmQuotaRuntime) private readonly quotas: LlmQuotaRuntime, @Optional() @Inject(AuthStore) private readonly auth?: AuthStore,
+      @Optional() @Inject(BROWSER_SCAN_LOCAL_ORIGIN) private readonly localOrigin: BrowserScanLocalOrigin = 'http://127.0.0.1:8080') {}
   history(): HistoryService {
     if (!this.auth) return historyUnavailable();
-    return this.historyService ??= new HistoryService(this.auth, this.reports, this.runtime, this.quotas, owner => this.acquire(owner));
+    return this.historyService ??= new HistoryService(this.auth, this.reports, this.runtime, this.quotas, owner => this.acquire(owner), this.localOrigin);
   }
   onModuleDestroy() { this.historyService?.close(); }
   private acquire(owner: string): () => void {
@@ -36,7 +50,20 @@ export class LlmService {
     const report = this.reports.read(identity, scanId);
     const policy = this.runtime.policy();
     return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,
-      policyVersion: policy?.version ?? null, disclosure: policy ? disclosure(policy) : null, enabled: policy !== null };
+      policyVersion: policy?.version ?? null, disclosure: policy ? disclosure(policy) : null, enabled: policy !== null,
+      ...(report.profile ? { findingCount: report.findingCount, findingCounts: report.findingCounts,
+        identifierCounts: report.identifierCounts, coverage: report.coverage } : {}) };
+  }
+  readiness(identity: Identity, scanId: string) {
+    // Owner/report binding precedes even non-secret setup metadata. This route does
+    // not need a history head, read a key, grant consent or contact the provider.
+    const report = this.reports.read(identity, scanId);
+    if (!report.profile) throw new NotFoundException();
+    let quotaAvailable = false, historyAvailable = false;
+    try { this.quotas.ledger().snapshot(identity.subject, scanId); quotaAvailable = true; } catch { /* No raw store diagnostics. */ }
+    try { this.history().runtime.store(); historyAvailable = true; } catch { /* Never initialize missing stores. */ }
+    return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,
+      ...publicReadiness(this.runtime.policy(), this.runtime.credentialStatus(), quotaAvailable, historyAvailable) };
   }
   usage(identity: Identity, scanId: string) {
     const report = this.reports.read(identity, scanId);
@@ -48,10 +75,10 @@ export class LlmService {
       let reserve: Vector | undefined;
             // The exact current free producer is shared with generation. This read never
             // constructs a provider, inspects its key, grants consent or reserves tokens.
-            if (policy?.freeOnly && report.findings.length > 0 && report.findings.length <= policy.findings &&
-                Buffer.byteLength(JSON.stringify(report)) <= policy.requestBytes) {
+            if (policy?.freeOnly && report.findings.length > 0 && (report.profile ||
+                report.findings.length <= policy.findings && Buffer.byteLength(JSON.stringify(report)) <= policy.requestBytes)) {
               try {
-                const candidate = prepareSummary(report, policy).reserve;
+                const candidate = prepareSummary(selectSummaryReport(report, policy, ledger.policy.requestInput), policy).reserve;
                 if (candidate.input <= ledger.policy.requestInput) reserve = candidate;
               } catch { /* Candidate cannot be established safely; counters are still useful. */ }
             }
@@ -69,7 +96,7 @@ export class LlmService {
     const policy = this.runtime.policy();
     if (!policy) throw configError();
     if (body.consent.policyVersion !== policy.version) throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
-    if (report.findings.length > policy.findings || Buffer.byteLength(JSON.stringify(report)) > policy.requestBytes)
+    if (!report.profile && (report.findings.length > policy.findings || Buffer.byteLength(JSON.stringify(report)) > policy.requestBytes))
       throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
     const releaseCapacity = this.acquire(identity.subject);
     const controller = new AbortController();
@@ -78,6 +105,7 @@ export class LlmService {
     const deadline = setTimeout(abort, policy.timeoutMs);
     let ledger: QuotaLedger | undefined;
     let reservation: string | undefined;
+    let sentReport = report;
     try {
       this.current(authorize, identity, report, policy, signal);
       // Every published hypothesis requires a real finding citation. An empty set
@@ -94,8 +122,10 @@ export class LlmService {
       // Three-argument fake providers and the separately configured legacy path
       // retain their existing contract; neither is evidence of quota acceptance.
       if (policy.freeOnly && provider.prepare && provider.summarizePrepared) {
-        const prepared = provider.prepare(report, policy);
         ledger = this.quotas.ledger();
+        const selected = selectSummaryReport(report, policy, ledger.policy.requestInput);
+        sentReport = selected;
+        const prepared = provider.prepare(selected, policy);
         reservation = ledger.reserve({ subject: identity.subject, scanId, reportVersion: report.reportVersion,
           policyVersion: policy.version, requestHash: prepared.hash }, prepared.reserve);
         this.current(authorize, identity, report, policy, controller.signal);
@@ -114,10 +144,13 @@ export class LlmService {
       } else operation = provider.summarize(report, policy, controller.signal);
       const reply = await Promise.race([operation, stopped]);
       this.current(authorize, identity, report, policy, signal);
-      const result = validateReply(reply, report);
-      if (Buffer.byteLength(JSON.stringify(result)) > policy.responseBytes)
+      const result = validateReply(reply, sentReport);
+            const selection = sentReport.contextSelection;
+            const response = selection ? { ...result, findingCount: report.findingCount, identifierCounts: report.identifierCounts,
+              findingCounts: report.findingCounts, coverage: report.coverage, contextSelection: selection } : result;
+      if (Buffer.byteLength(JSON.stringify(response)) > policy.responseBytes)
         throw new ServiceUnavailableException({ errorCode: 'LLM_RESPONSE_LIMIT' });
-      return result;
+      return response;
     } catch (error) {
       if (error instanceof HttpException) throw error;
       // Do not log/echo provider bodies, raw SQLite diagnostics, cookies or the key.

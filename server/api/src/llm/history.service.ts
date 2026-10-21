@@ -3,7 +3,7 @@ import { ConflictException, ForbiddenException, HttpException, ServiceUnavailabl
 import { AuthStore, type SessionSnapshot } from '../auth/auth.store.js';
 import { originForRequest, tokenFrom } from '../auth/auth.controller.js';
 import type { Identity } from '../security/identity.js';
-import { browserIdentity, type BrowserRequest } from './browser-identity.js';
+import { browserIdentity, type BrowserRequest, type BrowserScanLocalOrigin } from './browser-identity.js';
 import { HISTORY, bytes, cleanText, hashValue, historyConflict, historyUnavailable, invalidHistoryRequest, isId, historyProjection, mutationInputHash,
   reportBinding, validateChatReply, type HistoryHead, type ReportBinding } from './history-contract.js';
 import { PreparedContextCache, selectHistoryContext } from './history-context.js';
@@ -30,10 +30,11 @@ export class HistoryService {
   readonly runtime = new HistoryRuntime();
   readonly cache = new PreparedContextCache();
   constructor(private readonly auth: AuthStore, private readonly reports: ReportReader, private readonly providerRuntime: Runtime,
-    private readonly quotas: LlmQuotaRuntime, private readonly acquire: (owner: string) => () => void) {}
+    private readonly quotas: LlmQuotaRuntime, private readonly acquire: (owner: string) => () => void,
+    private readonly localOrigin: BrowserScanLocalOrigin = 'http://127.0.0.1:8080') {}
   close() { this.runtime.close(); this.cache.clear(); }
   private access(request: BrowserRequest, mutation = false): Access {
-    const base = browserIdentity(this.auth, request);
+    const base = browserIdentity(this.auth, request, false, this.localOrigin);
     if (mutation) {
       originForRequest(request);
       if (!historyBodyParsed(request as IncomingMessage & BrowserRequest)) return invalidHistoryRequest();
@@ -44,7 +45,7 @@ export class HistoryService {
   }
   private guard<T>(access: Access, action: () => T, busyMs = 100): T {
     return this.auth.guardSession(access.session, () => {
-      const current = browserIdentity(this.auth, access.request);
+      const current = browserIdentity(this.auth, access.request, false, this.localOrigin);
       if (current.subject !== access.identity.subject) throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });
       return action();
     }, Math.min(busyMs, HISTORY.busyMs));
@@ -83,7 +84,9 @@ export class HistoryService {
         enabled: !!policy?.freeOnly, policyVersion: policy?.freeOnly ? chatPolicy(policy) : null,
         disclosure: policy?.freeOnly ? { ...disclosure(policy), sentData: 'Cleaned question, all user history/accepted decisions and selected findings with complete coverage.',
           localRetention: 'Durable owner+scan history until separately authorized operator lifecycle; capacity can refuse; context cache only, not output cache.' } : null,
-        limits: { questionBytes: HISTORY.questionBytes, bodyBytes: HISTORY.bodyBytes }, deliveryMode: 'completed-response', pending: !!head.pending }, policy);
+        limits: { questionBytes: HISTORY.questionBytes, bodyBytes: HISTORY.bodyBytes }, deliveryMode: 'completed-response', pending: !!head.pending,
+        ...(report.profile ? { findingCount: report.findingCount, findingCounts: report.findingCounts,
+          identifierCounts: report.identifierCounts, coverage: report.coverage } : {}) }, policy);
     });
   }
   usage(request: BrowserRequest, scanId: string): HistoryResult {
@@ -218,7 +221,9 @@ export class HistoryService {
       }, boundLedger.policy.busyMs);
       const usage = { ...observation, source: 'server-validated-provider-reported-not-invoice' as const };
       const result = this.result(access, report, completed, { ...reportBinding(report), epoch: completed.epoch, revision: completed.revision,
-        turnId: id, deliveryMode: 'completed-response', reply, usage }, policy, signal);
+        turnId: id, deliveryMode: 'completed-response', reply, usage,
+        ...(report.profile ? { findingCount: report.findingCount, findingCounts: report.findingCounts,
+          identifierCounts: report.identifierCounts, coverage: report.coverage, contextSelection: context.omission } : {}) }, policy, signal);
       // Observation already persisted against the exact attempt; reply already committed. No receipt inference or auth boolean.
       const delivery: ChatDelivery = { ...reportBinding(report), epoch: completed.epoch, revision: completed.revision,
         mutationId: expected.mutationId, turnId: id, outcome: 'completed', reply, usage };

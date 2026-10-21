@@ -405,6 +405,15 @@
 .scan-a1__ai p {
   color: var(--a1-muted);
 }
+.scan-a1-detail .scan-a1__chat {
+  grid-column: 1 / -1;
+  padding-top: 24px;
+  border-top: 1px solid var(--a1-line);
+  scroll-margin-top: 24px;
+}
+.scan-a1-detail .scan-a1__report-nav a[href="#scan-report-chat"] {
+  grid-column: 1 / -1;
+}
 .scan-a1__compose {
   display: grid;
   gap: 10px;

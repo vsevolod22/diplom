@@ -20,7 +20,7 @@ export class LlmExceptionFilter extends BaseExceptionFilter {
     const request = http.getRequest<{ originalUrl?: string; url?: string }>();
     // Match Express's case-insensitive, optional-trailing-slash literal routes.
     // Do not decode static segments: Express does not route their encoded aliases.
-    if (!/^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/(?:context|summary|usage|history(?:\/decision)?|chat(?:\/(?:context|usage))?)\/?(?:\?|$)/i.test(request.originalUrl ?? request.url ?? ''))
+    if (!/^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/(?:context|summary|usage|readiness|history(?:\/decision)?|chat(?:\/(?:context|usage))?)\/?(?:\?|$)/i.test(request.originalUrl ?? request.url ?? ''))
       return super.catch(exception, host);
     const response = http.getResponse<ServerResponse>();
     const adapter = this.adapters.httpAdapter;

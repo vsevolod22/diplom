@@ -2,21 +2,22 @@ import { HISTORY, bytes, contextLimit, hashValue, type HistoryHead } from './his
 import type { LlmPolicy } from './policy.js';
 import { prepareHistory, type PreparedRequest } from './prepared-request.js';
 import type { ReportContext, SafeFinding } from './report-context.js';
+import { compareFindings, mandatoryFinding } from './summary-context.js';
 
 export type HistoryContext = { version: string; report: ReportContext; history: {
   epoch: string; revision: number; userTurns: unknown[]; decisions: unknown[]; optionalExplanations: unknown[] };
   question: string; omission: { findings: number; explanations: number; selectedFindingIds: string[] } };
-const mandatory = (f: SafeFinding) => ['CRITICAL', 'UNKNOWN'].includes(f.severity) ||
-  Array.isArray(f.assessments) && f.assessments.some(a => a && typeof a === 'object' && 'severity' in a && a.severity === 'CRITICAL');
+const mandatory = mandatoryFinding;
 export function selectHistoryContext(report: ReportContext, head: HistoryHead, question: string, policy: LlmPolicy, inputCeiling: number) {
   const required = report.findings.filter(mandatory);
   if (required.length > policy.findings) return contextLimit();
   const words = question.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter(w => w.length > 2).slice(0, 64);
   const score = (f: SafeFinding) => words.reduce((n, w) => n + Number(JSON.stringify(f).toLowerCase().includes(w)), 0);
-  const optional = report.findings.filter(f => !mandatory(f)).sort((a, b) => score(b) - score(a) || a.findingId.localeCompare(b.findingId));
+  const optional = report.findings.filter(f => !mandatory(f)).sort((a, b) => score(b) - score(a) || compareFindings(a, b));
   let count = Math.min(16, optional.length, policy.findings - required.length), recent = Math.min(4, head.turns.length);
   for (;;) {
     const findings = [...required, ...optional.slice(0, count)].sort((a, b) => a.findingId.localeCompare(b.findingId));
+        if (!findings.length) return contextLimit();
     const context: HistoryContext = { version: HISTORY.version, report: { ...report, findings }, question,
       history: { epoch: head.epoch, revision: head.revision,
         // All user content is conservatively decision-bearing. Age never excludes it.

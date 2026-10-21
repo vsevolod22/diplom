@@ -1,3 +1,4 @@
+import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, type PackageEcosystem } from '../worker/public-image-evidence.js';
 import { ADVISORY_SOURCES } from '../worker/vuln-advisory.js';
 import { exact, object } from './response.js';
 
@@ -24,9 +25,13 @@ export function safeHistoryFinding(value: unknown): boolean {
   if (f.check !== 'vuln') return false;
   const base = ['check', 'findingId', 'severity', 'cveId', 'ecosystem', 'severitySources', 'provenanceRef', 'fixedVersionReported', 'advisoryState'];
   const advisory = ['assessments', 'conflictState', 'conflicts', 'limitations'];
-  if (!exact(f, f.advisoryState === 'unknown' ? base : [...base, ...advisory]) ||
-    !matches(f.findingId, /^vuln-[a-f0-9]{64}$/) || !matches(f.cveId, /^CVE-\d{4}-\d{4,12}$/) ||
-    !member(f.ecosystem, ['apk', 'npm']) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
+  const publicFinding = Object.hasOwn(f, 'identifierKind');
+  const keys = publicFinding ? [...base, 'identifierKind'] : base;
+  if (!exact(f, f.advisoryState === 'unknown' ? keys : [...keys, ...advisory]) ||
+    !matches(f.findingId, /^vuln-[a-f0-9]{64}$/) ||
+    (publicFinding ? !member(f.ecosystem, PUBLIC_ECOSYSTEMS) || !publicVulnerabilityId(f.cveId, f.ecosystem as PackageEcosystem) ||
+      f.identifierKind !== (String(f.cveId).startsWith('TEMP-') ? 'debian-temp' : 'cve') :
+      !matches(f.cveId, /^CVE-\d{4}-\d{4,12}$/) || !member(f.ecosystem, ['apk', 'npm'])) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
     !list(f.severitySources, ADVISORY_SOURCES, ADVISORY_SOURCES.length) ||
     !matches(f.provenanceRef, /^target-[a-f0-9]{64}$/) || typeof f.fixedVersionReported !== 'boolean') return false;
   if (f.advisoryState === 'unknown') return true;

@@ -12,22 +12,29 @@ import { BrowserScansController } from '../scans/browser-scans.controller.js';
 import { ScansService } from '../scans/scans.service.js';
 import { PUBLIC_IMAGE_INSPECTOR, PublicImageScansService, type PublicImageInspector } from '../scans/public-image-scans.service.js';
 import { localDbTrustAnchorFromEnv } from '../worker/vuln-db-trust.js';
-import { BROWSER_SCAN_LOCAL_ORIGIN } from '../llm/browser-identity.js';
+import { BROWSER_SCAN_LOCAL_ORIGIN, BrowserIdentity } from '../llm/browser-identity.js';
+import { LlmController } from '../llm/llm.controller.js';
+import { LlmRuntime, LlmService } from '../llm/llm.service.js';
+import { PUBLIC_LLM_REPORTS, ReportReader } from '../llm/report-context.js';
+import { LlmQuotaRuntime } from '../llm/quota-runtime.js';
+import { llmExceptionProvider } from '../llm/llm-exception.filter.js';
+import { registerHistoryIngress } from '../llm/history-ingress.js';
 
 // Image-only public Docker Hub profile. No default ScansModule/LlmModule imports:
 // those would create another, restricted ScansService. Runtime/host are not exposed here.
 @Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule],
-  controllers: [ScansController, BrowserScansController],
-  providers: [{ provide: BROWSER_SCAN_LOCAL_ORIGIN, useValue: 'http://127.0.0.1:8081' },
+  controllers: [ScansController, BrowserScansController, LlmController],
+  providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, LlmQuotaRuntime, llmExceptionProvider,
+      { provide: PUBLIC_LLM_REPORTS, useValue: true }, { provide: BROWSER_SCAN_LOCAL_ORIGIN, useValue: 'http://127.0.0.1:8081' },
       { provide: PUBLIC_IMAGE_INSPECTOR, useValue: inspectPublicImage },
     { provide: ScansService, inject: [LedgerStore, OciResolver, PUBLIC_IMAGE_INSPECTOR],
       useFactory: (ledger: LedgerStore, resolver: OciResolver, inspect: PublicImageInspector) =>
         new PublicImageScansService(ledger, resolver, inspect, localDbTrustAnchorFromEnv()) }] })
 export class PublicImageModule {}
 
-// Parent ingress selects RuntimeApiModule and installs runtime/history raw intake.
-// This image-only root deliberately has neither; retain only ordinary Nest parsers.
+// Reuse the existing bounded history intake; no runtime/host routes are imported.
 export function configurePublicImageIngress(app: NestExpressApplication): void {
+  registerHistoryIngress(app);
   app.useBodyParser('json');
   app.useBodyParser('urlencoded', { extended: true });
 }

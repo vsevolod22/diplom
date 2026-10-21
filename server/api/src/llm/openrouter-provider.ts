@@ -4,6 +4,7 @@ import { prepareSummary, checkedPrepared, type PreparedRequest } from './prepare
 import { usageObservation, type QuotaPolicy, type UsageObservation } from './quota-policy.js';
 import { openRouterTransport, type BodySendGuard, type GuardedTransport } from './openrouter-transport.js';
 import type { ReportContext } from './report-context.js';
+import { PUBLIC_OPENROUTER_KEY_FILE, readPublicProviderKey } from './public-key-file.js';
 import { object, invalidReply } from './response.js';
 
 export const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
@@ -105,7 +106,9 @@ export class OpenRouterProvider implements LlmProvider {
 }
 
 export function productionProvider(env: NodeJS.ProcessEnv = process.env, transport: typeof fetch = openRouterTransport): LlmProvider {
-  const key = env.OPENROUTER_API_KEY;
+  const file = env.OPENROUTER_API_KEY_FILE;
+  if (file !== undefined && (file !== PUBLIC_OPENROUTER_KEY_FILE || env.OPENROUTER_API_KEY !== undefined)) throw configError();
+  const key = file === undefined ? env.OPENROUTER_API_KEY : readPublicProviderKey(file);
   if (!key || key.length > 512 || !/^[A-Za-z0-9_-]{16,512}$/.test(key)) throw configError();
   return new OpenRouterProvider(key, transport);
 }

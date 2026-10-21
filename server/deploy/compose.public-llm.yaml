@@ -1,0 +1,24 @@
+{
+  "services": {
+    "web": { "build": { "dockerfile": "server/deploy/public-stand.Dockerfile" } },
+    "api": {
+      "networks": { "llm_internal": null },
+      "depends_on": { "llm-egress": { "condition": "service_started" } }
+    },
+    "llm-egress": {
+      "image": "dip-public-images-llm-egress:local",
+      "build": { "context": "../..", "dockerfile": "server/deploy/gateway/openrouter.Dockerfile",
+        "labels": { "org.diplom.public-image-stand": "v1", "org.diplom.public-image-project": "dip-public-images" } },
+      "labels": { "org.diplom.public-image-stand": "v1" },
+      "command": ["python", "-I", "openrouter.py"],
+      "networks": { "llm_internal": null, "llm_uplink": null },
+      "read_only": true, "user": "65532:65532", "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"], "restart": "unless-stopped",
+      "mem_limit": "268435456", "memswap_limit": "268435456", "cpus": 1, "pids_limit": 128
+    }
+  },
+  "networks": {
+    "llm_internal": { "name": "dip-public-images_llm_internal", "labels": { "org.diplom.public-image-stand": "v1" }, "internal": true },
+    "llm_uplink": { "name": "dip-public-images_llm_uplink", "labels": { "org.diplom.public-image-stand": "v1" } }
+  }
+}
