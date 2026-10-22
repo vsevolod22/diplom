@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "scope": "native-public8081-ai-translation",
+  "origin": "http://127.0.0.1:8081",
+  "runId": "72c55c66-ccc0-42f7-9bce-67a73f764b35",
+  "startedAt": "2026-10-22T23:09:51.726Z",
+  "finishedAt": "2026-10-22T23:09:53.469Z",
+  "actuallyRun": true,
+  "attempt": "attempt2",
+  "guard": {
+    "blockedRequests": 1,
+    "benignAborts": 0,
+    "overflow": 0,
+    "events": [
+      {
+        "reason": "api-get-not-allowed",
+        "routeCategory": "otherlocal",
+        "method": "GET",
+        "count": 1
+      }
+    ]
+  },
+  "requiredPolicy": {
+    "provider": "OpenRouter",
+    "model": "xingchen-agi/xing4.0-29b-a4b:free",
+    "endpoint": "phala",
+    "freeOnly": true,
+    "noFallback": true
+  },
+  "serverEgressIndependentlyObserved": false,
+  "billingIndependentlyVerified": false,
+  "createdRuntimeDataAutomaticallyDeleted": false,
+  "credentialsPersisted": false,
+  "payloadArtifacts": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "owner_registration": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "native_scan": {
+      "status": "BLOCKED",
+      "code": "REQUEST_GUARD",
+      "runnerLine": 499
+    },
+    "report": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "deployed_ui": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "readiness": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "chat_1": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "chat_2": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "history_reload": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "history_fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "foreign_registration": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "foreign_denial": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "translation_context": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "translation": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "translation_toggle": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "preservation": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "safety": {
+      "status": "FAIL",
+      "code": "REQUEST_GUARD",
+      "accountsCreated": 1,
+      "scanLaunches": 0,
+      "chatPosts": 0,
+      "translationPosts": 0,
+      "blockedRequests": 1,
+      "pageErrors": 0,
+      "ignoredEligibility": 0,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

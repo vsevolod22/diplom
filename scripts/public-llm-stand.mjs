@@ -148,7 +148,7 @@ export function expectedPublicLlmConfig(root, cve = null, selection = null) {
 }
 // Fixed order is shared by maintenance, future main and BOTH current/prospective CVE models.
 export function publicLlmComposeArguments(root, args, { cve = false, llm = true, pinned = true, prospectiveCve = false, directory: dir = join(root, STATE) } = {}) {
-  safe(resolve(dir) === dir && [join(root, STATE), join(root, STATE, '.operation.lock/llm-candidate'), join(root, STATE, '.operation.lock/llm-initialize-candidate'), join(root, STATE, '.operation.lock/llm-rebuild-candidate'), join(root, STATE, '.operation.lock/init-exit-current'), join(root, STATE, '.operation.lock/admit-current'), join(root, STATE, '.operation.lock/api-current')].includes(dir));
+  safe(resolve(dir) === dir && [join(root, STATE), join(root, STATE, '.operation.lock/llm-candidate'), join(root, STATE, '.operation.lock/llm-initialize-candidate'), join(root, STATE, '.operation.lock/llm-rebuild-candidate'), join(root, STATE, '.operation.lock/init-exit-current'), join(root, STATE, '.operation.lock/admit-current'), join(root, STATE, '.operation.lock/api-current'), join(root, STATE, '.operation.lock/rollout-current')].includes(dir));
   safe(!prospectiveCve || cve && dir === join(root, STATE));
   return ['compose', '--env-file', '/dev/null', '-p', PROJECT, '-f', join(root, 'server/deploy/compose.public-images.yaml'),
     ...(cve ? ['-f', prospectiveCve ? join(root, STATE, '.operation.lock/candidate.cve.json') : join(dir, 'compose.cve.json')] : []),
@@ -235,7 +235,7 @@ export function validatePublicLlmContainer(item, name, spec, image, config, extr
   const images = extra.images && { ...extra.images, ...(name === 'llm-egress' ? { egress: p.image } : {}) };
   validateContainer(p.item, p.name, p.spec, p.image, p.config, { ...extra, images });
 }
-function validatePublicLlmKeyVolume(v, selection) {
+export function validatePublicLlmKeyVolume(v, selection) {
   safe(v.Name === selection.keyVolume && v.Driver === 'local' && v.Scope === 'local' &&
     typeof v.Mountpoint === 'string' && v.Mountpoint.startsWith('/') && !/[\x00-\x1f\x7f]/.test(v.Mountpoint) &&
     equal(v.Options ?? {}, {}) && equal(v.Labels, { 'diplom.public-llm': 'key-v1' }));
@@ -418,7 +418,7 @@ export const PUBLIC_LLM_CHECK_PROGRAM = initSource(false);
 export const PUBLIC_LLM_GATEWAY_PROBE = "import {connect as connectLlmGateway} from 'node:net';const llmGatewayReady=await new Promise(resolve=>{const s=connectLlmGateway({host:'llm-egress',port:8080,timeout:2000});let done=false;const finish=v=>{if(!done){done=true;s.destroy();resolve(v);}};s.once('connect',()=>finish(true));s.once('error',()=>finish(false));s.once('timeout',()=>finish(false));});if(!llmGatewayReady)throw Error('llm-gateway-not-ready');";
 const readyProgram = "const fs=require('node:fs');try{process.stdout.write(fs.readFileSync('/backup/ready.json','utf8'));}catch{process.stdout.write('{}');}";
 export function publicLlmHelperArguments(name, image, purpose = 'backup') {
-  safe(new RegExp(`^${PROJECT}-llm-[a-f0-9]{32}-(?:(?:continued|initialize-current|rebuild-current|init-exit-current|admit-current|api-current)-)?(?:fenced|before-api|after-api|initialize|check)$`).test(name) && imageId(image) && ['backup', 'initialize', 'check'].includes(purpose));
+  safe(new RegExp(`^${PROJECT}-llm-[a-f0-9]{32}-(?:(?:continued|initialize-current|rebuild-current|init-exit-current|admit-current|api-current|rollout-current)-)?(?:fenced|before-api|after-api|initialize|check)$`).test(name) && imageId(image) && ['backup', 'initialize', 'check'].includes(purpose));
   const args = backupArguments(name, image);
   args[args.length - 1] = purpose === 'backup' ? PUBLIC_LLM_BACKUP_PROGRAM : purpose === 'initialize' ? PUBLIC_LLM_INITIALIZE_PROGRAM : PUBLIC_LLM_CHECK_PROGRAM;
   args.splice(args.indexOf(image) + 1, 0, '--import', 'tsx');
@@ -453,7 +453,7 @@ export async function executePublicLlmMaintenance(ops, originalBaseline = null, 
   await ops.preflight(); await ops.intent();
   if (!originalBaseline) { await ops.stop('web'); await ops.stop('api'); await ops.drain(); await ops.stop('worker'); }
   const baseline = await ops.snapshot('fenced');
-  if (originalBaseline) safe(equal(baseline.core, originalBaseline.core) && (admission ? baseline.llm !== null && baseline.empty === true && (originalBaseline.llm === null || equal(baseline.llm, originalBaseline.llm)) : equal(baseline.llm, originalBaseline.llm)));
+  if (originalBaseline) safe(equal(baseline.core, originalBaseline.core) && (admission ? baseline.llm !== null && (admissionContext.rolloutOnly ? equal(baseline.llm, originalBaseline.llm) : baseline.empty === true && (originalBaseline.llm === null || equal(baseline.llm, originalBaseline.llm))) : equal(baseline.llm, originalBaseline.llm)));
   await ops.candidate(); // Existing image metadata was proved BEFORE any build.
   if (!admission) {
     await ops.initialize(baseline.llm === null);
@@ -539,14 +539,14 @@ function privateAudit(root) {
 
 // Reusable four-store bridge for the future CVE owner. Context owns peer/image/
 // writer checks; this factory always uses the concrete validated helper/export.
-export function createPublicLlmPreservation({ DB, root, lock, audit, helper, verifyState, continued = false, initializedCurrent = false, rebuiltCurrent = false, initExitCurrent = false, admitCurrent = false, apiCurrent = false }) {
+export function createPublicLlmPreservation({ DB, root, lock, audit, helper, verifyState, continued = false, initializedCurrent = false, rebuiltCurrent = false, initExitCurrent = false, admitCurrent = false, apiCurrent = false, rolloutCurrent = false }) {
   safe(typeof DB === 'function' && typeof helper === 'function' && typeof verifyState === 'function');
   safe(resolve(root) === root && lock.path === join(root, STATE, '.operation.lock') &&
     dirname(audit) === join(root, STATE, 'llm-deployments') && /^deploy-[a-f0-9]{32}$/.test(audit.slice(audit.lastIndexOf('/') + 1)));
   checkIgnores(root); lock.verify();
   const auditVerify = directoryFence(audit), parentVerify = directoryFence(dirname(audit));
-  safe([continued, initializedCurrent, rebuiltCurrent, initExitCurrent, admitCurrent, apiCurrent].every(v => typeof v === 'boolean') && [continued, initializedCurrent, rebuiltCurrent, initExitCurrent, admitCurrent, apiCurrent].filter(Boolean).length <= 1);
-  const output = apiCurrent ? join(audit, 'api-current') : admitCurrent ? join(audit, 'admit-current') : initExitCurrent ? join(audit, 'init-exit-current') : rebuiltCurrent ? join(audit, 'rebuild-current') : initializedCurrent ? join(audit, 'initialize-current') : continued ? join(audit, 'continued') : audit;
+  safe([continued, initializedCurrent, rebuiltCurrent, initExitCurrent, admitCurrent, apiCurrent, rolloutCurrent].every(v => typeof v === 'boolean') && [continued, initializedCurrent, rebuiltCurrent, initExitCurrent, admitCurrent, apiCurrent, rolloutCurrent].filter(Boolean).length <= 1);
+  const output = rolloutCurrent ? join(audit, 'rollout-current') : apiCurrent ? join(audit, 'api-current') : admitCurrent ? join(audit, 'admit-current') : initExitCurrent ? join(audit, 'init-exit-current') : rebuiltCurrent ? join(audit, 'rebuild-current') : initializedCurrent ? join(audit, 'initialize-current') : continued ? join(audit, 'continued') : audit;
   const outputVerify = directoryFence(output);
   let next = 0;
   return async phase => {
@@ -608,6 +608,14 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
   Database, sleep = ms => new Promise(r => setTimeout(r, ms)), now = () => performance.now(), request = fetch, log = console.log, onDiagnostic, checkSource = checkPublicLlmSourceBuild } = {}) {
   const [command, ...flags] = argv;
   let continuation;
+  if (['check-current-rollout', 'continue-current-rollout'].includes(command)) {
+    const checking = command === 'check-current-rollout';
+    safe(flags[0] === '--audit' && (checking ? flags.length === 2 : flags.length === 7 && flags[2] === '--review' && /^[a-f0-9]{64}$/.test(flags[3] ?? '') && flags[4] === '--ack-reviewed-current-source' && flags[5] === '--ack-retire-only-unavailable-api' && flags[6] === '--ack-retire-only-unavailable-web'));
+    const module = await import('./public-llm-rollout-completion.mjs');
+    continuation = await module.preparePublicLlmRolloutCompletion({ root, home, audit: flags[1], run, ambient, Database, checkSource });
+    if (checking) { log(JSON.stringify(continuation.summary)); return continuation.summary; }
+    safe(continuation.review === flags[3]); admissionContexts.add(continuation);
+  }
   if (['check-current-build', 'continue-current-build', 'check-current-initialize', 'continue-current-initialize', 'check-current-rebuild', 'continue-current-rebuild', 'check-current-init-exit', 'continue-current-init-exit', 'check-current-admit', 'continue-current-admit', 'check-current-api', 'continue-current-api'].includes(command)) {
     safe(flags[0] === '--audit' && /^deploy-[a-f0-9]{32}$/.test(flags[1] ?? '') && resolve(root) === root && fs.realpathSync(root) === root);
     const checking = command.startsWith('check-'), apiOnly = command.endsWith('-api'), admitting = apiOnly || command.endsWith('-admit'), initExit = command.endsWith('-init-exit'), rebuilding = command.endsWith('-rebuild'), initializing = admitting || initExit || rebuilding || command.endsWith('-initialize');
@@ -642,7 +650,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
   const records = new Set(), peers = new Map(), peerModels = new Map(), healthy = new Set();
   let failedHelper = continuation?.initialize?.failed ?? null;
     let keyVolumeAuthority, stoppedStand = false, staleHelper = continuation?.initialize?.retired ? null : continuation?.initialize ?? null;
-  const outputPrefix = continuation?.apiOnly ? 'api-current' : continuation?.admissionOnly ? 'admit-current' : continuation?.initialize?.failed ? 'init-exit-current' : continuation?.initialize?.retired ? 'rebuild-current' : continuation?.initialize ? 'initialize-current' : 'continued';
+  const outputPrefix = continuation?.rolloutOnly ? 'rollout-current' : continuation?.apiOnly ? 'api-current' : continuation?.admissionOnly ? 'admit-current' : continuation?.initialize?.failed ? 'init-exit-current' : continuation?.initialize?.retired ? 'rebuild-current' : continuation?.initialize ? 'initialize-current' : 'continued';
   const recordName = name => continuation?.initialize ? outputPrefix + '-' + name : name;
   const fences = [], candidateFences = [];
   let verifyStage, readinessFailure;
@@ -702,7 +710,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
   };
   const helper = async (suffix, purpose, work = async () => undefined) => {
     fence(); await verifyPeers(); await users(); await census();
-    const image = purpose === 'backup' && (!continuation || suffix === 'fenced') ? (continuation?.backupImage ?? priorImages.api) : candidateImages.api;
+    const image = purpose === 'backup' && suffix === 'fenced' ? (continuation?.backupImage ?? priorImages.api) : candidateImages.api;
     const imageRows = JSON.parse(await d(['image', 'inspect', image.Id]));
     safe(imageRows.length === 1 && imageRows[0].Id === image.Id && imageRows[0].Os === image.Os && equal(imageRows[0].Config, image.Config));
     validateImage(imageRows[0], 'api'); // Retagging may change RepoTags, never immutable execution defaults.
@@ -736,12 +744,13 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
     async preflight() {
       if (continuation) {
         phase = 'continue-check'; continuation.verify(); continuation.initialize?.checkPrefix();
-        profile = continuation.profile; priorSelection = null; jwt = loadSecret(root, true); before = continuation.inventory; priorImages = continuation.images;
-        stage = continuation.initialize ? join(lock.path, continuation.apiOnly ? 'api-current' : continuation.admissionOnly ? 'admit-current' : continuation.initialize.failed ? 'init-exit-current' : continuation.initialize.retired ? 'llm-rebuild-candidate' : 'llm-initialize-candidate') : continuation.stage; options = continuation.options; endpoint = continuation.endpoint;
+        profile = continuation.profile; priorSelection = continuation.rolloutOnly ? continuation.priorSelection : null; jwt = loadSecret(root, true); before = continuation.inventory; priorImages = continuation.images;
+        stage = continuation.initialize ? join(lock.path, continuation.rolloutOnly ? 'rollout-current' : continuation.apiOnly ? 'api-current' : continuation.admissionOnly ? 'admit-current' : continuation.initialize.failed ? 'init-exit-current' : continuation.initialize.retired ? 'llm-rebuild-candidate' : 'llm-initialize-candidate') : continuation.stage; options = continuation.options; endpoint = continuation.endpoint;
         verifySource = sourceFence(root); fences.push(...continuation.stateFiles, ...continuation.proofs); candidateFences.push(...continuation.candidateFiles);
         const deadline = now() + 20 * 60 * 1000;
         d = (args, extra = {}) => { fence(); safe((extra.env?.DOCKER_HOST ?? endpoint) === endpoint && now() < deadline); return run(args, { ...options, ...extra, timeout: publicLlmDockerTimeout(extra.timeout ?? 30000, deadline, now()) }); };
-        const model = expectedPublicLlmConfig(root, profile.cve, null);
+        const model = expectedPublicLlmConfig(root, profile.cve, priorSelection);
+        if (continuation.rolloutOnly) keyVolumeAuthority = continuation.keyVolumeAuthority;
         for (const c of before.containers) {
                   const name = role(c), admittedPeer = continuation.admissionOnly && ['worker', 'llm-egress'].includes(name);
                   peers.set(name, c); peerModels.set(name, admittedPeer ? { model: nextModel(), images: continuation.initialize.candidateImages, selection: settings.selection } : { model, images: priorImages, selection: null });
@@ -817,7 +826,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
           syncDirectory(stage);
         }
         verifyStage = directoryFence(stage);
-        snapshot = createPublicLlmPreservation({ DB: Database ?? requireApi('better-sqlite3'), root, lock, audit: audit.path, helper, continued: !continuation.initialize, initializedCurrent: Boolean(continuation.initialize && !continuation.initialize.retired), rebuiltCurrent: Boolean(continuation.initialize?.retired && !continuation.initialize.failed && !continuation.admissionOnly), initExitCurrent: Boolean(continuation.initialize?.failed), admitCurrent: Boolean(continuation.admissionOnly && !continuation.apiOnly), apiCurrent: Boolean(continuation.apiOnly),
+        snapshot = createPublicLlmPreservation({ DB: Database ?? requireApi('better-sqlite3'), root, lock, audit: audit.path, helper, continued: !continuation.initialize, initializedCurrent: Boolean(continuation.initialize && !continuation.initialize.retired), rebuiltCurrent: Boolean(continuation.initialize?.retired && !continuation.initialize.failed && !continuation.admissionOnly), initExitCurrent: Boolean(continuation.initialize?.failed), admitCurrent: Boolean(continuation.admissionOnly && !continuation.apiOnly && !continuation.rolloutOnly), apiCurrent: Boolean(continuation.apiOnly), rolloutCurrent: Boolean(continuation.rolloutOnly),
           verifyState: async () => { await verifyPeers(); await users(); await census(); } });
         return;
       }
@@ -853,7 +862,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
     async snapshot(part) { phase = 'backup-' + part; const value = await snapshot(part); if (part === 'fenced') { if (priorSelection) safe(value.llm !== null); fencedBaseline = value; } return value; },
     async candidate() {
       if (continuation?.admissionOnly) {
-        phase = 'admit-current-pins'; continuation.initialize.verifyImageSource(); candidateImages = continuation.initialize.candidateImages;
+        phase = continuation.rolloutOnly ? 'rollout-current-pins' : 'admit-current-pins'; continuation.initialize.verifyImageSource(); candidateImages = continuation.initialize.candidateImages;
         for (const [name, im] of Object.entries(candidateImages)) { const rows = JSON.parse(await d(['image', 'inspect', im.Id])); safe(rows.length === 1 && rows[0].Id === im.Id && equal(rows[0].Config, im.Config)); validatePublicLlmImage(rows[0], name); }
         writeExclusive(join(stage, 'compose.images.json'), JSON.stringify(continuation.initialize.currentPins), 0o600); syncDirectory(stage); candidateFences.push(fileFence(join(stage, 'compose.images.json')));
         validatePublicLlmConfig(JSON.parse(await d(stageArgs(['config', '--format', 'json']), { env: { ...options.env, SCAN_JWT_SECRET: CONFIG_SECRET } })), root, profile.cve, settings.selection, candidateImages); return;

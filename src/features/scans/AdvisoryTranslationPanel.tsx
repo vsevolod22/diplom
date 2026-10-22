@@ -1,0 +1,339 @@
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
+import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
+import {
+  createAdvisoryTranslationClient,
+  TranslationError,
+  translationErrorMessage,
+  type AdvisoryTranslationClient,
+} from '@/shared/api/scans/advisoryTranslationClient';
+import {
+  hasTranslationText,
+  matchesTranslationFields,
+  matchesTranslationSource,
+  translationContextFence,
+  translationSourceVersion,
+  type AdvisoryAssessment,
+  type TranslationContext,
+  type TranslationReply,
+} from '@/shared/api/scans/advisoryTranslationContract';
+import { sameChatBinding, type ChatReadiness } from '@/shared/api/scans/llmChatContract';
+import type { ScanStatus } from '@/shared/api/scans/scanTransport';
+
+const ReportScope = createContext<ScanStatus | null>(null);
+export function AdvisoryTranslationScope({
+  status,
+  children,
+}: {
+  status: ScanStatus | null;
+  children: ReactNode;
+}) {
+  return <ReportScope.Provider value={status}>{children}</ReportScope.Provider>;
+}
+type Props = {
+  findingId: string;
+  vulnerabilityId: string;
+  assessmentIndex: number;
+  assessment: AdvisoryAssessment;
+  client?: AdvisoryTranslationClient;
+};
+type Snapshot = { context: TranslationContext; readiness: ChatReadiness };
+const sessionKey = () => JSON.stringify(scanSession());
+const blockerMessages = {
+  'configuration-required': 'Оператор должен настроить политику ИИ.',
+  'public-key-required': 'Серверный ключ не настроен или отсутствует. Не вводите ключи в интерфейс.',
+  'public-key-unsafe': 'Метаданные серверного ключа не прошли проверку безопасности.',
+  'quota-store-unavailable': 'Хранилище квоты недоступно.',
+  'history-store-unavailable': 'Хранилище истории недоступно.',
+  'provider-profile-unavailable': 'Проверенный профиль провайдера недоступен.',
+};
+export function AdvisoryTranslationPanel(props: Props) {
+  const status = useContext(ReportScope);
+  const session = useSyncExternalStore(subscribeScanSession, sessionKey, sessionKey);
+  // Reset before rendering another owner, report, source slot or original text; never reuse consent.
+  const scope = JSON.stringify([
+    session,
+    status,
+    props.findingId,
+    props.vulnerabilityId,
+    props.assessmentIndex,
+    props.assessment,
+  ]);
+  return <TranslationScope key={scope} {...props} status={status} />;
+}
+function TranslationScope({
+  status,
+  findingId,
+  vulnerabilityId,
+  assessmentIndex,
+  assessment,
+  client: providedClient,
+}: Props & { status: ScanStatus | null }) {
+  const client = useMemo(() => providedClient ?? createAdvisoryTranslationClient(), [providedClient]);
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [consent, setConsent] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const [result, setResult] = useState<TranslationReply | null>(null);
+  const [showTranslation, setShowTranslation] = useState(true);
+  const request = useRef<AbortController | null>(null);
+  const generation = useRef(0);
+  const allowed = hasTranslationText(assessment);
+  const available = !!status && allowed && client.current();
+  const selection = { findingId, assessmentIndex };
+
+  function invalidate() {
+    generation.current++;
+    request.current?.abort();
+    request.current = null;
+  }
+  function clear() {
+    invalidate();
+    setSnapshot(null);
+    setConsent(false);
+    setResult(null);
+    setPending(false);
+  }
+  async function readSnapshot(signal: AbortSignal): Promise<Snapshot> {
+    if (!status || !allowed) throw new TranslationError('STALE');
+    const [context, readiness, sourceVersion] = await Promise.all([
+      client.context(status.scanId, selection, signal),
+      client.readiness(status.scanId, signal),
+      translationSourceVersion(vulnerabilityId, assessment),
+    ]);
+    if (
+      context.scanId !== status.scanId ||
+      context.findingId !== findingId ||
+      context.assessmentIndex !== assessmentIndex ||
+      (status.digest !== undefined && context.digest !== status.digest) ||
+      (status.platform !== undefined && context.platform !== status.platform) ||
+      context.sourceVersion !== sourceVersion ||
+      !matchesTranslationSource(context, assessment) ||
+      !sameChatBinding(readiness, context)
+    )
+      throw new TranslationError('STALE');
+    if (
+      context.enabled &&
+      (readiness.provider.status === 'unverified-profile' ||
+        readiness.provider.model !== context.disclosure?.model ||
+        readiness.provider.endpoint !== context.disclosure?.providers[0])
+    )
+      throw new TranslationError('STALE');
+    return { context, readiness };
+  }
+  async function operate(action: 'read' | 'translate') {
+    if (!available || request.current || (action === 'translate' && (!consent || !snapshot))) return;
+    const accepted = snapshot;
+    const controller = new AbortController();
+    const version = ++generation.current;
+    request.current = controller;
+    const live = () => generation.current === version && !controller.signal.aborted && client.current();
+    setPending(true);
+    setConsent(false);
+    setResult(null);
+    setMessage('');
+    try {
+      const before = await readSnapshot(controller.signal);
+      if (!live()) return;
+      setSnapshot(before);
+      if (action === 'read') return;
+      if (!accepted || translationContextFence(before.context) !== translationContextFence(accepted.context))
+        throw new TranslationError('STALE');
+      if (!before.readiness.localReady || !before.context.enabled || !before.context.policyVersion)
+        throw new TranslationError('LLM_CONFIGURATION_UNAVAILABLE');
+      const reply = await client.translate(
+        before.context,
+        { accepted: true, policyVersion: before.context.policyVersion },
+        controller.signal,
+      );
+      if (!live()) return;
+      if (!matchesTranslationFields(reply, assessment)) throw new TranslationError('INVALID');
+      const after = await readSnapshot(controller.signal);
+      if (!live()) return;
+      setSnapshot(after);
+      if (
+        !after.readiness.localReady ||
+        translationContextFence(after.context) !== translationContextFence(before.context)
+      )
+        throw new TranslationError('STALE');
+      setResult(reply);
+      setShowTranslation(true);
+    } catch (error) {
+      if (live()) {
+        setSnapshot(null);
+        setResult(null);
+        setMessage(translationErrorMessage(error));
+      }
+    } finally {
+      if (generation.current === version) {
+        request.current = null;
+        setPending(false);
+      }
+      controller.abort();
+    }
+  }
+  useEffect(() => {
+    const unsubscribe = subscribeScanSession(clear);
+    // Focus invalidates previous consent and display; no generation or retry is implicit.
+    const focus = () => {
+      clear();
+      setMessage('Условия могли измениться. Прочитайте их заново перед переводом.');
+    };
+    window.addEventListener('focus', focus);
+    return () => {
+      invalidate();
+      unsubscribe();
+      window.removeEventListener('focus', focus);
+    };
+    // The outer key includes the complete source, report and session snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client]);
+  const context = snapshot?.context;
+  const ready = available && !pending && !!context?.enabled && snapshot?.readiness.localReady === true;
+  return (
+    <section
+      aria-label={`Перевод ${vulnerabilityId}, источник ${assessment.source}, оценка ${assessmentIndex + 1}`}
+      aria-busy={pending}
+    >
+      <p>Оригинал выше сохранён без изменений. Язык перевода: русский (ru).</p>
+      {!allowed ? (
+        <p>
+          Перевод недоступен: нет разрешённого текста источника (данные отсутствуют, скрыты или не включены).
+        </p>
+      ) : !status ? (
+        <p>Перевод доступен только для авторизованного завершённого отчёта.</p>
+      ) : null}
+      <button
+        type="button"
+        className="scan-a1__link"
+        disabled={!available || pending}
+        onClick={() => void operate('read')}
+      >
+        Прочитать условия перевода
+      </button>
+      {context?.disclosure ? (
+        <div>
+          <p>
+            {context.disclosure.provider} · {context.disclosure.model} ·{' '}
+            {context.disclosure.providers.join(', ')} · global: регион не ограничен.
+          </p>
+          <p>
+            Внешнему провайдеру передаётся разрешённый текст заголовка и описания только выбранной оценки
+            advisory. Не весь отчёт и не история чата.
+          </p>
+          <p>
+            {context.disclosure.retention === 'no-storage'
+              ? 'Без хранения и обучения'
+              : 'Без обучения; отсутствие хранения не заявлено'}{' '}
+            — декларация провайдера, не доказательство соблюдения.
+          </p>
+          <p>
+            {context.disclosure.freeOnly ? 'Только бесплатный профиль' : 'Бесплатный режим выключен'} · бюджет
+            допуска {context.disclosure.requestBudgetUsd} USD/запрос, не фактический счёт. Политика{' '}
+            {context.policyVersion}.
+          </p>
+        </div>
+      ) : null}
+      {snapshot && !snapshot.readiness.localReady ? (
+        <ul>
+          {snapshot.readiness.blockers.map((blocker) => (
+            <li key={blocker}>{blockerMessages[blocker]}</li>
+          ))}
+        </ul>
+      ) : null}
+      {context && !context.enabled ? <p>Перевод выключен сервером. Оригинал остаётся доступен.</p> : null}
+      <label>
+        <input
+          type="checkbox"
+          checked={consent}
+          disabled={!ready}
+          onChange={(event) => setConsent(event.target.checked)}
+        />{' '}
+        Разрешаю один запрос перевода: отправить текст выбранного advisory внешнему провайдеру по указанной
+        политике.
+      </label>
+      <button
+        type="button"
+        className="scan-a1__link"
+        disabled={!ready || !consent}
+        onClick={() => void operate('translate')}
+      >
+        Перевести на русский
+      </button>
+      {pending ? (
+        <>
+          <p role="status">Проверяем условия или ожидаем полный проверенный перевод…</p>
+          <button
+            type="button"
+            className="scan-a1__link"
+            onClick={() => {
+              clear();
+              setMessage(translationErrorMessage(new TranslationError('ABORTED')));
+            }}
+          >
+            Отменить ожидание перевода
+          </button>
+        </>
+      ) : null}
+      {message ? <p role="alert">{message}</p> : null}
+      {result ? (
+        <div>
+          <p>Машинный перевод на русский · не официальный текст NVD или БДУ. Сверяйте с оригиналом.</p>
+          <div role="group" aria-label="Отображение перевода">
+            <button
+              type="button"
+              className="scan-a1__link"
+              aria-pressed={!showTranslation}
+              onClick={() => setShowTranslation(false)}
+            >
+              Оригинал
+            </button>
+            <button
+              type="button"
+              className="scan-a1__link"
+              aria-pressed={showTranslation}
+              onClick={() => setShowTranslation(true)}
+            >
+              Перевод
+            </button>
+          </div>
+          {showTranslation ? (
+            <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+              {result.translation.title !== null ? (
+                <p>
+                  <strong>Перевод заголовка: </strong>
+                  {result.translation.title}
+                </p>
+              ) : null}
+              {result.translation.description !== null ? (
+                <p>
+                  <strong>Перевод описания: </strong>
+                  {result.translation.description}
+                </p>
+              ) : null}
+              <p>
+                {result.provider} · {result.model} · {result.generatedAt}
+              </p>
+            </div>
+          ) : (
+            <p>Показан оригинальный текст источника выше.</p>
+          )}
+          {assessment.title.state === 'truncated' || assessment.description.state === 'truncated' ? (
+            <p>Исходный текст сокращён; перевод не восстанавливает пропущенное.</p>
+          ) : null}
+          {assessment.title.redacted || assessment.description.redacted ? (
+            <p>Скрытые поля не переводились и не восстанавливались.</p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}

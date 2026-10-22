@@ -59,7 +59,7 @@ export const PUBLIC_LLM_EXECUTION_MODULES = Object.freeze([
   'scripts/public-cve-bridge-runtime.mjs', 'scripts/public-cve-bridge.mjs',
   'scripts/public-cve-provision.mjs', 'scripts/public-image-stand-profile.mjs',
   'scripts/public-image-stand.mjs', 'scripts/public-llm-build-continuation.mjs',
-  'scripts/public-llm-source-build.mjs', 'scripts/public-llm-stand.mjs', 'scripts/public-llm-initialize-continuation.mjs',
+  'scripts/public-llm-source-build.mjs', 'scripts/public-llm-stand.mjs', 'scripts/public-llm-initialize-continuation.mjs', 'scripts/public-llm-rollout-completion.mjs',
   'scripts/public-refresh-cve-preservation.mjs', 'scripts/refresh-local-cve.mjs',
   'scripts/refresh-public-cve.mjs', 'scripts/setup-local-cve.mjs',
   'server/deploy/trust/fetch-db-layer.mjs',

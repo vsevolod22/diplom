@@ -2,6 +2,8 @@
 
 ## Фактический результат
 
+> Позднее выполнен отдельный translation/key rollout: audit `deploy-830b7aa07d1c9a728de1a957829e43c2` завершён READY, ключ подключён API-only readonly, gateway authentication HTTP200. Completion probe вернул HTTP429; успешная генерация пока не подтверждена. Актуальная AI-приёмка и перевод: [public-ai-translation-20261022.md](public-ai-translation-20261022.md). Дальнейший текст сохраняет дату и границы первоначального recovery.
+
 Координатор выполнил один reviewed **`continue-current-api`**, получил **READY / exit0** и подтвердил сохранность accounts, reports, JWT, history и quota: четыре SQLite stores плюс JWT. Это завершает recovery HOLD из [status 21.10](public-product-status-20261021.md) и [исторического handoff](public-product-handoff-20261021.md); их старые команды не являются текущими инструкциями.
 
 Audit: `deploy-8d83a8806715c2f0fa575efedee1b0af`. Успешный single-use route: `check-current-api` → `continue-current-api`; consumed review token: `718f045ccdc8c33ec7805345d64525451b9b02eb222a23c459f57e4333d41aab`. Это запись выполненной операции, **не команда для повторного запуска**.

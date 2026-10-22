@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "scope": "native-public8081-ai-translation",
+  "origin": "http://127.0.0.1:8081",
+  "runId": "66874291-6aa6-427a-8ef2-e1f2595f3c73",
+  "startedAt": "2026-10-22T22:55:45.512Z",
+  "finishedAt": "2026-10-22T22:56:53.204Z",
+  "actuallyRun": true,
+  "requiredPolicy": {
+    "provider": "OpenRouter",
+    "model": "xingchen-agi/xing4.0-29b-a4b:free",
+    "endpoint": "phala",
+    "freeOnly": true,
+    "noFallback": true
+  },
+  "serverEgressIndependentlyObserved": false,
+  "billingIndependentlyVerified": false,
+  "createdRuntimeDataAutomaticallyDeleted": false,
+  "credentialsPersisted": false,
+  "payloadArtifacts": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "owner_registration": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "native_scan": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "scanId": "304142ee-a0e6-415f-843a-748a22c5a601",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "completed"
+    },
+    "report": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "pages": 4,
+      "cve": 158,
+      "debianTemp": 0,
+      "vulnerabilities": 158
+    },
+    "deployed_ui": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "readiness": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "reportVersion": "f224ff01c0f15f41a83377a1b52087398a3c1f6b9046a3bac0c002666ab81fc0",
+      "policyVersion": "cb4ba4b269d7f67116c19dafc53dc3b486c120230a89396d77d41343be7fc367",
+      "initialUsageZero": true,
+      "credential": "metadata-valid"
+    },
+    "chat_1": {
+      "status": "BLOCKED",
+      "code": "LLM_HTTP_ERROR",
+      "runnerLine": 480
+    },
+    "chat_2": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "history_reload": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "history_fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "foreign_registration": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "foreign_denial": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "translation_context": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "translation": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "translation_toggle": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "preservation": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN"
+    },
+    "safety": {
+      "status": "FAIL",
+      "code": "REQUEST_GUARD",
+      "accountsCreated": 1,
+      "scanLaunches": 1,
+      "chatPosts": 1,
+      "translationPosts": 0,
+      "blockedRequests": 3,
+      "pageErrors": 0,
+      "ignoredEligibility": 1,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

@@ -4,12 +4,14 @@ import Database from 'better-sqlite3';
 import { ScansService } from '../scans/scans.service.js';
 import type { Identity } from '../security/identity.js';
 import { validateConfigReport } from '../image-config/report-contract.js';
-import { ADVISORY_SOURCES, validateAdvisory } from '../worker/vuln-advisory.js';
+import { ADVISORY_SOURCES, validateAdvisory, type AdvisoryV1 } from '../worker/vuln-advisory.js';
 import { CEILINGS } from './policy.js';
 import { exact, object } from './response.js';
 import { validateDbEvidence, CURRENT_DB_POLICY } from '../worker/cve-db-evidence.js';
 import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
 import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, type PackageEcosystem } from '../worker/public-image-evidence.js';
+
+import { selectedTranslation, translationSelection, TRANSLATION, type TranslationSnapshot } from './translation-contract.js';
 
 export const PUBLIC_LLM_REPORTS = Symbol('PUBLIC_LLM_REPORTS');
 
@@ -152,7 +154,49 @@ export class ReportReader {
       throw new ServiceUnavailableException({ errorCode: 'LLM_REPORT_UNAVAILABLE' });
     } finally { db?.close(); }
   }
-  private collect(identity: Identity, scanId: string, db: Database.Database): ReportContext {
+  readTranslation(identity: Identity, scanId: string, findingId: string, assessmentIndex: number): TranslationSnapshot {
+    return this.withTranslation(identity, scanId, findingId, assessmentIndex, snapshot => snapshot);
+  }
+  withTranslation<T>(identity: Identity, scanId: string, findingId: string, assessmentIndex: number,
+    action: (snapshot: TranslationSnapshot) => T): T {
+    if (!this.publicReports) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+    if (!identity.scope.includes('scan:read')) throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });
+    if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+    const selection: { findingId: string; assessmentIndex: number; finding?: Record<string, unknown> } = translationSelection(findingId, assessmentIndex);
+    let db: Database.Database | undefined;
+    try {
+      const path = process.env.SCAN_LEDGER_PATH;
+      if (!path || path === ':memory:') return invalid();
+      // fileMustExist forbids initialization; no application data is written here.
+      // SQLite readonly WAL handles silently omit the writer fence even for BEGIN
+      // IMMEDIATE, so acquire it first, then enforce query_only for every query/action.
+      db = new Database(path, { fileMustExist: true, timeout: TRANSLATION.busyMs });
+      const connection = db;
+      return connection.transaction(() => {
+        connection.pragma('query_only = ON');
+        // Hold the WAL writer-admission fence through synchronous body admission/
+        // publication. AuthStore.guardSession holds the independent session fence.
+        const before = connection.pragma('data_version', { simple: true });
+        if (!connection.prepare('SELECT id FROM scans WHERE id=? AND subject=?').get(scanId, identity.subject))
+          throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+        const report = this.collect(identity, scanId, connection, selection);
+        if (!report.profile) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+        if (!selection.finding) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+        const selected = selectedTranslation(selection.finding.advisory as AdvisoryV1 | undefined, assessmentIndex, String(selection.finding.cveId));
+        if (connection.pragma('data_version', { simple: true }) !== before) return invalid();
+        const snapshot = freeze({ scanId: report.scanId, digest: report.digest, platform: report.platform,
+          reportVersion: report.reportVersion, findingId, assessmentIndex, ...selected });
+        const result = action(snapshot);
+        if (result && typeof result === 'object' && 'then' in result) return invalid();
+        return result;
+      }).immediate();
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new ServiceUnavailableException({ errorCode: 'LLM_REPORT_UNAVAILABLE' });
+    } finally { db?.close(); }
+  }
+  private collect(identity: Identity, scanId: string, db: Database.Database,
+    selection?: { findingId: string; finding?: Record<string, unknown> }): ReportContext {
     const status = record(this.scans.status(identity, scanId)); // Ownership precedes config disclosure.
     const digest = match(status.digest, /^sha256:[a-f0-9]{64}$/);
     const platform = match(status.platform, /^linux\/amd64$/);
@@ -221,7 +265,11 @@ export class ReportReader {
             current.outcome === 'checked' && page.platform !== platform) || page.platform !== undefined && page.platform !== platform)) return invalid();
         const entries = check === 'sbom' ? page.components : page.findings;
         if (!Array.isArray(entries) || entries.length > 100 || current.outcome !== 'checked' && entries.length) return invalid();
-        for (const f of entries) if (check !== 'sbom') append(finding(f, check, publicProfile));
+        for (const f of entries) if (check !== 'sbom') {
+          const safe = finding(f, check, publicProfile);
+          append(safe);
+          if (check === 'vuln' && selection?.findingId === safe.findingId) selection.finding = record(f);
+        }
         total += entries.length;
         if (total > 1000) return overflow();
         const next = page.nextCursor;

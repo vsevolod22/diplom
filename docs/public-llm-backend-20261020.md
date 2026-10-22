@@ -1,6 +1,6 @@
 # Public image-only 8081: existing LLM backend — 2026-10-20
 
-> **CURRENT RUNTIME: READY / public8081 HTTP200, 22.10.2026.** Audit `deploy-8d83a8806715c2f0fa575efedee1b0af` completed with four-store/JWT preservation; no active operation lock. See [actual recovery result](public-recovery-ready-20261022.md). Consumed checker/continuation commands below are historical, not restart instructions. Public provider key remains unavailable; native generation is NOT verified. The browser scan completed, but overall smoke has unresolved REQUEST_GUARD blocks; see [attempt2](public8081launch-20261022.attempt2.md).
+> **CURRENT RUNTIME: READY / public8081 HTTP200, 22.10.2026.** Audit `deploy-8d83a8806715c2f0fa575efedee1b0af` completed with four-store/JWT preservation; no active operation lock. See [actual recovery result](public-recovery-ready-20261022.md) and the later AI/key rollout audit `deploy-830b7aa07d1c9a728de1a957829e43c2`, completed READY with nonempty four-store preservation. Consumed checker/continuation commands below are historical, not restart instructions. Public provider key is now supplied through an API-only readonly volume; gateway authentication returned HTTP200. A completion diagnostic returned HTTP429; successful native generation is NOT verified. See [current AI/translation status](public-ai-translation-20261022.md). The browser scan completed, but overall smoke has unresolved REQUEST_GUARD blocks; see [attempt2](public8081launch-20261022.attempt2.md).
 
 ## Scope / implementation
 

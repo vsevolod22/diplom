@@ -6,7 +6,7 @@ import { quotaDenial } from './quota-policy.js';
 const safeCodes = new Set(['LLM_UNAVAILABLE', 'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_STALE_REPORT',
   'LLM_STALE_POLICY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_CAPACITY', 'LLM_REQUEST_ABORTED', 'LLM_RESPONSE_LIMIT',
   'LLM_PROVIDER_UNAVAILABLE', 'LLM_INVALID_RESPONSE', 'LLM_REPORT_UNAVAILABLE', 'LLM_CONFIGURATION_UNAVAILABLE',
-    'LLM_QUOTA_UNAVAILABLE', 'LLM_QUOTA_EXCEEDED', 'LLM_HISTORY_UNAVAILABLE', 'LLM_HISTORY_CONFLICT', 'LLM_HISTORY_CAPACITY',
+    'LLM_QUOTA_UNAVAILABLE', 'LLM_QUOTA_EXCEEDED', 'LLM_HISTORY_UNAVAILABLE', 'LLM_HISTORY_CONFLICT', 'LLM_HISTORY_CAPACITY', 'LLM_TRANSLATION_UNAVAILABLE', 'LLM_STALE_SOURCE',
   'SCAN_ACCESS_DENIED', 'SCAN_ACCESS_DISABLED', 'SCAN_NOT_FOUND', 'INVALID_BROWSER_REQUEST', 'UNAUTHORIZED',
   'INVALID_ORIGIN', 'INVALID_CONTENT_TYPE', 'AUTH_UNAVAILABLE']);
 
@@ -20,7 +20,7 @@ export class LlmExceptionFilter extends BaseExceptionFilter {
     const request = http.getRequest<{ originalUrl?: string; url?: string }>();
     // Match Express's case-insensitive, optional-trailing-slash literal routes.
     // Do not decode static segments: Express does not route their encoded aliases.
-    if (!/^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/(?:context|summary|usage|readiness|history(?:\/decision)?|chat(?:\/(?:context|usage))?)\/?(?:\?|$)/i.test(request.originalUrl ?? request.url ?? ''))
+    if (!/^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/(?:context|summary|usage|readiness|translation(?:\/context)?|history(?:\/decision)?|chat(?:\/(?:context|usage))?)\/?(?:\?|$)/i.test(request.originalUrl ?? request.url ?? ''))
       return super.catch(exception, host);
     const response = http.getResponse<ServerResponse>();
     const adapter = this.adapters.httpAdapter;

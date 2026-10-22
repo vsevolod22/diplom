@@ -12,6 +12,7 @@ import {
 } from '@/features/scans/ReportAccordion';
 import { ScanFilterSheet } from '@/features/scans/ScanFilterSheet';
 import { ScanSummaryPanel } from '@/features/scans/ScanSummaryPanel';
+import { AdvisoryTranslationScope } from '@/features/scans/AdvisoryTranslationPanel';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { ScanScene } from '@/features/scans/ScanScene';
@@ -380,7 +381,9 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                     <option value="all">Все категории</option><option value={demo ? "vulnerability" : "cve"}>{publicReport ? 'Уязвимости' : 'CVE'}</option><option value="secret">Secrets</option>
                   </select>
                 </div>
-                <ScanReportSections status={scan.data} transport={transport} scope={scope} demo={demo} filter={filter} onResetFilter={() => changeFilter("all")} />
+                <AdvisoryTranslationScope status={!demo && live && !active ? scan.data : null}>
+                  <ScanReportSections status={scan.data} transport={transport} scope={scope} demo={demo} filter={filter} onResetFilter={() => changeFilter("all")} />
+                </AdvisoryTranslationScope>
               </section>
             </div>
             {!demo && live && !active ? <ScanSummaryPanel

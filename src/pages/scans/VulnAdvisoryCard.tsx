@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { AdvisoryTranslationPanel } from '@/features/scans/AdvisoryTranslationPanel';
 import type { VulnFinding } from '@/shared/api/scans/scanTransport';
 import { canonicalReferences, FIRST_CALCULATOR, validCvssVector } from '@/shared/api/scans/vulnAdvisory';
 import { isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
@@ -120,9 +121,15 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
                 <p>
                   <strong>Источник: {item.source}</strong> · {item.provenanceRef}
                 </p>
-                <p>Язык источника: {item.language ?? 'не указан'} · перевод не выполнялся</p>
+                <p>Язык источника: {item.language ?? 'не указан'} · оригинальный текст источника</p>
                 <AdvisoryText label="Заголовок" field={item.title} />
                 <AdvisoryText label="Описание" field={item.description} />
+                <AdvisoryTranslationPanel
+                  findingId={finding.findingId}
+                  vulnerabilityId={finding.cveId}
+                  assessmentIndex={index}
+                  assessment={item}
+                />
                 <p>
                   Severity источника: {item.severity ?? 'не предоставлена'} · исправление источника:{' '}
                   {item.fixedVersion ?? 'не предоставлено'}

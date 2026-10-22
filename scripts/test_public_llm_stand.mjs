@@ -18,6 +18,7 @@ import { PROJECT, STATE, LABEL, expectedConfig, acquireLock, recoverySqlite, bac
 import { fixture } from './public-refresh-cve-fixtures.mjs';
 import { checkPublicLlmSourceBuild } from './public-llm-source-build.mjs';
 import { publicLlmSecretlessControl, preparePublicLlmBuildContinuation, capturePublicLlmExecutionClosure, PUBLIC_LLM_EXECUTION_MODULES } from './public-llm-build-continuation.mjs';
+import { ROLLOUT_HOLD, preparePublicLlmRolloutCompletion } from './public-llm-rollout-completion.mjs';
 import { INITIALIZE_HOLD, preparePublicLlmInitializeContinuation, preparePublicLlmRebuildContinuation, preparePublicLlmInitExitContinuation, INIT_EXIT_HOLD, classifyInitExitFailure, preparePublicLlmAdmitContinuation, ADMIT_HOLD, preparePublicLlmApiContinuation, API_HOLD } from './public-llm-initialize-continuation.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -345,8 +346,9 @@ function concreteFixture(t) {
     if(name==='llm-egress')c.Config.Env=f.images[name].Config.Env;
     for(const m of c.Mounts.filter(m=>m.Type==='volume')){m.Driver='local';m.Source=`/fixture/volumes/${m.Name}`;}
     if(name==='api'&&spec.volumes.some(m=>m.target==='/run/secrets')){
-      const selected=keySelection.keyVolume,d=c.HostConfig.Mounts.find(m=>m.Target==='/run/secrets'),m=c.Mounts.find(m=>m.Destination==='/run/secrets');d.Source=selected;d.VolumeOptions={NoCopy:true};m.Name=selected;m.Source=`/fixture/volumes/${selected}`;
+      const selected=f.selectedKeyVolume??keySelection.keyVolume,d=c.HostConfig.Mounts.find(m=>m.Target==='/run/secrets'),m=c.Mounts.find(m=>m.Destination==='/run/secrets');d.Source=selected;d.VolumeOptions={NoCopy:true};m.Name=selected;m.Source=`/fixture/volumes/${selected}`;
     }
+    if(f.rolloutFixture&&['worker','llm-egress'].includes(name)){const fixed=name==='worker'?ROLLOUT_HOLD.worker:ROLLOUT_HOLD.gateway;c.Id=fixed.id;c.State.StartedAt=fixed.startedAt;c.State.FinishedAt='0001-01-01T00:00:00Z';}
     if(f.admissionFixture&&['worker','llm-egress'].includes(name)){const fixed=name==='worker'?ADMIT_HOLD.worker:ADMIT_HOLD.gateway;c.Id=fixed.id;c.State.StartedAt=fixed.startedAt;c.State.FinishedAt='0001-01-01T00:00:00Z';}
     return c;
   };
@@ -358,7 +360,8 @@ function concreteFixture(t) {
     if(args[0]==='context')return JSON.stringify('unix:///fixture/docker.sock');
     if(args[0]==='compose'){
       const envFile=args.filter((_,i)=>args[i-1]==='-f').find(p=>p.endsWith('compose.llm-env.json'));
-      const selected=JSON.parse(fs.readFileSync(envFile)).volumes?keySelection:selection;
+      const selectedVolume=JSON.parse(fs.readFileSync(envFile)).volumes?.public_llm_key?.name;
+            const selected=selectedVolume?{version:1,keyVolume:selectedVolume}:selection;
       const model=expectedPublicLlmConfig(f.root,cve,selected);
       if(args.includes('config')){
         const pins=args.filter((_,i)=>args[i-1]==='-f').find(p=>p.endsWith('compose.images.json'));
@@ -644,6 +647,101 @@ for(const fault of ['core','nonempty-llm','after-api','ready-after-intent'])test
   const at=x.f.submissions.length;await assert.rejects(publicLlmStand(admitArgs(ctx.review),{...x.options,run}));assert(!x.f.submissions.slice(at).some(a=>a[0]==='compose'&&a.includes('up')&&a.at(-1)==='web'||a[0]==='create'&&a.at(-1)===PUBLIC_LLM_INITIALIZE_PROGRAM));assert(fs.existsSync(join(x.paths.auth,'llm-history.sqlite')));assert(fs.existsSync(join(lock,'admit-current-continue.json')));
   if(fault==='ready-after-intent'){assert.equal(readyAttempts,1);const text=fs.readFileSync(join(lock,'admit-current-failure.json'),'utf8'),diagnostic=JSON.parse(text);assert.equal(diagnostic.phase,'ready-worker');assert(!text.includes('PRIVATE_DIAGNOSTIC_SENTINEL'));assert(diagnostic.frames.every(f=>Number.isInteger(f.line)));}
   const count=x.f.submissions.length;await assert.rejects(publicLlmStand(admitArgs(ctx.review),x.options));assert.equal(x.f.submissions.length,count);
+});
+
+async function normalRolloutFixture(t, hold = true) {
+  const x = concreteFixture(t);
+  const options = { root: x.f.root, home: x.state.home, run: x.run, ambient: { HOME: x.state.home, PATH: process.env.PATH }, Database: DB, checkSource: sourceQualification, sleep: async () => {}, request: async () => new Response(null, { status: 401 }), log: () => {} };
+  assert.equal((await publicLlmStand(['up', '--build', '--ack-public-maintenance'], options)).outcome, 'ready');
+  const seeded = runNative("import {HistoryStore} from './src/llm/history-store.ts';const h=new HistoryStore('/auth/llm-history.sqlite');h.snapshot('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','00000000-0000-4000-8000-000000000001');h.close();", x.paths);
+  assert.equal(seeded.status, 0, 'native HistoryStore must create a valid persisted head');
+  const quota = new DB(join(x.paths.auth, 'llm-usage.sqlite')); quota.exec('UPDATE quota_meta SET clock=17'); quota.close();
+  const pinsPath = join(x.f.stand, 'compose.images.json'), oldPins = JSON.parse(fs.readFileSync(pinsPath));
+  for (const name of ['api', 'web']) {
+    const fixed = ROLLOUT_HOLD[name], image = x.f.images[name], oldId = image.Id, container = x.f.containers.find(c => c.Name.endsWith('-' + name + '-1')), oldContainerId = container.Id;
+    x.allImages.delete(oldId); image.Id = fixed.image; x.allImages.set(image.Id, structuredClone(image)); oldPins.services[name].image = image.Id;
+    container.Id = fixed.id; container.Image = image.Id; container.Config.Image = image.Id;
+    for (const n of x.f.networks) if (n.Containers[oldContainerId]) { n.Containers[container.Id] = n.Containers[oldContainerId]; delete n.Containers[oldContainerId]; }
+  }
+  fs.writeFileSync(pinsPath, JSON.stringify(oldPins));
+  x.f.rolloutFixture = true; x.f.selectedKeyVolume = ROLLOUT_HOLD.keyVolume;
+  x.f.volumes.push({ Name: ROLLOUT_HOLD.keyVolume, Driver: 'local', Scope: 'local', Mountpoint: '/fixture/volumes/' + ROLLOUT_HOLD.keyVolume, Options: null, Labels: { 'diplom.public-llm': 'key-v1' } });
+  fs.writeFileSync(join(x.state.path, 'key-volume.json'), JSON.stringify({ version: 1, volume: ROLLOUT_HOLD.keyVolume, uid: 65532, gid: 65532, fileMode: '0400', directoryMode: '0500', target: PUBLIC_LLM_ENV.OPENROUTER_API_KEY_FILE, initializerImage: ROLLOUT_HOLD.api.image }), { mode: 0o600 });
+  x.f.afterBuild = name => {
+    if (!['api', 'web', 'worker', 'llm-egress'].includes(name)) return;
+    const image = x.f.images[name]; x.allImages.delete(image.Id);
+    image.Id = name === 'api' || name === 'web' ? ROLLOUT_HOLD[name].candidate : name === 'worker' ? ROLLOUT_HOLD.worker.image : ROLLOUT_HOLD.gateway.image;
+    x.allImages.set(image.Id, structuredClone(image));
+    if (['api', 'web'].includes(name)) x.allImages.delete(ROLLOUT_HOLD[name].image);
+  };
+  const run = async (args, opts) => {
+    const partial = fs.readdirSync(join(x.f.stand, 'llm-deployments')).find(n => !fs.existsSync(join(x.f.stand, 'llm-deployments', n, 'complete.json')));
+    // Reproduce only the historical pre-create image selection in this disposable fixture.
+    if (hold && partial && fs.existsSync(join(x.f.stand, 'llm-deployments', partial, 'before-api')) && args[0] === 'image' && args[1] === 'inspect') return x.run(['image', 'inspect', ROLLOUT_HOLD.api.image], opts);
+    return x.run(args, opts);
+  };
+  const at = x.f.submissions.length;
+  if (hold) {
+    await assert.rejects(publicLlmStand(['up', '--build', '--ack-public-maintenance'], { ...options, run }), /phase=backup-before-api;/);
+    const parent = join(x.f.stand, 'llm-deployments'), audit = fs.readdirSync(parent).find(n => !fs.existsSync(join(parent, n, 'complete.json')));
+    fs.renameSync(join(parent, audit), join(parent, ROLLOUT_HOLD.audit));
+    // Only receipts of removed helpers get exact historical identities; no live mutation.
+    for (const [file, id] of [['helper-fenced.json', ROLLOUT_HOLD.backup], ['helper-check.json', ROLLOUT_HOLD.check]]) { const p = join(x.f.stand, '.operation.lock', file), value = JSON.parse(fs.readFileSync(p)); value.id = id; fs.writeFileSync(p, JSON.stringify(value)); }
+  } else assert.equal((await publicLlmStand(['up', '--build', '--ack-public-maintenance'], options)).outcome, 'ready');
+  x.f.afterBuild = null;
+  return { ...x, options, audit: ROLLOUT_HOLD.audit, at, oldPins };
+}
+const rolloutArgs = review => ['continue-current-rollout', '--audit', ROLLOUT_HOLD.audit, '--review', review, '--ack-reviewed-current-source', '--ack-retire-only-unavailable-api', '--ack-retire-only-unavailable-web'];
+test('ROLLOUT normal helper selection survives prior image deletion after rebuild and preserves nonempty history/quota', async t => {
+  const x = await normalRolloutFixture(t, false), actions = x.f.submissions.slice(x.at);
+  assert(!x.allImages.has(ROLLOUT_HOLD.api.image)); // The old !continuation predicate would choose this unavailable image.
+  await assert.rejects(x.run(['image', 'inspect', ROLLOUT_HOLD.api.image], {}), e => e.category === 'image');
+  const helpers = actions.filter(a => a[0] === 'create' && a.at(-1) === PUBLIC_LLM_BACKUP_PROGRAM);
+  assert.equal(helpers.length, 3); assert(helpers[0].includes(ROLLOUT_HOLD.api.image)); assert(helpers.slice(1).every(a => a.includes(ROLLOUT_HOLD.api.candidate)));
+  const db = new DB(join(x.paths.auth, 'llm-history.sqlite'), { readonly: true }); assert.equal(db.prepare('SELECT count(*) n FROM history_head').get().n, 1); db.close();
+  const q = new DB(join(x.paths.auth, 'llm-usage.sqlite'), { readonly: true }); assert.equal(q.prepare('SELECT clock FROM quota_meta').get().clock, 17); q.close();
+});
+test('ROLLOUT exact completion preserves nonempty four stores and mounts selected key only on API readonly, web last, no build/init/restart', async t => {
+  const x = await normalRolloutFixture(t), lock = join(x.f.stand, '.operation.lock'), archive = join(x.f.stand, 'llm-deployments', x.audit), ctx = await preparePublicLlmRolloutCompletion({ ...x.options, audit: x.audit }), oldLock = treeBytes(lock), oldAudit = treeBytes(archive);
+  assert(ctx.rolloutOnly && ctx.baseline.llm && ctx.baseline.empty === false); assert.equal(ctx.summary.keyVolumeConsumersBeforeApi, 0);
+  const at = x.f.submissions.length, builds = x.f.builds;
+  assert.equal((await publicLlmStand(rolloutArgs(ctx.review), x.options)).outcome, 'ready'); assert.equal(x.f.builds, builds);
+  const actions = x.f.submissions.slice(at); assert.deepEqual(actions.filter(a => a[0] === 'compose' && a.includes('up')).map(a => a.at(-1)), ['api', 'web']);
+  assert(!actions.some(a => a[0] === 'create' && a.at(-1) !== PUBLIC_LLM_BACKUP_PROGRAM)); assert(actions.filter(a => a[0] === 'create').every(a => a.includes(ROLLOUT_HOLD.api.candidate)));
+  assert(!actions.some(a => a[0] === 'container' && ['start', 'stop', 'rm'].includes(a[1]) && [ROLLOUT_HOLD.worker.id, ROLLOUT_HOLD.gateway.id].includes(a[2])));
+  const consumers = x.f.containers.filter(c => c.Mounts.some(m => m.Name === ROLLOUT_HOLD.keyVolume)); assert.equal(consumers.length, 1); assert(consumers[0].Name.endsWith('-api-1')); assert(consumers[0].Mounts.find(m => m.Name === ROLLOUT_HOLD.keyVolume).RW === false);
+  for (const [p, b] of oldLock) assert.deepEqual(fs.readFileSync(join(archive, 'rollout-current/operation-evidence', p)), b);
+  for (const [p, b] of oldAudit) assert.deepEqual(fs.readFileSync(join(archive, p)), b);
+  for (const phase of ['fenced', 'before-api', 'after-api']) { assert.equal(llmFingerprint(DB, fs, crypto, join(archive, 'rollout-current', phase, 'llm/auth.sqlite'), 'history'), ctx.baseline.llm.history); assert.equal(llmFingerprint(DB, fs, crypto, join(archive, 'rollout-current', phase, 'llm/ledger.sqlite'), 'quota'), ctx.baseline.llm.quota); }
+  assert(!fs.existsSync(lock));
+});
+for (const fault of ['metadata-error', 'candidate-config', 'source', 'epoch', 'prefix', 'backup', 'key-consumer', 'key-driver']) test(`ROLLOUT ${fault} refuses before intent without metadata fallback or key reads`, async t => {
+  const x = await normalRolloutFixture(t), ctx = await preparePublicLlmRolloutCompletion({ ...x.options, audit: x.audit }), lock = join(x.f.stand, '.operation.lock');
+  if (fault === 'candidate-config') x.allImages.get(ROLLOUT_HOLD.api.candidate).Config.User = '0:0';
+  if (fault === 'source') fs.appendFileSync(join(x.f.root, 'server/api/src/current-sanitizer.ts'), '// drift\n');
+  if (fault === 'epoch') x.f.containers.find(c => c.Id === ROLLOUT_HOLD.worker.id).RestartCount++;
+  if (fault === 'prefix') fs.writeFileSync(join(x.f.stand, 'llm-deployments', x.audit, 'before-api/unknown'), 'hold', { mode: 0o600 });
+  if (fault === 'backup') { const p = join(x.f.stand, 'llm-deployments', x.audit, 'fenced/llm/auth.sqlite'), b = fs.readFileSync(p); b[100] ^= 1; fs.writeFileSync(p, b); }
+  if (fault === 'key-consumer') x.f.containers.find(c => c.Id === ROLLOUT_HOLD.worker.id).Mounts.push({ Type: 'volume', Name: ROLLOUT_HOLD.keyVolume, Destination: '/run/secrets', RW: false });
+  if (fault === 'key-driver') x.f.volumes.find(v => v.Name === ROLLOUT_HOLD.keyVolume).Driver = 'unsafe';
+  const run = (a, o) => { if (fault === 'metadata-error' && a[0] === 'image' && a[1] === 'inspect' && a[2] === ROLLOUT_HOLD.api.image) { const e = Error('PRIVATE'); e.category = 'timeout'; throw e; } return x.run(a, o); };
+  const at = x.f.submissions.length; await assert.rejects(publicLlmStand(rolloutArgs(ctx.review), { ...x.options, run })); assert(!fs.existsSync(join(lock, 'rollout-current-continue.json')));
+  assert(x.f.submissions.slice(at).every(a => readonlySubmission(a) || a[0] === 'container' && a[1] === 'exec'));
+});
+for (const fault of ['live-history', 'before-api', 'after-api', 'helper-env', 'execution-after-intent']) test(`ROLLOUT ${fault} holds with nonempty stores intact and web closed, no replay`, async t => {
+  const x = await normalRolloutFixture(t), ctx = await preparePublicLlmRolloutCompletion({ ...x.options, audit: x.audit }), lock = join(x.f.stand, '.operation.lock');
+  if (fault === 'live-history') { const db = new DB(join(x.paths.auth, 'llm-history.sqlite')); db.exec("UPDATE history_meta SET incarnation='00000000-0000-0000-0000-000000000003'"); db.close(); }
+  const run = async (a, o) => {
+    if (['before-api', 'after-api'].includes(fault) && a[0] === 'create' && a.includes(`${PROJECT}-llm-${x.audit.slice(7)}-rollout-current-${fault}`)) { const db = new DB(join(x.paths.auth, 'llm-usage.sqlite')); db.exec('UPDATE quota_meta SET clock=18'); db.close(); }
+    if (fault === 'helper-env' && a[0] === 'create') x.f.llmFault = 'helper-env';
+    const result = await x.run(a, o);
+    if (fault === 'execution-after-intent' && a[0] === 'create') fs.appendFileSync(join(x.f.root, 'scripts/local-stand.mjs'), '\n// fixture-only concurrent execution dependency drift\n');
+    return result;
+  };
+  const at = x.f.submissions.length; await assert.rejects(publicLlmStand(rolloutArgs(ctx.review), { ...x.options, run }));
+  assert(!x.f.submissions.slice(at).some(a => a[0] === 'compose' && a.includes('up') && a.at(-1) === 'web' || a[0] === 'create' && a.at(-1) === PUBLIC_LLM_INITIALIZE_PROGRAM));
+  assert(fs.existsSync(join(lock, 'rollout-current-continue.json'))); assert(fs.existsSync(join(x.paths.auth, 'llm-history.sqlite')));
+  const count = x.f.submissions.length; await assert.rejects(publicLlmStand(rolloutArgs(ctx.review), x.options)); assert.equal(x.f.submissions.length, count);
 });
 
 async function apiFixture(t) {

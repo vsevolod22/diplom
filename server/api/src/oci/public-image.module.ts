@@ -19,11 +19,13 @@ import { PUBLIC_LLM_REPORTS, ReportReader } from '../llm/report-context.js';
 import { LlmQuotaRuntime } from '../llm/quota-runtime.js';
 import { llmExceptionProvider } from '../llm/llm-exception.filter.js';
 import { registerHistoryIngress } from '../llm/history-ingress.js';
+import { TranslationController } from '../llm/translation.controller.js';
+import { registerTranslationIngress } from '../llm/translation-ingress.js';
 
 // Image-only public Docker Hub profile. No default ScansModule/LlmModule imports:
 // those would create another, restricted ScansService. Runtime/host are not exposed here.
 @Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule],
-  controllers: [ScansController, BrowserScansController, LlmController],
+  controllers: [ScansController, BrowserScansController, LlmController, TranslationController],
   providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, LlmQuotaRuntime, llmExceptionProvider,
       { provide: PUBLIC_LLM_REPORTS, useValue: true }, { provide: BROWSER_SCAN_LOCAL_ORIGIN, useValue: 'http://127.0.0.1:8081' },
       { provide: PUBLIC_IMAGE_INSPECTOR, useValue: inspectPublicImage },
@@ -35,6 +37,7 @@ export class PublicImageModule {}
 // Reuse the existing bounded history intake; no runtime/host routes are imported.
 export function configurePublicImageIngress(app: NestExpressApplication): void {
   registerHistoryIngress(app);
+  registerTranslationIngress(app);
   app.useBodyParser('json');
   app.useBodyParser('urlencoded', { extended: true });
 }

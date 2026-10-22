@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, Optional, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { AuthStore } from '../auth/auth.store.js';
 import { HistoryService } from './history.service.js';
+import { TranslationService } from './translation.service.js';
 import { historyUnavailable } from './history-contract.js';
 import type { Identity } from '../security/identity.js';
 import { PUBLIC_LLM_REPORTS, ReportReader, type ReportContext } from './report-context.js';
@@ -34,12 +35,17 @@ export class LlmRuntime {
 export class LlmService {
   private readonly active = new Set<string>();
   private historyService?: HistoryService;
+  private translationService?: TranslationService;
   constructor(@Inject(ReportReader) private readonly reports: ReportReader, @Inject(LlmRuntime) private readonly runtime: LlmRuntime,
       @Inject(LlmQuotaRuntime) private readonly quotas: LlmQuotaRuntime, @Optional() @Inject(AuthStore) private readonly auth?: AuthStore,
       @Optional() @Inject(BROWSER_SCAN_LOCAL_ORIGIN) private readonly localOrigin: BrowserScanLocalOrigin = 'http://127.0.0.1:8080') {}
   history(): HistoryService {
     if (!this.auth) return historyUnavailable();
     return this.historyService ??= new HistoryService(this.auth, this.reports, this.runtime, this.quotas, owner => this.acquire(owner), this.localOrigin);
+  }
+  translation(): TranslationService {
+    if (!this.auth || this.localOrigin !== 'http://127.0.0.1:8081') throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+    return this.translationService ??= new TranslationService(this.auth, this.reports, this.runtime, this.quotas, owner => this.acquire(owner), this.localOrigin);
   }
   onModuleDestroy() { this.historyService?.close(); }
   private acquire(owner: string): () => void {
