@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { ORIGIN, SCANS, CHECKS, TARGETS, parseMode, fixedUrl, allowedGet, validIntent, eligibilityReady,
   EligibilityFence, awaitEligibility, consumePermit, partition, cancelVerdict, preservationVerdict, keyBoundaryAllowed, checkPage, readAllPages, loadContracts, safeMeta, ResultBook, GLOBAL_MS, WORKER_MS,
-    BROWSER_ARGS, safeMutationRequest, assertDeniedReply, assertChatUsage, renderedRowParts, paginationVerdict, evidenceDocuments, writeEvidence } from './public-product-live.mjs';
+    BROWSER_ARGS, safeMutationRequest, assertDeniedReply, assertChatUsage, renderedRowParts, paginationVerdict, evidenceDocuments, writeEvidence,
+    SMOKE_MS, nativePlan, scanLaunchAllowed, smokeMutationAllowed, resultExitCode, assertAuthUser, failureMeta } from './public-product-live.mjs';
 
 const id = '12345678-1234-4234-8234-123456789abc';
 const ready = target => ({ imageReference: target.reference, eligible: true, reason: 'READY', eligibility: 'public-hub-profile', allowedCheckSets: [[...CHECKS]] });
@@ -18,6 +19,95 @@ test('default is not-run; full explicit GO/no-key-activation acknowledgements re
   assert.equal(parseMode(['--self-test']), 'offline');
   assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation']), 'native');
   for (const args of [['--run'], ['--run', '--ack-coordinator-go'], ['--native-child'], ['--run-native'], ['--url', ORIGIN], ['--self-test', '--run'], ['--run', '--ack-coordinator-go', '--ack-no-key-activation', '--target=other']]) assert.throws(() => parseMode(args));
+});
+
+test('auth user identity is the backend 32-hex ID, not a scan UUID, and remains bound across login', () => {
+  const subject = '0123456789abcdef0123456789abcdef', email = 'offline@example.invalid';
+  assert.equal(assertAuthUser({ id: subject, email }, email), subject);
+  assert.equal(assertAuthUser({ id: subject, email }, email, subject), subject);
+  for (const user of [null, { id, email }, { id: subject.toUpperCase(), email }, { id: subject.slice(1), email }, { id: subject, email: 'other@example.invalid' }, { id: subject, email, token: 'synthetic' }]) assert.throws(() => assertAuthUser(user, email));
+  assert.throws(() => assertAuthUser({ id: subject, email }, email, 'f'.repeat(32)));
+  const source = readFileSync(new URL('./public-product-live.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes('account.subject = assertAuthUser(me.value, account.email, account.subject)'));
+  assert.equal(source.includes('UUID.test(me.value.id)'), false);
+});
+
+test('one-scan smoke requires the exact run flag and both GO/no-key acknowledgements', () => {
+  assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation']), 'smoke');
+  for (const args of [
+    ['--smoke-only'], ['--run', '--smoke-only'], ['--run', '--smoke-only', '--ack-coordinator-go'],
+    ['--run', '--smoke-only', '--ack-no-key-activation'],
+    ['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation', '--target=debian'],
+    ['--self-test', '--smoke-only'], ['--run', '--smoke-only', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation'],
+  ]) assert.throws(() => parseMode(args));
+});
+
+test('smoke shares the fixed Node target/four checks but has a hard one-launch, 15-minute budget', () => {
+  const plan = nativePlan('smoke');
+  assert.deepEqual(plan.targets, [TARGETS[0]]); assert.equal(plan.maxScans, 1);
+  assert.equal(plan.globalMs, SMOKE_MS); assert.equal(SMOKE_MS, 15 * 60000); assert.ok(SMOKE_MS > WORKER_MS);
+  assert.ok(Object.isFrozen(plan) && Object.isFrozen(plan.targets) && Object.isFrozen(plan.cases));
+  assert.ok(scanLaunchAllowed(plan, TARGETS[0], 0));
+  for (const [target, launches] of [[TARGETS[0], 1], [TARGETS[0], -1], [TARGETS[0], NaN], [TARGETS[1], 0], [{ ...TARGETS[0] }, 0]]) assert.equal(scanLaunchAllowed(plan, target, launches), false);
+  assert.ok(validIntent(intent(plan.targets[0]), plan.targets[0]));
+  const full = nativePlan(); assert.deepEqual(full.targets, TARGETS); assert.equal(full.maxScans, 3); assert.equal(full.globalMs, GLOBAL_MS);
+  assert.ok(scanLaunchAllowed(full, TARGETS[1], 2)); assert.equal(scanLaunchAllowed(full, TARGETS[0], 3), false);
+  assert.throws(() => nativePlan('other'));
+});
+
+test('smoke mutation gate forbids every LLM POST, cancel, foreign routes and query overrides even with a permit', () => {
+  for (const path of ['/api/v1/auth/register', '/api/v1/auth/login', SCANS, `${SCANS}/images/eligibility`]) assert.ok(smokeMutationAllowed(path));
+  for (const path of [`${SCANS}/${id}/llm/chat`, `${SCANS}/${id}/llm/summary`, `${SCANS}/${id}/llm/history/decision`, `${SCANS}/${id}/cancel`, `${SCANS}?extra=1`, '/api/v1/admin', '/api/v1/auth/logout']) assert.equal(smokeMutationAllowed(path), false);
+  const source = readFileSync(new URL('./public-product-live.mjs', import.meta.url), 'utf8');
+  const gate = source.indexOf('plan.smokeOnly && !smokeMutationAllowed(u.pathname)');
+  assert.ok(gate > 0 && gate < source.indexOf('if (consumePermit(state.permit'));
+  assert.equal(source.includes('stats.scanLaunches < 3'), false);
+});
+
+test('smoke evidence has only selected assertions, no provider qualification and distinct exclusive launch paths', async () => {
+  const book = new ResultBook('smoke'), evidence = book.evidence(), full = nativePlan();
+  assert.equal(evidence.scope, 'native-public8081-one-scan-smoke');
+  assert.equal(evidence.generationPolicy, 'readiness-only-no-llm-posts');
+  assert.equal(evidence.providerGenerationQualified, false); assert.equal(evidence.providerDispatchIndependentlyObserved, false);
+  for (const required of ['node.scan', 'node.report', 'node.filters', 'node.reload', 'scan_history', 'llm_readiness', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'safety']) assert.ok(required in evidence.cases);
+  for (const excluded of ['debian.scan', 'node.pagination', 'node.events', 'foreign_registration', 'cancel', 'llm_no_consent', 'llm_missing_key', 'llm_manual_history']) {
+    assert.equal(excluded in evidence.cases, false); assert.throws(() => book.record(excluded, 'PASS', 'VERIFIED'));
+  }
+  const paths = [];
+  await writeEvidence(evidence, async (path, mode, permissions) => {
+    paths.push(path); assert.equal(mode, 'wx'); assert.equal(permissions, 0o600);
+    return { writeFile: async () => {}, sync: async () => {}, close: async () => {} };
+  });
+  assert.deepEqual(paths.map(path => path.split('/').at(-1)), ['public8081launch-20261022.attempt2.json', 'public8081launch-20261022.attempt2.md']);
+  assert.ok(paths.every(path => !full.evidencePaths.includes(path)));
+  assert.equal(evidence.evidenceRoot, 'docs/public8081launch-20261022.attempt2');
+  assert.ok(paths.every(path => !path.endsWith('/public8081launch-20261022.json') && !path.endsWith('/public8081launch-20261022.md')));
+  const [json, md] = evidenceDocuments(evidence);
+  assert.equal(JSON.parse(json).mode, 'smoke'); assert.ok(md.includes('no LLM POST'));
+});
+
+test('failure diagnostics project only runner line numbers, never raw stack/credentials/payload', () => {
+  const error = new Error('SYNTHETIC_PRIVATE_MARKER');
+  error.stack = 'SYNTHETIC_PRIVATE_MARKER\n    at auth (file:///synthetic/tests-e2e/public-product-live.mjs:431:12)';
+  assert.deepEqual(failureMeta(error), { runnerLine: 431 });
+  assert.equal(JSON.stringify(failureMeta(error)).includes('SYNTHETIC_PRIVATE_MARKER'), false);
+  assert.deepEqual(failureMeta({ stack: 'other-module.mjs:5:10' }), {});
+  assert.deepEqual(failureMeta({ stack: 'public-product-live.mjs:9999999:1' }), {});
+  assert.deepEqual(failureMeta(null), {});
+  assert.deepEqual(safeMeta({ digest: 'sha256:' + 'a'.repeat(64), platform: 'linux/amd64' }), { digest: 'sha256:' + 'a'.repeat(64), platform: 'linux/amd64' });
+  assert.deepEqual(safeMeta({ digest: 'SYNTHETIC_PRIVATE_MARKER', platform: 'other' }), {});
+});
+
+test('smoke cannot exit successfully with missing, blocked or inconclusive selected assertions', () => {
+  const book = new ResultBook('smoke'); assert.equal(resultExitCode(book), 2);
+  book.record('llm_generation', 'BLOCKED', 'GENERATION_NOT_AUTHORIZED');
+  for (const name of book.plan.cases.filter(name => name !== 'llm_generation')) book.record(name, 'PASS', 'VERIFIED');
+  assert.equal(resultExitCode(book), 0);
+  book.record('llm_readiness', 'BLOCKED', 'KEY_NOT_ABSENT_NO_POST'); assert.equal(resultExitCode(book), 2);
+  book.record('llm_readiness', 'PASS', 'VERIFIED');
+  book.record('node.report', 'INCONCLUSIVE', 'PREREQUISITE_UNAVAILABLE'); assert.equal(resultExitCode(book), 2);
+  book.record('node.report', 'BLOCKED', 'ASSERTION_FAILED'); assert.equal(resultExitCode(book), 1);
+  book.record('node.report', 'PASS', 'VERIFIED'); assert.equal(resultExitCode(book), 1);
 });
 
 test('exact public origin: no old port, localhost, credentials, fragments, redirect destinations', () => {
@@ -181,7 +271,7 @@ test('result book does not accept arbitrary case names/status/error text', () =>
 test('offline entrypoints do not launch browser, access stand or write evidence', () => {
   const script = fileURLToPath(new URL('./public-product-live.mjs', import.meta.url));
   const env = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'SystemRoot'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
-  for (const [args, expected] of [[['--self-test'], 0], [[], 2], [['--run'], 2]]) {
+  for (const [args, expected] of [[['--self-test'], 0], [[], 2], [['--run'], 2], [['--smoke-only'], 2], [['--run', '--smoke-only', '--ack-coordinator-go'], 2]]) {
     const result = spawnSync(process.execPath, [script, ...args], { env, timeout: 10000, encoding: 'utf8' });
     assert.equal(result.status, expected); assert.equal(result.stderr, '');
     const value = JSON.parse(result.stdout); assert.equal(value.browserLaunched, false);

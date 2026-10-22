@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "mode": "smoke",
+  "runId": "80a363ea-9308-4577-9cc9-9afedca88a95",
+  "startedAt": "2026-10-22T06:22:59.575Z",
+  "finishedAt": "2026-10-22T06:23:01.246Z",
+  "scope": "native-public8081-one-scan-smoke",
+  "origin": "http://127.0.0.1:8081",
+  "providerGenerationQualified": false,
+  "generationPolicy": "readiness-only-no-llm-posts",
+  "providerDispatchIndependentlyObserved": false,
+  "credentialPersistence": false,
+  "screenshots": false,
+  "har": false,
+  "trace": false,
+  "lifecycleOperations": 0,
+  "syntheticResponses": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "registration": {
+      "status": "BLOCKED",
+      "code": "ASSERTION_FAILED",
+      "failure": true
+    },
+    "node.scan": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "node.report": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "node.filters": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "node.reload": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "scan_history": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "llm_readiness": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "llm_reload": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "llm_fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "llm_generation": {
+      "status": "BLOCKED",
+      "code": "GENERATION_NOT_AUTHORIZED",
+      "failure": false
+    },
+    "safety": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanLaunches": 0,
+      "accountsCreated": 1,
+      "pageErrors": 0,
+      "blockedRequests": 0,
+      "ignoredEligibility": 0,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

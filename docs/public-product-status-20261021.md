@@ -1,5 +1,7 @@
 # Public product: фактический итог 21.10.2026
 
+> **Историческая точка HOLD, заменена текущим READY:** public8081 восстановлен, HTTP200, 7 сервисов/6 сетей, four-store preservation завершена. Актуальный итог: [public-recovery-ready-20261022.md](public-recovery-ready-20261022.md), native scan/browser evidence: [attempt2](public8081launch-20261022.attempt2.md). Старые команды/требования продолжения ниже сохранены как история и не являются текущими инструкциями. Provider key по-прежнему отсутствует; full smoke safety guard остаётся незакрытым.
+
 Это продолжение `public-product-handoff-20261021.md`, а не приёмка работающего продукта. Исторические proofs сохраняют свои даты.
 
 ## Runtime и сохранность

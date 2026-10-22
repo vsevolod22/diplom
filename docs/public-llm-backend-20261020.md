@@ -1,6 +1,6 @@
 # Public image-only 8081: existing LLM backend — 2026-10-20
 
-> **CURRENT OPERATOR GATE: NEW `initialize` HOLD after one reviewed continuation.** Audit `deploy-8d83a8806715c2f0fa575efedee1b0af`; initializer is created/never-started. Do not retry ordinary `up` or the original checker/continuation, start/remove the helper, remove locks, prune images or reset stores. The original checker prefix no longer matches. Current source fixes do not authorize live recovery and the pre-fix API candidate is stale. See [current status and required separately reviewed next path](public-product-status-20261021.md). All deployment/checker command examples below are historical and **not instructions for the current HOLD**.
+> **CURRENT RUNTIME: READY / public8081 HTTP200, 22.10.2026.** Audit `deploy-8d83a8806715c2f0fa575efedee1b0af` completed with four-store/JWT preservation; no active operation lock. See [actual recovery result](public-recovery-ready-20261022.md). Consumed checker/continuation commands below are historical, not restart instructions. Public provider key remains unavailable; native generation is NOT verified. The browser scan completed, but overall smoke has unresolved REQUEST_GUARD blocks; see [attempt2](public8081launch-20261022.attempt2.md).
 
 ## Scope / implementation
 

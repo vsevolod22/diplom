@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "mode": "smoke",
+  "evidenceRoot": "docs/public8081launch-20261022.attempt2",
+  "runId": "bba4c5fb-4e99-4081-b755-230c6d5cab45",
+  "startedAt": "2026-10-22T06:48:13.117Z",
+  "finishedAt": "2026-10-22T06:49:52.712Z",
+  "scope": "native-public8081-one-scan-smoke",
+  "origin": "http://127.0.0.1:8081",
+  "providerGenerationQualified": false,
+  "generationPolicy": "readiness-only-no-llm-posts",
+  "providerDispatchIndependentlyObserved": false,
+  "credentialPersistence": false,
+  "screenshots": false,
+  "har": false,
+  "trace": false,
+  "lifecycleOperations": 0,
+  "syntheticResponses": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "registration": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "node.scan": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanId": "f55f172d-b96f-4ac1-b016-2d31bae7a9be",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "completed",
+      "allChecksChecked": true,
+      "counts": {
+        "secret": 0,
+        "sbom": 217,
+        "vuln": 158,
+        "config": 1,
+        "cve": 158,
+        "debianTemp": 0
+      },
+      "checks": {
+        "secret": "checked",
+        "sbom": "checked",
+        "vuln": "checked",
+        "config": "checked"
+      }
+    },
+    "node.report": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanId": "f55f172d-b96f-4ac1-b016-2d31bae7a9be",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "completed",
+      "pages": 10,
+      "counts": {
+        "secret": 0,
+        "sbom": 217,
+        "vuln": 158,
+        "config": 1,
+        "cve": 158,
+        "debianTemp": 0
+      },
+      "checks": {
+        "secret": "checked",
+        "sbom": "checked",
+        "vuln": "checked",
+        "config": "checked"
+      }
+    },
+    "node.filters": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "checkedSets": 3
+    },
+    "node.reload": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "scan_history": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "checkedSets": 1
+    },
+    "llm_readiness": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "noGenerationPosts": true,
+      "credential": "missing",
+      "blockers": [
+        "public-key-required"
+      ]
+    },
+    "llm_reload": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "noGenerationPosts": true,
+      "historyUnchanged": true
+    },
+    "fresh_login": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "checkedSets": 1
+    },
+    "llm_fresh_login": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "noGenerationPosts": true,
+      "historyUnchanged": true,
+      "credential": "missing"
+    },
+    "llm_generation": {
+      "status": "BLOCKED",
+      "code": "GENERATION_NOT_AUTHORIZED",
+      "failure": false
+    },
+    "safety": {
+      "status": "BLOCKED",
+      "code": "REQUEST_GUARD",
+      "failure": true,
+      "scanLaunches": 1,
+      "accountsCreated": 1,
+      "pageErrors": 0,
+      "blockedRequests": 3,
+      "ignoredEligibility": 1,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

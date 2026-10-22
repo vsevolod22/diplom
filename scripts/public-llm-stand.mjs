@@ -27,6 +27,18 @@ const canonical = v => Array.isArray(v) ? v.map(canonical) : v && typeof v === '
 const hash = x => crypto.createHash('sha256').update(typeof x === 'string' ? x : JSON.stringify(canonical(x))).digest('hex');
 const has = p => fs.lstatSync(p, { throwIfNoEntry: false }) !== undefined;
 const safe = ok => { if (!ok) throw new Error('PUBLIC LLM integration refused; details withheld.'); };
+// execFile rejects fractional timeouts; zero would disable its timeout entirely.
+export function publicLlmDockerTimeout(requested, deadline, now) {
+  const remaining = Math.min(requested, deadline - now);
+  safe(Number.isFinite(requested) && Number.isFinite(deadline) && Number.isFinite(now) && remaining >= 1 && remaining <= 2147483647);
+  return Math.floor(remaining);
+}
+const ownValue = (error, key) => error && (typeof error === 'object' || typeof error === 'function') ? Object.getOwnPropertyDescriptor(error, key)?.value : undefined;
+function finiteFailure(error, origin) {
+  const category = ownValue(error, 'category'), stack = ownValue(error, 'stack');
+  const frames = typeof stack === 'string' ? [...stack.matchAll(/scripts\/(public-llm-stand|public-image-stand|public-llm-initialize-continuation)\.mjs:([0-9]+):[0-9]+/g)].map(m => ({ module: m[1], line: Number(m[2]) })).filter(f => f.line >= 100).slice(0, 3) : [];
+  return { category: ['image', 'timeout', 'docker_unavailable', 'unclassified', 'resources', 'runtime_health'].includes(category) ? category : 'guard', origin, frames };
+}
 const role = c => c.Config?.Labels?.['com.docker.compose.service'];
 const privateJson = text => { try { return JSON.parse(text); } catch { throw new Error('PUBLIC LLM metadata invalid; content withheld.'); } };
 const imageId = v => typeof v === 'string' && /^sha256:[a-f0-9]{64}$/.test(v);
@@ -136,7 +148,7 @@ export function expectedPublicLlmConfig(root, cve = null, selection = null) {
 }
 // Fixed order is shared by maintenance, future main and BOTH current/prospective CVE models.
 export function publicLlmComposeArguments(root, args, { cve = false, llm = true, pinned = true, prospectiveCve = false, directory: dir = join(root, STATE) } = {}) {
-  safe(resolve(dir) === dir && [join(root, STATE), join(root, STATE, '.operation.lock/llm-candidate')].includes(dir));
+  safe(resolve(dir) === dir && [join(root, STATE), join(root, STATE, '.operation.lock/llm-candidate'), join(root, STATE, '.operation.lock/llm-initialize-candidate'), join(root, STATE, '.operation.lock/llm-rebuild-candidate'), join(root, STATE, '.operation.lock/init-exit-current'), join(root, STATE, '.operation.lock/admit-current'), join(root, STATE, '.operation.lock/api-current')].includes(dir));
   safe(!prospectiveCve || cve && dir === join(root, STATE));
   return ['compose', '--env-file', '/dev/null', '-p', PROJECT, '-f', join(root, 'server/deploy/compose.public-images.yaml'),
     ...(cve ? ['-f', prospectiveCve ? join(root, STATE, '.operation.lock/candidate.cve.json') : join(dir, 'compose.cve.json')] : []),
@@ -348,6 +360,23 @@ export function llmFingerprint(DB, io, crypto, path, kind, empty = false) {
     db.exec('ROLLBACK'); return h.digest('hex');
   } finally { db.close(); }
 }
+// Admission has no earlier LLM snapshot: accept only the native bootstrap tables
+// and metadata, never unknown data/schema disguised by empty business tables.
+export function assertAdmissionStoreEmpty(DB, path, kind) {
+  const db = new DB(path, { readonly: true, fileMustExist: true, timeout: 2000 });
+  try {
+    db.defaultSafeIntegers(true); db.pragma('query_only=ON'); db.exec('BEGIN');
+    const tables = kind === 'history' ? ['history_completion_space', 'history_head', 'history_meta'] : ['quota_attempt', 'quota_meta'];
+    safe(equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").pluck().all(), tables));
+    safe(db.prepare("SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view')").pluck().get() === 0n);
+    const meta = kind === 'history' ? 'history_meta' : 'quota_meta';
+    for (const table of tables.filter(n => n !== meta)) safe(db.prepare(`SELECT count(*) FROM "${table}"`).pluck().get() === 0n);
+    if (kind === 'history') { const rows = db.prepare('SELECT id,incarnation FROM history_meta').all(); safe(rows.length === 1 && rows[0].id === 1n && /^[a-f0-9-]{36}$/.test(rows[0].incarnation)); }
+    else { const rows = db.prepare('SELECT id,clock FROM quota_meta').all(); safe(rows.length === 1 && rows[0].id === 1n && rows[0].clock === 0n); }
+    db.exec('ROLLBACK');
+  } finally { db.close(); }
+}
+
 // Same stable-copy + native backup + restore check as the existing bridge; the
 // role aliases below exist ONLY in the private export protocol, never in live paths.
 export async function backupLlmSqlite(DB, io, crypto, paths, output) {
@@ -389,10 +418,11 @@ export const PUBLIC_LLM_CHECK_PROGRAM = initSource(false);
 export const PUBLIC_LLM_GATEWAY_PROBE = "import {connect as connectLlmGateway} from 'node:net';const llmGatewayReady=await new Promise(resolve=>{const s=connectLlmGateway({host:'llm-egress',port:8080,timeout:2000});let done=false;const finish=v=>{if(!done){done=true;s.destroy();resolve(v);}};s.once('connect',()=>finish(true));s.once('error',()=>finish(false));s.once('timeout',()=>finish(false));});if(!llmGatewayReady)throw Error('llm-gateway-not-ready');";
 const readyProgram = "const fs=require('node:fs');try{process.stdout.write(fs.readFileSync('/backup/ready.json','utf8'));}catch{process.stdout.write('{}');}";
 export function publicLlmHelperArguments(name, image, purpose = 'backup') {
-  safe(new RegExp(`^${PROJECT}-llm-[a-f0-9]{32}-(?:continued-)?(?:fenced|before-api|after-api|initialize|check)$`).test(name) && imageId(image) && ['backup', 'initialize', 'check'].includes(purpose));
+  safe(new RegExp(`^${PROJECT}-llm-[a-f0-9]{32}-(?:(?:continued|initialize-current|rebuild-current|init-exit-current|admit-current|api-current)-)?(?:fenced|before-api|after-api|initialize|check)$`).test(name) && imageId(image) && ['backup', 'initialize', 'check'].includes(purpose));
   const args = backupArguments(name, image);
   args[args.length - 1] = purpose === 'backup' ? PUBLIC_LLM_BACKUP_PROGRAM : purpose === 'initialize' ? PUBLIC_LLM_INITIALIZE_PROGRAM : PUBLIC_LLM_CHECK_PROGRAM;
   args.splice(args.indexOf(image) + 1, 0, '--import', 'tsx');
+  args.splice(args.indexOf('--workdir'), 0, '--env', 'TMPDIR=/backup');
   if (purpose !== 'backup') {
     const at = args.indexOf(`type=volume,src=${PROJECT}_auth_accounts,dst=/auth,readonly,volume-nocopy`); safe(at >= 0);
     args[at] = `type=volume,src=${PROJECT}_auth_accounts,dst=/auth,volume-nocopy`;
@@ -405,8 +435,8 @@ export function validatePublicLlmHelper(c, name, image, purpose, state) {
   const program = purpose === 'backup' ? PUBLIC_LLM_BACKUP_PROGRAM : purpose === 'initialize' ? PUBLIC_LLM_INITIALIZE_PROGRAM : PUBLIC_LLM_CHECK_PROGRAM;
   safe(['backup', 'initialize', 'check'].includes(purpose) && equal(c.Config.Cmd, ['--import', 'tsx', '--input-type=module', '-e', program]) && equal(c.Args, c.Config.Cmd));
   const copy = structuredClone(c); copy.Config.Cmd = ['--input-type=module', '-e', RECOVERY_BACKUP]; copy.Args = copy.Config.Cmd;
+  safe(equal(envMap(copy.Config.Env), { ...envMap(image.Config.Env), ...(purpose !== 'backup' ? PUBLIC_LLM_ENV : {}), TMPDIR: '/backup' })); copy.Config.Env = image.Config.Env;
   if (purpose !== 'backup') {
-    safe(equal(envMap(copy.Config.Env), { ...envMap(image.Config.Env), ...PUBLIC_LLM_ENV })); copy.Config.Env = image.Config.Env;
     const m = copy.HostConfig.Mounts.filter(m => m.Target === '/auth'), o = copy.Mounts.filter(m => m.Destination === '/auth');
     safe(m.length === 1 && o.length === 1 && (!Object.hasOwn(m[0], 'ReadOnly') || m[0].ReadOnly === false) && o[0].RW === true); m[0].ReadOnly = true; o[0].RW = false;
   }
@@ -415,16 +445,22 @@ export function validatePublicLlmHelper(c, name, image, purpose, state) {
 
 // The orchestrator has no weak/no-op production defaults. Concrete authority,
 // snapshots and probes are assembled below; injected operations are offline test seams.
-export async function executePublicLlmMaintenance(ops, originalBaseline = null) {
+const admissionContexts = new WeakSet();
+export async function executePublicLlmMaintenance(ops, originalBaseline = null, admissionContext = null) {
+  const admission = admissionContext !== null;
+  safe(!admission || admissionContexts.has(admissionContext));
   for (const key of ['preflight', 'intent', 'stop', 'drain', 'snapshot', 'candidate', 'initialize', 'startRetained', 'up', 'ready', 'publish', 'complete']) safe(typeof ops[key] === 'function');
   await ops.preflight(); await ops.intent();
   if (!originalBaseline) { await ops.stop('web'); await ops.stop('api'); await ops.drain(); await ops.stop('worker'); }
   const baseline = await ops.snapshot('fenced');
-  if (originalBaseline) safe(equal(baseline.core, originalBaseline.core) && equal(baseline.llm, originalBaseline.llm));
+  if (originalBaseline) safe(equal(baseline.core, originalBaseline.core) && (admission ? baseline.llm !== null && baseline.empty === true && (originalBaseline.llm === null || equal(baseline.llm, originalBaseline.llm)) : equal(baseline.llm, originalBaseline.llm)));
   await ops.candidate(); // Existing image metadata was proved BEFORE any build.
-  await ops.initialize(baseline.llm === null);
-  await ops.startRetained(); // Only after the original network-none preservation snapshot.
-  await ops.up('llm-egress'); await ops.up('worker'); await ops.ready('worker');
+  if (!admission) {
+    await ops.initialize(baseline.llm === null);
+    await ops.startRetained(); // Only after the original network-none preservation snapshot.
+    await ops.up('llm-egress'); await ops.up('worker');
+  }
+  await ops.ready('worker');
   const initialized = await ops.snapshot('before-api');
   safe(equal(baseline.core, initialized.core));
   if (baseline.llm === null) safe(initialized.llm !== null && initialized.empty === true);
@@ -503,13 +539,14 @@ function privateAudit(root) {
 
 // Reusable four-store bridge for the future CVE owner. Context owns peer/image/
 // writer checks; this factory always uses the concrete validated helper/export.
-export function createPublicLlmPreservation({ DB, root, lock, audit, helper, verifyState, continued = false }) {
+export function createPublicLlmPreservation({ DB, root, lock, audit, helper, verifyState, continued = false, initializedCurrent = false, rebuiltCurrent = false, initExitCurrent = false, admitCurrent = false, apiCurrent = false }) {
   safe(typeof DB === 'function' && typeof helper === 'function' && typeof verifyState === 'function');
   safe(resolve(root) === root && lock.path === join(root, STATE, '.operation.lock') &&
     dirname(audit) === join(root, STATE, 'llm-deployments') && /^deploy-[a-f0-9]{32}$/.test(audit.slice(audit.lastIndexOf('/') + 1)));
   checkIgnores(root); lock.verify();
   const auditVerify = directoryFence(audit), parentVerify = directoryFence(dirname(audit));
-  safe(typeof continued === 'boolean'); const output = continued ? join(audit, 'continued') : audit;
+  safe([continued, initializedCurrent, rebuiltCurrent, initExitCurrent, admitCurrent, apiCurrent].every(v => typeof v === 'boolean') && [continued, initializedCurrent, rebuiltCurrent, initExitCurrent, admitCurrent, apiCurrent].filter(Boolean).length <= 1);
+  const output = apiCurrent ? join(audit, 'api-current') : admitCurrent ? join(audit, 'admit-current') : initExitCurrent ? join(audit, 'init-exit-current') : rebuiltCurrent ? join(audit, 'rebuild-current') : initializedCurrent ? join(audit, 'initialize-current') : continued ? join(audit, 'continued') : audit;
   const outputVerify = directoryFence(output);
   let next = 0;
   return async phase => {
@@ -537,8 +574,12 @@ export function createPublicLlmPreservation({ DB, root, lock, audit, helper, ver
     if (result) {
       const history = join(dir, 'llm/auth.sqlite'), quota = join(dir, 'llm/ledger.sqlite');
       llm = { history: llmFingerprint(DB, fs, crypto, history, 'history'), quota: llmFingerprint(DB, fs, crypto, quota, 'quota') };
-      if (phase === 'before-api') {
-        try { llmFingerprint(DB, fs, crypto, history, 'history', true); llmFingerprint(DB, fs, crypto, quota, 'quota', true); empty = true; }
+      if (phase === 'before-api' || (admitCurrent || apiCurrent) && phase === 'fenced') {
+        try {
+                  llmFingerprint(DB, fs, crypto, history, 'history', true); llmFingerprint(DB, fs, crypto, quota, 'quota', true);
+                  if ((admitCurrent || apiCurrent) && phase === 'fenced') { assertAdmissionStoreEmpty(DB, history, 'history'); assertAdmissionStoreEmpty(DB, quota, 'quota'); }
+                  empty = true;
+                }
         catch { /* Existing nonempty durable state is compared, never truncated. */ }
       }
     }
@@ -567,15 +608,21 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
   Database, sleep = ms => new Promise(r => setTimeout(r, ms)), now = () => performance.now(), request = fetch, log = console.log, onDiagnostic, checkSource = checkPublicLlmSourceBuild } = {}) {
   const [command, ...flags] = argv;
   let continuation;
-  if (['check-current-build', 'continue-current-build'].includes(command)) {
+  if (['check-current-build', 'continue-current-build', 'check-current-initialize', 'continue-current-initialize', 'check-current-rebuild', 'continue-current-rebuild', 'check-current-init-exit', 'continue-current-init-exit', 'check-current-admit', 'continue-current-admit', 'check-current-api', 'continue-current-api'].includes(command)) {
     safe(flags[0] === '--audit' && /^deploy-[a-f0-9]{32}$/.test(flags[1] ?? '') && resolve(root) === root && fs.realpathSync(root) === root);
-    const checking = command === 'check-current-build';
+    const checking = command.startsWith('check-'), apiOnly = command.endsWith('-api'), admitting = apiOnly || command.endsWith('-admit'), initExit = command.endsWith('-init-exit'), rebuilding = command.endsWith('-rebuild'), initializing = admitting || initExit || rebuilding || command.endsWith('-initialize');
     safe(checking ? flags.length === 2 : flags[2] === '--review' && /^[a-f0-9]{64}$/.test(flags[3] ?? '') && flags[4] === '--ack-reviewed-current-source' &&
-      (flags.length === 5 || flags.length === 6 && flags[5] === '--ack-retire-only-unavailable-worker'));
-    const module = await import('./public-llm-build-continuation.mjs');
-    continuation = await module.preparePublicLlmBuildContinuation({ root, home, audit: flags[1], run, ambient, Database, checkSource });
+      (flags.length === 5 || flags.length === 6 && flags[5] === '--ack-retire-only-unavailable-worker' ||
+        initializing && flags.length === 7 && flags[5] === '--ack-retire-only-unavailable-worker' && ['--ack-retire-only-unavailable-api', '--ack-retire-only-unavailable-web'].includes(flags[6]) ||
+        initializing && flags.length === 8 && flags[5] === '--ack-retire-only-unavailable-worker' && flags[6] === '--ack-retire-only-unavailable-api' && flags[7] === '--ack-retire-only-unavailable-web'));
+    const module = initializing ? await import('./public-llm-initialize-continuation.mjs') : await import('./public-llm-build-continuation.mjs');
+    const prepare = apiOnly ? module.preparePublicLlmApiContinuation : admitting ? module.preparePublicLlmAdmitContinuation : initExit ? module.preparePublicLlmInitExitContinuation : rebuilding ? module.preparePublicLlmRebuildContinuation : initializing ? module.preparePublicLlmInitializeContinuation : module.preparePublicLlmBuildContinuation;
+    continuation = await prepare({ root, home, audit: flags[1], run, ambient, Database, checkSource });
     if (checking) { log(JSON.stringify(continuation.summary)); return continuation.summary; }
-    safe(continuation.review === flags[3] && Boolean(continuation.replacement) === (flags.length === 6));
+    if (admitting) admissionContexts.add(continuation);
+    safe(continuation.review === flags[3] && Boolean(continuation.replacement) === flags.includes('--ack-retire-only-unavailable-worker') &&
+      Boolean(continuation.apiReplacement) === flags.includes('--ack-retire-only-unavailable-api') &&
+            Boolean(continuation.webReplacement) === flags.includes('--ack-retire-only-unavailable-web'));
   }
   safe(Boolean(continuation) || ['plan', 'status', 'up'].includes(command) && (command === 'up' ? flags.includes('--ack-public-maintenance') &&
     flags.every(f => ['--ack-public-maintenance', '--build'].includes(f)) && new Set(flags).size === flags.length : flags.length === 0));
@@ -587,27 +634,37 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
   if (command === 'status') { const s = readPublicLlmBinding(root); log(s ? `Public LLM profile recorded; key volume ${s.keyVolume ? 'supplied' : 'unavailable'}; not a runtime/credential verification.` : 'No public LLM profile recorded.'); return; }
   safe(!resolve(home, '.local/state/diplom-public-images/llm').startsWith(root + '/'));
   const settings = loadPublicLlmSettings(home); // Approved non-secret config/receipt only.
+  let archivedLock;
   const verifyHeldLock = continuation ? directoryFence(continuation.lockPath) : null;
   const lock = continuation ? { path: continuation.lockPath, verify: verifyHeldLock,
-    release() { verifyHeldLock(); fs.rmdirSync(continuation.lockPath); syncDirectory(join(root, STATE)); } } : acquireLock(root);
+    release() { if (archivedLock) { archivedLock(); return; } verifyHeldLock(); fs.rmdirSync(continuation.lockPath); syncDirectory(join(root, STATE)); } } : acquireLock(root);
   const verifyPublicState = directoryFence(join(root, STATE)); let hold = Boolean(continuation), phase = 'preflight', audit, stage, candidateImages, before, priorImages, profile, priorSelection, jwt, d, options, endpoint, verifySource;
   const records = new Set(), peers = new Map(), peerModels = new Map(), healthy = new Set();
-  let keyVolumeAuthority, stoppedStand = false;
+  let failedHelper = continuation?.initialize?.failed ?? null;
+    let keyVolumeAuthority, stoppedStand = false, staleHelper = continuation?.initialize?.retired ? null : continuation?.initialize ?? null;
+  const outputPrefix = continuation?.apiOnly ? 'api-current' : continuation?.admissionOnly ? 'admit-current' : continuation?.initialize?.failed ? 'init-exit-current' : continuation?.initialize?.retired ? 'rebuild-current' : continuation?.initialize ? 'initialize-current' : 'continued';
+  const recordName = name => continuation?.initialize ? outputPrefix + '-' + name : name;
   const fences = [], candidateFences = [];
-  let verifyStage;
-  const fence = () => { verifyPublicState(); lock.verify(); continuation?.verifyExecution(); settings.verify(); verifySource?.(); audit?.verify(); verifyStage?.(); for (const f of [...fences, ...candidateFences]) f.verify(); };
-  const record = (name, value) => { lock.verify(); continuation?.verifyExecution(); writeExclusive(join(lock.path, name), JSON.stringify(value), 0o600); records.add(name); syncDirectory(lock.path); };
+  let verifyStage, readinessFailure;
+  const fence = () => { verifyPublicState(); lock.verify(); continuation?.verifyExecution(); continuation?.initialize?.verify(); settings.verify(); verifySource?.(); audit?.verify(); verifyStage?.(); for (const f of [...fences, ...candidateFences]) f.verify(); };
+  const record = (name, value) => { lock.verify(); continuation?.verifyExecution(); const target = recordName(name); writeExclusive(join(lock.path, target), JSON.stringify(value), 0o600); records.add(target); syncDirectory(lock.path); };
   const inspect = async (id, name, model, images, selection) => {
     const a = JSON.parse(await d(['container', 'inspect', id])); safe(a.length === 1 && a[0].Id === id);
-    if (continuation?.replacement && name === 'worker' && id === continuation.inventory.containers.find(c => role(c) === 'worker').Id) {
+    if (continuation?.replacement && !continuation.admissionOnly && name === 'worker' && id === continuation.inventory.containers.find(c => role(c) === 'worker').Id) {
       const module = await import('./public-llm-build-continuation.mjs');
       module.validateRetiredPublicLlmWorker(a[0], continuation.pins.services.worker.image, continuation.replacement, model, images);
+    } else if (continuation?.apiReplacement && name === 'api' && id === continuation.inventory.containers.find(c => role(c) === 'api').Id) {
+      continuation.initialize.validateRetiredApi(a[0], continuation.pins.services.api.image, model, images, jwt);
+    } else if (continuation?.webReplacement && name === 'web' && id === continuation.inventory.containers.find(c => role(c) === 'web').Id) {
+      continuation.initialize.validateRetiredWeb(a[0], continuation.pins.services.web.image, model, images);
     } else validatePublicLlmContainer(a[0], name, model.services[name], images[name], model, { secret: jwt, images }, selection);
     const command = [...(a[0].Config.Entrypoint ?? []), ...a[0].Config.Cmd]; safe(a[0].Path === command[0] && equal(a[0].Args, command.slice(1)));
     return a[0];
   };
   const verifyPeers = async () => {
-    fence();
+    fence(); if (failedHelper) await failedHelper.check(d);
+        if (staleHelper) await staleHelper.checkHelper(d);
+        else if (continuation?.initialize?.retired) await continuation.initialize.checkHelper(d);
     for (const [name, previous] of peers) {
       const authority = peerModels.get(name), current = await inspect(previous.Id, name, authority.model, authority.images, authority.selection);
       safe(control(previous) === control(current) && equal(epoch(previous), epoch(current)) && !current.State.Paused && !current.State.Dead && !current.State.Restarting && !current.State.OOMKilled);
@@ -631,7 +688,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
       const allowed = [...peers.values()].filter(c => c.Mounts.some(m => m.Type === 'volume' && m.Name === `${PROJECT}_${key}`));
       for (const all of [true, false]) {
         const ids = (await d(['container', 'ls', ...(all ? ['--all'] : []), '--filter', `volume=${PROJECT}_${key}`, '--format', '{{.ID}}', '--no-trunc'])).trim().split('\n').filter(Boolean);
-        safe(equal(ids.sort(), [...allowed.filter(c => all || c.State.Running).map(c => c.Id), ...(helperId && (all || runningHelper) ? [helperId] : [])].sort()));
+        safe(equal(ids.sort(), [...allowed.filter(c => all || c.State.Running).map(c => c.Id), ...(helperId && (all || runningHelper) ? [helperId] : []), ...(staleHelper && all ? [staleHelper.helper.id] : []), ...(failedHelper && all ? [failedHelper.id] : [])].sort()));
       }
     }
   };
@@ -639,15 +696,17 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
     const rows = (await d(['container', 'ls', '--all', '--no-trunc', '--format', '{{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.project"}}'])).trim().split('\n').filter(Boolean).map(v => v.split('\t'))
       .filter(r => r[1]?.startsWith(PROJECT + '-') || r[2] === PROJECT);
     const expected = [...peers.values()].map(c => [c.Id, c.Name.slice(1), PROJECT]); if (helperRecord) expected.push(helperRecord);
+    if (staleHelper) expected.push([staleHelper.helper.id, `${PROJECT}-llm-${continuation.nonce}-continued-initialize`, PROJECT]);
+    if (failedHelper) expected.push([failedHelper.id, failedHelper.name, PROJECT]);
     safe(equal(rows.sort((a,b)=>a[1].localeCompare(b[1])), expected.sort((a,b)=>a[1].localeCompare(b[1]))));
   };
   const helper = async (suffix, purpose, work = async () => undefined) => {
     fence(); await verifyPeers(); await users(); await census();
-    const image = purpose === 'backup' && (!continuation || suffix === 'fenced') ? priorImages.api : candidateImages.api;
+    const image = purpose === 'backup' && (!continuation || suffix === 'fenced') ? (continuation?.backupImage ?? priorImages.api) : candidateImages.api;
     const imageRows = JSON.parse(await d(['image', 'inspect', image.Id]));
     safe(imageRows.length === 1 && imageRows[0].Id === image.Id && imageRows[0].Os === image.Os && equal(imageRows[0].Config, image.Config));
     validateImage(imageRows[0], 'api'); // Retagging may change RepoTags, never immutable execution defaults.
-    const recordedSuffix = (continuation ? 'continued-' : '') + suffix;
+    const recordedSuffix = (continuation ? outputPrefix + '-' : '') + suffix;
     const name = `${PROJECT}-llm-${audit.nonce}-${recordedSuffix}`;
     const id = (await d(publicLlmHelperArguments(name, image.Id, purpose))).trim(); safe(containerId(id));
     let authority, execution;
@@ -676,14 +735,17 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
   const ops = {
     async preflight() {
       if (continuation) {
-        phase = 'continue-check'; continuation.verify();
+        phase = 'continue-check'; continuation.verify(); continuation.initialize?.checkPrefix();
         profile = continuation.profile; priorSelection = null; jwt = loadSecret(root, true); before = continuation.inventory; priorImages = continuation.images;
-        stage = continuation.stage; options = continuation.options; endpoint = continuation.endpoint;
+        stage = continuation.initialize ? join(lock.path, continuation.apiOnly ? 'api-current' : continuation.admissionOnly ? 'admit-current' : continuation.initialize.failed ? 'init-exit-current' : continuation.initialize.retired ? 'llm-rebuild-candidate' : 'llm-initialize-candidate') : continuation.stage; options = continuation.options; endpoint = continuation.endpoint;
         verifySource = sourceFence(root); fences.push(...continuation.stateFiles, ...continuation.proofs); candidateFences.push(...continuation.candidateFiles);
         const deadline = now() + 20 * 60 * 1000;
-        d = (args, extra = {}) => { fence(); safe((extra.env?.DOCKER_HOST ?? endpoint) === endpoint && now() < deadline); return run(args, { ...options, ...extra, timeout: Math.min(extra.timeout ?? 30000, deadline - now()) }); };
+        d = (args, extra = {}) => { fence(); safe((extra.env?.DOCKER_HOST ?? endpoint) === endpoint && now() < deadline); return run(args, { ...options, ...extra, timeout: publicLlmDockerTimeout(extra.timeout ?? 30000, deadline, now()) }); };
         const model = expectedPublicLlmConfig(root, profile.cve, null);
-        for (const c of before.containers) { peers.set(role(c), c); peerModels.set(role(c), { model, images: priorImages, selection: null }); }
+        for (const c of before.containers) {
+                  const name = role(c), admittedPeer = continuation.admissionOnly && ['worker', 'llm-egress'].includes(name);
+                  peers.set(name, c); peerModels.set(name, admittedPeer ? { model: nextModel(), images: continuation.initialize.candidateImages, selection: settings.selection } : { model, images: priorImages, selection: null });
+                }
         await verifyPeers(); await census(); await users(); return;
       }
       phase = 'preflight-history'; assertReconciliationHistory(root);
@@ -699,7 +761,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
       safe(typeof rawEndpoint === 'string' && /^unix:\/\/\/[^\s\0]+$/.test(rawEndpoint)); endpoint = rawEndpoint;
       const env = { ...baseEnv, DOCKER_HOST: endpoint, COMPOSE_DISABLE_ENV_FILE: '1' }; for (const k of ['DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH']) delete env[k];
       options = { root, env }; const end = now() + 20 * 60 * 1000;
-      d = (args, extra = {}) => { fence(); safe((extra.env?.DOCKER_HOST ?? endpoint) === endpoint && now() < end); return run(args, { ...options, ...extra, timeout: Math.min(extra.timeout ?? 30000, end - now()) }); };
+      d = (args, extra = {}) => { fence(); safe((extra.env?.DOCKER_HOST ?? endpoint) === endpoint && now() < end); return run(args, { ...options, ...extra, timeout: publicLlmDockerTimeout(extra.timeout ?? 30000, end, now()) }); };
       phase = 'preflight-pins'; const priorModel = expectedPublicLlmConfig(root, profile.cve, priorSelection), pins = JSON.parse(readBounded(join(root, STATE, 'compose.images.json'), 16384, 0o600));
       safe(equal(Object.keys(pins), ['services']) && equal(Object.keys(pins.services).sort(), Object.keys(priorModel.services).sort())); priorImages = {};
       for (const name of Object.keys(priorModel.services)) {
@@ -736,16 +798,26 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
     },
     async intent() {
       if (continuation) {
-        continuation.verify(); // Recheck the complete execution closure before the exclusive mutation claim.
-        phase = 'continue-intent'; record('continue.json', { version: 1, command: 'continue-current-build', audit: continuation.auditName, review: continuation.review,
-          sourceReview: 'explicit-current-source-not-historical', retireOnlyWorker: Boolean(continuation.replacement) });
+        continuation.verify(); continuation.initialize?.checkPrefix(); // Final exclusive-prefix and execution-closure fence.
+        phase = 'continue-intent'; record('continue.json', { version: 1, command, audit: continuation.auditName, review: continuation.review,
+          sourceReview: 'explicit-current-source-not-historical', retireOnlyWorker: Boolean(continuation.replacement),
+          ...(continuation.initialize ? { retireOnlyApi: Boolean(continuation.apiReplacement), retireOnlyWeb: Boolean(continuation.webReplacement), backupHelperBasis: continuation.summary.backupHelperBasis } : {}) });
         record('continuation-checkpoint.json', continuation.reviewEvidence);
         const parentVerify = directoryFence(dirname(continuation.auditPath)), auditVerify = directoryFence(continuation.auditPath);
         audit = { path: continuation.auditPath, nonce: continuation.nonce, verify() { parentVerify(); auditVerify(); } };
-        fs.mkdirSync(join(audit.path, 'continued'), { mode: 0o700 });
-        writeExclusive(join(audit.path, 'continued/review.json'), JSON.stringify(continuation.reviewEvidence), 0o600);
-        syncDirectory(join(audit.path, 'continued')); syncDirectory(audit.path); verifyStage = directoryFence(stage);
-        snapshot = createPublicLlmPreservation({ DB: Database ?? requireApi('better-sqlite3'), root, lock, audit: audit.path, helper, continued: true,
+        fs.mkdirSync(join(audit.path, outputPrefix), { mode: 0o700 });
+        writeExclusive(join(audit.path, outputPrefix, 'review.json'), JSON.stringify(continuation.reviewEvidence), 0o600);
+        syncDirectory(join(audit.path, outputPrefix)); syncDirectory(audit.path);
+        if (continuation.initialize) {
+          fs.mkdirSync(stage, { mode: 0o700 }); syncDirectory(lock.path);
+          for (const name of ['compose.cve.json', 'compose.llm-env.json']) {
+            writeExclusive(join(stage, name), readBounded(join(continuation.stage, name), 16384, 0o600), 0o600);
+            candidateFences.push(fileFence(join(stage, name)));
+          }
+          syncDirectory(stage);
+        }
+        verifyStage = directoryFence(stage);
+        snapshot = createPublicLlmPreservation({ DB: Database ?? requireApi('better-sqlite3'), root, lock, audit: audit.path, helper, continued: !continuation.initialize, initializedCurrent: Boolean(continuation.initialize && !continuation.initialize.retired), rebuiltCurrent: Boolean(continuation.initialize?.retired && !continuation.initialize.failed && !continuation.admissionOnly), initExitCurrent: Boolean(continuation.initialize?.failed), admitCurrent: Boolean(continuation.admissionOnly && !continuation.apiOnly), apiCurrent: Boolean(continuation.apiOnly),
           verifyState: async () => { await verifyPeers(); await users(); await census(); } });
         return;
       }
@@ -780,6 +852,34 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
     },
     async snapshot(part) { phase = 'backup-' + part; const value = await snapshot(part); if (part === 'fenced') { if (priorSelection) safe(value.llm !== null); fencedBaseline = value; } return value; },
     async candidate() {
+      if (continuation?.admissionOnly) {
+        phase = 'admit-current-pins'; continuation.initialize.verifyImageSource(); candidateImages = continuation.initialize.candidateImages;
+        for (const [name, im] of Object.entries(candidateImages)) { const rows = JSON.parse(await d(['image', 'inspect', im.Id])); safe(rows.length === 1 && rows[0].Id === im.Id && equal(rows[0].Config, im.Config)); validatePublicLlmImage(rows[0], name); }
+        writeExclusive(join(stage, 'compose.images.json'), JSON.stringify(continuation.initialize.currentPins), 0o600); syncDirectory(stage); candidateFences.push(fileFence(join(stage, 'compose.images.json')));
+        validatePublicLlmConfig(JSON.parse(await d(stageArgs(['config', '--format', 'json']), { env: { ...options.env, SCAN_JWT_SECRET: CONFIG_SECRET } })), root, profile.cve, settings.selection, candidateImages); return;
+      }
+      if (failedHelper) {
+        phase = 'retire-exited-initializer'; await verifyPeers(); await users(); await census();
+        safe(fencedBaseline.llm === null); await failedHelper.confirmFailure(); await failedHelper.check(d);
+        record('retired-failed-initializer.json', failedHelper.evidence);
+        await d(['container', 'rm', failedHelper.id]); // Exact exited helper only; never restart/force/stop.
+        failedHelper = null; await census(); await users();
+        phase = 'reuse-current-pins'; continuation.initialize.verifyImageSource(); candidateImages = continuation.initialize.candidateImages;
+        for (const [name, im] of Object.entries(candidateImages)) {
+          const rows = JSON.parse(await d(['image', 'inspect', im.Id])); safe(rows.length === 1 && rows[0].Id === im.Id && equal(rows[0].Config, im.Config)); validatePublicLlmImage(rows[0], name);
+        }
+        writeExclusive(join(stage, 'compose.images.json'), JSON.stringify(continuation.initialize.currentPins), 0o600); syncDirectory(stage); candidateFences.push(fileFence(join(stage, 'compose.images.json')));
+        validatePublicLlmConfig(JSON.parse(await d(stageArgs(['config', '--format', 'json']), { env: { ...options.env, SCAN_JWT_SECRET: CONFIG_SECRET } })), root, profile.cve, settings.selection, candidateImages);
+        fence(); return;
+      }
+      if (staleHelper) {
+        // Reached only AFTER the new network-none snapshot equals both held backups.
+        phase = 'retire-created-initializer'; await verifyPeers(); await users(); await census();
+        await staleHelper.checkHelper(d);
+        record('retired-initializer.json', staleHelper.evidence);
+        await d(['container', 'rm', staleHelper.helper.id]); // No force, stop, start or exec.
+        staleHelper = null; await census(); await users();
+      }
       phase = 'build-source'; await verifyPeers(); await users();
       const qualified = await checkSource(root); safe(qualified?.typescript === true && qualified?.bundle === true);
       phase = 'build-config'; const rendered = JSON.parse(await d(publicLlmComposeArguments(root, ['config', '--format', 'json'], { cve: Boolean(profile.cve), directory: stage, pinned: false }), { env: { ...options.env, SCAN_JWT_SECRET: CONFIG_SECRET } }));
@@ -790,6 +890,9 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
           sourceBasis: continuation ? 'explicit-reviewed-current' : 'validated-before-build', baseline: fencedBaseline,
           imageMetadata: Object.fromEntries(Object.entries(priorImages).map(([n, im]) => [n, { Id: im.Id, Os: im.Os, Config: im.Config }])),
           retirementPolicy: continuation?.replacement ? { workerId: continuation.pins.services.worker.image, replacementId: continuation.replacement.Id, executeOriginal: false } : null,
+          ...(continuation?.initialize ? { backupHelperBasis: 'validated-stale-candidate-api', backupImageId: continuation.backupImage.Id,
+            apiRetirementPolicy: continuation.apiReplacement ? { apiId: continuation.pins.services.api.image, validationImageId: continuation.apiReplacement.Id, executeOriginal: false } : null,
+            webRetirementPolicy: continuation.webReplacement ? { originalId: continuation.pins.services.web.image, validationImageId: continuation.webReplacement.Id, metadataUnavailable: true, executeOriginal: false } : null } : {}),
           peers: [...peers].map(([name, c]) => ({ name, id: c.Id, image: c.Image, control: control(c), epoch: epoch(c) })),
           publicProfile: profile, pins: JSON.parse(readBounded(join(root, STATE, 'compose.images.json'), 16384, 0o600)),
           jwtIdentity: { dev: String(jwtStat.dev), ino: String(jwtStat.ino), mode: jwtStat.mode, uid: jwtStat.uid, size: jwtStat.size, mtime: jwtStat.mtimeMs, ctime: jwtStat.ctimeMs } });
@@ -850,9 +953,14 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
         if (name === 'worker' || name === 'api' && current.State.Health?.Status === 'healthy') {
           const reportProbe = profile.cve ? PUBLIC_READY_PROBE : "import {chainReady} from './src/scans/scan-readiness.ts';if(!await chainReady())throw Error('not-ready');console.log('{\"ready\":true}');";
           const code = (name === 'api' ? PUBLIC_LLM_GATEWAY_PROBE : '') + reportProbe;
-          try { const r = JSON.parse(await d(['container', 'exec', current.Id, 'node', ...['--import', 'tsx', '--input-type=module'], '-e', code], { timeout: Math.max(1, Math.min(120000, deadline - now())) }));
+          let origin = 'docker-dispatch';
+          try {
+            const text = await d(['container', 'exec', current.Id, 'node', ...['--import', 'tsx', '--input-type=module'], '-e', code], { timeout: publicLlmDockerTimeout(120000, deadline, now()) });
+            origin = 'receipt-json'; const r = JSON.parse(text);
             if (r.ready === true && (!profile.cve || r.manifest === profile.cve.manifestDigest && r.bundle === profile.cve.artifactSha256)) { if (name === 'api') healthy.add(name); return; }
-          } catch { /* Only bounded, same-epoch readiness polling; never generation retry. */ }
+            readinessFailure = { category: 'readiness-receipt', origin: 'receipt-compare', frames: [] };
+          } catch (error) { readinessFailure = finiteFailure(error, origin); safe(!continuation?.admissionOnly); }
+          safe(!continuation?.admissionOnly); // One same-epoch admission attempt; never hide its finite cause.
         }
         if (name === 'web') {
           for (const path of ['/api/v1/auth/me', '/api/v1/browser/scans/00000000-0000-0000-0000-000000000000/llm/readiness',
@@ -892,7 +1000,17 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
       for (const v of before.volumes.filter(v => v.Name.startsWith(PROJECT + '_'))) safe(after.volumes.some(n => equal(n, v)));
       for (const n of before.networks) { const current = after.networks.find(x => x.Name === n.Name); safe(current && current.Id === n.Id && equal({ ...current, Containers: {} }, { ...n, Containers: {} })); }
       phase = 'postflight-receipt';
-      if (records.has('build-checkpoint.json')) writeExclusive(join(audit.path, continuation ? 'continued/build-checkpoint.json' : 'build-checkpoint.json'), readBounded(join(lock.path, 'build-checkpoint.json'), 16 * 1024 ** 2, 0o600), 0o600);
+      if (records.has(recordName('build-checkpoint.json'))) writeExclusive(join(audit.path, continuation ? outputPrefix + '/build-checkpoint.json' : 'build-checkpoint.json'), readBounded(join(lock.path, recordName('build-checkpoint.json')), 16 * 1024 ** 2, 0o600), 0o600);
+      if (continuation?.initialize) {
+        // Preserve the ENTIRE original lock, stale stage, receipts and new intent;
+        // never overwrite/unlink the failed continuation's evidence on success.
+        fence(); const destination = join(audit.path, outputPrefix, 'operation-evidence');
+        safe(!has(destination));
+        writeExclusive(join(audit.path, 'complete.json'), JSON.stringify({ version: 1, project: PROJECT, preserved: true }), 0o600); syncDirectory(audit.path);
+        fs.renameSync(lock.path, destination); archivedLock = directoryFence(destination);
+        syncDirectory(dirname(destination)); syncDirectory(join(root, STATE));
+        hold = false; return;
+      }
       if (continuation) {
         const archive = join(audit.path, 'continued/original-operation'); fs.mkdirSync(archive, { mode: 0o700 });
         for (const f of [...continuation.originalFiles, ...continuation.candidateFiles]) { f.verify(); writeExclusive(join(archive, f.path.split('/').at(-1)), f.bytes, 0o600); }
@@ -906,10 +1024,15 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
     },
   };
   try {
-    const result = await executePublicLlmMaintenance(ops, continuation?.baseline ?? null);
+    const result = await executePublicLlmMaintenance(ops, continuation?.baseline ?? null, continuation?.admissionOnly ? continuation : null);
     log(`Public LLM local deployment READY; key ${settings.selection.keyVolume ? 'supplied, generation unverified' : 'unavailable (operator setup required)'}; accounts/reports/JWT/history/quota preserved.`);
     return result;
-  } catch {
+  } catch (error) {
+    if (continuation?.admissionOnly && records.has(recordName('continue.json'))) {
+      try {
+        record('failure.json', { version: 1, phase, ...finiteFailure(error, 'maintenance'), ...(readinessFailure ? { readiness: readinessFailure } : {}) });
+      } catch { /* Preserve HOLD even when a failed source fence prevents diagnostics. */ }
+    }
     if (typeof onDiagnostic === 'function') {
       // Only a finite internal reason, never an Error/stack/command/config value.
       const diagnostic = PUBLIC_LLM_PREFLIGHT_DIAGNOSTICS[phase];
@@ -921,6 +1044,7 @@ export async function publicLlmStand(argv, { root = ROOT, home = homedir(), run 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   publicLlmStand(process.argv.slice(2)).catch(error => {
     const safeMessage = /^PUBLIC LLM maintenance (?:HOLD|refused); phase=[a-z-]+; details withheld\. No automatic retry, cleanup, rollback or secret rotation\.$/.test(error?.message ?? '');
-    console.error(safeMessage ? error.message : 'PUBLIC LLM integration refused/HOLD; details withheld. Review the shared public operation lock; never delete uncertainty evidence automatically.'); process.exitCode = 1;
+    if (error?.reason === 'REBUILD_PRIOR_BUILD_FAILURE_REJECTED') { console.error('PUBLIC LLM rebuild refused; phase=prior-build-failure; existing failure receipt preserved; no retry permitted.'); process.exitCode = 1; }
+    else console.error(safeMessage ? error.message : 'PUBLIC LLM integration refused/HOLD; details withheld. Review the shared public operation lock; never delete uncertainty evidence automatically.'); process.exitCode = 1;
   });
 }

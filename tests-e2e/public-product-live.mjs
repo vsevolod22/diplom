@@ -1,6 +1,8 @@
 // Native acceptance only. No stand lifecycle, fixture server, mock response or saved credentials.
 // LIVE (only after coordinator GO; key activation must stay fenced throughout this run):
 // node tests-e2e/public-product-live.mjs --run --ack-coordinator-go --ack-no-key-activation
+// ONE-SCAN SMOKE (same GO fence, no LLM mutations):
+// node tests-e2e/public-product-live.mjs --run --smoke-only --ack-coordinator-go --ack-no-key-activation
 // OFFLINE: node tests-e2e/public-product-live.mjs --self-test
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -19,6 +21,7 @@ export const TARGETS = Object.freeze([
 export const SCANS = '/api/v1/browser/scans';
 export const WORKER_MS = 660_000;
 export const GLOBAL_MS = 2_520_000; // 42 min: two full attempts, one cancel attempt, bounded UI/HTTP.
+export const SMOKE_MS = 900_000; // One full native attempt plus bounded browser/report checks.
 // The browser proxy is a second fence for redirects, which Playwright routing does not
 // reliably intercept on every hop. No other loopback port is implicitly bypassed.
 export const BROWSER_ARGS = Object.freeze(['--disable-background-networking', '--disable-component-update', '--disable-default-apps', '--no-first-run',
@@ -33,13 +36,31 @@ const OUTCOMES = new Set(['checked', 'failed', 'unsupported', 'skipped', 'not_au
 const BLOCKERS = new Set(['configuration-required', 'public-key-required', 'public-key-unsafe', 'quota-store-unavailable', 'history-store-unavailable', 'provider-profile-unavailable']);
 const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'STAND_OR_BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED', 'PREREQUISITE_UNAVAILABLE', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED', 'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NO_SECOND_PAGE', 'SSE_NOT_OBSERVED', 'CANCEL_RACE', 'NO_COMPLETED_SUBSET_OBSERVED', 'SUBSET_CAPTURE_CHANGED', 'UNSAFE_DEBUG_ENVIRONMENT', 'KEY_ABSENT', 'KEY_NOT_ABSENT_NO_POST', 'LLM_STORES_OR_CONTEXT_UNAVAILABLE', 'NO_EVIDENCE', 'CONTEXT_LIMIT', 'GENERATION_NOT_AUTHORIZED', 'QUOTA_WINDOW_CHANGED', 'QUOTA_UNAVAILABLE', 'INCOMPLETE_PAGINATION_COVERAGE']);
 const CASES = ['tooling', 'registration', ...TARGETS.flatMap(t => ['scan', 'report', 'pagination', 'filters', 'events', 'reload'].map(s => `${t.name}.${s}`)), 'scan_history', 'foreign_registration', 'ownership', 'anonymous', 'ownership_mutations', 'anonymous_mutations', 'llm_readiness', 'llm_no_consent', 'llm_missing_key', 'llm_manual_history', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'cancel', 'cancel_preservation', 'cancel_history', 'cancel_fresh_login', 'safety'];
+const SMOKE_CASES = ['tooling', 'registration', 'node.scan', 'node.report', 'node.filters', 'node.reload', 'scan_history', 'llm_readiness', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'safety'];
 const EVIDENCE = ['public-product-browser-20261021.json', 'public-product-browser-20261021.md'].map(name => join(ROOT, 'docs', name));
+const SMOKE_EVIDENCE_ROOT = 'docs/public8081launch-20261022.attempt2';
+const SMOKE_EVIDENCE = ['json', 'md'].map(extension => join(ROOT, `${SMOKE_EVIDENCE_ROOT}.${extension}`));
+export function nativePlan(mode = 'native') {
+  assert.ok(['native', 'smoke'].includes(mode));
+  const smokeOnly = mode === 'smoke';
+  return Object.freeze({ mode, smokeOnly, targets: Object.freeze(smokeOnly ? [TARGETS[0]] : [...TARGETS]),
+    maxScans: smokeOnly ? 1 : 3, globalMs: smokeOnly ? SMOKE_MS : GLOBAL_MS,
+    evidenceRoot: smokeOnly ? SMOKE_EVIDENCE_ROOT : 'docs/public-product-browser-20261021',
+    cases: Object.freeze([...(smokeOnly ? SMOKE_CASES : CASES)]), evidencePaths: Object.freeze([...(smokeOnly ? SMOKE_EVIDENCE : EVIDENCE)]) });
+}
+export function scanLaunchAllowed(plan, target, launches) {
+  return plan.targets.includes(target) && Number.isSafeInteger(launches) && launches >= 0 && launches < plan.maxScans;
+}
+export function smokeMutationAllowed(path) {
+  return ['/api/v1/auth/register', '/api/v1/auth/login', SCANS, `${SCANS}/images/eligibility`].includes(path);
+}
 const QUESTION = 'Какие ограничения покрытия этого отчёта нужно учесть при ручной проверке?';
 const DECISION = 'Проверить приоритеты находок вручную; это решение пользователя, не вывод сканера.';
 
 export function parseMode(args) {
   if (isDeepStrictEqual(args, ['--self-test'])) return 'offline';
   if (isDeepStrictEqual(args, ['--run', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'native';
+  if (isDeepStrictEqual(args, ['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'smoke';
   if (!args.length) return 'not-run';
   throw new Error('INVALID_ARGUMENTS');
 }
@@ -100,6 +121,13 @@ export function safeMutationRequest(url, headers = {}) {
   const values = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
   return !('authorization' in values) && !('proxy-authorization' in values) && !('x-api-key' in values) &&
     values.origin === ORIGIN && /^application\/json(?:;|$)/i.test(values['content-type'] ?? '');
+}
+export function assertAuthUser(value, email, subject) {
+  assert.ok(exact(value, ['id', 'email']));
+  assert.ok(typeof value.id === 'string' && /^[a-f0-9]{32}$/.test(value.id));
+  assert.equal(value.email, email);
+  if (subject !== undefined) assert.equal(value.id, subject);
+  return value.id;
 }
 export function assertDeniedReply(response, expected) {
   assert.equal(response.status, expected);
@@ -176,13 +204,20 @@ export async function readAllPages(kind, expected, read) {
   throw new Error('ASSERTION_FAILED'); // Exhaustion is never silently accepted as EOF.
 }
 
-// This is a projection, not a blacklist/redactor. No strings from HTTP/errors/DOM are emitted.
+// Error text/stack never leaves the runner; retain only a bounded first-party line number.
+export function failureMeta(error) {
+  const match = typeof error?.stack === 'string' ? error.stack.match(/public-product-live\.mjs:([0-9]+):[0-9]+/) : null;
+  return match ? safeMeta({ runnerLine: Number(match[1]) }) : {};
+}
+// Closed projection: no free-form strings from HTTP/errors/DOM are emitted.
 export function safeMeta(input = {}) {
   const out = {};
   if (UUID.test(input.scanId)) out.scanId = input.scanId;
+  if (DIGEST.test(input.digest)) out.digest = input.digest;
+  if (input.platform === 'linux/amd64') out.platform = input.platform;
   if (['queued', 'running', ...TERMINAL].includes(input.state)) out.state = input.state;
   if (Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) out.httpStatus = input.httpStatus;
-  for (const key of ['pages', 'checkedSets', 'observedEvents', 'scanLaunches', 'accountsCreated', 'pageErrors', 'blockedRequests', 'ignoredEligibility']) if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 100000) out[key] = input[key];
+  for (const key of ['pages', 'checkedSets', 'observedEvents', 'scanLaunches', 'accountsCreated', 'pageErrors', 'blockedRequests', 'ignoredEligibility', 'runnerLine']) if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 100000) out[key] = input[key];
   for (const key of ['allChecksChecked', 'noGenerationPosts', 'historyUnchanged', 'quotaUnchanged', 'browserClosed', 'nativeScanMayRemainActive']) if (typeof input[key] === 'boolean') out[key] = input[key];
   if (['unconfigured', 'missing', 'unsafe', 'metadata-valid'].includes(input.credential)) out.credential = input.credential;
   if (Array.isArray(input.blockers)) out.blockers = [...new Set(input.blockers.filter(x => BLOCKERS.has(x)))];
@@ -198,14 +233,14 @@ export function safeMeta(input = {}) {
   return out;
 }
 export class ResultBook {
-  constructor() { this.runId = randomUUID(); this.startedAt = new Date().toISOString(); this.finishedAt = null; this.cases = Object.fromEntries(CASES.map(id => [id, { status: 'BLOCKED', code: 'NOT_RUN', failure: false }])); }
+  constructor(mode = 'native') { this.plan = nativePlan(mode); this.runId = randomUUID(); this.startedAt = new Date().toISOString(); this.finishedAt = null; this.cases = Object.fromEntries(this.plan.cases.map(id => [id, { status: 'BLOCKED', code: 'NOT_RUN', failure: false }])); }
   record(id, status, code, meta = {}, failure = code === 'ASSERTION_FAILED') {
-    assert.ok(CASES.includes(id) && ['PASS', 'BLOCKED', 'INCONCLUSIVE'].includes(status) && CODES.has(code));
+    assert.ok(this.plan.cases.includes(id) && ['PASS', 'BLOCKED', 'INCONCLUSIVE'].includes(status) && CODES.has(code));
     if (this.cases[id].failure && !failure) return; // A later successful probe must not hide an earlier violation.
     this.cases[id] = { status, code, failure: !!failure, ...safeMeta(meta) };
   }
   evidence() {
-    return { schema: 1, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: 'negative-boundary-only',
+    return { schema: 1, mode: this.plan.mode, evidenceRoot: this.plan.evidenceRoot, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: this.plan.smokeOnly ? 'native-public8081-one-scan-smoke' : 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: this.plan.smokeOnly ? 'readiness-only-no-llm-posts' : 'negative-boundary-only',
       providerDispatchIndependentlyObserved: false, credentialPersistence: false, screenshots: false, har: false, trace: false,
       lifecycleOperations: 0, syntheticResponses: false, cases: structuredClone(this.cases) };
   }
@@ -220,17 +255,18 @@ async function bounded(promise, ms) {
   try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Fault('GLOBAL_DEADLINE')), ms); })]); }
   finally { clearTimeout(timer); }
 }
-async function absentEvidence() {
-  for (const path of EVIDENCE) {
+async function absentEvidence(plan) {
+  for (const path of plan.evidencePaths) {
     try { await lstat(path); } catch (e) { if (e.code === 'ENOENT') continue; throw new Fault('EVIDENCE_WRITE_FAILED'); }
     throw new Fault('EVIDENCE_ALREADY_EXISTS');
   }
 }
 export function evidenceDocuments(evidence) {
-  const markdown = ['# Public product browser qualification — 2026-10-21', '', `Origin: ${ORIGIN}`, '',
+  const smokeOnly = evidence.mode === 'smoke';
+  const markdown = [smokeOnly ? '# Public 8081 one-scan browser smoke — 2026-10-22' : '# Public product browser qualification — 2026-10-21', '', `Origin: ${ORIGIN}`, `Evidence root: ${evidence.evidenceRoot}`, '',
     `Run: ${evidence.runId}. Provisional summary only: require the matching complete JSON and a successful evidence write; this Markdown alone is not acceptance.`,
         'Native generation is NOT qualified. No key is sought or persisted. Provider dispatch is not independently observed.',
-    'Accounts/scans/decisions are retained in the public stand; credentials exist only in runner/browser memory.',
+    smokeOnly ? 'One account and at most one scan are retained; no LLM POST or manual decision is authorized. Credentials exist only in runner/browser memory.' : 'Accounts/scans/decisions are retained in the public stand; credentials exist only in runner/browser memory.',
     'PASS is per assertion; BLOCKED is not success; cancel races and unavailable pagination/subset observations are INCONCLUSIVE.', '',
     '| Case | Result | Code |', '| --- | --- | --- |', ...Object.entries(evidence.cases).map(([id, item]) => `| ${id} | ${item.status} | ${item.code} |`), ''].join('\n');
   return [JSON.stringify(evidence, null, 2) + '\n', markdown];
@@ -240,7 +276,7 @@ export async function writeEvidence(evidence, openFile = open) {
   try {
     // Acquire both exclusive destinations before writing anything. A second-path
     // collision must not leave a valid-looking JSON receipt from a failed run.
-    for (const path of EVIDENCE) files.push(await openFile(path, 'wx', 0o600));
+    for (const path of nativePlan(evidence.mode ?? 'native').evidencePaths) files.push(await openFile(path, 'wx', 0o600));
     for (const index of [1, 0]) { await files[index].writeFile(documents[index]); await files[index].sync(); }
   } finally { await Promise.all(files.map(file => file.close())); }
 }
@@ -260,20 +296,21 @@ export async function loadContracts() {
   return { decoder, view, metadata, chat };
 }
 
-async function runNative() {
-  await absentEvidence(); // Refuse before registration/browser launch; never replace earlier evidence.
+async function runNative(mode = 'native') {
+  const plan = nativePlan(mode);
+  await absentEvidence(plan); // Refuse before registration/browser launch; never replace earlier evidence.
   if (['DEBUG', 'PWDEBUG', 'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'PLAYWRIGHT_TRACE_DIR', 'PLAYWRIGHT_BROWSERS_PATH'].some(key => process.env[key])) throw new Fault('UNSAFE_DEBUG_ENVIRONMENT');
   process.env.TSX_DISABLE_CACHE = '1'; // Transpile in memory, not into a new disk cache.
-  const book = new ResultBook();
+  const book = new ResultBook(mode);
   book.record('llm_generation', 'BLOCKED', 'GENERATION_NOT_AUTHORIZED');
-  const contexts = [], scans = new Map();
+  const contexts = [], contextStates = new Map(), scans = new Map();
   const stats = { scanLaunches: 0, accountsCreated: 0, pageErrors: 0, blockedRequests: 0, ignoredEligibility: 0 };
   const owner = { email: `public-product-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
   const foreign = { email: `public-product-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
   let browser, stopped = false, browserClosed = false, activeLaunch = null, pendingCreation = Promise.resolve();
   let currentCase = 'tooling', fatalCode = null, interrupt;
   const interrupted = new Promise((_, reject) => { interrupt = code => { fatalCode = code; reject(new Fault(code)); }; });
-  const globalTimer = setTimeout(() => interrupt('GLOBAL_DEADLINE'), GLOBAL_MS);
+  const globalTimer = setTimeout(() => interrupt('GLOBAL_DEADLINE'), plan.globalMs);
   const signal = () => interrupt('INTERRUPTED');
   process.once('SIGINT', signal); process.once('SIGTERM', signal); process.once('SIGHUP', signal);
   const ensureLive = () => { if (stopped || fatalCode) throw new Fault(fatalCode ?? 'INTERRUPTED'); };
@@ -285,7 +322,7 @@ async function runNative() {
       book.record(id, result?.status ?? 'PASS', result?.code ?? 'VERIFIED', result?.meta ?? {});
       return result?.value;
     } catch (e) {
-      book.record(id, 'BLOCKED', e instanceof Fault ? e.message : 'ASSERTION_FAILED', {}, e instanceof Fault ? e.failure : true);
+      book.record(id, 'BLOCKED', e instanceof Fault ? e.message : 'ASSERTION_FAILED', failureMeta(e), e instanceof Fault ? e.failure : true);
       if (fatalCode || stats.blockedRequests) throw e;
       return undefined;
     }
@@ -335,6 +372,7 @@ async function runNative() {
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, reducedMotion: 'reduce', serviceWorkers: 'block', acceptDownloads: false });
     contexts.push(context);
     const state = { context, permit: null, generationPosts: 0, fence: new EligibilityFence(), eligibilityPending: Promise.resolve(), target: null };
+    contextStates.set(context, state);
     await context.route('**/*', async route => {
       try {
         const request = route.request(), u = new URL(request.url()), method = request.method();
@@ -348,6 +386,7 @@ async function runNative() {
         if (method !== 'POST') return deny();
         const headers = await request.allHeaders();
         if (stopped || fatalCode || !safeMutationRequest(request.url(), headers)) return deny();
+        if (plan.smokeOnly && !smokeMutationAllowed(u.pathname)) return deny();
         let body; try { body = request.postDataJSON(); } catch { return deny(); }
         if (method === 'POST' && u.pathname === `${SCANS}/images/eligibility`) {
           const target = state.target;
@@ -362,12 +401,12 @@ async function runNative() {
           await state.eligibilityPending;
           return;
         }
-        if (method === 'POST' && u.pathname === SCANS && activeLaunch?.state === state && activeLaunch.armed && validIntent(body, activeLaunch.target) && stats.scanLaunches < 3) {
+        if (method === 'POST' && u.pathname === SCANS && activeLaunch?.state === state && activeLaunch.armed && validIntent(body, activeLaunch.target) && scanLaunchAllowed(plan, activeLaunch.target, stats.scanLaunches)) {
           const launch = activeLaunch;
           // The UI can receive an eligibility response before our response.json()
           // finishes. Await that genuine check, then recheck cancellation/authority.
           const ready = await awaitEligibility(state.fence, launch.sequence, state.eligibilityPending,
-            () => !stopped && !fatalCode && activeLaunch === launch && launch.armed && stats.scanLaunches < 3);
+            () => !stopped && !fatalCode && activeLaunch === launch && launch.armed && scanLaunchAllowed(plan, launch.target, stats.scanLaunches));
           if (!ready) return deny();
           launch.armed = false; stats.scanLaunches++;
           pendingCreation = (async () => {
@@ -404,9 +443,8 @@ async function runNative() {
     await page.getByRole('button', { name: action === 'register' ? 'Создать аккаунт' : 'Войти', exact: true }).click();
     assert.equal((await pending)?.status(), action === 'register' ? 201 : 200);
     if (action === 'register') stats.accountsCreated++;
-    const me = await http(page, '/api/v1/auth/me'); assert.equal(me.status, 200); assert.equal(me.value.email, account.email);
-    assert.ok(UUID.test(me.value.id));
-    if (account.subject) assert.equal(me.value.id, account.subject); else account.subject = me.value.id;
+    const me = await http(page, '/api/v1/auth/me'); assert.equal(me.status, 200);
+    account.subject = assertAuthUser(me.value, account.email, account.subject);
     const session = (await handle.context.cookies(ORIGIN)).find(item => item.name === 'demo_session');
     assert.ok(session?.httpOnly && session.sameSite === 'Lax');
   };
@@ -455,7 +493,7 @@ async function runNative() {
     }
     return value;
   };
-  const statusMeta = snapshot => ({ scanId: snapshot.scanId, state: snapshot.state,
+  const statusMeta = snapshot => ({ scanId: snapshot.scanId, state: snapshot.state, digest: snapshot.digest, platform: snapshot.platform,
     checks: Object.fromEntries(CHECKS.map(key => [key, snapshot.perCheck?.[key]?.outcome ?? null])),
     counts: { ...Object.fromEntries(CHECKS.map(key => [key, snapshot.perCheck?.[key]?.outcome === 'checked' ? count(key === 'sbom' ? snapshot.perCheck[key].componentCount : snapshot.perCheck[key].findingCount) : null])), ...(snapshot.identifierCounts ? { cve: count(snapshot.identifierCounts.cve), debianTemp: count(snapshot.identifierCounts.debianTemp) } : {}) } });
   const terminalStatus = async (page, id) => {
@@ -627,7 +665,7 @@ async function runNative() {
       let own = await newPage();
       if (!await step('registration', async () => { await auth(own, owner, 'register'); return ok(true); })) return;
       const completed = [];
-      for (const target of TARGETS) {
+      for (const target of plan.targets) {
         const snapshot = await step(`${target.name}.scan`, async () => {
           const id = await launch(own, target), value = await terminalStatus(own.page, id);
           const all = value.state === 'completed' && CHECKS.every(key => value.perCheck?.[key]?.outcome === 'checked');
@@ -640,25 +678,28 @@ async function runNative() {
           return { value, status: Object.keys(value).length === 3 && snapshot.perCheck.config?.outcome === 'checked' ? 'PASS' : 'BLOCKED', code: Object.keys(value).length === 3 && snapshot.perCheck.config?.outcome === 'checked' ? 'VERIFIED' : 'REQUIRED_CHECK_NOT_CHECKED', meta: { ...statusMeta(snapshot), pages: Object.values(value).reduce((sum, item) => sum + item.pages, 0) } };
         });
         if (reports) {
-          await step(`${target.name}.pagination`, () => pagination(own.page, snapshot, reports));
+          if (!plan.smokeOnly) await step(`${target.name}.pagination`, () => pagination(own.page, snapshot, reports));
           await step(`${target.name}.filters`, () => filters(own.page, snapshot, reports));
           await step(`${target.name}.reload`, async () => {
             await own.page.reload(); assert.deepEqual(await status(own.page, snapshot.scanId), snapshot);
             assert.deepEqual(await verifyReport(own.page, snapshot), reports); return ok();
           });
         }
-        await step(`${target.name}.events`, async () => {
+        if (!plan.smokeOnly) await step(`${target.name}.events`, async () => {
           const response = await http(own.page, `${SCANS}/${snapshot.scanId}/events`, undefined, true); assert.equal(response.status, 200);
           return { status: response.hint ? 'PASS' : 'INCONCLUSIVE', code: response.hint ? 'VERIFIED' : 'SSE_NOT_OBSERVED', meta: { observedEvents: response.hint ? 1 : 0 } };
         });
       }
       if (!completed.length) return;
       await step('scan_history', () => history(own.page, completed));
-      const other = await newPage();
-      const foreignRegistered = await step('foreign_registration', async () => { await auth(other, foreign, 'register'); return ok(true); });
-      if (foreignRegistered) await step('ownership', () => deny(other, completed[0].scanId, 404));
-      const anonymous = await newPage(); await anonymous.page.goto(`${ORIGIN}/login`);
-      await step('anonymous', () => deny(anonymous, completed[0].scanId, 401));
+      let other, foreignRegistered, anonymous;
+      if (!plan.smokeOnly) {
+        other = await newPage();
+        foreignRegistered = await step('foreign_registration', async () => { await auth(other, foreign, 'register'); return ok(true); });
+        if (foreignRegistered) await step('ownership', () => deny(other, completed[0].scanId, 404));
+        anonymous = await newPage(); await anonymous.page.goto(`${ORIGIN}/login`);
+        await step('anonymous', () => deny(anonymous, completed[0].scanId, 401));
+      }
       const report = completed.find(s => CHECKS.some(key => key !== 'sbom' && s.perCheck?.[key]?.outcome === 'checked' && s.perCheck[key].findingCount > 0)) ?? completed[0];
       const llmPath = `${SCANS}/${report.scanId}/llm`;
       const openChat = async page => {
@@ -674,6 +715,16 @@ async function runNative() {
         assert.equal(context.scanId, report.scanId); assert.equal(context.digest, report.digest); assert.equal(context.platform, report.platform);
         assert.equal(saved.scanId, context.scanId); assert.equal(saved.epoch, context.epoch); assert.equal(saved.revision, context.revision);
         return { context, saved };
+      };
+      // Shared fresh-login proof; neither mode injects cookies or inherits storage.
+      const freshLogin = async () => {
+        await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
+        return step('fresh_login', async () => {
+          assert.equal((await http(own.page, `${SCANS}/${completed[0].scanId}`)).status, 401);
+          await auth(own, owner, 'login'); await history(own.page, completed);
+          for (const snapshot of completed) { await own.page.goto(`${ORIGIN}/scans/${snapshot.scanId}`); assert.deepEqual(await status(own.page, snapshot.scanId), snapshot); await verifyReport(own.page, snapshot); }
+          return ok(true, { checkedSets: completed.length });
+        });
       };
       let panel, ready, head, savedHistory;
       await own.page.goto(`${ORIGIN}/scans/${report.scanId}`);
@@ -697,6 +748,32 @@ async function runNative() {
         await expect(own.page.getByRole('heading', { name: 'Image config · только метаданные образа', exact: true })).toBeVisible();
         return ok(undefined, { credential: ready.credential, blockers: ready.blockers, noGenerationPosts: true });
       });
+      if (plan.smokeOnly) {
+        const saved = await step('llm_reload', async () => {
+          if (book.cases.llm_readiness.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
+          const before = await readChat(own.page);
+          if (!keyBoundaryAllowed(ready, before.context)) throw new Fault('LLM_STORES_OR_CONTEXT_UNAVAILABLE');
+          await own.page.reload(); panel = await openChat(own.page);
+          assert.deepEqual((await readChat(own.page)).saved, before.saved);
+          assert.equal(own.state.generationPosts, 0);
+          return ok(before.saved, { historyUnchanged: true, noGenerationPosts: true });
+        });
+        if (!await freshLogin()) return;
+        await step('llm_fresh_login', async () => {
+          if (!saved) throw new Fault('PREREQUISITE_UNAVAILABLE');
+          panel = await openChat(own.page);
+          const current = await readChat(own.page), response = await http(own.page, `${llmPath}/readiness`);
+          assert.equal(response.status, 200);
+          const fresh = chat.chatReadinessSchema.parse(response.value);
+          if (!keyBoundaryAllowed(fresh, current.context)) throw new Fault(fresh.credential !== 'missing' ? 'KEY_NOT_ABSENT_NO_POST' : 'LLM_STORES_OR_CONTEXT_UNAVAILABLE');
+          assert.deepEqual(current.saved, saved);
+          await expect(panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).not.toBeChecked();
+          await expect(panel.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeDisabled();
+          assert.equal(own.state.generationPosts, 0);
+          return ok(undefined, { credential: fresh.credential, historyUnchanged: true, noGenerationPosts: true });
+        });
+        return; // No negative-generation, decision, foreign-account or cancel mutations in smoke mode.
+      }
       head = await step('llm_no_consent', async () => {
         const { context, saved } = await readChat(own.page);
         const body = { epoch: context.epoch, revision: context.revision, mutationId: randomUUID(), reportVersion: context.reportVersion, question: QUESTION, consent: { accepted: false, policyVersion: context.policyVersion } };
@@ -749,14 +826,7 @@ async function runNative() {
         assert.deepEqual((await readChat(own.page)).saved, savedHistory); await expect(panel.getByText(DECISION, { exact: true })).toBeVisible();
         return ok(undefined, { historyUnchanged: true });
       });
-      // Close the original context: no cookie injection or inherited storage in the next login.
-      await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
-      const loggedIn = await step('fresh_login', async () => {
-        assert.equal((await http(own.page, `${SCANS}/${completed[0].scanId}`)).status, 401);
-        await auth(own, owner, 'login'); await history(own.page, completed);
-        for (const snapshot of completed) { await own.page.goto(`${ORIGIN}/scans/${snapshot.scanId}`); assert.deepEqual(await status(own.page, snapshot.scanId), snapshot); await verifyReport(own.page, snapshot); }
-        return ok(true, { checkedSets: completed.length });
-      });
+      const loggedIn = await freshLogin();
       if (!loggedIn) return;
       await step('llm_fresh_login', async () => {
         if (!savedHistory) throw new Fault('PREREQUISITE_UNAVAILABLE');
@@ -837,28 +907,38 @@ async function runNative() {
     })()]);
   } catch (e) {
     const code = fatalCode ?? (e instanceof Fault ? e.message : 'ASSERTION_FAILED');
-    book.record(currentCase, 'BLOCKED', code, {}, !(e instanceof Fault) || e.failure);
+    book.record(currentCase, 'BLOCKED', code, failureMeta(e), !(e instanceof Fault) || e.failure);
   } finally {
     stopped = true; clearTimeout(globalTimer); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); process.removeListener('SIGHUP', signal);
     try { await bounded(Promise.allSettled(contexts.map(context => context.close())), 10_000); if (browser) await bounded(browser.close(), 10_000); browserClosed = !browser || !browser.isConnected(); }
     catch { browserClosed = false; }
-    const failure = !browserClosed || stats.blockedRequests > 0 || stats.pageErrors > 0;
-    book.record('safety', failure ? 'BLOCKED' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : 'VERIFIED', { ...stats, browserClosed, nativeScanMayRemainActive: stats.scanLaunches !== scans.size || [...scans.values()].some(record => !record.terminal) }, failure);
+    const smokeMutationViolation = plan.smokeOnly && (stats.scanLaunches > 1 || stats.accountsCreated > 1 || contexts.some(context => contextStates.get(context)?.generationPosts > 0));
+    const failure = !browserClosed || stats.blockedRequests > 0 || stats.pageErrors > 0 || smokeMutationViolation;
+    book.record('safety', failure ? 'BLOCKED' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests || smokeMutationViolation ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : 'VERIFIED', { ...stats, browserClosed, nativeScanMayRemainActive: stats.scanLaunches !== scans.size || [...scans.values()].some(record => !record.terminal) }, failure);
     book.finishedAt = new Date().toISOString();
     const evidence = book.evidence();
     // Only our projected cases go to stdout/disk, never caught exceptions or Playwright diagnostics.
     try { await writeEvidence(evidence); } catch { book.record('safety', 'BLOCKED', 'EVIDENCE_WRITE_FAILED', {}, true); }
     console.log(JSON.stringify(book.evidence(), null, 2));
   }
+  return resultExitCode(book);
+}
+
+export function resultExitCode(book) {
   const results = Object.entries(book.cases);
   if (results.some(([, item]) => item.failure)) return 1;
-  return results.some(([id, item]) => item.status === 'BLOCKED' && id !== 'llm_generation') ? 2 : 0;
+  return results.some(([id, item]) => id !== 'llm_generation' && (book.plan.smokeOnly ? item.status !== 'PASS' : item.status === 'BLOCKED')) ? 2 : 0;
 }
 
 export function offlineSelfTest() {
   assert.equal(parseMode([]), 'not-run'); assert.equal(parseMode(['--self-test']), 'offline');
   assert.throws(() => parseMode(['--run']));
   assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation']), 'native');
+  assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation']), 'smoke');
+  assert.throws(() => parseMode(['--run', '--smoke-only']));
+  assert.ok(scanLaunchAllowed(nativePlan('smoke'), TARGETS[0], 0));
+  assert.ok(!scanLaunchAllowed(nativePlan('smoke'), TARGETS[0], 1));
+  assert.ok(!smokeMutationAllowed(`${SCANS}/example/llm/chat`));
   assert.ok(fixedUrl(`${ORIGIN}/scans`)); assert.ok(!fixedUrl('http://127.0.0.1:8080/scans'));
   assert.ok(!fixedUrl('http://localhost:8081/scans'));
   const fence = new EligibilityFence(); const seq = fence.start();
@@ -873,7 +953,7 @@ async function main() {
   try { mode = parseMode(process.argv.slice(2)); } catch { console.log(JSON.stringify({ status: 'BLOCKED', code: 'INVALID_ARGUMENTS', browserLaunched: false })); return 2; }
   if (mode === 'offline') { offlineSelfTest(); return 0; }
   if (mode === 'not-run') { console.log(JSON.stringify({ status: 'BLOCKED', code: 'NOT_RUN', browserLaunched: false, requiresCoordinatorGo: true, requiresNoConcurrentKeyActivation: true })); return 2; }
-  try { return await runNative(); }
+  try { return await runNative(mode); }
   catch (e) { console.log(JSON.stringify({ status: 'BLOCKED', code: e instanceof Fault ? e.message : 'ASSERTION_FAILED', rawDiagnosticsSuppressed: true })); return 1; }
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) process.exitCode = await main();

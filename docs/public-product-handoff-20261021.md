@@ -1,6 +1,6 @@
 # Продолжение локального image-only продукта — 2026-10-21
 
-> **SUPERSEDED для текущего lifecycle:** после этого handoff выполнен один reviewed continuation, возник новый **HOLD phase=initialize**. Старые checker/continue команды ниже больше неприменимы. Актуальный итог, never-started initializer, source fixes и необходимые новые review/authorization: [public-product-status-20261021.md](public-product-status-20261021.md). Original backups/lock сохранены; 8081 HTTP000, 8080 HTTP200; provider key отсутствует. Ниже сохранён исторический handoff без переписывания прежних evidence.
+> **SUPERSEDED для текущего lifecycle:** public8081 восстановлен **READY / HTTP200**, final four-store/JWT preservation завершена, operation evidence архивированы, активного lock нет. Актуальный итог: [public-recovery-ready-20261022.md](public-recovery-ready-20261022.md); native scan и границы browser smoke: [attempt2](public8081launch-20261022.attempt2.md). 8080 сохранён; provider key отсутствует, generation NOTRUN. Старые checker/continue команды ниже consumed и больше неприменимы. Ниже сохранён исторический handoff без переписывания прежних evidence.
 
 ## Актуальная точка передачи
 

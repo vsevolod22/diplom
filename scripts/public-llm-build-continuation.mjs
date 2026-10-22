@@ -29,12 +29,12 @@ const has = p => fs.lstatSync(p, { throwIfNoEntry: false }) !== undefined;
 const names = p => fs.readdirSync(p).sort();
 const role = c => c.Config.Labels['com.docker.compose.service'];
 const stamp = s => ({ dev: String(s.dev), ino: String(s.ino), mode: s.mode, uid: s.uid, nlink: s.nlink, size: s.size, mtime: s.mtimeMs, ctime: s.ctimeMs });
-function privateFile(path, cap = 16384) {
+export function privateFile(path, cap = 16384) {
   const before = fs.lstatSync(path), text = readBounded(path, cap, 0o600), after = fs.lstatSync(path);
   need(eq(stamp(before), stamp(after))); const initial = stamp(after);
   return { path, bytes: text, identity: initial, verify() { need(eq(stamp(fs.lstatSync(path)), initial) && readBounded(path, cap, 0o600) === text); } };
 }
-function byteFile(path, privateMode = true, { maxBytes = 256 * 1024 ** 2, captureText = false } = {}) {
+export function byteFile(path, privateMode = true, { maxBytes = 256 * 1024 ** 2, captureText = false } = {}) {
   const initial = fs.lstatSync(path); need(initial.isFile() && !initial.isSymbolicLink() && initial.nlink === 1 && initial.uid === process.getuid() && (privateMode ? (initial.mode & 0o777) === 0o600 : !(initial.mode & 0o022)) && initial.size <= maxBytes);
   let text;
   const read = (capture = false) => {
@@ -59,7 +59,7 @@ export const PUBLIC_LLM_EXECUTION_MODULES = Object.freeze([
   'scripts/public-cve-bridge-runtime.mjs', 'scripts/public-cve-bridge.mjs',
   'scripts/public-cve-provision.mjs', 'scripts/public-image-stand-profile.mjs',
   'scripts/public-image-stand.mjs', 'scripts/public-llm-build-continuation.mjs',
-  'scripts/public-llm-source-build.mjs', 'scripts/public-llm-stand.mjs',
+  'scripts/public-llm-source-build.mjs', 'scripts/public-llm-stand.mjs', 'scripts/public-llm-initialize-continuation.mjs',
   'scripts/public-refresh-cve-preservation.mjs', 'scripts/refresh-local-cve.mjs',
   'scripts/refresh-public-cve.mjs', 'scripts/setup-local-cve.mjs',
   'server/deploy/trust/fetch-db-layer.mjs',
@@ -133,7 +133,7 @@ export function capturePublicLlmExecutionClosure(root) {
   verify(); return { programs, directoryProofs, verify, manifest: { entries: EXECUTION_ENTRIES, modules: [...modules.keys()].sort(), edges: [...edges].sort() } };
 }
 
-function directoryIdentity(path) {
+export function directoryIdentity(path) {
   directory(path, 0o700); const a = fs.lstatSync(path);
   return () => { directory(path, 0o700); const b = fs.lstatSync(path); need(a.dev === b.dev && a.ino === b.ino); };
 }
@@ -145,6 +145,7 @@ export function publicLlmSecretlessControl(c) {
   const v = structuredClone(c);
   v.Config.Env = v.Config.Env.filter(x => !x.startsWith('SCAN_JWT_SECRET='));
   delete v.State.Health; // Running API is forbidden; old health logs are not review material.
+  if (v.HostConfig?.Mounts) v.HostConfig.Mounts.sort((a, b) => a.Target.localeCompare(b.Target));
   return { id: v.Id, image: v.Image, created: v.Created, restartCount: v.RestartCount, path: v.Path, args: v.Args,
     config: v.Config, host: v.HostConfig, mounts: [...v.Mounts].sort((a, b) => a.Destination.localeCompare(b.Destination)), state: v.State, networks: v.NetworkSettings.Networks };
 }
@@ -162,8 +163,8 @@ export function validateRetiredPublicLlmWorker(c, pinnedId, replacement, model, 
 
 // Scoped listings cover BOTH own names and own project labels. Consumers of the
 // two public volumes are also included, never arbitrary old-holder inspection.
-export function publicLlmReadOnlyMetadata(run, options, pinnedIds, { limit = 180 } = {}) {
-  let calls = 0; const deadline = Date.now() + 120000, containerIds = new Set();
+export function publicLlmReadOnlyMetadata(run, options, pinnedIds, { limit = 180, helperId = null } = {}) {
+  let calls = 0; const deadline = Date.now() + 120000, containerIds = new Set(helperId ? [helperId] : []);
   return async args => {
     need(++calls <= limit && Date.now() < deadline, 'CURRENT_BUILD_METADATA_BUDGET');
     const [kind, op, ref] = args;
@@ -187,15 +188,18 @@ export function publicLlmReadOnlyMetadata(run, options, pinnedIds, { limit = 180
 }
 
 export async function preparePublicLlmBuildContinuation({ root, home = homedir(), audit, run = runIsolatedDocker, ambient = process.env,
-  Database = require('better-sqlite3'), checkSource = checkPublicLlmSourceBuild }) {
+  Database = require('better-sqlite3'), checkSource = checkPublicLlmSourceBuild, createdInitializerOnly = false, postRetirementOnly = false, failedInitializerOnly = false, admissionOnly = false, apiOnly = false }) {
   need(resolve(root) === root && fs.realpathSync(root) === root, 'CURRENT_BUILD_ROOT_REJECTED');
   need(/^deploy-[a-f0-9]{32}$/.test(audit), 'CURRENT_BUILD_AUDIT_ARGUMENT');
   const state = join(root, STATE), lockPath = join(state, '.operation.lock'), auditPath = join(state, 'llm-deployments', audit), stage = join(lockPath, 'llm-candidate');
   const directoryChecks = [state, lockPath, join(state, 'llm-deployments'), auditPath, stage, join(auditPath, 'fenced'), join(auditPath, 'fenced/core')].map(directoryIdentity);
   const disk = fs.statfsSync(state); need(disk.bavail * disk.bsize >= 4 * 1024 ** 3, 'CURRENT_BUILD_DISK_BUDGET_REJECTED');
   const execution = capturePublicLlmExecutionClosure(root), programs = execution.programs;
-  need(eq(names(lockPath), ['helper-fenced.json', 'llm-candidate', 'mutation.json']), 'CURRENT_BUILD_PREFIX_REJECTED');
-  need(eq(names(auditPath), ['fenced']) && eq(names(join(auditPath, 'fenced')), ['core']), 'CURRENT_BUILD_BACKUP_PREFIX_REJECTED');
+  const initialize = createdInitializerOnly ? await (await import('./public-llm-initialize-continuation.mjs')).readCreatedInitializerPrefix({ root, audit, Database, postRetirementOnly, failedInitializerOnly, admissionOnly, apiOnly }) : null;
+  if (!initialize) {
+    need(eq(names(lockPath), ['helper-fenced.json', 'llm-candidate', 'mutation.json']), 'CURRENT_BUILD_PREFIX_REJECTED');
+    need(eq(names(auditPath), ['fenced']) && eq(names(join(auditPath, 'fenced')), ['core']), 'CURRENT_BUILD_BACKUP_PREFIX_REJECTED');
+  }
   const audits = names(join(state, 'llm-deployments')); need(audits.length <= 16 && audits.every(n => /^deploy-[a-f0-9]{32}$/.test(n)), 'CURRENT_BUILD_AUDIT_BUDGET_REJECTED');
   const partials = audits.filter(n => !has(join(state, 'llm-deployments', n, 'complete.json')));
   need(eq(partials, [audit]), 'CURRENT_BUILD_NOT_UNIQUE');
@@ -206,8 +210,8 @@ export async function preparePublicLlmBuildContinuation({ root, home = homedir()
   need(eq(Object.keys(helper).sort(), ['id', 'image', 'purpose']) && helper.purpose === 'backup' && /^[a-f0-9]{64}$/.test(helper.id));
   const profile = readProfile(root), selection = loadPublicLlmSettings(home), priorSelection = readPublicLlmBinding(root);
   need(profile?.version === 2 && profile.cve && priorSelection === null && selection.selection.keyVolume === null, 'CURRENT_BUILD_SCOPE_REJECTED');
-  need(eq(names(stage), ['compose.cve.json', 'compose.llm-env.json']));
-  const candidateFiles = ['compose.cve.json', 'compose.llm-env.json'].map(n => privateFile(join(stage, n)));
+  need(eq(names(stage), ['compose.cve.json', ...(initialize ? ['compose.images.json'] : []), 'compose.llm-env.json']));
+  const candidateFiles = ['compose.cve.json', 'compose.llm-env.json', ...(initialize ? ['compose.images.json'] : [])].map(n => privateFile(join(stage, n)));
   need(candidateFiles[0].bytes === readBounded(join(state, 'compose.cve.json'), 16384, 0o600));
   need(eq(JSON.parse(candidateFiles[1].bytes), publicLlmEnvironmentOverlay(selection.selection)));
   const stateFiles = ['profile.json', 'scan-jwt', 'compose.images.json', 'compose.cve.json'].map(n => privateFile(join(state, n)));
@@ -218,35 +222,45 @@ export async function preparePublicLlmBuildContinuation({ root, home = homedir()
   const env = dockerEnvironment(ambient), endpoint = env.DOCKER_HOST && !env.DOCKER_CONTEXT ? env.DOCKER_HOST : JSON.parse(await run(['context', 'inspect', '--format', '{{json .Endpoints.docker.Host}}'], { root, env, timeout: 10000 }));
   need(typeof endpoint === 'string' && endpoint.startsWith('unix:///') && endpoint === mutation.endpoint, 'CURRENT_BUILD_ENDPOINT_REJECTED');
   env.DOCKER_HOST = endpoint; env.COMPOSE_DISABLE_ENV_FILE = '1'; for (const k of ['DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH']) delete env[k];
-  const options = { root, env }, d = publicLlmReadOnlyMetadata(run, options, new Set(Object.values(pins.services).map(v => v.image))), images = {}, missing = [];
+  const options = { root, env }, d = publicLlmReadOnlyMetadata(run, options, new Set([...Object.values(pins.services).map(v => v.image), ...(initialize ? Object.values(initialize.pins.services).map(v => v.image) : []), ...(initialize?.currentPins ? Object.values(initialize.currentPins.services).map(v => v.image) : [])]), { limit: failedInitializerOnly ? 220 : 180, helperId: initialize?.failedId ?? initialize?.helper.id }), images = {}, missing = [];
+  if (initialize) await initialize.inspect(d, { run, options });
   for (const [name, p] of Object.entries(pins.services)) {
-    let a; try { a = JSON.parse(await d(['image', 'inspect', p.image])); } catch (e) { if (name !== 'worker' || e?.category !== 'image') throw e; missing.push(name); continue; }
+    let a; try { a = JSON.parse(await d(['image', 'inspect', p.image])); } catch (e) { if (!(name === 'worker' || initialize && (name === 'api' || name === 'web' && p.image === initialize.originalWebImage)) || e?.category !== 'image') throw e; missing.push(name); continue; }
     need(a.length === 1 && a[0].Id === p.image); validatePublicLlmImage(a[0], name); images[name] = a[0];
   }
   let replacement;
-  if (missing.length) { const a = JSON.parse(await d(['image', 'inspect', `${PROJECT}-worker:local`])); need(a.length === 1); replacement = a[0]; validatePublicLlmImage(replacement, 'worker'); need(replacement.Id !== pins.services.worker.image); }
+  if (missing.includes('worker')) { const a = JSON.parse(await d(['image', 'inspect', `${PROJECT}-worker:local`])); need(a.length === 1); replacement = a[0]; validatePublicLlmImage(replacement, 'worker'); need(replacement.Id !== pins.services.worker.image); }
+  const apiReplacement = initialize && missing.includes('api') ? (initialize.policyApiImage ?? initialize.backupImage) : null;
+  const webReplacement = initialize && missing.includes('web') ? initialize.webPolicyImage : null;
   const real = new Map(), jwt = loadSecret(root, true);
   const projectedRun = async args => {
-    const text = await d(args);
-    if (args[0] === 'image' && args[1] === 'ls' && text.split('\n').includes(`${PROJECT}-llm-egress:local`)) {
+    const raw = await d(args), text = initialize && args[0] === 'container' && args[1] === 'ls' ? initialize.withoutHelper(raw) : raw;
+    if (admissionOnly && args[0] === 'network' && args[1] === 'ls') return text.split('\n').filter(line => ![PROJECT + '_llm_internal', PROJECT + '_llm_uplink'].includes(line.split('\t')[0])).join('\n');
+        if (args[0] === 'image' && args[1] === 'ls' && text.split('\n').includes(`${PROJECT}-llm-egress:local`)) {
       const a = JSON.parse(await d(['image', 'inspect', `${PROJECT}-llm-egress:local`])); need(a.length === 1); validatePublicLlmImage(a[0], 'llm-egress');
       return text.split('\n').filter(n => n !== `${PROJECT}-llm-egress:local`).join('\n');
     }
     if (args[0] === 'container' && args[1] === 'inspect') {
       const a = JSON.parse(text); need(a.length === 1); real.set(role(a[0]), structuredClone(a[0]));
-      if (replacement && role(a[0]) === 'worker') { validateRetiredPublicLlmWorker(a[0], pins.services.worker.image, replacement, model, images); a[0].Image = replacement.Id; a[0].Config.Image = replacement.Id; return JSON.stringify(a); }
+      if (admissionOnly && role(a[0]) === 'worker') { initialize.validateAdmissionPeer(a[0], 'worker'); return JSON.stringify(a); }
+            if (replacement && role(a[0]) === 'worker') { validateRetiredPublicLlmWorker(a[0], pins.services.worker.image, replacement, model, images); a[0].Image = replacement.Id; a[0].Config.Image = replacement.Id; return JSON.stringify(a); }
+      if (apiReplacement && role(a[0]) === 'api') { initialize.validateRetiredApi(a[0], pins.services.api.image, model, images, jwt); a[0].Image = apiReplacement.Id; a[0].Config.Image = apiReplacement.Id; return JSON.stringify(a); }
+      if (webReplacement && role(a[0]) === 'web') { initialize.validateRetiredWeb(a[0], pins.services.web.image, model, images); a[0].Image = webReplacement.Id; a[0].Config.Image = webReplacement.Id; return JSON.stringify(a); }
     }
     return text;
   };
   // Additional replacement ID is now an explicitly validated own public image.
-  const projectionImages = replacement ? { ...images, worker: replacement } : images;
+  const projectionImages = { ...images, ...(replacement ? { worker: replacement } : {}), ...(apiReplacement ? { api: apiReplacement } : {}), ...(webReplacement ? { web: webReplacement } : {}) };
   const inspectRun = async args => args[0] === 'image' && args[1] === 'inspect' && replacement && args[2] === replacement.Id ? JSON.stringify([replacement]) : projectedRun(args);
   const inventory = await inspectPublicLlmNamespace(inspectRun, options, root, profile.cve, null, { secret: jwt, images: projectionImages });
   inventory.containers = inventory.containers.map(c => real.get(role(c)) ?? c);
-  need(inventory.containers.length === 6 && inventory.volumes.length === 2 && inventory.networks.length === 4);
+    if (admissionOnly) { inventory.containers.push(initialize.admitExtra.gateway); inventory.networks.push(...initialize.admitExtra.networks); }
+  initialize?.verifyOriginalState?.(pins, inventory);
+  need(inventory.containers.length === (admissionOnly ? 7 : 6) && inventory.volumes.length === 2 && inventory.networks.length === (admissionOnly ? 6 : 4));
   for (const c of inventory.containers) {
     const command = [...(c.Config.Entrypoint ?? []), ...c.Config.Cmd]; need(c.Path === command[0] && eq(c.Args, command.slice(1)), 'CURRENT_BUILD_EXECUTABLE_REJECTED');
-    if (role(c) === 'egress') need(c.State.Running && c.State.Status === 'running' && c.RestartCount === 0 && !c.State.OOMKilled && !c.State.Paused && !c.State.Restarting && !c.State.Dead);
+    if (admissionOnly && ['worker', 'llm-egress'].includes(role(c))) initialize.validateAdmissionPeer(c, role(c));
+    else if (role(c) === 'egress') need(c.State.Running && c.State.Status === 'running' && c.RestartCount === 0 && !c.State.OOMKilled && !c.State.Paused && !c.State.Restarting && !c.State.Dead);
     else clean(c);
   }
   need(!(await d(['container', 'ls', '--all', '--no-trunc', '--filter', `id=${helper.id}`, '--format', '{{.ID}}'])).trim(), 'CURRENT_BUILD_OLD_HELPER_PRESENT');
@@ -269,18 +283,26 @@ export async function preparePublicLlmBuildContinuation({ root, home = homedir()
     baseline = { core: Object.fromEntries(Object.entries(paths).map(([r, p]) => [r, { logicalSha256: llmFingerprint(Database, fs, crypto, p, r) }])), llm: null, empty: false };
     for (const c of Object.values(copies)) c.verify();
   } finally { for (const c of Object.values(copies)) c.cleanup(); fs.rmSync(temp, { recursive: true, force: true }); }
-  const proofs = [...execution.directoryProofs, ...originalFiles, ...candidateFiles, manifestFile, ...backups, ...sidecars, ...programs], verify = () => { execution.verify(); need(eq(names(join(auditPath, 'fenced/core')), coreNames)); for (const v of directoryChecks) v(); for (const f of proofs) f.verify(); source.verify(); selection.verify(); };
+  if (initialize) need(eq(initialize.baseline.core, baseline.core) && initialize.baseline.llm === null, 'CURRENT_INITIALIZE_BACKUPS_DIFFER');
+  const proofs = [...execution.directoryProofs, ...originalFiles, ...candidateFiles, manifestFile, ...backups, ...sidecars, ...programs, ...(initialize?.files ?? [])], verify = () => { execution.verify(); initialize?.verify(); need(eq(names(join(auditPath, 'fenced/core')), coreNames)); for (const v of directoryChecks) v(); for (const f of proofs) f.verify(); source.verify(); selection.verify(); };
   verify(); for (const f of stateFiles) f.verify();
-  const reviewEvidence = { version: 1, audit, endpoint, source: source.manifest, executionClosure: execution.manifest, settings: selection.selection, baseline,
+  if (admissionOnly) { await initialize.verifyReadiness(run, options); verify(); }
+  if (apiOnly) { need(initialize.apiBaseline?.llm && initialize.apiBaseline.empty === true); baseline = initialize.apiBaseline; }
+  const reviewEvidence = { version: 1, audit, endpoint, ...(initialize ? { continuation: apiOnly ? 'exact-post-admit-timeout-pre-api' : admissionOnly ? 'exact-post-init-pre-api-admission' : failedInitializerOnly ? 'exact-init-exit-current-source' : postRetirementOnly ? 'post-retirement-pre-pins-current-source' : 'created-initializer-only-current-source', staleCandidate: initialize.evidence } : {}), source: source.manifest, executionClosure: execution.manifest, settings: selection.selection, baseline,
     // JWT metadata only, never its value or a digest of it.
     state: stateFiles.map(f => ({ path: f.path.slice(root.length + 1), identity: f.identity, ...(f.path.endsWith('/scan-jwt') ? {} : { content: f.bytes }) })),
     original: proofs.map(f => ({ path: f.path.slice(root.length + 1), identity: f.identity, ...(f.sha256 ? { sha256: f.sha256 } : { content: f.bytes }) })),
     peers: inventory.containers.map(publicLlmSecretlessControl), volumes: inventory.volumes, networks: inventory.networks,
     priorImageMetadata: Object.fromEntries(Object.entries(images).map(([n, im]) => [n, { Id: im.Id, Os: im.Os, Config: im.Config }])),
-    retireOnlyWorker: replacement ? { originalId: pins.services.worker.image, replacement: { Id: replacement.Id, Os: replacement.Os, Config: replacement.Config } } : null };
+    retireOnlyWorker: replacement ? { originalId: pins.services.worker.image, replacement: { Id: replacement.Id, Os: replacement.Os, Config: replacement.Config } } : null,
+    ...(initialize ? { backupHelperBasis: failedInitializerOnly ? 'validated-current-candidate-api' : 'validated-stale-candidate-api', backupImageId: initialize.backupImage.Id,
+          ...(failedInitializerOnly ? { ...(admissionOnly ? { admissionOnly: true, ...(apiOnly ? { apiOnly: true, previousFailure: initialize.apiFailure, baselineBasis: 'admit-current-fenced-four-stores', authorizedHostChanges: ['scripts/public-llm-stand.mjs', 'scripts/public-llm-build-continuation.mjs', 'scripts/public-llm-initialize-continuation.mjs'] } : {}) } : { failedInitializer: initialize.failed.evidence }), currentPins: initialize.currentPins, currentCandidateImageMetadata: Object.fromEntries(Object.entries(initialize.candidateImages).map(([role, im]) => [role, { Id: im.Id, Os: im.Os, Config: { ...im.Config, Env: undefined } }])) } : {}),
+      retireOnlyApi: apiReplacement ? { originalId: pins.services.api.image, validationImageId: apiReplacement.Id, executeOriginal: false } : null,
+      retireOnlyWeb: webReplacement ? { originalId: pins.services.web.image, validationImageId: webReplacement.Id, metadataUnavailable: true, executeOriginal: false } : null } : {}) };
   const review = digest(reviewEvidence);
   return { root, auditPath, auditName: audit, nonce: audit.slice(7), stage, lockPath, endpoint, options, profile, selection: selection.selection,
-    pins, images, replacement, inventory, baseline, review, reviewEvidence, originalFiles, candidateFiles, stateFiles, proofs, verify, verifyExecution: execution.verify, verifyDirectories: () => directoryChecks.forEach(v => v()),
+    pins, images, replacement, apiReplacement, webReplacement, admissionOnly, apiOnly, backupImage: initialize?.backupImage, inventory, baseline, review, reviewEvidence, originalFiles, candidateFiles, stateFiles, proofs, verify, initialize, verifyExecution: execution.verify, verifyDirectories: () => directoryChecks.forEach(v => v()),
     summary: { audit, review, sourceClosure: sourceResult, executionModules: programs.length, originalSourceBaseline: 'not-persisted-requires-explicit-current-source-review',
-      missingPriorMetadata: missing, workerRetirementOnly: Boolean(replacement), fencedBackupVerified: true, services: 6, webApiWorkerStopped: true, lifecycle: false } };
+      missingPriorMetadata: missing.sort(), workerRetirementOnly: Boolean(replacement), fencedBackupVerified: true, services: admissionOnly ? 7 : 6, webApiWorkerStopped: !admissionOnly, ...(admissionOnly ? { apiWebStopped: true, existingWorkerReady: true, initializedEmptySnapshotRequired: true } : {}), lifecycle: false,
+      ...(initialize ? { command: apiOnly ? 'check-current-api' : admissionOnly ? 'check-current-admit' : failedInitializerOnly ? 'check-current-init-exit' : postRetirementOnly ? 'check-current-rebuild' : 'check-current-initialize', ...(postRetirementOnly ? { retiredInitializerAbsent: true, initializeBackupVerified: true } : {}), apiRetirementOnly: Boolean(apiReplacement), webRetirementOnly: Boolean(webReplacement), backupHelperBasis: failedInitializerOnly ? 'validated-current-candidate-api' : 'validated-stale-candidate-api', ...(failedInitializerOnly ? { rebuildBackupVerified: true, candidateImageSourceMatches: true, ...(admissionOnly ? { initExitBackupVerified: true, requiresInitialization: false, ...(apiOnly ? { admitBackupVerified: true, exactPriorFailure: 'ready-worker-guard-946', baselineBasis: 'admit-current-fenced-four-stores' } : {}) } : { failedInitializer: initialize.failed.id }) } : {}), continuedBackupVerified: true, staleInitializer: initialize.helper.id, staleCandidateIsCurrentSource: false, requiresCurrentBuild: !failedInitializerOnly } : {}) } };
 }
