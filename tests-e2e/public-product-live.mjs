@@ -3,6 +3,8 @@
 // node tests-e2e/public-product-live.mjs --run --ack-coordinator-go --ack-no-key-activation --attempt-id <new UUID>
 // ONE-SCAN SMOKE (same GO fence, no LLM mutations):
 // node tests-e2e/public-product-live.mjs --run --smoke-only --ack-coordinator-go --ack-no-key-activation --attempt-id <new UUID>
+// CANCEL ONLY (one scan, all LLM POSTs denied; supplied key presence is irrelevant):
+// node tests-e2e/public-product-live.mjs --run --cancel-only --ack-coordinator-go --ack-no-key-activation --attempt-id <new UUID>
 // OFFLINE: node tests-e2e/public-product-live.mjs --self-test
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -22,6 +24,7 @@ export const SCANS = '/api/v1/browser/scans';
 export const WORKER_MS = 660_000;
 export const GLOBAL_MS = 2_520_000; // 42 min: two full attempts, one cancel attempt, bounded UI/HTTP.
 export const SMOKE_MS = 900_000; // One full native attempt plus bounded browser/report checks.
+export const CANCEL_MS = 900_000; // First-subset observation, one UI cancel, durable reads; never relaunch.
 // The browser proxy is a second fence for redirects, which Playwright routing does not
 // reliably intercept on every hop. No other loopback port is implicitly bypassed.
 export const BROWSER_ARGS = Object.freeze(['--disable-background-networking', '--disable-component-update', '--disable-default-apps', '--no-first-run',
@@ -37,24 +40,37 @@ const BLOCKERS = new Set(['configuration-required', 'public-key-required', 'publ
 const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'STAND_OR_BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED', 'PREREQUISITE_UNAVAILABLE', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED', 'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NO_SECOND_PAGE', 'SSE_NOT_OBSERVED', 'CANCEL_RACE', 'NO_COMPLETED_SUBSET_OBSERVED', 'SUBSET_CAPTURE_CHANGED', 'UNSAFE_DEBUG_ENVIRONMENT', 'KEY_ABSENT', 'KEY_NOT_ABSENT_NO_POST', 'LLM_STORES_OR_CONTEXT_UNAVAILABLE', 'NO_EVIDENCE', 'CONTEXT_LIMIT', 'GENERATION_NOT_AUTHORIZED', 'QUOTA_WINDOW_CHANGED', 'QUOTA_UNAVAILABLE', 'INCOMPLETE_PAGINATION_COVERAGE', 'RUNTIME_NOT_OFF']);
 const CASES = ['tooling', 'registration', ...TARGETS.flatMap(t => ['scan', 'report', 'pagination', 'filters', 'events', 'reload'].map(s => `${t.name}.${s}`)), 'scan_history', 'foreign_registration', 'ownership', 'anonymous', 'ownership_mutations', 'anonymous_mutations', 'llm_readiness', 'llm_no_consent', 'llm_missing_key', 'llm_manual_history', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'cancel', 'cancel_preservation', 'cancel_history', 'cancel_fresh_login', 'safety'];
 const SMOKE_CASES = ['tooling', 'registration', 'node.scan', 'node.report', 'node.filters', 'node.reload', 'scan_history', 'llm_readiness', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'safety'];
+const CANCEL_CASES = ['tooling', 'registration', 'cancel', 'cancel_report', 'cancel_preservation', 'cancel_reload', 'cancel_history', 'cancel_fresh_login', 'safety'];
 const EVIDENCE = ['public-product-browser-20261021.json', 'public-product-browser-20261021.md'].map(name => join(ROOT, 'docs', name));
 const SMOKE_EVIDENCE_ROOT = 'docs/public8081launch-20261022.attempt2';
 const SMOKE_EVIDENCE = ['json', 'md'].map(extension => join(ROOT, `${SMOKE_EVIDENCE_ROOT}.${extension}`));
 export function nativePlan(mode = 'native', attemptId = null) {
-  assert.ok(['native', 'smoke'].includes(mode));
-  const smokeOnly = mode === 'smoke';
+  assert.ok(['native', 'smoke', 'cancel'].includes(mode));
+  const smokeOnly = mode === 'smoke', cancelOnly = mode === 'cancel';
+  if (cancelOnly && attemptId === null) throw new Error('INVALID_ARGUMENTS');
   if (attemptId !== null && !UUID.test(attemptId)) throw new Error('INVALID_ARGUMENTS');
   const finalRoot = attemptId === null ? null : `docs/public-final-${attemptId}-${mode}`;
-  return Object.freeze({ mode, smokeOnly, targets: Object.freeze(smokeOnly ? [TARGETS[0]] : [...TARGETS]),
-    maxScans: smokeOnly ? 1 : 3, globalMs: smokeOnly ? SMOKE_MS : GLOBAL_MS,
+  return Object.freeze({ mode, smokeOnly, cancelOnly, targets: Object.freeze(smokeOnly || cancelOnly ? [TARGETS[0]] : [...TARGETS]),
+    maxScans: smokeOnly || cancelOnly ? 1 : 3, globalMs: cancelOnly ? CANCEL_MS : smokeOnly ? SMOKE_MS : GLOBAL_MS,
     attemptId, evidenceRoot: finalRoot ?? (smokeOnly ? SMOKE_EVIDENCE_ROOT : 'docs/public-product-browser-20261021'),
-    cases: Object.freeze([...(smokeOnly ? SMOKE_CASES : CASES)]), evidencePaths: Object.freeze(finalRoot ? ['json', 'md'].map(ext => join(ROOT, `${finalRoot}.${ext}`)) : [...(smokeOnly ? SMOKE_EVIDENCE : EVIDENCE)]) });
+    cases: Object.freeze([...(cancelOnly ? CANCEL_CASES : smokeOnly ? SMOKE_CASES : CASES)]), evidencePaths: Object.freeze(finalRoot ? ['json', 'md'].map(ext => join(ROOT, `${finalRoot}.${ext}`)) : [...(smokeOnly ? SMOKE_EVIDENCE : EVIDENCE)]) });
 }
 export function scanLaunchAllowed(plan, target, launches) {
   return plan.targets.includes(target) && Number.isSafeInteger(launches) && launches >= 0 && launches < plan.maxScans;
 }
 export function smokeMutationAllowed(path) {
   return ['/api/v1/auth/register', '/api/v1/auth/login', SCANS, `${SCANS}/images/eligibility`].includes(path);
+}
+export function cancelMutationAllowed(path, ids) {
+  if (smokeMutationAllowed(path)) return true;
+  for (const id of ids) if (UUID.test(id) && path === `${SCANS}/${id}/cancel`) return true;
+  return false;
+}
+export function completedChecks(snapshot) {
+  return CHECKS.filter(key => snapshot?.perCheck?.[key]?.outcome === 'checked');
+}
+export function cancelObservation(snapshot) {
+  return TERMINAL.has(snapshot?.state) ? 'terminal' : completedChecks(snapshot).length ? 'ready' : 'waiting';
 }
 const QUESTION = 'Какие ограничения покрытия этого отчёта нужно учесть при ручной проверке?';
 const DECISION = 'Проверить приоритеты находок вручную; это решение пользователя, не вывод сканера.';
@@ -65,6 +81,7 @@ export function parseMode(args) {
     const flags = args.slice(0, -2);
     if (isDeepStrictEqual(flags, ['--run', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'native';
     if (isDeepStrictEqual(flags, ['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'smoke';
+        if (isDeepStrictEqual(flags, ['--run', '--cancel-only', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'cancel';
   }
   if (!args.length) return 'not-run';
   throw new Error('INVALID_ARGUMENTS');
@@ -191,6 +208,11 @@ export function assertDeniedReply(response, expected) {
     assert.ok(['UNAUTHORIZED', 'SCAN_NOT_FOUND', 'SCAN_ACCESS_DENIED', 'SCAN_ACCESS_DISABLED', 'LLM_UNAVAILABLE', 'LLM_REPORT_UNAVAILABLE'].includes(value.errorCode));
     return;
   }
+  if (expected === 404 && exact(value, ['statusCode', 'message'])) {
+    assert.equal(value.statusCode, 404);
+    assert.equal(value.message, 'Not Found');
+    return;
+  }
   assert.ok(exact(value, ['statusCode', 'message', 'error']));
   assert.equal(value.statusCode, expected);
   assert.equal(value.message, expected === 401 ? 'Unauthorized' : 'Not Found');
@@ -272,7 +294,7 @@ export function safeMeta(input = {}) {
   if (input.platform === 'linux/amd64') out.platform = input.platform;
   if (['queued', 'running', ...TERMINAL].includes(input.state)) out.state = input.state;
   if (Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) out.httpStatus = input.httpStatus;
-  for (const key of ['pages', 'checkedSets', 'observedEvents', 'scanLaunches', 'accountsCreated', 'pageErrors', 'blockedRequests', 'ignoredEligibility', 'runnerLine']) if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 100000) out[key] = input[key];
+  for (const key of ['pages', 'checkedSets', 'observedEvents', 'scanLaunches', 'cancelPosts', 'accountsCreated', 'pageErrors', 'blockedRequests', 'ignoredEligibility', 'runnerLine']) if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 100000) out[key] = input[key];
   for (const key of ['allChecksChecked', 'noGenerationPosts', 'historyUnchanged', 'quotaUnchanged', 'browserClosed', 'nativeScanMayRemainActive']) if (typeof input[key] === 'boolean') out[key] = input[key];
   if (['unconfigured', 'missing', 'unsafe', 'metadata-valid'].includes(input.credential)) out.credential = input.credential;
   if (Array.isArray(input.blockers)) out.blockers = [...new Set(input.blockers.filter(x => BLOCKERS.has(x)))];
@@ -295,7 +317,7 @@ export class ResultBook {
     this.cases[id] = { status, code, failure: !!failure, ...safeMeta(meta) };
   }
   evidence() {
-    return { schema: 1, actuallyRun: this.actual, mode: this.plan.mode, attemptId: this.plan.attemptId, evidenceRoot: this.plan.evidenceRoot, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: this.plan.smokeOnly ? 'native-public8081-one-scan-smoke' : 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: this.plan.smokeOnly ? 'readiness-only-no-llm-posts' : 'negative-boundary-only',
+    return { schema: 1, actuallyRun: this.actual, mode: this.plan.mode, attemptId: this.plan.attemptId, evidenceRoot: this.plan.evidenceRoot, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: this.plan.cancelOnly ? 'native-public8081-one-scan-cancel' : this.plan.smokeOnly ? 'native-public8081-one-scan-smoke' : 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: this.plan.cancelOnly ? 'all-llm-posts-denied' : this.plan.smokeOnly ? 'readiness-only-no-llm-posts' : 'negative-boundary-only',
       providerDispatchIndependentlyObserved: false, credentialPersistence: false, screenshots: false, har: false, trace: false,
       lifecycleOperations: 0, syntheticResponses: false, cases: structuredClone(this.cases) };
   }
@@ -317,11 +339,11 @@ async function absentEvidence(plan) {
   }
 }
 export function evidenceDocuments(evidence) {
-  const smokeOnly = evidence.mode === 'smoke';
-  const markdown = [smokeOnly ? '# Public 8081 one-scan browser smoke — 2026-10-22' : '# Public product browser qualification — 2026-10-21', '', `Origin: ${ORIGIN}`, `Evidence root: ${evidence.evidenceRoot}`, '',
+  const smokeOnly = evidence.mode === 'smoke', cancelOnly = evidence.mode === 'cancel';
+  const markdown = [cancelOnly ? '# Public 8081 one-scan cancel qualification' : smokeOnly ? '# Public 8081 one-scan browser smoke — 2026-10-22' : '# Public product browser qualification — 2026-10-21', '', `Origin: ${ORIGIN}`, `Evidence root: ${evidence.evidenceRoot}`, '',
     `Run: ${evidence.runId}. Provisional summary only: require the matching complete JSON and a successful evidence write; this Markdown alone is not acceptance.`,
         'Native generation is NOT qualified. No key is sought or persisted. Provider dispatch is not independently observed.',
-    smokeOnly ? 'One account and at most one scan are retained; no LLM POST or manual decision is authorized. Credentials exist only in runner/browser memory.' : 'Accounts/scans/decisions are retained in the public stand; credentials exist only in runner/browser memory.',
+    cancelOnly ? 'One account and at most one native four-check scan are retained. All LLM POSTs are denied, including manual history; key presence is irrelevant and no key-absent/readiness probe is required. Terminal races and absent subset evidence never qualify cancellation. No relaunch.' : smokeOnly ? 'One account and at most one scan are retained; no LLM POST or manual decision is authorized. Credentials exist only in runner/browser memory.' : 'Accounts/scans/decisions are retained in the public stand; credentials exist only in runner/browser memory.',
     'PASS is per assertion; BLOCKED is not success; cancel races and unavailable pagination/subset observations are INCONCLUSIVE.', '',
     '| Case | Result | Code |', '| --- | --- | --- |', ...Object.entries(evidence.cases).map(([id, item]) => `| ${id} | ${item.status} | ${item.code} |`), ''].join('\n');
   return [JSON.stringify(evidence, null, 2) + '\n', markdown];
@@ -358,9 +380,9 @@ async function runNative(mode = 'native', attemptId) {
   if (['DEBUG', 'PWDEBUG', 'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'PLAYWRIGHT_TRACE_DIR', 'PLAYWRIGHT_BROWSERS_PATH'].some(key => process.env[key])) throw new Fault('UNSAFE_DEBUG_ENVIRONMENT');
   process.env.TSX_DISABLE_CACHE = '1'; // Transpile in memory, not into a new disk cache.
   const book = new ResultBook(mode, attemptId);
-  book.record('llm_generation', 'BLOCKED', 'GENERATION_NOT_AUTHORIZED');
+  if (!plan.cancelOnly) book.record('llm_generation', 'BLOCKED', 'GENERATION_NOT_AUTHORIZED');
   const contexts = [], contextStates = new Map(), scans = new Map();
-  const stats = { scanLaunches: 0, accountsCreated: 0, pageErrors: 0, blockedRequests: 0, ignoredEligibility: 0 };
+  const stats = { scanLaunches: 0, cancelPosts: 0, accountsCreated: 0, pageErrors: 0, blockedRequests: 0, ignoredEligibility: 0 };
   const owner = { email: `public-product-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
   const foreign = { email: `public-product-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
   let browser, stopped = false, browserClosed = false, activeLaunch = null, pendingCreation = Promise.resolve();
@@ -448,6 +470,9 @@ async function runNative(mode = 'native', attemptId) {
         const headers = await request.allHeaders();
         if (stopped || fatalCode || !safeMutationRequest(request.url(), headers)) return deny();
         if (plan.smokeOnly && !smokeMutationAllowed(u.pathname)) return deny();
+                if (plan.cancelOnly && (!cancelMutationAllowed(u.pathname, scans.keys()) ||
+                          u.pathname.endsWith('/cancel') && stats.cancelPosts >= 1 ||
+                          u.pathname === '/api/v1/auth/register' && stats.accountsCreated >= 1)) return deny();
         let body; try { body = request.postDataJSON(); } catch { return deny(); }
         if (method === 'POST' && u.pathname === `${SCANS}/images/eligibility`) {
           const target = state.target;
@@ -481,7 +506,8 @@ async function runNative(mode = 'native', attemptId) {
           await pendingCreation; return;
         }
         if (consumePermit(state.permit, method, u.pathname, body)) {
-          if (u.pathname.endsWith('/llm/chat') || u.pathname.endsWith('/llm/summary')) state.generationPosts++;
+          if (u.pathname.endsWith('/cancel')) stats.cancelPosts++;
+          if (u.pathname.endsWith('/llm/chat') || u.pathname.endsWith('/llm/summary') || u.pathname.endsWith('/llm/translation')) state.generationPosts++;
           await route.continue(); return;
         }
         return deny();
@@ -738,6 +764,10 @@ async function runNative(mode = 'native', attemptId) {
       let own = await newPage();
       if (!await step('registration', async () => { await auth(own, owner, 'register'); return ok(true); })) return;
       const completed = [];
+      if (plan.cancelOnly) {
+        await runCancellation();
+        return;
+      }
       for (const target of plan.targets) {
         const snapshot = await step(`${target.name}.scan`, async () => {
           const id = await launch(own, target), value = await terminalStatus(own.page, id);
@@ -919,13 +949,15 @@ async function runNative(mode = 'native', attemptId) {
         await step('anonymous_mutations', () => denyMutations(anonymous, report.scanId, 401, ownerContext, own.page));
         assert.deepEqual((await readChat(own.page)).saved, savedHistory);
       }
+      async function runCancellation() {
       const cancelled = await step('cancel', async () => {
         if (stats.scanLaunches !== scans.size || [...scans.values()].some(record => !record.terminal)) throw new Fault('PREREQUISITE_UNAVAILABLE');
         const id = await launch(own, TARGETS[0]); let before = await status(own.page, id);
         // Observe real subset publication if it happens; never add artificial worker barriers.
-        const observationDeadline = Date.now() + 20_000;
-        while (!TERMINAL.has(before.state) && !CHECKS.some(key => before.perCheck?.[key] != null) && Date.now() < observationDeadline) { await wait(500); before = await status(own.page, id); }
-        const observed = CHECKS.filter(key => before.perCheck?.[key] != null);
+        const observationDeadline = Date.now() + (plan.cancelOnly ? WORKER_MS : 20_000);
+        while (!TERMINAL.has(before.state) && (plan.cancelOnly ? cancelObservation(before) === 'waiting' : !CHECKS.some(key => before.perCheck?.[key] != null)) && Date.now() < observationDeadline) { ensureLive(); await wait(500); before = await status(own.page, id); }
+        if (plan.cancelOnly && cancelObservation(before) === 'waiting') return { status: 'INCONCLUSIVE', code: 'NO_COMPLETED_SUBSET_OBSERVED', meta: statusMeta(before) };
+        const observed = plan.cancelOnly ? completedChecks(before) : CHECKS.filter(key => before.perCheck?.[key] != null);
         const subsets = {}; let subsetChanged = false;
         if (!TERMINAL.has(before.state)) for (const kind of observed.filter(key => key !== 'config' && before.perCheck[key].outcome === 'checked')) {
           try { subsets[kind] = await collect(own.page, before, kind); }
@@ -936,7 +968,8 @@ async function runNative(mode = 'native', attemptId) {
           }
         }
         let httpStatus = null;
-        if (!TERMINAL.has(before.state)) {
+        const stillActive = !TERMINAL.has(before.state) && (!plan.cancelOnly || !TERMINAL.has((await status(own.page, id)).state));
+        if (stillActive) {
           const button = own.page.getByRole('button', { name: 'Отменить скан', exact: true });
           if (await button.isVisible()) {
             const path = `${SCANS}/${id}/cancel`; permit(own.state, path, body => exact(body, []));
@@ -952,31 +985,58 @@ async function runNative(mode = 'native', attemptId) {
         return { ...verdict, value: { before, after, observed, subsets, subsetChanged }, meta: { ...statusMeta(after), ...(httpStatus ? { httpStatus } : {}), observedCompletedChecks: observed } };
       });
       if (cancelled) {
+        let focusedReports;
+        if (plan.cancelOnly) focusedReports = await step('cancel_report', async () => {
+          if (cancelled.after.state !== 'cancelled') return { status: 'INCONCLUSIVE', code: 'CANCEL_RACE' };
+          await own.page.goto(`${ORIGIN}/scans/${cancelled.after.scanId}`);
+          const reports = await verifyReport(own.page, cancelled.after);
+          return ok(reports, { ...statusMeta(cancelled.after), checkedSets: Object.keys(reports).length });
+        });
         await step('cancel_preservation', async () => {
           const { before, after, observed, subsets, subsetChanged } = cancelled;
           if (after.state !== 'cancelled') return { status: 'INCONCLUSIVE', code: 'CANCEL_RACE' };
           for (const key of observed) assert.deepEqual(after.perCheck[key], before.perCheck[key]);
           if (observed.includes('config')) assert.deepEqual(after.config, before.config);
-          const persisted = await verifyReport(own.page, after);
+          if (plan.cancelOnly && !focusedReports) throw new Fault('PREREQUISITE_UNAVAILABLE');
+          const persisted = plan.cancelOnly ? focusedReports : await verifyReport(own.page, after);
           for (const [kind, original] of Object.entries(subsets)) {
             assert.deepEqual(persisted[kind].rows, original.rows); assert.deepEqual(persisted[kind].baseline, original.baseline);
           }
-          await own.page.reload(); assert.deepEqual(await status(own.page, after.scanId), after); assert.deepEqual(await verifyReport(own.page, after), persisted);
-          await wait(2000); // Bounded late-publication observation, not a guarantee about all future writes.
-          const final = await status(own.page, after.scanId);
-          for (const key of CHECKS.filter(key => !observed.includes(key))) assert.deepEqual(final.perCheck[key], after.perCheck[key]);
+          if (!plan.cancelOnly) {
+            await own.page.reload(); assert.deepEqual(await status(own.page, after.scanId), after); assert.deepEqual(await verifyReport(own.page, after), persisted);
+            await wait(2000); // Bounded late-publication observation, not a guarantee about all future writes.
+            const final = await status(own.page, after.scanId);
+            for (const key of CHECKS.filter(key => !observed.includes(key))) assert.deepEqual(final.perCheck[key], after.perCheck[key]);
+          }
           return { ...preservationVerdict(before, observed, subsets, subsetChanged), meta: { observedCompletedChecks: observed } };
+        });
+        if (plan.cancelOnly) await step('cancel_reload', async () => {
+          const { after } = cancelled;
+          if (after.state !== 'cancelled') return { status: 'INCONCLUSIVE', code: 'CANCEL_RACE' };
+          if (!focusedReports) throw new Fault('PREREQUISITE_UNAVAILABLE');
+          await own.page.reload(); assert.deepEqual(await status(own.page, after.scanId), after);
+          assert.deepEqual(await verifyReport(own.page, after), focusedReports);
+          await wait(2000);
+          const final = await status(own.page, after.scanId);
+          assert.deepEqual(final.perCheck, after.perCheck); assert.deepEqual(final.config, after.config);
+          return ok(undefined, { ...statusMeta(final), historyUnchanged: true });
         });
         await step('cancel_history', () => history(own.page, [...completed, cancelled.after]));
         await step('cancel_fresh_login', async () => {
-          own.state.closing = true; await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
+          own.state.closing = true; await own.context.close(); own = await newPage();
+          assert.equal((await own.context.cookies()).length, 0);
+          await own.page.goto(`${ORIGIN}/login`);
           assert.equal((await http(own.page, `${SCANS}/${cancelled.after.scanId}`)).status, 401);
           await auth(own, owner, 'login'); await history(own.page, [...completed, cancelled.after]);
           await own.page.goto(`${ORIGIN}/scans/${cancelled.after.scanId}`);
-          assert.deepEqual(await status(own.page, cancelled.after.scanId), cancelled.after); await verifyReport(own.page, cancelled.after);
+          assert.deepEqual(await status(own.page, cancelled.after.scanId), cancelled.after);
+          const reports = await verifyReport(own.page, cancelled.after);
+          if (plan.cancelOnly && focusedReports) assert.deepEqual(reports, focusedReports);
           return ok(undefined, { state: cancelled.after.state, historyUnchanged: true });
         });
       }
+      }
+      await runCancellation();
     })()]);
   } catch (e) {
     const code = fatalCode ?? (e instanceof Fault ? e.message : 'ASSERTION_FAILED');
@@ -985,9 +1045,9 @@ async function runNative(mode = 'native', attemptId) {
     stopped = true; for (const state of contextStates.values()) state.closing = true; clearTimeout(globalTimer); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); process.removeListener('SIGHUP', signal);
     try { await bounded(Promise.allSettled(contexts.map(context => context.close())), 10_000); if (browser) await bounded(browser.close(), 10_000); browserClosed = !browser || !browser.isConnected(); }
     catch { browserClosed = false; }
-    const smokeMutationViolation = plan.smokeOnly && (stats.scanLaunches > 1 || stats.accountsCreated > 1 || contexts.some(context => contextStates.get(context)?.generationPosts > 0));
+    const smokeMutationViolation = (plan.smokeOnly || plan.cancelOnly) && (stats.scanLaunches > 1 || stats.accountsCreated > 1 || contexts.some(context => contextStates.get(context)?.generationPosts > 0) || plan.cancelOnly && stats.cancelPosts > 1);
     const failure = !browserClosed || stats.blockedRequests > 0 || stats.pageErrors > 0 || smokeMutationViolation;
-    book.record('safety', failure ? 'BLOCKED' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests || smokeMutationViolation ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : 'VERIFIED', { ...stats, browserClosed, nativeScanMayRemainActive: stats.scanLaunches !== scans.size || [...scans.values()].some(record => !record.terminal) }, failure);
+    book.record('safety', failure ? 'BLOCKED' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests || smokeMutationViolation ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : 'VERIFIED', { ...stats, noGenerationPosts: contexts.every(context => contextStates.get(context)?.generationPosts === 0), browserClosed, nativeScanMayRemainActive: stats.scanLaunches !== scans.size || [...scans.values()].some(record => !record.terminal) }, failure);
     book.finishedAt = new Date().toISOString();
     const evidence = book.evidence();
     // Only our projected cases go to stdout/disk, never caught exceptions or Playwright diagnostics.
@@ -1000,7 +1060,7 @@ async function runNative(mode = 'native', attemptId) {
 export function resultExitCode(book) {
   const results = Object.entries(book.cases);
   if (results.some(([, item]) => item.failure)) return 1;
-  return results.some(([id, item]) => id !== 'llm_generation' && (book.plan.smokeOnly ? item.status !== 'PASS' : item.status === 'BLOCKED')) ? 2 : 0;
+  return results.some(([id, item]) => id !== 'llm_generation' && (book.plan.smokeOnly || book.plan.cancelOnly ? item.status !== 'PASS' : item.status === 'BLOCKED')) ? 2 : 0;
 }
 
 export function offlineSelfTest() {
@@ -1008,6 +1068,7 @@ export function offlineSelfTest() {
   assert.throws(() => parseMode(['--run']));
   assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', randomUUID()]), 'native');
   assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', randomUUID()]), 'smoke');
+    assert.equal(parseMode(['--run', '--cancel-only', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', randomUUID()]), 'cancel');
   assert.throws(() => parseMode(['--run', '--smoke-only']));
   assert.ok(scanLaunchAllowed(nativePlan('smoke'), TARGETS[0], 0));
   assert.ok(!scanLaunchAllowed(nativePlan('smoke'), TARGETS[0], 1));

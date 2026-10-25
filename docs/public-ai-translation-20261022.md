@@ -1,6 +1,6 @@
 # Public AI / ru advisory translation — historical22.10 DEPLOYED READY, qualification BLOCKED
 
-> **Operational status superseded25.10:** new rollout is in build HOLD, public8081HTTP000, separate Docker blob storage-I/O refusal during read-only recovery. New provider/UI/prompt fixes are source-tested, not deployed/accepted. Historical STOP below applied to22.10 scope; owner separately authorized new bounded qualification on25.10, but no new native attempt ran because infrastructure is blocked. DOC15/DOC16 are now v3; current full-body receipts and limits: [new handoff](public-product-handoff-20261025.md). Historical evidence below remains unchanged.
+> **Operational status superseded25.10 after recovery:** public8081/protected8080 HTTP200, new rollout READY/exit0 with four-store/JWT preservation. Owner separately authorized bounded native qualification: actual native scan/report/freshlogin PASS, chat502 unknown upstream and translation429rate_limited BLOCKED; no successful generation or fallback. Independent foreign browser404/UI denial PASS; originalfullrunFAIL retained. DOC15/DOC16v3applied. Historical STOP below belongs to22.10 scope, not a reason to rewrite oldFAIL or claim successful25.10 generation. [Current actual receipt](public-recovery-ready-20261025.md). Historical evidence below remains unchanged.
 
 ## Статус и разрешённая область
 

@@ -8,7 +8,7 @@ import test from 'node:test';
 import { ORIGIN, SCANS, CHECKS, TARGETS, parseMode, fixedUrl, allowedGet, validIntent, eligibilityReady,
   EligibilityFence, awaitEligibility, consumePermit, partition, cancelVerdict, preservationVerdict, keyBoundaryAllowed, checkPage, readAllPages, loadContracts, safeMeta, ResultBook, GLOBAL_MS, WORKER_MS,
     BROWSER_ARGS, safeMutationRequest, allowedApiGet, safeReadRequest, runtimeProbeRead, assertRuntimeOffReply, assertDeniedReply, assertChatUsage, renderedRowParts, paginationVerdict, evidenceDocuments, writeEvidence,
-    SMOKE_MS, nativePlan, scanLaunchAllowed, smokeMutationAllowed, resultExitCode, assertAuthUser, failureMeta } from './public-product-live.mjs';
+    SMOKE_MS, CANCEL_MS, nativePlan, scanLaunchAllowed, smokeMutationAllowed, cancelMutationAllowed, completedChecks, cancelObservation, resultExitCode, assertAuthUser, failureMeta } from './public-product-live.mjs';
 
 const id = '12345678-1234-4234-8234-123456789abc';
 const ready = target => ({ imageReference: target.reference, eligible: true, reason: 'READY', eligibility: 'public-hub-profile', allowedCheckSets: [[...CHECKS]] });
@@ -84,6 +84,98 @@ test('smoke evidence has only selected assertions, no provider qualification and
   assert.ok(paths.every(path => !path.endsWith('/public8081launch-20261022.json') && !path.endsWith('/public8081launch-20261022.md')));
   const [json, md] = evidenceDocuments(evidence);
   assert.equal(JSON.parse(json).mode, 'smoke'); assert.ok(md.includes('no LLM POST'));
+});
+
+test('cancel-only accepts only its exact acknowledged CLI with a fresh UUID; mixed modes and overrides refuse', () => {
+  const flags = ['--run', '--cancel-only', '--ack-coordinator-go', '--ack-no-key-activation'];
+  assert.equal(parseMode([...flags, '--attempt-id', id]), 'cancel');
+  for (const args of [flags, ['--cancel-only'], ['--run', '--cancel-only'],
+    ['--run', '--cancel-only', '--ack-coordinator-go', '--attempt-id', id],
+    ['--run', '--cancel-only', '--ack-no-key-activation', '--attempt-id', id],
+    ['--run', '--cancel-only', '--ack-coordinator-readygo', '--ack-no-key-activation', '--attempt-id', id],
+    [...flags, '--attempt-id', '../attempt2'], [...flags, '--attempt-id', id, '--target=other'],
+    ['--run', '--smoke-only', ...flags.slice(1), '--attempt-id', id],
+    [...flags, '--cancel-only', '--attempt-id', id],
+  ]) assert.throws(() => parseMode(args));
+});
+
+test('cancel-only plan has one fixed four-check Node launch and only cancellation durability cases', () => {
+  const plan = nativePlan('cancel', id);
+  assert.equal(plan.cancelOnly, true); assert.equal(plan.smokeOnly, false);
+  assert.deepEqual(plan.targets, [TARGETS[0]]); assert.equal(plan.maxScans, 1);
+  assert.equal(plan.globalMs, CANCEL_MS); assert.equal(CANCEL_MS, 15 * 60000); assert.ok(CANCEL_MS > WORKER_MS);
+  assert.ok(scanLaunchAllowed(plan, TARGETS[0], 0));
+  for (const [target, launches] of [[TARGETS[0], 1], [TARGETS[0], 2], [TARGETS[1], 0], [{ ...TARGETS[0] }, 0]]) assert.equal(scanLaunchAllowed(plan, target, launches), false);
+  assert.ok(validIntent(intent(plan.targets[0]), plan.targets[0]));
+  assert.deepEqual(plan.cases, ['tooling', 'registration', 'cancel', 'cancel_report', 'cancel_preservation', 'cancel_reload', 'cancel_history', 'cancel_fresh_login', 'safety']);
+  assert.ok(Object.isFrozen(plan) && Object.isFrozen(plan.targets) && Object.isFrozen(plan.cases));
+  assert.throws(() => nativePlan('cancel')); assert.throws(() => nativePlan('cancel', 'attempt3'));
+  const book = new ResultBook('cancel', id);
+  for (const name of ['node.scan', 'debian.scan', 'llm_readiness', 'llm_missing_key', 'llm_no_consent', 'llm_manual_history', 'llm_generation', 'ownership_mutations']) assert.throws(() => book.record(name, 'PASS', 'VERIFIED'));
+});
+
+test('cancel-only hard gate rejects ALL LLM POST paths even with permits and only permits known-scan cancellation', () => {
+  for (const path of ['/api/v1/auth/register', '/api/v1/auth/login', SCANS, `${SCANS}/images/eligibility`, `${SCANS}/${id}/cancel`]) assert.equal(cancelMutationAllowed(path, [id]), true);
+  for (const suffix of ['chat', 'summary', 'translation', 'history/decision', 'history', 'chat/context', 'readiness', 'unknown']) assert.equal(cancelMutationAllowed(`${SCANS}/${id}/llm/${suffix}`, [id]), false);
+  for (const path of [`${SCANS}/${id}/cancel?x=1`, `${SCANS}/${id}/cancel/extra`, `${SCANS}/${id}/cancel/`, `${SCANS}?x=1`, '/api/v1/auth/logout', '/api/v1/admin', '/api/v1/browser/runtime/consents']) assert.equal(cancelMutationAllowed(path, [id]), false);
+  assert.equal(cancelMutationAllowed(`${SCANS}/${id}/cancel`, []), false);
+  assert.equal(cancelMutationAllowed(`${SCANS}/private/cancel`, ['private']), false);
+  const source = readFileSync(new URL('./public-product-live.mjs', import.meta.url), 'utf8');
+  const gate = source.indexOf('!cancelMutationAllowed(u.pathname, scans.keys())');
+  assert.ok(gate > 0 && gate < source.indexOf('if (consumePermit(state.permit'));
+  assert.ok(source.includes("u.pathname.endsWith('/cancel') && stats.cancelPosts >= 1"));
+  assert.ok(source.includes("u.pathname === '/api/v1/auth/register' && stats.accountsCreated >= 1"));
+});
+
+test('first subset must contain a checked result; terminal wins the race and unknown/failed outcomes are not proof', () => {
+  assert.deepEqual(completedChecks({ perCheck: { secret: { outcome: 'checked' }, sbom: { outcome: 'failed' }, config: { outcome: 'checked' } } }), ['secret', 'config']);
+  for (const perCheck of [undefined, {}, { secret: null }, { secret: { outcome: 'failed' } }, { vuln: { outcome: 'unknown' } }]) assert.equal(cancelObservation({ state: 'running', perCheck }), 'waiting');
+  assert.equal(cancelObservation({ state: 'running', perCheck: { secret: { outcome: 'checked', findingCount: 0 } } }), 'ready');
+  assert.equal(cancelObservation({ state: 'running', perCheck: { config: { outcome: 'checked' } } }), 'ready');
+  for (const state of ['completed', 'partial', 'failed', 'cancelled']) assert.equal(cancelObservation({ state, perCheck: { secret: { outcome: 'checked' } } }), 'terminal');
+});
+
+test('cancel-only cannot pass missing, blocked or inconclusive criteria, including terminal races', () => {
+  const book = new ResultBook('cancel', id); assert.equal(resultExitCode(book), 2);
+  for (const name of book.plan.cases) book.record(name, 'PASS', 'VERIFIED');
+  assert.equal(resultExitCode(book), 0);
+  for (const name of book.plan.cases) {
+    book.record(name, 'INCONCLUSIVE', 'CANCEL_RACE'); assert.equal(resultExitCode(book), 2);
+    book.record(name, 'PASS', 'VERIFIED');
+    book.record(name, 'BLOCKED', 'PREREQUISITE_UNAVAILABLE'); assert.equal(resultExitCode(book), 2);
+    book.record(name, 'PASS', 'VERIFIED');
+  }
+  book.record('cancel', 'INCONCLUSIVE', 'NO_COMPLETED_SUBSET_OBSERVED'); assert.equal(resultExitCode(book), 2);
+  book.record('cancel', 'BLOCKED', 'ASSERTION_FAILED'); assert.equal(resultExitCode(book), 1);
+  book.record('cancel', 'PASS', 'VERIFIED'); assert.equal(resultExitCode(book), 1);
+});
+
+test('cancel-only evidence is exclusive new cancel UUID paths, no key-absent condition or historical overwrite', async () => {
+  const book = new ResultBook('cancel', id), evidence = book.evidence(), opened = [];
+  assert.equal(evidence.scope, 'native-public8081-one-scan-cancel');
+  assert.equal(evidence.generationPolicy, 'all-llm-posts-denied'); assert.equal(evidence.providerGenerationQualified, false);
+  await writeEvidence(evidence, async (path, mode, permissions) => {
+    opened.push(path); assert.equal(mode, 'wx'); assert.equal(permissions, 0o600);
+    return { writeFile: async () => {}, sync: async () => {}, close: async () => {} };
+  });
+  assert.deepEqual(opened.map(path => path.split('/').at(-1)), [`public-final-${id}-cancel.json`, `public-final-${id}-cancel.md`]);
+  assert.ok(opened.every(path => !nativePlan().evidencePaths.includes(path) && !nativePlan('smoke').evidencePaths.includes(path)));
+  const [json, md] = evidenceDocuments(evidence);
+  assert.equal(JSON.parse(json).mode, 'cancel');
+  assert.ok(md.includes('key presence is irrelevant')); assert.ok(md.includes('All LLM POSTs are denied'));
+});
+
+test('cancel-only source branches before all full/LLM flows and reuses real UI eligibility, confirm, durable reads and fresh login', () => {
+  const source = readFileSync(new URL('./public-product-live.mjs', import.meta.url), 'utf8');
+  const branch = source.indexOf('if (plan.cancelOnly) {\n        await runCancellation();\n        return;\n      }');
+  assert.ok(branch > 0 && branch < source.indexOf('for (const target of plan.targets)'));
+  assert.ok(branch < source.indexOf("await step('llm_readiness'"));
+  const cancellation = source.slice(source.indexOf('async function runCancellation()'), source.indexOf('    })()]);', source.indexOf('async function runCancellation()')));
+  for (const forbidden of ['keyBoundaryAllowed(', 'readChat(', 'openChat(', 'llmPath', 'DECISION', 'QUESTION']) assert.equal(cancellation.includes(forbidden), false);
+  for (const required of ['await launch(own, TARGETS[0])', 'plan.cancelOnly ? WORKER_MS : 20_000', "cancelObservation(before) === 'waiting'", 'completedChecks(before)', "dialog.type() === 'confirm'", "dialog.message() === 'Отменить скан?", "await step('cancel_report'", "await step('cancel_reload'", "await step('cancel_history'", "await step('cancel_fresh_login'", "await auth(own, owner, 'login')", 'assert.equal((await own.context.cookies()).length, 0)', 'assert.deepEqual(final.perCheck, after.perCheck)', 'if (plan.cancelOnly && focusedReports) assert.deepEqual(reports, focusedReports)']) assert.ok(cancellation.includes(required), required);
+  assert.equal((cancellation.match(/await launch\(/g) ?? []).length, 1);
+  assert.ok(source.includes('if (!plan.cancelOnly) book.record(\'llm_generation\''));
+  assert.ok(source.includes('plan.smokeOnly || plan.cancelOnly'));
 });
 
 test('failure diagnostics project only runner line numbers, never raw stack/credentials/payload', () => {
@@ -308,6 +400,27 @@ test('denied replies cannot pass with HTML, oversized/null JSON, nested data or 
   assert.doesNotThrow(() => assertDeniedReply({ status: 404, value: { errorCode: 'LLM_UNAVAILABLE' } }, 404));
   for (const value of [null, '<html>not found</html>', [], { errorCode: 'LLM_UNAVAILABLE', findings: [] }, { error: { turns: [] } }, { errorCode: 'ARBITRARY_PRIVATE_MESSAGE' }]) assert.throws(() => assertDeniedReply({ status: 404, value }, 404));
   assert.throws(() => assertDeniedReply({ status: 200, value: { errorCode: 'LLM_UNAVAILABLE' } }, 404));
+});
+
+test('observed two-field NotFound denial is accepted only for exact 404 without weakening other shapes', () => {
+  const value = { statusCode: 404, message: 'Not Found' };
+  assert.doesNotThrow(() => assertDeniedReply({ status: 404, value }, 404));
+  assert.doesNotThrow(() => assertDeniedReply({ status: 404, value: { message: 'Not Found', statusCode: 404 } }, 404));
+  for (const status of [200, 201, 301, 401, 403, 429, 500, '404']) assert.throws(() => assertDeniedReply({ status, value }, 404));
+  for (const expected of [200, 401, 403, 429, 500]) assert.throws(() => assertDeniedReply({ status: expected, value: { statusCode: expected, message: expected === 401 ? 'Unauthorized' : 'Not Found' } }, expected));
+  for (const body of [
+    { ...value, statusCode: 401 }, { ...value, statusCode: '404' }, { ...value, statusCode: null },
+    { ...value, message: 'not found' }, { ...value, message: 'Not Found ' }, { ...value, message: 'PRIVATE' },
+    { ...value, message: null }, { ...value, message: ['Not Found'] }, { ...value, message: { text: 'Not Found' } },
+    { statusCode: 404 }, { message: 'Not Found' }, { error: 'Not Found' }, { error: 'SCAN_NOT_FOUND' },
+    { ...value, findings: [] }, { ...value, turns: [] }, { ...value, data: {} }, { ...value, extra: null },
+    { ...value, errorCode: 'SCAN_NOT_FOUND' }, { ...value, error: undefined }, { ...value, error: null },
+    { ...value, error: 'SCAN_NOT_FOUND' }, { ...value, error: { message: 'Not Found' } },
+    null, [], 'Not Found', '<html>Not Found</html>',
+  ]) assert.throws(() => assertDeniedReply({ status: 404, value: body }, 404));
+  assert.doesNotThrow(() => assertDeniedReply({ status: 401, value: { statusCode: 401, message: 'Unauthorized', error: 'Unauthorized' } }, 401));
+  assert.doesNotThrow(() => assertDeniedReply({ status: 404, value: { ...value, error: 'Not Found' } }, 404));
+  for (const errorCode of ['SCAN_NOT_FOUND', 'LLM_UNAVAILABLE']) assert.doesNotThrow(() => assertDeniedReply({ status: 404, value: { errorCode } }, 404));
 });
 
 test('quota unchanged cannot pass by comparing missing vectors or unavailable snapshots', () => {

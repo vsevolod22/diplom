@@ -1,6 +1,8 @@
-# Public8081 — текущая передача 2026-10-25: Docker storage I/O / build HOLD
+# Public8081 — историческая передача до restart/recovery25.10
 
-Этот документ supersedes operational READY от22.10. Исторические receipts/FAIL не переписываются.
+> **SUPERSEDED:** после явного разрешения владельца выполнен один Docker Desktop restart и одно exact continuation — actual READY/exit0, public8081 и protected8080 HTTP200, четыре stores/JWT сохранены, operation evidence архивированы. Fresh native scan completed, foreign browser404/UI denial PASS; chat502/translation429 BLOCKED, cancel attempt доsubmission не квалифицирован, publicCVEdownload failed доfence, schedulerpending. Актуальная передача: [public-recovery-ready-20261025.md](public-recovery-ready-20261025.md). Token/checker/continue для audit2c9 consumed, не повторять. Ниже сохранён исходный pre-restart HOLD handoff, **не текущая operational инструкция**.
+
+Этот документ superseded READY от22.10 на момент своей первой записи; теперь сам superseded новым READY receipt. Исторические receipts/FAIL не переписываются.
 
 ## Фактический статус
 

@@ -31,6 +31,34 @@ const control = c => { const config = structuredClone(c.Config); config.Env = co
 const epoch = c => [c.Id, c.State.StartedAt, c.State.FinishedAt, c.State.Pid, c.RestartCount, c.State.Running, c.State.Status, c.State.ExitCode, c.State.Error];
 const stopped = c => need(c.State.Status === 'exited' && c.State.Running === false && c.State.Pid === 0 && c.RestartCount === 0 && (['web', 'egress', 'llm-egress'].includes(role(c)) ? [0, 143] : [0]).includes(c.State.ExitCode) && !c.State.Paused && !c.State.OOMKilled && !c.State.Dead && !c.State.Restarting && !c.State.Error);
 
+// Owner authorized exactly one Docker Desktop restart at this recorded instant.
+// Only the two fixed old-record/new-epoch pairs below may cross that boundary.
+export const EXISTING_BUILD_GATEWAY_RESTART = Object.freeze({
+  audit: "deploy-2c9ed08b8269264b09bf14eb6189a649",
+  authorizationAt: "2026-10-25T17:57:47Z",
+  gateways: Object.freeze({
+    "egress": Object.freeze({ original: Object.freeze({ ...{"name":"egress","id":"6f0c9cf6259938d35e13bfb78ad515f424d4ce3e7420a92c0e0d7b8cfa25ac55","image":"sha256:ce9ff52cb3aa1c5f6011bec9c239c6446a1c385f30256a9cc85fc00f436c889f","control":"e54d60f7c44032eb154802c2b5c6100432ef7c75b100c2ede332fda0625bd5a2"}, epoch: Object.freeze(["6f0c9cf6259938d35e13bfb78ad515f424d4ce3e7420a92c0e0d7b8cfa25ac55","2026-10-25T16:18:26.467964043Z","2026-10-25T16:18:26.011240418Z",1156,0,true,"running",0,""]) }), currentEpoch: Object.freeze(["6f0c9cf6259938d35e13bfb78ad515f424d4ce3e7420a92c0e0d7b8cfa25ac55","2026-10-25T17:57:47.768921128Z","2026-10-25T17:57:47.286674669Z",1080,0,true,"running",0,""]) }),
+    "llm-egress": Object.freeze({ original: Object.freeze({ ...{"name":"llm-egress","id":"660bd9867e413b704ac05a7d87f9d4fbd3b5f9ffdb0bd71196dcffa0095d8b2f","image":"sha256:ed51df52f8a92f4966e688d6b4b4337e6522f8b41139a105ef6fc80d93430912","control":"06f4199cb3f7d3da7d2537be003a92cea6531603bfc7f99b2f53385c7f2bca9d"}, epoch: Object.freeze(["660bd9867e413b704ac05a7d87f9d4fbd3b5f9ffdb0bd71196dcffa0095d8b2f","2026-10-25T16:18:26.472246751Z","2026-10-25T16:18:26.011483126Z",1155,0,true,"running",0,""]) }), currentEpoch: Object.freeze(["660bd9867e413b704ac05a7d87f9d4fbd3b5f9ffdb0bd71196dcffa0095d8b2f","2026-10-25T17:57:47.770044503Z","2026-10-25T17:57:47.286869002Z",1077,0,true,"running",0,""]) })
+  })
+});
+
+// Pure tuple check: no IO, no mutable policy argument and no restart-time window.
+// Other peers retain exact original epochs; gateways require the fixed new epoch.
+export function validateExistingBuildPeerEpoch(audit, original, current) {
+  const fields = ['control', 'epoch', 'id', 'image', 'name'];
+  need(audit === EXISTING_BUILD_HOLD.audit && original && current && roles.includes(original.name) &&
+    equal(Object.keys(original).sort(), fields) && equal(Object.keys(current).sort(), fields) &&
+    current.name === original.name && current.id === original.id && current.image === original.image && current.control === original.control &&
+    /^[a-f0-9]{64}$/.test(original.id) && /^sha256:[a-f0-9]{64}$/.test(original.image) && /^[a-f0-9]{64}$/.test(original.control) &&
+    Array.isArray(original.epoch) && Array.isArray(current.epoch) && original.epoch.length === 9 && current.epoch.length === 9 &&
+    original.epoch[0] === original.id && current.epoch[0] === current.id);
+  if (Object.hasOwn(EXISTING_BUILD_GATEWAY_RESTART.gateways, original.name)) {
+    const fixed = EXISTING_BUILD_GATEWAY_RESTART.gateways[original.name];
+    need(equal(original, fixed.original) && equal(current.epoch, fixed.currentEpoch));
+  } else need(equal(current.epoch, original.epoch));
+  return true;
+}
+
 // Existing audited transitive closure + exactly this new entry. No import edge is
 // added to the old launcher: its check-current-* routes keep their old whitelist.
 export function captureExistingBuildExecution(root) {
@@ -132,11 +160,52 @@ function metadataReader(run, options, pins, helper, keyVolume) {
 }
 
 const ownValue = (error, key) => error && (typeof error === 'object' || typeof error === 'function') ? Object.getOwnPropertyDescriptor(error, key)?.value : undefined;
-const metadataCategories = ['image', 'timeout', 'docker_unavailable', 'network_pool', 'resources', 'runtime_health', 'unclassified', 'storage_io', 'guard'];
+const metadataCategories = ['image', 'timeout', 'docker_unavailable', 'network_pool', 'resources', 'runtime_health', 'unclassified', 'storage_io', 'worker_output_blob_not_found', 'guard'];
+// Exact observed broken mutable output, NOT a missing/certified execution image.
+// Failed census cannot prove absence of extra own-prefix tags: review that loss.
+export const EXISTING_BUILD_WORKER_OUTPUT_RETIREMENT = Object.freeze({
+  audit: "deploy-2c9ed08b8269264b09bf14eb6189a649",
+  tag: "dip-public-images-worker:local",
+  blobDigest: "sha256:17d479836bb4426cc81f0e9dd358a19f2d2faf99bbddce95be3c354a85e1c88a",
+  workerFailure: Object.freeze({"version":1,"kind":"rpc-blob-not-found","exitCode":1,"blobDigest":"sha256:17d479836bb4426cc81f0e9dd358a19f2d2faf99bbddce95be3c354a85e1c88a","stdoutSha256":"37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570","stderrSha256":"b348d6446a278291bb7a787ef445b2c5de971d7d48d6b82350bfd81f8b5387d3"}),
+  censusFailure: Object.freeze({"version":1,"kind":"rpc-blob-not-found","exitCode":1,"blobDigest":"sha256:17d479836bb4426cc81f0e9dd358a19f2d2faf99bbddce95be3c354a85e1c88a","stdoutSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stderrSha256":"b348d6446a278291bb7a787ef445b2c5de971d7d48d6b82350bfd81f8b5387d3"}),
+  knownTags: Object.freeze(["dip-public-images-api:local","dip-public-images-egress:local","dip-public-images-llm-egress:local","dip-public-images-web:local","dip-public-images-worker:local"]),
+  validatedOtherRoles: Object.freeze(["api", "egress", "llm-egress", "web"]),
+  executionAuthority: false, requiresWorkerBuild: true, ownPrefixCensusProven: false
+});
+
+// Bounded raw-output classification only. This never means image-missing and
+// grants no execution/recovery authority; admission separately matches fixed proof.
+export function classifyExistingWorkerOutputFailure(error, stdout = '', stderr = '') {
+  if (ownValue(error, 'code') !== 1 || ownValue(error, 'killed') || ownValue(error, 'signal') ||
+      typeof stdout !== 'string' || typeof stderr !== 'string' || Buffer.byteLength(stdout) > 65536 || Buffer.byteLength(stderr) > 65536 ||
+      !['', '[]'].includes(stdout.trim()) || !/^[\x09\x0a\x0d\x20-\x7e]*$/.test(stderr) ||
+      /input\/output error|\bi\/o error\b/i.test(stderr) || !/rpc error:\s*code\s*=\s*NotFound\b/.test(stderr) ||
+      !/expected at/.test(stderr) || !/blob not found/.test(stderr)) return null;
+  const digests = [...new Set([...stderr.matchAll(/blob\s+(sha256:[a-f0-9]{64})/g)].map(m => m[1]))];
+  if (digests.length !== 1) return null;
+  return Object.freeze({ version: 1, kind: 'rpc-blob-not-found', exitCode: 1, blobDigest: digests[0], stdoutSha256: hash(stdout), stderrSha256: hash(stderr) });
+}
+function workerOutputProof(error) {
+  const p = ownValue(error, 'workerOutputFailure'), fields = ['blobDigest', 'exitCode', 'kind', 'stderrSha256', 'stdoutSha256', 'version'];
+  if (!p || !equal(Object.keys(p).sort(), fields)) return null;
+  const v = Object.fromEntries(fields.map(k => [k, ownValue(p, k)]));
+  if (v.version !== 1 || v.kind !== 'rpc-blob-not-found' || v.exitCode !== 1 || typeof v.blobDigest !== 'string' ||
+      typeof v.stdoutSha256 !== 'string' || typeof v.stderrSha256 !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(v.blobDigest) ||
+      !/^[a-f0-9]{64}$/.test(v.stdoutSha256) || !/^[a-f0-9]{64}$/.test(v.stderrSha256)) return null;
+  return Object.freeze(v);
+}
+function ownTagFailure(error, boundary) {
+  const failure = Error('PUBLIC LLM own image metadata refused; details withheld.'), category = ownValue(error, 'category');
+  failure.boundary = boundary; failure.category = metadataCategories.includes(category) ? category : 'guard';
+  const proof = workerOutputProof(error); if (proof) failure.workerOutputFailure = proof;
+  return failure;
+}
+
 export function existingBuildMetadataDiagnostic(error) {
   const boundary = ownValue(error, 'boundary'), category = ownValue(error, 'category');
-  if (!roles.some(name => boundary === 'prior-image-inspect-' + name) || !metadataCategories.includes(category)) return null;
-  return Object.freeze({ boundary, category: category === 'storage_io' ? 'DockerIO' : category });
+  if (!(roles.some(name => boundary === 'prior-image-inspect-' + name) || ['own-image-tag-census', 'own-worker-output-inspect'].includes(boundary)) || !metadataCategories.includes(category)) return null;
+  return Object.freeze({ boundary, category: category === 'storage_io' ? 'DockerIO' : category === 'worker_output_blob_not_found' ? 'WorkerOutputBlobNotFound' : category });
 }
 export async function inspectExistingBuildPriorImage(query, name, image) {
   need(roles.includes(name) && /^sha256:[a-f0-9]{64}$/.test(image));
@@ -148,6 +217,69 @@ export async function inspectExistingBuildPriorImage(query, name, image) {
     // No raw error/cause/output/reference is carried across this boundary.
     throw failure;
   }
+}
+
+// Pure admission of one fixed damaged OUTPUT record. The four other exact tags
+// must be actual validated metadata; none of this certifies/executes the worker.
+export function validateExistingWorkerOutputRetirement(audit, workerFailure, censusFailure, otherImages) {
+  const fixed = EXISTING_BUILD_WORKER_OUTPUT_RETIREMENT;
+  need(audit === fixed.audit && equal(workerFailure, fixed.workerFailure) && equal(censusFailure, fixed.censusFailure) &&
+    workerFailure.blobDigest === censusFailure.blobDigest && workerFailure.blobDigest === fixed.blobDigest &&
+    otherImages && equal(Object.keys(otherImages).sort(), fixed.validatedOtherRoles));
+  const validatedOtherTags = {};
+  for (const name of fixed.validatedOtherRoles) {
+    const image = otherImages[name]; validatePublicLlmImage(image, name);
+    need(image.RepoTags?.includes(`${PROJECT}-${name}:local`));
+    validatedOtherTags[name] = { Id: image.Id, Os: image.Os, Config: structuredClone(image.Config) };
+  }
+  return { version: 1, audit, kind: 'broken-mutable-worker-output-rebuild-only', tag: fixed.tag, blobDigest: fixed.blobDigest,
+    workerFailure: { ...workerFailure }, censusFailure: { ...censusFailure }, validatedOtherTags,
+    knownTagAuthority: [...fixed.knownTags], executionAuthority: false, requiresWorkerBuildBeforeUse: true,
+    ownPrefixCensusProven: false, additionalOwnPrefixTagsAbsentProven: false, originalImageMetadataCertified: false };
+}
+
+export async function inspectExistingBuildOwnTags(query, audit, missingPriorMetadata) {
+  const images = [], taggedImages = {};
+  const inspectTag = async name => {
+    const rows = JSON.parse(await query(['image', 'inspect', `${PROJECT}-${name}:local`]));
+    need(rows.length === 1); validatePublicLlmImage(rows[0], name); return rows[0];
+  };
+  const remember = (name, image) => { taggedImages[name] = image; images.push({ name, Id: image.Id, Os: image.Os, Config: image.Config }); };
+  let tags;
+  try { tags = (await query(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])).trim().split('\n').filter(Boolean); }
+  catch (error) {
+    if (!workerOutputProof(error)) throw ownTagFailure(error, 'own-image-tag-census');
+    try {
+      const fixed = EXISTING_BUILD_WORKER_OUTPUT_RETIREMENT, censusFailure = workerOutputProof(error);
+      need(audit === fixed.audit && equal(missingPriorMetadata, ['api', 'worker']) && equal(censusFailure, fixed.censusFailure));
+      let workerFailure;
+      try { await query(['image', 'inspect', fixed.tag]); }
+      catch (workerError) {
+        workerFailure = workerOutputProof(workerError);
+        if (!workerFailure) throw ownTagFailure(workerError, 'own-worker-output-inspect');
+      }
+      need(equal(workerFailure, fixed.workerFailure)); // A successful inspect or any other error refuses.
+      const otherImages = {};
+      for (const name of fixed.validatedOtherRoles) otherImages[name] = await inspectTag(name);
+      const retirement = validateExistingWorkerOutputRetirement(audit, workerFailure, censusFailure, otherImages);
+      // Fence the four positive tag observations around exception capture as well
+      // as comparing the complete runtime evidence again immediately pre-intent.
+      for (const name of fixed.validatedOtherRoles) {
+        const current = await inspectTag(name), previous = otherImages[name];
+        need(equal({ Id: current.Id, Os: current.Os, Config: current.Config }, { Id: previous.Id, Os: previous.Os, Config: previous.Config }));
+        need(current.RepoTags?.includes(`${PROJECT}-${name}:local`)); remember(name, current);
+      }
+      return { images, taggedImages, workerOutputRetirement: retirement };
+    } catch (failure) { throw ownTagFailure(failure, 'own-image-tag-census'); }
+  }
+  // Successful census retains the original strict own-prefix policy unchanged.
+  try {
+    for (const tag of [...new Set(tags)].sort()) {
+      const name = [...replaceable, 'egress'].find(n => tag === `${PROJECT}-${n}:local`); need(name);
+      remember(name, await inspectTag(name));
+    }
+  } catch (error) { throw ownTagFailure(error, 'own-image-tag-census'); }
+  return { images, taggedImages };
 }
 
 export async function preparePublicLlmExistingBuildContinuation({ root, home = homedir(), audit, run = runExistingBuildDocker, ambient = process.env, Database = requireApi('better-sqlite3') }) {
@@ -203,7 +335,8 @@ export async function preparePublicLlmExistingBuildContinuation({ root, home = h
   // compared with the durable pre-build record, never selected for execution.
   const validateOriginalPeer = (c, name) => {
     const saved = build.peers.find(p => p.name === name), command = [...(c.Config.Entrypoint ?? []), ...c.Config.Cmd];
-    need(saved && role(c) === name && c.Name === `/${PROJECT}-${name}-1` && owned(c.Config.Labels) && /^[a-f0-9]{64}$/.test(c.Id) && c.Config.Image === pins.services[name].image && saved.id === c.Id && saved.image === c.Image && saved.control === control(c) && equal(saved.epoch, epoch(c)) && c.Path === command[0] && equal(c.Args, command.slice(1)));
+    need(saved && role(c) === name && c.Name === `/${PROJECT}-${name}-1` && owned(c.Config.Labels) && /^[a-f0-9]{64}$/.test(c.Id) && c.Config.Image === pins.services[name].image && saved.id === c.Id && saved.image === c.Image && saved.control === control(c) && c.Path === command[0] && equal(c.Args, command.slice(1)));
+    validateExistingBuildPeerEpoch(audit, saved, { name, id: c.Id, image: c.Image, control: control(c), epoch: epoch(c) });
     if (['api', 'worker', 'web'].includes(name) || name.endsWith('volume-init') || !c.State.Running) stopped(c);
     else need(['egress', 'llm-egress'].includes(name) && c.State.Status === 'running' && Number.isSafeInteger(c.State.Pid) && c.State.Pid > 0 && c.RestartCount === 0 && !c.State.Paused && !c.State.OOMKilled && !c.State.Restarting && !c.State.Dead && !c.State.Error);
     // Reapply independent runtime policy using actual persisted defaults when
@@ -240,11 +373,9 @@ export async function preparePublicLlmExistingBuildContinuation({ root, home = h
     }
     for (const n of inventory.networks) need(equal(Object.keys(n.Containers ?? {}).sort(), inventory.containers.filter(c => c.State.Running && Object.hasOwn(c.NetworkSettings.Networks, n.Name)).map(c => c.Id).sort()));
     need(!(await q(['container', 'ls', '--all', '--no-trunc', '--filter', `id=${helper.id}`, '--format', '{{.ID}}'])).trim());
-    const tags = (await q(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])).trim().split('\n').filter(Boolean);
-    for (const tag of [...new Set(tags)].sort()) {
-      const name = [...replaceable, 'egress'].find(n => tag === `${PROJECT}-${n}:local`); need(name);
-      const rows = JSON.parse(await q(['image', 'inspect', tag])); need(rows.length === 1); validatePublicLlmImage(rows[0], name); inventory.images.push({ name, Id: rows[0].Id, Os: rows[0].Os, Config: rows[0].Config }); taggedImages[name] = rows[0];
-    }
+    const ownTags = await inspectExistingBuildOwnTags(q, audit, [...missing].sort());
+    inventory.images = ownTags.images; Object.assign(taggedImages, ownTags.taggedImages);
+    if (ownTags.workerOutputRetirement) inventory.workerOutputRetirement = ownTags.workerOutputRetirement;
     inventory.containers.sort((a, b) => role(a).localeCompare(role(b))); inventory.volumes.sort((a, b) => a.Name.localeCompare(b.Name)); inventory.networks.sort((a, b) => a.Name.localeCompare(b.Name));
     return inventory;
   };
@@ -269,14 +400,15 @@ export async function preparePublicLlmExistingBuildContinuation({ root, home = h
   };
   verify(); checkPrefix();
   const proofEvidence = f => ({ path: f.path.slice(root.length + 1), identity: f.identity, ...(f.sha256 ? { sha256: f.sha256 } : f.bytes !== undefined && !f.path.endsWith('/scan-jwt') ? { sha256: hash(f.bytes) } : {}) });
-  const reviewEvidence = { version: 1, audit, continuation: 'exact-existing-llm-normal-build-worker-hold', endpoint, source: source.manifest, executionClosure: execution.manifest, settings: settings.selection, priorSelection, baseline: stored.baseline,
+  const reviewEvidence = { version: 1, audit, continuation: 'exact-existing-llm-normal-build-worker-hold', gatewayRestartAuthorization: EXISTING_BUILD_GATEWAY_RESTART, endpoint, source: source.manifest, executionClosure: execution.manifest, settings: settings.selection, priorSelection, baseline: stored.baseline,
     original: proofs.map(proofEvidence), state: stateFiles.map(proofEvidence), candidate: candidateFiles.map(proofEvidence), runtime,
+    workerOutputRetirement: inventory.workerOutputRetirement ?? null,
     missingPriorMetadata: missing.sort(), retirementPolicy: missing.map(name => ({ name, image: pins.services[name].image, basis: 'durable-pre-build-checkpoint-controls-and-epoch', executeOriginal: false })),
     priorImageMetadata: Object.fromEntries(Object.entries(images).map(([n, im]) => [n, { Id: im.Id, Os: im.Os, Config: im.Config }])), backupHelper: { Id: backupImage.Id, Os: backupImage.Os, Config: backupImage.Config }, initialization: 'forbidden-existing-four-stores' };
   const review = hash(reviewEvidence);
   return { root, auditName: audit, nonce: audit.slice(7), auditPath, lockPath, stage, options, endpoint, profile, priorSelection, selection: settings.selection, pins, images, inventory, backupImage, keyVolumeAuthority: inventory.volumes.find(v => v.Name === priorSelection.keyVolume), baseline: stored.baseline,
     existingBuildOnly: true, review, reviewEvidence, originalFiles, stateFiles, candidateFiles, proofs, verify, verifyStable, verifyExecution: execution.verify, checkPrefix, revalidate, validateOriginalPeer,
-    summary: { audit, review, command: 'check-existing-build', lifecycle: false, services: 7, missingPriorMetadata: missing, baselineBasis: 'durable-pre-build-checkpoint-and-original-fenced-four-stores', requiresCurrentBuild: true, requiresInitialization: false, keyVolumeApiOnlyReadonly: true, executionModules: execution.programs.length, liveStoresCompared: false, mandatoryPreBuildNetworkNoneComparison: true } };
+    summary: { audit, review, command: 'check-existing-build', lifecycle: false, services: 7, exactGatewayRestartException: true, workerOutputRebuildRequired: Boolean(inventory.workerOutputRetirement), ownPrefixTagCensusProven: !inventory.workerOutputRetirement, additionalOwnPrefixTagsAbsentProven: !inventory.workerOutputRetirement, missingPriorMetadata: missing, baselineBasis: 'durable-pre-build-checkpoint-and-original-fenced-four-stores', requiresCurrentBuild: true, requiresInitialization: false, keyVolumeApiOnlyReadonly: true, executionModules: execution.programs.length, liveStoresCompared: false, mandatoryPreBuildNetworkNoneComparison: true } };
 }
 
 // Raw Docker failure output never leaves this adapter. Finite hints are NOT
@@ -298,19 +430,27 @@ export function classifyExistingBuildCause(error, stdout = '', stderr = '') {
 export function runExistingBuildDocker(args, options, execute = execFile) {
   const building = args[0] === 'compose' && args.at(-2) === 'build' && replaceable.includes(args.at(-1));
   if (!building) {
-    if (!(args.length === 3 && args[0] === 'image' && args[1] === 'inspect')) return runIsolatedDocker(args, options, execute);
-    let storageIo = false;
+    const ownCensus = equal(args, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}', '--filter', `reference=${PROJECT}-*`]);
+    const workerOutput = equal(args, ['image', 'inspect', `${PROJECT}-worker:local`]);
+    if (!(args.length === 3 && args[0] === 'image' && args[1] === 'inspect') && !ownCensus) return runIsolatedDocker(args, options, execute);
+    let storageIo = false, outputFailure = null;
     // Keep the existing metadata adapter's categories, especially image vs
     // unclassified. Observe IO locally without a second dispatch or fallback.
     const observe = (program, received, settings, done) => {
       try { return execute(program, received, settings, (error, stdout, stderr) => {
         storageIo = Boolean(error) && classifyExistingBuildCause(error, stdout, stderr) === 'storage_io';
+        if (error && (workerOutput || ownCensus)) outputFailure = classifyExistingWorkerOutputFailure(error, stdout, stderr);
         done(error, stdout, stderr);
       }); } catch (error) { storageIo = classifyExistingBuildCause(error) === 'storage_io'; throw error; }
     };
     return runIsolatedDocker(args, options, observe).catch(error => {
-      if (!storageIo) throw error;
-      const failure = Error('PUBLIC LLM Docker metadata IO failure; output withheld.'); failure.category = 'storage_io'; throw failure;
+      if (!storageIo && !outputFailure && !ownCensus) throw error;
+      const failure = Error('PUBLIC LLM Docker metadata failure; output withheld.');
+      failure.category = storageIo ? 'storage_io' : outputFailure ? 'worker_output_blob_not_found' : metadataCategories.includes(ownValue(error, 'category')) ? ownValue(error, 'category') : 'guard';
+      if (ownCensus) failure.boundary = 'own-image-tag-census';
+      else if (workerOutput) failure.boundary = 'own-worker-output-inspect';
+      if (outputFailure) failure.workerOutputFailure = outputFailure;
+      throw failure;
     });
   }
   return new Promise((resolveOutput, reject) => {

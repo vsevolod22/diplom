@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "scope": "independent-ownership-only-browser",
+  "runId": "4dc12aa6-fcc5-4c38-b1e4-82ea8a3ba2a5",
+  "startedAt": "2026-10-25T18:46:15.790Z",
+  "finishedAt": "2026-10-25T18:46:17.202Z",
+  "actuallyRun": true,
+  "origin": "http://127.0.0.1:8081",
+  "targetScanId": "41450b5b-641d-4839-9fae-c2698ef75dae",
+  "selectionFromPriorArtifact": true,
+  "priorFullRunUnchanged": true,
+  "priorFullRunVerdict": "FAIL_PRESERVED",
+  "semanticAccuracy": "unverified",
+  "credentialsPersisted": false,
+  "payloadArtifacts": false,
+  "registration": {
+    "status": "PASS",
+    "freshContext": true,
+    "httpStatus": 201,
+    "viaUI": true
+  },
+  "gets": [
+    {
+      "endpoint": "scan-status",
+      "status": 404,
+      "result": "PASS",
+      "jsonContentType": true,
+      "errorCodePresent": false,
+      "errorPresent": false,
+      "safeErrorCode": null,
+      "exactTwoFieldNotFound": true,
+      "exactErrorCodeOnly": false,
+      "denialAccepted": true
+    },
+    {
+      "endpoint": "chat-history",
+      "status": 404,
+      "result": "PASS",
+      "jsonContentType": true,
+      "errorCodePresent": true,
+      "errorPresent": false,
+      "safeErrorCode": "LLM_UNAVAILABLE",
+      "exactTwoFieldNotFound": false,
+      "exactErrorCodeOnly": true,
+      "denialAccepted": true
+    },
+    {
+      "endpoint": "chat-context",
+      "status": 404,
+      "result": "PASS",
+      "jsonContentType": true,
+      "errorCodePresent": true,
+      "errorPresent": false,
+      "safeErrorCode": "LLM_UNAVAILABLE",
+      "exactTwoFieldNotFound": false,
+      "exactErrorCodeOnly": true,
+      "denialAccepted": true
+    },
+    {
+      "endpoint": "llm-readiness",
+      "status": 404,
+      "result": "PASS",
+      "jsonContentType": true,
+      "errorCodePresent": true,
+      "errorPresent": false,
+      "safeErrorCode": "LLM_UNAVAILABLE",
+      "exactTwoFieldNotFound": false,
+      "exactErrorCodeOnly": true,
+      "denialAccepted": true
+    },
+    {
+      "endpoint": "translation-context",
+      "status": 404,
+      "result": "PASS",
+      "jsonContentType": true,
+      "errorCodePresent": true,
+      "errorPresent": false,
+      "safeErrorCode": "SCAN_NOT_FOUND",
+      "exactTwoFieldNotFound": false,
+      "exactErrorCodeOnly": true,
+      "denialAccepted": true
+    }
+  ],
+  "reportUI": {
+    "result": "PASS",
+    "httpStatus": 404,
+    "denialVisible": true,
+    "noFindings": true,
+    "noChat": true
+  },
+  "safety": {
+    "result": "PASS",
+    "contextClosed": true,
+    "browserClosed": true,
+    "noActiveBrowserTraffic": true
+  },
+  "stats": {
+    "registrationPosts": 1,
+    "accountsCreated": 1,
+    "scanPosts": 0,
+    "generationPosts": 0,
+    "foreignApiGets": 6,
+    "blockedRequests": 0,
+    "pageErrors": 0
+  },
+  "status": "PASS",
+  "code": "VERIFIED"
+}

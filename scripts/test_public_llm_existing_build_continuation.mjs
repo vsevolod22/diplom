@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import {
-  executePublicLlmMaintenance, expectedPublicLlmConfig, inspectPublicLlmNamespace, PUBLIC_LLM_ENV, publicLlmEnvironmentOverlay,
+  executePublicLlmMaintenance, publicLlmStand, expectedPublicLlmConfig, inspectPublicLlmNamespace, PUBLIC_LLM_ENV, publicLlmEnvironmentOverlay,
   validatePublicLlmContainer, validatePublicLlmImage, publicLlmHelperArguments, PUBLIC_LLM_BACKUP_PROGRAM,
   PUBLIC_LLM_CHECK_PROGRAM, PUBLIC_LLM_INITIALIZE_PROGRAM, capturePublicLlmSource,
 } from './public-llm-stand.mjs';
@@ -20,10 +20,14 @@ import {
   byteFile, privateFile, capturePublicLlmExecutionClosure, PUBLIC_LLM_EXECUTION_MODULES,
 } from './public-llm-build-continuation.mjs';
 import { fixture } from './public-refresh-cve-fixtures.mjs';
+import * as existingBuildModule from './public-llm-existing-build-continuation.mjs';
 import {
   EXISTING_BUILD_HOLD, preparePublicLlmExistingBuildContinuation, captureExistingBuildExecution,
   publicLlmExistingBuildStand, classifyExistingBuildCause, runExistingBuildDocker,
   inspectExistingBuildPriorImage, existingBuildMetadataDiagnostic,
+  EXISTING_BUILD_GATEWAY_RESTART, validateExistingBuildPeerEpoch,
+  classifyExistingWorkerOutputFailure, EXISTING_BUILD_WORKER_OUTPUT_RETIREMENT,
+  validateExistingWorkerOutputRetirement, inspectExistingBuildOwnTags,
 } from './public-llm-existing-build-continuation.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -95,7 +99,7 @@ function existingNamespace(t) {
     return f.docker(args, options);
   };
   const inspect = () => inspectPublicLlmNamespace(metadata, { root: f.root, env: { DOCKER_HOST: f.endpoint }, timeout: 15000 }, f.root, bound, SELECTION, { images: f.images });
-  return { f, model, bound, inspect };
+  return { f, model, bound, inspect, metadata };
 }
 
 function operations({ fault, mutate } = {}) {
@@ -540,6 +544,473 @@ test('STORAGE finite metadata diagnostic ignores unknown labels and never reads 
     category: { get() { assert.fail('must not evaluate an error category getter'); } },
   });
   assert.equal(existingBuildMetadataDiagnostic(getters), null);
+});
+
+function sourceVariable(name, context = {}) {
+  const declaration = sourceNode('scripts/public-llm-existing-build-continuation.mjs', node => ts.isVariableDeclaration(node) && node.name.getText() === name);
+  return runInNewContext(`(${declaration.slice(declaration.indexOf('=') + 1)})`, context);
+}
+
+// Source-level peer-policy fixture: actual private validation closure and its
+// pure hash/epoch helpers, backed only by disposable synthetic container data.
+// No full preparer, engine runner or native restore is executed here.
+function peerPolicyFixture(t, name) {
+  const x = existingNamespace(t), peer = clone(x.f.containers.find(c => role(c) === name));
+  const command = [...(peer.Config.Entrypoint ?? []), ...peer.Config.Cmd];
+  peer.Path = command[0]; peer.Args = command.slice(1);
+  Object.assign(peer.State, { Running: false, Status: 'exited', Pid: 0, ExitCode: 0, StartedAt: '2026-10-01T00:00:00Z', FinishedAt: '2026-10-01T00:05:00Z', Error: '', OOMKilled: false, Paused: false, Restarting: false, Dead: false });
+  const context = {
+    ...existingBuildModule, PROJECT, LABEL, structuredClone, crypto: { createHash }, audit: AUDIT,
+    need: value => { if (!value) throw Error('synthetic peer policy refusal'); },
+  };
+  for (const helper of ['canonical', 'equal', 'hash', 'role', 'owned', 'control', 'epoch', 'stopped']) context[helper] = sourceVariable(helper, context);
+  const saved = { name, id: peer.Id, image: peer.Image, control: context.control(peer), epoch: Array.from(context.epoch(peer)) };
+  context.build = { peers: [saved], imageMetadata: clone(x.f.images) };
+  context.pins = { services: Object.fromEntries(Object.entries(x.f.images).map(([role, image]) => [role, { image: image.Id }])) };
+  Object.assign(context, { model: x.model, images: x.f.images, priorSelection: SELECTION, validatePublicLlmContainer,
+    jwtFile: { bytes: peer.Config.Env.find(v => v.startsWith('SCAN_JWT_SECRET='))?.slice('SCAN_JWT_SECRET='.length) } });
+  const validate = sourceVariable('validateOriginalPeer', context);
+  return { ...x, peer, saved, context, validate };
+}
+
+for (const name of ['api', 'worker', 'web', 'auth-volume-init', 'scan-volume-init']) test(`RESTART stopped ${name} stays exact: timestamp/PID/counter/state/exit/OOM drifts refuse without changing original evidence`, t => {
+  const x = peerPolicyFixture(t, name), before = evidenceTree(x.f.stand), original = clone(x.saved);
+  x.validate(x.peer, name);
+  for (const [label, mutate] of [
+    ['container identity', c => { c.Id = 'f'.repeat(64); }],
+    ['runtime image', c => { c.Image = 'sha256:' + 'f'.repeat(64); }],
+    ['configured image', c => { c.Config.Image = 'sha256:' + 'f'.repeat(64); }],
+    ['control/command', c => { c.Config.Cmd = [...c.Config.Cmd, 'unreviewed']; }],
+    ['host control', c => { c.HostConfig.ReadonlyRootfs = false; }],
+    ['start timestamp', c => { c.State.StartedAt = '2026-10-25T17:57:47Z'; }],
+    ['finish timestamp', c => { c.State.FinishedAt = '2026-10-25T17:57:47Z'; }],
+    ['PID', c => { c.State.Pid = 999; }],
+    ['restart counter', c => { c.RestartCount++; }],
+    ['running', c => { c.State.Running = true; }],
+    ['status', c => { c.State.Status = 'running'; }],
+    ['exit', c => { c.State.ExitCode = 137; }],
+    ['OOM', c => { c.State.OOMKilled = true; }],
+    ['paused', c => { c.State.Paused = true; }],
+    ['restarting', c => { c.State.Restarting = true; }],
+    ['dead', c => { c.State.Dead = true; }],
+    ['error', c => { c.State.Error = 'synthetic-state-error'; }],
+  ]) {
+    const changed = clone(x.peer); mutate(changed);
+    assert.throws(() => x.validate(changed, name), `${name}: ${label} must not inherit the gateway restart exception`);
+  }
+  assert.deepEqual(x.saved, original);
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+  assert.equal(x.f.calls.length, 0);
+});
+
+for (const refusal of ['stale-token', 'current-source-drift']) test(`RESTART shared continuation entry still rejects ${refusal} before engine access or original-evidence mutation`, async t => {
+  const x = prefixFixture(t), proof = captureExistingBuildExecution(x.root), current = 'c'.repeat(64), checks = [];
+  const continuation = {
+    existingBuildOnly: true, root: x.root, auditName: AUDIT, review: current,
+    verify() { checks.push('source'); proof.verify(); },
+    checkPrefix() { assert.fail('must refuse before proceeding to prefix/preflight'); },
+  };
+  if (refusal === 'current-source-drift') fs.appendFileSync(join(x.root, 'scripts/public-llm-existing-build-continuation.mjs'), '\n// synthetic change after gateway epoch review\n');
+  const before = evidenceTree(x.f.stand);
+  await assert.rejects(publicLlmStand(['continue-existing-build', '--audit', AUDIT, '--review', refusal === 'stale-token' ? 'b'.repeat(64) : current, '--ack-reviewed-current-source', '--ack-retire-only-unavailable-peers'], {
+    root: x.root, home: x.home, ambient: {}, existingBuildContinuation: continuation,
+    run: async () => assert.fail('must not dispatch Docker'),
+    Database: class { constructor() { assert.fail('must not access SQLite'); } }, log: () => {},
+  }));
+  assert.deepEqual(checks, refusal === 'stale-token' ? [] : ['source']);
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+});
+
+function fixedGatewayPair(name) {
+  const fixed = EXISTING_BUILD_GATEWAY_RESTART.gateways[name];
+  return { original: clone(fixed.original), current: { ...clone(fixed.original), epoch: clone(fixed.currentEpoch) } };
+}
+
+test('RESTART authorization is frozen to the exact audit, recorded instant and two gateway roles', () => {
+  const policy = EXISTING_BUILD_GATEWAY_RESTART;
+  assert.equal(policy.audit, AUDIT);
+  assert.equal(policy.authorizationAt, '2026-10-25T17:57:47Z');
+  assert.deepEqual(Object.keys(policy.gateways).sort(), ['egress', 'llm-egress']);
+  assert(Object.isFrozen(policy)); assert(Object.isFrozen(policy.gateways));
+  for (const fixed of Object.values(policy.gateways)) {
+    assert(Object.isFrozen(fixed)); assert(Object.isFrozen(fixed.original));
+    assert(Object.isFrozen(fixed.original.epoch)); assert(Object.isFrozen(fixed.currentEpoch));
+  }
+});
+
+for (const name of ['egress', 'llm-egress']) {
+  test(`RESTART ${name} accepts only its fixed original-record/new-epoch pair with unchanged ID/image/control and evidence`, t => {
+    const x = prefixFixture(t), before = evidenceTree(x.f.stand), pair = fixedGatewayPair(name), retained = clone(pair);
+    assert.equal(validateExistingBuildPeerEpoch(AUDIT, pair.original, pair.current), true);
+    for (const field of ['name', 'id', 'image', 'control']) assert.equal(pair.current[field], pair.original[field]);
+    assert.notDeepEqual(pair.current.epoch, pair.original.epoch);
+    assert.deepEqual(pair, retained, 'validation must never rewrite the original peer record');
+    assert.deepEqual(evidenceTree(x.f.stand), before);
+    assert.deepEqual(x.counts(), { dispatches: 0, databases: 0 });
+  });
+
+  for (const [label, mutate] of [
+    ['container ID', p => { p.current.id = 'f'.repeat(64); p.current.epoch[0] = p.current.id; }],
+    ['epoch container ID', p => { p.current.epoch[0] = 'f'.repeat(64); }],
+    ['image ID', p => { p.current.image = 'sha256:' + 'f'.repeat(64); }],
+    ['control hash', p => { p.current.control = 'f'.repeat(64); }],
+    ['start timestamp', p => { p.current.epoch[1] = '2026-10-25T17:57:48Z'; }],
+    ['finish timestamp', p => { p.current.epoch[2] = '2026-10-25T17:57:48Z'; }],
+    ['PID', p => { p.current.epoch[3]++; }],
+    ['restart counter', p => { p.current.epoch[4]++; }],
+    ['running state', p => { p.current.epoch[5] = false; }],
+    ['status', p => { p.current.epoch[6] = 'restarting'; }],
+    ['exit code', p => { p.current.epoch[7] = 137; }],
+    ['error', p => { p.current.epoch[8] = 'synthetic-runtime-error'; }],
+    ['extra epoch field', p => { p.current.epoch.push(false); }],
+    ['incomplete epoch', p => { p.current.epoch.pop(); }],
+    ['extra record authority', p => { p.current.allowRestart = true; }],
+    ['role substitution', p => { p.current.name = 'worker'; }],
+    ['rewritten old epoch', p => { p.original.epoch[3]++; }],
+    ['rewritten matching controls', p => { p.original.control = p.current.control = 'f'.repeat(64); }],
+    ['rewritten matching images', p => { p.original.image = p.current.image = 'sha256:' + 'f'.repeat(64); }],
+    ['rewritten matching IDs', p => { p.original.id = p.current.id = 'f'.repeat(64); p.original.epoch[0] = p.current.epoch[0] = 'f'.repeat(64); }],
+  ]) test(`RESTART ${name} rejects ${label}, not an arbitrary epoch relaxation`, () => {
+    const pair = fixedGatewayPair(name); mutate(pair);
+    assert.throws(() => validateExistingBuildPeerEpoch(AUDIT, pair.original, pair.current));
+  });
+
+  test(`RESTART ${name} refuses another audit, stale old live epoch, subsequent restart and cross-gateway epochs`, () => {
+    const pair = fixedGatewayPair(name);
+    assert.throws(() => validateExistingBuildPeerEpoch('deploy-' + '0'.repeat(32), pair.original, pair.current));
+    assert.throws(() => validateExistingBuildPeerEpoch(AUDIT, pair.original, clone(pair.original)), 'post-restart checking must not accept stale pre-restart live metadata');
+    const third = clone(pair.current); third.epoch[1] = '2026-10-25T18:00:00Z'; third.epoch[3]++;
+    assert.throws(() => validateExistingBuildPeerEpoch(AUDIT, pair.original, third));
+    assert.throws(() => validateExistingBuildPeerEpoch(AUDIT, pair.current, third), 'the approved new epoch cannot become a new historical authority');
+    const other = fixedGatewayPair(name === 'egress' ? 'llm-egress' : 'egress');
+    assert.throws(() => validateExistingBuildPeerEpoch(AUDIT, pair.original, other.current));
+  });
+
+  test(`RESTART ${name} retains production running-state guard: OOM/paused/restarting/dead drift cannot hide outside the epoch tuple`, () => {
+    const statement = sourceNode('scripts/public-llm-existing-build-continuation.mjs', node => ts.isIfStatement(node) && node.expression.getText().includes("['api', 'worker', 'web'].includes(name)") && node.elseStatement?.getText().includes('c.State.OOMKilled'));
+    const stateGuard = runInNewContext(`(c, name) => {${statement}}`, {
+      need: value => { if (!value) throw Error('synthetic running-state refusal'); },
+      stopped: () => assert.fail('healthy fixed gateway must not enter the stopped-peer branch'),
+    });
+    const pair = fixedGatewayPair(name), e = pair.current.epoch;
+    const peer = { Id: e[0], RestartCount: e[4], State: { StartedAt: e[1], FinishedAt: e[2], Pid: e[3], Running: e[5], Status: e[6], ExitCode: e[7], Error: e[8], OOMKilled: false, Paused: false, Restarting: false, Dead: false } };
+    assert.equal(validateExistingBuildPeerEpoch(AUDIT, pair.original, pair.current), true);
+    stateGuard(peer, name);
+    for (const field of ['OOMKilled', 'Paused', 'Restarting', 'Dead']) {
+      const changed = clone(peer); changed.State[field] = true;
+      assert.throws(() => stateGuard(changed, name), `${field} must fail independently of the allowed epoch pair`);
+    }
+  });
+}
+
+test('RESTART caller rejects synthetic gateway epochs even if ID/image/control and old/live epoch match each other', t => {
+  for (const name of ['egress', 'llm-egress']) {
+    const x = peerPolicyFixture(t, name), before = evidenceTree(x.f.stand);
+    assert.throws(() => x.validate(x.peer, name), 'matching arbitrary gateway records are not fixed restart authority');
+    assert.deepEqual(evidenceTree(x.f.stand), before);
+    assert.equal(x.f.calls.length, 0);
+  }
+});
+
+test('TAG normal namespace image census still refuses a blob error, with no fixed-tag fallback, retry or evidence change', async t => {
+  const x = existingNamespace(t), before = evidenceTree(x.f.stand), submissions = [];
+  const query = async (args, options) => {
+    if (args[0] !== 'image' || args[1] !== 'ls') return x.metadata(args, options);
+    return runExistingBuildDocker(args, options, (program, received, settings, callback) => {
+      submissions.push(received.slice()); assert.equal(program, 'docker');
+      callback(Object.assign(Error('synthetic image census failure'), { code: 1 }), '', 'rpc error: code = NotFound desc = content digest sha256:' + 'a'.repeat(64) + ': blob not found');
+    });
+  };
+  await assert.rejects(inspectPublicLlmNamespace(query, { root: x.f.root, env: { DOCKER_HOST: x.f.endpoint }, timeout: 15000 }, x.f.root, x.bound, SELECTION, { images: x.f.images }));
+  assert.equal(submissions.length, 1);
+  assert.deepEqual(submissions[0].slice(0, 2), ['image', 'ls']);
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+});
+
+test('TAG normal namespace image census refuses an unknown own output tag instead of inspecting/executing it', async t => {
+  const x = existingNamespace(t), unknown = `${PROJECT}-unreviewed:local`, before = evidenceTree(x.f.stand);
+  const query = async (args, options) => {
+    const result = await x.metadata(args, options);
+    return args[0] === 'image' && args[1] === 'ls' ? result + '\n' + unknown : result;
+  };
+  await assert.rejects(inspectPublicLlmNamespace(query, { root: x.f.root, env: { DOCKER_HOST: x.f.endpoint }, timeout: 15000 }, x.f.root, x.bound, SELECTION, { images: x.f.images }));
+  assert(!x.f.calls.some(({ args }) => args[0] === 'image' && args[1] === 'inspect' && args[2] === unknown));
+  assert(x.f.calls.every(({ args }) => ['ls', 'inspect'].includes(args[1])));
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+});
+
+test('TAG SOURCE fresh-build boundary keeps all four builds before candidate image inspection, immutable pins and pinned-model validation', () => {
+  const method = sourceNode('scripts/public-llm-stand.mjs', node => ts.isMethodDeclaration(node) && node.name.getText() === 'candidate');
+  const source = ts.createSourceFile('offline-candidate.mjs', `const ops = {${method}};`, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  assert.equal(source.parseDiagnostics.length, 0);
+  const nodes = [];
+  const visit = node => { nodes.push(node); ts.forEachChild(node, visit); }; visit(source);
+  const builds = nodes.filter(node => ts.isForOfStatement(node) && ts.isArrayLiteralExpression(node.expression) && node.expression.elements.every(ts.isStringLiteralLike) && node.expression.elements.map(e => e.text).join(',') === 'api,worker,web,llm-egress');
+  assert.equal(builds.length, 1);
+  const selections = nodes.filter(node => ts.isForOfStatement(node) && node.expression.getText(source) === 'Object.entries(nextModel().services)');
+  assert.equal(selections.length, 1);
+  assert(selections[0].pos > builds[0].end, 'a failed fresh build must not reach candidate tag inspection');
+  const immutablePin = nodes.find(node => ts.isCallExpression(node) && node.expression.getText(source) === 'writeExclusive' && node.getText(source).includes("'compose.images.json'") && node.getText(source).includes('Object.entries(candidateImages)'));
+  assert(immutablePin && immutablePin.pos > selections[0].end);
+  const pinnedValidation = nodes.find(node => ts.isCallExpression(node) && node.expression.getText(source) === 'validatePublicLlmConfig' && node.arguments[0]?.getText(source) === 'pinned' && node.arguments.at(-1)?.getText(source) === 'candidateImages');
+  assert(pinnedValidation && pinnedValidation.pos > immutablePin.end, 'runtime execution remains behind validated immutable candidate pins');
+});
+
+for (const corruption of ['missing-container', 'unknown-own-container']) test(`TAG SOURCE runtime container census remains mandatory despite output-tag exception: ${corruption} refuses before image authority`, async t => {
+  const x = existingNamespace(t), calls = [], roles = Array.from(sourceVariable('roles'));
+  const equalityContext = {}; equalityContext.canonical = sourceVariable('canonical', equalityContext);
+  const equal = sourceVariable('equal', equalityContext);
+  const inspectRuntime = sourceVariable('inspectRuntime', {
+    ...existingBuildModule, PROJECT, model: x.model, roles, equal,
+    need: value => { if (!value) throw Error('synthetic census refusal'); },
+    validateOriginalPeer: () => assert.fail('invalid census must refuse before peer inspection'),
+  });
+  const rows = roles.map(name => [`${PROJECT}-${name}-1`, PROJECT]);
+  if (corruption === 'missing-container') rows.pop();
+  else rows.push([`${PROJECT}-unreviewed-1`, PROJECT]);
+  const before = evidenceTree(x.f.stand);
+  await assert.rejects(inspectRuntime(async args => {
+    calls.push(Array.from(args));
+    assert.equal(args[0], 'container'); assert.equal(args[1], 'ls'); assert(args.includes('--all'));
+    return rows.map(row => row.join('\t')).join('\n');
+  }), error => error.message === 'synthetic census refusal');
+  assert.equal(calls.length, 1, 'no image lookup, fallback, execution or retry before a valid runtime census');
+  assert.deepEqual(calls[0].slice(0, 2), ['container', 'ls']);
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+  assert.equal(x.f.calls.length, 0);
+});
+
+function syntheticBlobFailureText(digest = 'sha256:' + 'a'.repeat(64)) {
+  return `rpc error: code = NotFound desc = blob ${digest} expected at /offline-synthetic/content/${digest}: blob not found`;
+}
+
+test('TAG classifier emits bounded hashed blob evidence only, never missing-image or execution authority', () => {
+  const digest = 'sha256:' + 'a'.repeat(64), stderr = syntheticBlobFailureText(digest);
+  const proof = classifyExistingWorkerOutputFailure({ code: 1 }, '[]', stderr);
+  assert.deepEqual(proof, { version: 1, kind: 'rpc-blob-not-found', exitCode: 1, blobDigest: digest, stdoutSha256: sha('[]'), stderrSha256: sha(stderr) });
+  assert(Object.isFrozen(proof));
+  assert(!JSON.stringify(proof).includes('/offline-synthetic'));
+  for (const key of ['Config', 'Id', 'image', 'category', 'execute', 'stdout', 'stderr', 'cmd', 'cause']) assert(!Object.hasOwn(proof, key));
+});
+
+for (const [label, mutate] of [
+  ['wrong exit', v => { v.error.code = 2; }],
+  ['string exit', v => { v.error.code = '1'; }],
+  ['killed process', v => { v.error.killed = true; }],
+  ['signal', v => { v.error.signal = 'SIGKILL'; }],
+  ['nonempty stdout', v => { v.stdout = 'unreviewed output'; }],
+  ['oversized stdout', v => { v.stdout = ' '.repeat(65537); }],
+  ['oversized stderr', v => { v.stderr += ' '.repeat(65537); }],
+  ['non-ASCII stderr', v => { v.stderr += '\u0080'; }],
+  ['storage input/output', v => { v.stderr += ': input/output error'; }],
+  ['storage I/O', v => { v.stderr += ': I/O error'; }],
+  ['missing RPC code', v => { v.stderr = v.stderr.replace('rpc error: code = NotFound', 'unknown error'); }],
+  ['missing expected-at bound', v => { v.stderr = v.stderr.replace('expected at', 'elsewhere'); }],
+  ['different failure text', v => { v.stderr = v.stderr.replace('blob not found', 'permission denied'); }],
+  ['ambiguous blob digests', v => { v.stderr += ' blob sha256:' + 'b'.repeat(64); }],
+]) test(`TAG classifier rejects ${label}, without a generic unclassified fallback`, () => {
+  const value = { error: { code: 1 }, stdout: '[]', stderr: syntheticBlobFailureText() }; mutate(value);
+  assert.equal(classifyExistingWorkerOutputFailure(value.error, value.stdout, value.stderr), null);
+});
+
+test('TAG classifier does not evaluate raw error getters', () => {
+  const error = Object.defineProperty({}, 'code', { get() { assert.fail('must not invoke an error getter'); } });
+  assert.equal(classifyExistingWorkerOutputFailure(error, '', syntheticBlobFailureText()), null);
+});
+
+// Sanitized recorded proofs come from the public production constant. These
+// policy fixtures do not claim to reproduce the private daemon stderr whose
+// hashes were recorded; raw parsing/adapter behavior is tested separately.
+function outputTagFixture(t, normal = false) {
+  const x = existingNamespace(t), fixed = EXISTING_BUILD_WORKER_OUTPUT_RETIREMENT, calls = [], counts = new Map();
+  const failure = proof => Object.assign(Error('synthetic sanitized metadata refusal'), { category: 'unclassified', workerOutputFailure: clone(proof) });
+  const state = {
+    audit: AUDIT, missingPriorMetadata: ['api', 'worker'],
+    censusError: normal ? null : failure(fixed.censusFailure),
+    workerError: normal ? null : failure(fixed.workerFailure),
+    tags: [...fixed.knownTags], overrides: {},
+  };
+  const query = async args => {
+    calls.push(Array.from(args));
+    assert.equal(args[0], 'image', 'output-tag qualification must never execute a container/build/lifecycle operation');
+    if (args[1] === 'ls') { if (state.censusError) throw state.censusError; return state.tags.join('\n'); }
+    assert.equal(args[1], 'inspect');
+    const name = ['api', 'worker', 'web', 'egress', 'llm-egress'].find(name => args[2] === `${PROJECT}-${name}:local`);
+    assert(name, 'no arbitrary tag or prior pinned image ID may be inspected by the output-only exception');
+    const count = (counts.get(name) ?? 0) + 1; counts.set(name, count);
+    if (name === 'worker' && state.workerError) throw state.workerError;
+    if (Object.hasOwn(state.overrides, name)) return state.overrides[name](clone(x.f.images[name]), count);
+    return JSON.stringify([clone(x.f.images[name])]);
+  };
+  const inspect = () => inspectExistingBuildOwnTags(query, state.audit, state.missingPriorMetadata);
+  return { ...x, fixed, state, calls, counts, failure, query, inspect };
+}
+
+test('TAG exact worker-output policy is frozen, fixed to five tags and explicitly grants no execution/full-census authority', () => {
+  const fixed = EXISTING_BUILD_WORKER_OUTPUT_RETIREMENT;
+  assert.equal(fixed.audit, AUDIT); assert.equal(fixed.tag, `${PROJECT}-worker:local`);
+  assert.deepEqual(fixed.knownTags, ['api', 'egress', 'llm-egress', 'web', 'worker'].map(name => `${PROJECT}-${name}:local`));
+  assert.deepEqual(fixed.validatedOtherRoles, ['api', 'egress', 'llm-egress', 'web']);
+  assert.equal(fixed.workerFailure.blobDigest, fixed.blobDigest); assert.equal(fixed.censusFailure.blobDigest, fixed.blobDigest);
+  assert.equal(fixed.executionAuthority, false); assert.equal(fixed.requiresWorkerBuild, true); assert.equal(fixed.ownPrefixCensusProven, false);
+  for (const value of [fixed, fixed.workerFailure, fixed.censusFailure, fixed.knownTags, fixed.validatedOtherRoles]) assert(Object.isFrozen(value));
+});
+
+test('TAG exact matching worker+census failures plus four actual metadata observations admit rebuild-only evidence, never fabricated worker metadata', async t => {
+  const x = outputTagFixture(t), before = evidenceTree(x.f.stand), result = await x.inspect(), retirement = result.workerOutputRetirement;
+  assert(retirement); assert.equal(retirement.audit, AUDIT);
+  assert.deepEqual(retirement.workerFailure, x.fixed.workerFailure); assert.deepEqual(retirement.censusFailure, x.fixed.censusFailure);
+  assert.deepEqual(retirement.knownTagAuthority, x.fixed.knownTags);
+  assert.equal(retirement.executionAuthority, false); assert.equal(retirement.requiresWorkerBuildBeforeUse, true);
+  assert.equal(retirement.ownPrefixCensusProven, false); assert.equal(retirement.additionalOwnPrefixTagsAbsentProven, false);
+  assert.equal(retirement.originalImageMetadataCertified, false);
+  assert.deepEqual(Object.keys(result.taggedImages).sort(), x.fixed.validatedOtherRoles);
+  assert.deepEqual(result.images.map(image => image.name).sort(), x.fixed.validatedOtherRoles);
+  assert(!Object.hasOwn(result.taggedImages, 'worker')); assert(!Object.hasOwn(retirement, 'Config')); assert(!Object.hasOwn(retirement, 'Id'));
+  for (const name of x.fixed.validatedOtherRoles) {
+    validatePublicLlmImage(x.f.images[name], name);
+    assert.deepEqual(result.taggedImages[name], x.f.images[name]);
+    assert.deepEqual(retirement.validatedOtherTags[name], { Id: x.f.images[name].Id, Os: x.f.images[name].Os, Config: x.f.images[name].Config });
+    assert.equal(x.counts.get(name), 2, 'successful metadata is fenced twice, not retried after failure');
+  }
+  assert.equal(x.counts.get('worker'), 1); assert.equal(x.calls.filter(args => args[1] === 'ls').length, 1);
+  assert.equal(x.calls.length, 10); assert.deepEqual(evidenceTree(x.f.stand), before);
+});
+
+test('TAG successful scoped census keeps all five real tag observations and never invokes the damaged-output exception', async t => {
+  const x = outputTagFixture(t, true), result = await x.inspect();
+  assert.deepEqual(Object.keys(result.taggedImages).sort(), ['api', 'egress', 'llm-egress', 'web', 'worker']);
+  assert.equal(result.images.length, 5); assert(!Object.hasOwn(result, 'workerOutputRetirement'));
+  assert.equal(x.calls.length, 6);
+  for (const count of x.counts.values()) assert.equal(count, 1);
+});
+
+for (const corruption of [
+  'wrong-audit', 'wrong-missing-prior-roles', 'wrong-worker-blob', 'wrong-census-blob', 'matching-but-unapproved-blob',
+  'wrong-worker-output-hash', 'wrong-census-output-hash', 'plain-census-unclassified', 'plain-worker-unclassified',
+  'census-storage-io', 'worker-storage-io', 'worker-unexpected-failure', 'worker-success', 'extra-worker-proof-authority',
+]) test(`TAG exceptional admission rejects ${corruption}; no execution, cleanup or failed-query retry`, async t => {
+  const x = outputTagFixture(t), before = evidenceTree(x.f.stand);
+  if (corruption === 'wrong-audit') x.state.audit = 'deploy-' + '0'.repeat(32);
+  if (corruption === 'wrong-missing-prior-roles') x.state.missingPriorMetadata = ['api'];
+  if (corruption === 'wrong-worker-blob') x.state.workerError.workerOutputFailure.blobDigest = 'sha256:' + 'b'.repeat(64);
+  if (corruption === 'wrong-census-blob') x.state.censusError.workerOutputFailure.blobDigest = 'sha256:' + 'b'.repeat(64);
+  if (corruption === 'matching-but-unapproved-blob') x.state.workerError.workerOutputFailure.blobDigest = x.state.censusError.workerOutputFailure.blobDigest = 'sha256:' + 'b'.repeat(64);
+  if (corruption === 'wrong-worker-output-hash') x.state.workerError.workerOutputFailure.stderrSha256 = 'b'.repeat(64);
+  if (corruption === 'wrong-census-output-hash') x.state.censusError.workerOutputFailure.stdoutSha256 = 'b'.repeat(64);
+  if (corruption === 'plain-census-unclassified') x.state.censusError = Object.assign(Error('synthetic unrelated error'), { category: 'unclassified' });
+  if (corruption === 'plain-worker-unclassified') x.state.workerError = Object.assign(Error('synthetic unrelated error'), { category: 'unclassified' });
+  if (corruption === 'census-storage-io') x.state.censusError = Object.assign(Error('synthetic I/O error'), { category: 'storage_io' });
+  if (corruption === 'worker-storage-io') x.state.workerError = Object.assign(Error('synthetic I/O error'), { category: 'storage_io' });
+  if (corruption === 'worker-unexpected-failure') x.state.workerError = Object.assign(Error('synthetic daemon unavailable'), { category: 'docker_unavailable' });
+  if (corruption === 'worker-success') x.state.workerError = null;
+  if (corruption === 'extra-worker-proof-authority') x.state.workerError.workerOutputFailure.execute = true;
+  await assert.rejects(x.inspect());
+  assert(x.calls.every(args => args[0] === 'image' && ['ls', 'inspect'].includes(args[1])));
+  assert.equal(x.calls.filter(args => args[1] === 'ls').length, 1);
+  assert((x.counts.get('worker') ?? 0) <= 1);
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+});
+
+for (const name of ['api', 'egress', 'llm-egress', 'web']) for (const corruption of ['missing-metadata', 'invalid-policy', 'wrong-tag', 'extra-unknown-failure', 'second-observation-drift']) {
+  test(`TAG exceptional admission requires actual stable ${name} metadata: ${corruption} refuses`, async t => {
+    const x = outputTagFixture(t), before = evidenceTree(x.f.stand);
+    x.state.overrides[name] = (image, count) => {
+      if (corruption === 'missing-metadata') return '[]';
+      if (corruption === 'invalid-policy') image.Config.User = 'synthetic-unapproved-user';
+      if (corruption === 'wrong-tag') image.RepoTags = [`${PROJECT}-unreviewed:local`];
+      if (corruption === 'extra-unknown-failure') throw Object.assign(Error('synthetic additional metadata failure'), { category: 'unclassified' });
+      if (corruption === 'second-observation-drift' && count === 2) image.Id = 'sha256:' + 'b'.repeat(64);
+      return JSON.stringify([image]);
+    };
+    await assert.rejects(x.inspect());
+    assert.equal(x.counts.get('worker'), 1); assert((x.counts.get(name) ?? 0) <= 2);
+    assert(x.calls.every(args => args[0] === 'image' && ['ls', 'inspect'].includes(args[1])));
+    assert.deepEqual(evidenceTree(x.f.stand), before);
+  });
+}
+
+for (const unknown of [`${PROJECT}-unreviewed:local`, `${PROJECT}-worker:latest`, 'foreign-worker:local']) test(`TAG own-tags API refuses arbitrary successful-census tag ${unknown}`, async t => {
+  const x = outputTagFixture(t, true), before = evidenceTree(x.f.stand); x.state.tags.push(unknown);
+  await assert.rejects(x.inspect());
+  assert(!x.calls.some(args => args[1] === 'inspect' && args[2] === unknown));
+  assert.deepEqual(evidenceTree(x.f.stand), before);
+});
+
+test('TAG pure retirement validation refuses missing/extra positive metadata authorities', t => {
+  const x = outputTagFixture(t), positive = Object.fromEntries(x.fixed.validatedOtherRoles.map(name => [name, clone(x.f.images[name])]));
+  for (const name of x.fixed.validatedOtherRoles) {
+    const changed = clone(positive); delete changed[name];
+    assert.throws(() => validateExistingWorkerOutputRetirement(AUDIT, x.fixed.workerFailure, x.fixed.censusFailure, changed));
+  }
+  positive.worker = clone(x.f.images.worker);
+  assert.throws(() => validateExistingWorkerOutputRetirement(AUDIT, x.fixed.workerFailure, x.fixed.censusFailure, positive));
+});
+
+for (const [label, args, scoped] of [
+  ['exact worker output', ['image', 'inspect', `${PROJECT}-worker:local`], true],
+  ['exact filtered own census', ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}', '--filter', `reference=${PROJECT}-*`], true],
+  ['unfiltered census', ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'], false],
+  ['foreign-filter census', ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}', '--filter', 'reference=foreign-*'], false],
+  ['other own tag', ['image', 'inspect', `${PROJECT}-api:local`], false],
+  ['arbitrary worker tag', ['image', 'inspect', `${PROJECT}-worker:latest`], false],
+  ['immutable original ID', ['image', 'inspect', 'sha256:' + 'b'.repeat(64)], false],
+]) test(`TAG real adapter scopes sanitized RPC blob proof to ${label}: ${scoped ? 'bounded proof' : 'no exception authority'}`, async () => {
+  const stderr = syntheticBlobFailureText(), stdout = '', expected = classifyExistingWorkerOutputFailure({ code: 1 }, stdout, stderr);
+  let dispatches = 0;
+  await assert.rejects(runExistingBuildDocker(args, { root: '/offline-fixture', env: {}, timeout: 1000 }, (program, received, options, callback) => {
+    dispatches++; assert.equal(program, 'docker'); assert.deepEqual(received, args);
+    callback(Object.assign(Error('PRIVATE_SYNTHETIC_RPC_BLOB_OUTPUT'), { code: 1 }), stdout, stderr);
+  }), failure => {
+    if (scoped) {
+      assert.equal(failure.category, 'worker_output_blob_not_found'); assert.deepEqual(failure.workerOutputFailure, expected);
+    } else assert(!Object.hasOwn(failure, 'workerOutputFailure'));
+    assert.notEqual(failure.category, 'image'); assert(!failure.message.includes('/offline-synthetic'));
+    for (const key of ['stdout', 'stderr', 'cmd', 'cause']) assert(!Object.hasOwn(failure, key));
+    return true;
+  });
+  assert.equal(dispatches, 1);
+});
+
+for (const args of [
+  ['image', 'inspect', `${PROJECT}-worker:local`],
+  ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}', '--filter', `reference=${PROJECT}-*`],
+]) test(`TAG real adapter rejects mixed RPC blob + I/O as storage_io, never worker retirement: ${args[1]}`, async () => {
+  let dispatches = 0;
+  await assert.rejects(runExistingBuildDocker(args, { root: '/offline-fixture', env: {}, timeout: 1000 }, (program, received, options, callback) => {
+    dispatches++; callback(Object.assign(Error('synthetic storage failure'), { code: 1 }), '', syntheticBlobFailureText() + ': input/output error');
+  }), failure => failure.category === 'storage_io' && !Object.hasOwn(failure, 'workerOutputFailure'));
+  assert.equal(dispatches, 1);
+});
+
+test('TAG SOURCE review token binds the worker-output exception and positive metadata rather than reusing the pre-exception token', async t => {
+  const x = outputTagFixture(t), result = await x.inspect(), hashingContext = { crypto: { createHash } };
+  hashingContext.canonical = sourceVariable('canonical', hashingContext);
+  const hash = sourceVariable('hash', hashingContext);
+  const base = {
+    ...existingBuildModule, audit: AUDIT, endpoint: 'unix:///offline-fixture/docker.sock',
+    source: { manifest: { files: [{ path: 'src/offline.ts', sha256: sha('offline-source') }] } },
+    execution: { manifest: { modules: ['scripts/public-llm-existing-build-continuation.mjs'] } },
+    settings: { selection: SELECTION }, priorSelection: SELECTION, stored: { baseline: clone(ORIGINAL) },
+    proofs: [], stateFiles: [], candidateFiles: [], proofEvidence: value => value,
+    runtime: { containers: [], images: result.images },
+    images: {}, backupImage: x.f.images.api,
+    pins: { services: { api: { image: x.f.images.api.Id }, worker: { image: x.f.images.worker.Id } } },
+  };
+  const tokenFor = workerOutputRetirement => {
+    const reviewEvidence = sourceVariable('reviewEvidence', { ...base, missing: ['api', 'worker'], inventory: { workerOutputRetirement } });
+    assert.deepEqual(reviewEvidence.workerOutputRetirement, workerOutputRetirement ?? null);
+    return sourceVariable('review', { hash, reviewEvidence });
+  };
+  const accepted = tokenFor(result.workerOutputRetirement), beforeException = tokenFor(undefined);
+  assert.match(accepted, /^[a-f0-9]{64}$/); assert.notEqual(accepted, beforeException);
+  for (const mutation of ['failure-hash', 'positive-image', 'census-proven']) {
+    const changed = clone(result.workerOutputRetirement);
+    if (mutation === 'failure-hash') changed.workerFailure.stderrSha256 = 'b'.repeat(64);
+    if (mutation === 'positive-image') changed.validatedOtherTags.api.Id = 'sha256:' + 'b'.repeat(64);
+    if (mutation === 'census-proven') changed.ownPrefixCensusProven = true;
+    assert.notEqual(tokenFor(changed), accepted, 'evidence hashing must bind each reviewed exception fact');
+  }
 });
 
 test('BUILD adapter success discards raw output and does not dispatch an extra operation', async () => {

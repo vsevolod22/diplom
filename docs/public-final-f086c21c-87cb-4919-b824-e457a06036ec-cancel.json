@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "actuallyRun": true,
+  "mode": "cancel",
+  "attemptId": "f086c21c-87cb-4919-b824-e457a06036ec",
+  "evidenceRoot": "docs/public-final-f086c21c-87cb-4919-b824-e457a06036ec-cancel",
+  "runId": "d17ad639-9af8-4f19-b7fc-8ab1a8457add",
+  "startedAt": "2026-10-25T19:03:58.062Z",
+  "finishedAt": "2026-10-25T19:04:25.630Z",
+  "scope": "native-public8081-one-scan-cancel",
+  "origin": "http://127.0.0.1:8081",
+  "providerGenerationQualified": false,
+  "generationPolicy": "all-llm-posts-denied",
+  "providerDispatchIndependentlyObserved": false,
+  "credentialPersistence": false,
+  "screenshots": false,
+  "har": false,
+  "trace": false,
+  "lifecycleOperations": 0,
+  "syntheticResponses": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "registration": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "cancel": {
+      "status": "BLOCKED",
+      "code": "ASSERTION_FAILED",
+      "failure": true,
+      "runnerLine": 561
+    },
+    "cancel_report": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "cancel_preservation": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "cancel_reload": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "cancel_history": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "cancel_fresh_login": {
+      "status": "BLOCKED",
+      "code": "NOT_RUN",
+      "failure": false
+    },
+    "safety": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanLaunches": 0,
+      "cancelPosts": 0,
+      "accountsCreated": 1,
+      "pageErrors": 0,
+      "blockedRequests": 0,
+      "ignoredEligibility": 1,
+      "noGenerationPosts": true,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

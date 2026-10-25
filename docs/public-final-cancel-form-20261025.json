@@ -1,0 +1,286 @@
+{
+  "scope": "cancel-form-only-no-scan",
+  "runId": "b898da06-350c-461f-870f-e2c4fe5d6061",
+  "startedAt": "2026-10-25T19:08:34.251Z",
+  "finishedAt": "2026-10-25T19:08:42.372Z",
+  "actuallyRun": true,
+  "registration": {
+    "status": "PASS",
+    "httpStatus": 201
+  },
+  "operations": [
+    {
+      "operation": "product-explicit-eligibility",
+      "startedAtMs": 1909,
+      "finishedAtMs": 8062,
+      "status": 200,
+      "reason": "READY",
+      "eligible": true,
+      "targetMatches": true,
+      "fullCheckSetAllowed": true
+    },
+    {
+      "operation": "product-preconditions",
+      "passed": true,
+      "atMs": 8070
+    },
+    {
+      "operation": "consent.check",
+      "passed": true,
+      "startedAtMs": 8070,
+      "finishedAtMs": 8095
+    },
+    {
+      "operation": "expect-submit-enabled",
+      "passed": true,
+      "startedAtMs": 8096,
+      "finishedAtMs": 8098
+    }
+  ],
+  "samples": [
+    {
+      "stage": "form-mount",
+      "atMs": 1002,
+      "formPresent": false,
+      "inputEnabled": false,
+      "inputValid": false,
+      "targetMatches": false,
+      "checks": {
+        "secret": {
+          "present": false,
+          "enabled": false,
+          "checked": false
+        },
+        "sbom": {
+          "present": false,
+          "enabled": false,
+          "checked": false
+        },
+        "vuln": {
+          "present": false,
+          "enabled": false,
+          "checked": false
+        },
+        "config": {
+          "present": false,
+          "enabled": false,
+          "checked": false
+        }
+      },
+      "consentPresent": false,
+      "consentEnabled": false,
+      "consentChecked": false,
+      "submitDisabled": false,
+      "confirmedCopy": false,
+      "eligibilityConfirmed": false,
+      "eligibilityUnconfirmed": false,
+      "waitVisible": false,
+      "waitReason": null,
+      "refreshEnabled": false,
+      "alertPresent": false
+    },
+    {
+      "stage": "four-checks-selected",
+      "atMs": 1909,
+      "formPresent": true,
+      "inputEnabled": true,
+      "inputValid": true,
+      "targetMatches": true,
+      "checks": {
+        "secret": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "sbom": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "vuln": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "config": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        }
+      },
+      "consentPresent": true,
+      "consentEnabled": true,
+      "consentChecked": false,
+      "submitDisabled": true,
+      "confirmedCopy": false,
+      "eligibilityConfirmed": false,
+      "eligibilityUnconfirmed": true,
+      "waitVisible": false,
+      "waitReason": null,
+      "refreshEnabled": false,
+      "alertPresent": false
+    },
+    {
+      "stage": "after-explicit-eligibility",
+      "atMs": 8064,
+      "formPresent": true,
+      "inputEnabled": true,
+      "inputValid": true,
+      "targetMatches": true,
+      "checks": {
+        "secret": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "sbom": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "vuln": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "config": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        }
+      },
+      "consentPresent": true,
+      "consentEnabled": true,
+      "consentChecked": false,
+      "submitDisabled": true,
+      "confirmedCopy": false,
+      "eligibilityConfirmed": false,
+      "eligibilityUnconfirmed": true,
+      "waitVisible": false,
+      "waitReason": null,
+      "refreshEnabled": false,
+      "alertPresent": false
+    },
+    {
+      "stage": "after-consent-check",
+      "atMs": 8096,
+      "formPresent": true,
+      "inputEnabled": true,
+      "inputValid": true,
+      "targetMatches": true,
+      "checks": {
+        "secret": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "sbom": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "vuln": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "config": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        }
+      },
+      "consentPresent": true,
+      "consentEnabled": true,
+      "consentChecked": true,
+      "submitDisabled": false,
+      "confirmedCopy": true,
+      "eligibilityConfirmed": true,
+      "eligibilityUnconfirmed": false,
+      "waitVisible": false,
+      "waitReason": null,
+      "refreshEnabled": true,
+      "alertPresent": false
+    },
+    {
+      "stage": "after-submit-enabled-check",
+      "atMs": 8098,
+      "formPresent": true,
+      "inputEnabled": true,
+      "inputValid": true,
+      "targetMatches": true,
+      "checks": {
+        "secret": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "sbom": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "vuln": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        },
+        "config": {
+          "present": true,
+          "enabled": true,
+          "checked": true
+        }
+      },
+      "consentPresent": true,
+      "consentEnabled": true,
+      "consentChecked": true,
+      "submitDisabled": false,
+      "confirmedCopy": true,
+      "eligibilityConfirmed": true,
+      "eligibilityUnconfirmed": false,
+      "waitVisible": false,
+      "waitReason": null,
+      "refreshEnabled": true,
+      "alertPresent": false
+    }
+  ],
+  "network": [
+    {
+      "endpoint": "eligibility",
+      "requestAtMs": 1910,
+      "targetMatches": true,
+      "fullChecks": true,
+      "status": 200,
+      "responseAtMs": 8061,
+      "reason": "READY",
+      "eligible": true,
+      "fullCheckSetAllowed": true
+    },
+    {
+      "endpoint": "eligibility",
+      "requestAtMs": 2059,
+      "targetMatches": true,
+      "fullChecks": true,
+      "status": 200,
+      "responseAtMs": 8080,
+      "reason": "READY",
+      "eligible": true,
+      "fullCheckSetAllowed": true
+    }
+  ],
+  "safety": {
+    "registrationPosts": 1,
+    "eligibilityPosts": 2,
+    "ignoredEligibility": 1,
+    "scanPosts": 0,
+    "cancelPosts": 0,
+    "llmPosts": 0,
+    "blockedRequests": 0,
+    "pageErrors": 0,
+    "browserClosed": true
+  },
+  "status": "OBSERVED",
+  "code": "FORM_DIAGNOSTIC_COMPLETE",
+  "credentialsPersisted": false,
+  "payloadArtifacts": false
+}
