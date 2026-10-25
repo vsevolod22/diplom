@@ -2,10 +2,11 @@ import { ArgumentsHost, Catch, HttpException, Inject } from '@nestjs/common';
 import { APP_FILTER, BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
 import type { ServerResponse } from 'node:http';
 import { quotaDenial } from './quota-policy.js';
+import { safeProviderFailure } from './openrouter-provider.js';
 
 const safeCodes = new Set(['LLM_UNAVAILABLE', 'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_STALE_REPORT',
   'LLM_STALE_POLICY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_CAPACITY', 'LLM_REQUEST_ABORTED', 'LLM_RESPONSE_LIMIT',
-  'LLM_PROVIDER_UNAVAILABLE', 'LLM_INVALID_RESPONSE', 'LLM_REPORT_UNAVAILABLE', 'LLM_CONFIGURATION_UNAVAILABLE',
+  'LLM_PROVIDER_UNAVAILABLE', 'LLM_PROVIDER_RATE_LIMITED', 'LLM_PROVIDER_AUTH_FAILED', 'LLM_INVALID_RESPONSE', 'LLM_REPORT_UNAVAILABLE', 'LLM_CONFIGURATION_UNAVAILABLE',
     'LLM_QUOTA_UNAVAILABLE', 'LLM_QUOTA_EXCEEDED', 'LLM_HISTORY_UNAVAILABLE', 'LLM_HISTORY_CONFLICT', 'LLM_HISTORY_CAPACITY', 'LLM_TRANSLATION_UNAVAILABLE', 'LLM_STALE_SOURCE',
   'SCAN_ACCESS_DENIED', 'SCAN_ACCESS_DISABLED', 'SCAN_NOT_FOUND', 'INVALID_BROWSER_REQUEST', 'UNAUTHORIZED',
   'INVALID_ORIGIN', 'INVALID_CONTENT_TYPE', 'AUTH_UNAVAILABLE']);
@@ -38,7 +39,10 @@ export class LlmExceptionFilter extends BaseExceptionFilter {
     }
     response.setHeader('Cache-Control', 'no-store');
     const admission = status === 429 && errorCode === 'LLM_QUOTA_EXCEEDED' ? quotaDenial(exception) : undefined;
-        adapter.reply(response, { errorCode, ...(admission ? { admission } : {}) }, status);
+    const failure = exception instanceof HttpException ? safeProviderFailure(exception.getResponse()) : undefined;
+    if (failure?.providerFailure.retryAfterSeconds !== undefined && [429, 503].includes(status))
+      response.setHeader('Retry-After', String(failure.providerFailure.retryAfterSeconds));
+    adapter.reply(response, { errorCode, ...(failure ? { providerFailure: failure.providerFailure } : {}), ...(admission ? { admission } : {}) }, status);
   }
 }
 export const llmExceptionProvider = { provide: APP_FILTER, useClass: LlmExceptionFilter };

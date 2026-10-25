@@ -5,9 +5,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import test from 'node:test';
 import {
   ORIGIN, WORKER_MS, GLOBAL_MS, MODEL, ENDPOINT, CASES, EVIDENCE_PATHS, evidencePaths, parseMode,
-  projectMeta, ResultBook, Fault, recordFailure, GuardLedger, routeCategory, guardAbortReason, canRunTranslation,
+  projectMeta, llmFailureMeta, assertLlmSuccess, ResultBook, Fault, recordFailure, GuardLedger, routeCategory, guardAbortReason, canRunTranslation,
     exitCode, evidenceDocuments, writeEvidence, assertFixedPolicy, assertReady,
-  chatBodyMatches, translationBody, canDispatch, allowedApiGet, runtimeProbeRead, assertRuntimeOffReply, eligibleAssessment, assertInitialUsage, renderedReplyMatches, historyMetadata, loadTranslationContracts,
+  qualificationCases, chatBodyMatches, translationBody, canDispatch, allowedApiGet, runtimeProbeRead, assertRuntimeOffReply, eligibleAssessment, assertInitialUsage, renderedReplyMatches, historyMetadata, loadTranslationContracts,
 } from './public-ai-translation-live.mjs';
 
 const scanId = '12345678-1234-4234-8234-123456789abc';
@@ -29,9 +29,15 @@ const source = () => readFileSync(new URL('./public-ai-translation-live.mjs', im
 
 test('live requires the exact coordinator READYGO and three-request acknowledgements; default and import are inert', () => {
   assert.equal(parseMode([]), 'not-run'); assert.equal(parseMode(['--self-test']), 'offline');
-  assert.equal(parseMode(['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests']), 'live');
-  assert.equal(parseMode(['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', 'attempt2']), 'live-attempt2');
-  assert.equal(parseMode(['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', 'attempt3']), 'live-attempt3');
+  assert.equal(parseMode(['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-id', scanId]), 'live-final');
+  assert.equal(parseMode(['--run', '--translation-only', '--ack-coordinator-readygo', '--ack-one-translation-request', '--attempt-id', scanId]), 'translation-final');
+  for (const args of [
+    ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests'],
+    ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', 'attempt2'],
+    ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', 'attempt3'],
+    ['--run', '--translation-only', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-id', scanId],
+    ['--run', '--ack-coordinator-readygo', '--ack-one-translation-request', '--attempt-id', scanId],
+  ]) assert.throws(() => parseMode(args));
   for (const suffix of ['attempt4', '../attempt2', '/tmp/attempt2', '', 'attempt2.json'])
     assert.throws(() => parseMode(['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', suffix]));
   assert.throws(() => parseMode(['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix']));
@@ -204,6 +210,98 @@ test('metadata projection rejects conversations, provider payloads, private diag
   assert.equal(JSON.stringify(historyMetadata(history)).includes(marker), false);
 });
 
+test('finite provider failures survive HTTP/NDJSON faults and repeated evidence projection without raw diagnostics', () => {
+  const marker = 'SYNTHETIC_PRIVATE_MARKER';
+  for (const [status, kind, errorCode] of [
+    [429, 'rate_limited', 'LLM_PROVIDER_RATE_LIMITED'], [503, 'rate_limited', 'LLM_PROVIDER_RATE_LIMITED'],
+    [401, 'auth_failed', 'LLM_PROVIDER_AUTH_FAILED'], [502, 'unavailable', 'LLM_PROVIDER_UNAVAILABLE'],
+  ]) for (const retry of kind === 'rate_limited' ? [undefined, 0, 60, 86400] : [undefined]) {
+    const providerFailure = { kind, status, ...(retry === undefined ? {} : { retryAfterSeconds: retry }) };
+    for (const deliveryKind of ['http-error', 'ndjson-error']) {
+      const httpStatus = deliveryKind === 'ndjson-error' ? 200 : kind === 'auth_failed' ? 503 : status;
+      const wire = { errorCode, providerFailure, message: marker, body: marker, payload: { private: marker } };
+      const expected = { httpStatus, errorCode, providerFailure, deliveryKind };
+      let fault;
+      if (deliveryKind === 'http-error') {
+        assert.throws(() => assertLlmSuccess({ status: httpStatus, value: wire }), error => {
+          fault = error; return error instanceof Fault && error.message === 'LLM_HTTP_ERROR';
+        });
+      } else fault = new Fault('LLM_HTTP_ERROR', llmFailureMeta(httpStatus, wire, deliveryKind));
+      assert.deepEqual(fault.meta, expected);
+      assert.deepEqual(projectMeta(projectMeta(fault.meta)), expected);
+      assert.notEqual(fault.meta.providerFailure, providerFailure);
+      const book = new ResultBook(scanId);
+      const name = deliveryKind === 'ndjson-error' ? 'chat_1' : 'translation';
+      recordFailure(book, name, fault);
+      recordFailure(book, name, new Error(marker));
+      assert.equal(book.cases[name].status, 'BLOCKED');
+      assert.equal(book.cases[name].code, 'LLM_HTTP_ERROR');
+      const { runnerLine, ...persisted } = projectMeta(book.evidence().cases[name]);
+            assert.ok(runnerLine === undefined || Number.isSafeInteger(runnerLine) && runnerLine > 0);
+            assert.deepEqual(persisted, expected);
+      const documents = evidenceDocuments(book);
+      assert.deepEqual(JSON.parse(documents[0]).cases[name].providerFailure, providerFailure);
+      assert.ok(documents.every(text => !text.includes(marker)));
+    }
+  }
+  assert.equal(assertLlmSuccess({ status: 200, value: null }), null);
+    assert.deepEqual(llmFailureMeta(502, null, 'http-error'), { httpStatus: 502, deliveryKind: 'http-error' });
+  assert.deepEqual(llmFailureMeta(502, { errorCode: marker, providerFailure: marker }, 'http-error'), { httpStatus: 502, deliveryKind: 'http-error' });
+  const code = source();
+  assert.ok(code.includes("llmFailureMeta(result.status, result.value, 'http-error')"));
+  assert.ok(code.includes("llmFailureMeta(200, delivered, 'ndjson-error')"));
+});
+
+test('provider metadata rejects unknown kinds, mismatches, unsafe bounds, extra fields and missing hints remain unknown', () => {
+  const errorCode = 'LLM_PROVIDER_RATE_LIMITED';
+  const valid = { kind: 'rate_limited', status: 429 };
+  for (const failure of [null, [], 'private', {}, { ...valid, kind: 'busy' }, { ...valid, status: 401 },
+    ...[299, 600, 429.5, '429', NaN, Infinity].map(status => ({ ...valid, status })),
+    ...[-1, 86401, 0.5, '60', null, NaN, Infinity].map(retryAfterSeconds => ({ ...valid, retryAfterSeconds })),
+    { ...valid, message: 'PRIVATE' }, { ...valid, payload: { private: 'PRIVATE' } },
+    { ...valid, kind: 'unavailable', status: 500 }, { ...valid, kind: 'auth_failed', status: 401 },
+  ]) assert.equal(projectMeta({ errorCode, providerFailure: failure }).providerFailure, undefined);
+  for (const code of ['LLM_UNAVAILABLE', 'LLM_INVALID_RESPONSE', 'LLM_PROVIDER_AUTH_FAILED', 'LLM_PROVIDER_UNAVAILABLE', 'PRIVATE'])
+    assert.equal(projectMeta({ errorCode: code, providerFailure: valid }).providerFailure, undefined);
+  for (const [code, kind, status] of [['LLM_PROVIDER_AUTH_FAILED', 'auth_failed', 401], ['LLM_PROVIDER_UNAVAILABLE', 'unavailable', 500]])
+    assert.equal(projectMeta({ errorCode: code, providerFailure: { kind, status, retryAfterSeconds: 0 } }).providerFailure, undefined);
+  const projected = projectMeta({ errorCode, providerFailure: valid });
+  assert.deepEqual(projected.providerFailure, valid);
+  assert.equal(Object.hasOwn(projected.providerFailure, 'retryAfterSeconds'), false);
+  for (let status = 300; status <= 599; status++) {
+    const kind = [429, 503].includes(status) ? 'rate_limited' : status === 401 ? 'auth_failed' : 'unavailable';
+    const code = kind === 'rate_limited' ? errorCode : kind === 'auth_failed' ? 'LLM_PROVIDER_AUTH_FAILED' : 'LLM_PROVIDER_UNAVAILABLE';
+    assert.deepEqual(projectMeta({ errorCode: code, providerFailure: { kind, status } }).providerFailure, { kind, status });
+  }
+});
+
+test('actual frontend NDJSON parser retains safe provider diagnostics for accepted and unavailable receipts', async () => {
+  const { chat } = await loadTranslationContracts();
+  for (const [status, kind, errorCode] of [[429, 'rate_limited', 'LLM_PROVIDER_RATE_LIMITED'], [503, 'rate_limited', 'LLM_PROVIDER_RATE_LIMITED'],
+    [401, 'auth_failed', 'LLM_PROVIDER_AUTH_FAILED'], [502, 'unavailable', 'LLM_PROVIDER_UNAVAILABLE']]) for (const receipt of ['accepted', 'unavailable']) {
+    const providerFailure = { kind, status, ...(kind === 'rate_limited' ? { retryAfterSeconds: 60 } : {}) };
+    const frame = { ...binding, v: 1, deliveryMode: 'validated-completed-reply', nativeProviderStream: false,
+      epoch: context.epoch, revision: context.revision + 2, mutationId: scanId, turnId: scanId };
+    const parser = chat.createChatFrameParser(context, scanId);
+    if (receipt === 'accepted') parser.accept({ ...frame, type: 'usage', seq: 0,
+      usage: { input: 1, output: 1, costMicros: 0, source: 'server-validated-provider-reported-not-invoice' } });
+    parser.accept({ ...frame, type: 'error', seq: receipt === 'accepted' ? 1 : 0, receipt, errorCode, providerFailure });
+    const delivered = parser.finish();
+    const book = new ResultBook(scanId);
+    recordFailure(book, 'chat_1', new Fault('LLM_HTTP_ERROR', llmFailureMeta(200, delivered, 'ndjson-error')));
+    assert.deepEqual(projectMeta(book.evidence().cases.chat_1), { httpStatus: 200, errorCode, providerFailure, deliveryKind: 'ndjson-error' });
+    assert.equal(exitCode(book), 2);
+  }
+});
+
+test('schema/render success never asserts semantic accuracy or authorizes retries', () => {
+  const book = new ResultBook(scanId);
+  for (const name of CASES) book.record(name, 'PASS', 'VERIFIED');
+  assert.equal(book.evidence().semanticAccuracy, 'unverified');
+  assert.ok(evidenceDocuments(book)[1].includes('Semantic accuracy is unverified'));
+  assert.ok(evidenceDocuments(book)[1].includes('not permission to retry or refund'));
+});
+
 test('every individual case must pass; blocked/fail outcomes are not success and FAIL is sticky', () => {
   const book = new ResultBook(); assert.equal(exitCode(book), 2);
   for (const name of CASES) book.record(name, 'PASS', 'VERIFIED');
@@ -341,6 +439,47 @@ test('finite guard telemetry distinguishes three genuine denials from three vali
   assert.ok(code.includes('runtimeProbeRead(response.url(), response.request().method())'));
   assert.ok(code.includes('assertRuntimeOffReply(response.url(), response.request().method(), response.status())'));
   assert.ok(code.includes("book.record('safety', 'FAIL', 'RUNTIME_NOT_OFF'"));
+});
+
+test('independent translation has no chat prerequisite or dispatch and cannot qualify chat', () => {
+  const book = new ResultBook(scanId, 'translation');
+  assert.deepEqual(book.requiredCases, qualificationCases('translation'));
+  for (const name of book.requiredCases) book.record(name, 'PASS', 'VERIFIED');
+  assert.equal(exitCode(book), 0);
+  for (const name of ['readiness', 'chat_1', 'chat_2', 'history_reload', 'history_fresh_login']) {
+    assert.equal(book.cases[name].code, 'NOT_RUN');
+    assert.equal(book.requiredCases.includes(name), false);
+  }
+  assert.equal(canRunTranslation(book), true);
+  const state = { aiOwner: true, permit: { context, question, used: false }, chatPosts: 0, translationPosts: 0 };
+  assert.equal(canDispatch(state, `/api/v1/browser/scans/${scanId}/llm/chat`, body(), 'translation'), false);
+  assert.equal(canDispatch(state, `/api/v1/browser/scans/${scanId}/llm/translation`, translationBody(context), 'translation'), true);
+  assert.equal(canDispatch(state, `/api/v1/browser/scans/${scanId}/llm/translation`, translationBody(context), 'unknown'), false);
+  book.record('translation', 'BLOCKED', 'LLM_HTTP_ERROR', { httpStatus: 429 });
+  assert.equal(exitCode(book), 2);
+  const full = new ResultBook(scanId);
+  for (const name of book.requiredCases) full.record(name, 'PASS', 'VERIFIED');
+  assert.equal(exitCode(full), 2);
+  const code = source();
+  const translation = code.slice(code.indexOf("const contextOk = await step('translation_context'"), code.indexOf("const translatedOk ="));
+  assert.equal(translation.includes('readChat('), false);
+  assert.match(code, /if \(qualification === 'full'\) \{\s*const readyOk/);
+});
+
+test('new AI evidence destinations are UUID-scoped, exclusive and separate from attempts 1/2/3', async () => {
+  const finalPaths = evidencePaths(scanId);
+  const historical = [...EVIDENCE_PATHS, ...evidencePaths('attempt2'), ...evidencePaths('attempt3')];
+  assert.ok(finalPaths.every(path => path.includes(`/docs/public-final-${scanId}-ai-translation.`) && !historical.includes(path)));
+  const book = new ResultBook(scanId, 'translation'), opened = [];
+  await assert.rejects(writeEvidence(book, async () => { throw new Error('must not open'); }));
+  book.actual = true;
+  await writeEvidence(book, async (path, flags, mode) => {
+    opened.push(path); assert.equal(flags, 'wx'); assert.equal(mode, 0o600);
+    return { writeFile: async () => {}, sync: async () => {}, close: async () => {} };
+  });
+  assert.deepEqual(opened, finalPaths);
+  assert.equal(book.evidence().qualification, 'translation');
+  assert.ok(evidenceDocuments(book)[1].includes('Chat generation is NOT qualified or attempted'));
 });
 
 test('loads the actual frontend wire decoders/translation schema entirely offline, without provider initialization', async () => {

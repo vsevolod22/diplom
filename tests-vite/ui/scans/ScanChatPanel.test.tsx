@@ -9,6 +9,7 @@ import {
   binding,
   chatApi,
   context,
+  epoch,
   history,
   json,
   reply,
@@ -17,6 +18,10 @@ import {
   status,
   turnId,
 } from './llmChatFixtures';
+
+const { encodeDelivery } = await import(
+  /* @vite-ignore */ '../../../server/api/src/llm/' + 'history-delivery.ts'
+);
 
 beforeEach(() => transitionScanSession('alice', new QueryClient(), true));
 afterEach(() => {
@@ -178,6 +183,79 @@ for (const code of [
     ).toHaveLength(1);
   });
 }
+it.each([429, 503, 401])(
+  'shows classified provider HTTP %s from backend frames and recovers failed history only manually',
+  async (providerStatus) => {
+    const api = chatApi();
+    const auth = providerStatus === 401;
+    const errorCode = auth ? 'LLM_PROVIDER_AUTH_FAILED' : 'LLM_PROVIDER_RATE_LIMITED';
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (init?.method !== 'POST') return api.fetcher(input, init);
+      const body = JSON.parse(String(init.body));
+      api.head = {
+        ...history,
+        revision: 2,
+        turns: [
+          {
+            id: turnId,
+            mutationId: body.mutationId,
+            question: body.question,
+            report: binding,
+            createdAt: 0,
+            state: 'failed',
+          },
+        ],
+      };
+      return new Response(
+        encodeDelivery({
+          ...binding,
+          epoch,
+          revision: 2,
+          mutationId: body.mutationId,
+          turnId,
+          outcome: 'failed',
+          receipt: 'unavailable',
+          failure: {
+            errorCode,
+            providerFailure: {
+              kind: auth ? 'auth_failed' : 'rate_limited',
+              status: providerStatus,
+              ...(auth ? {} : { retryAfterSeconds: 0 }),
+            },
+          },
+        }).lines.join(''),
+        { headers: { 'Content-Type': 'application/x-ndjson' } },
+      );
+    });
+    mount(api, fetcher);
+    await open();
+    send();
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(auth ? 'Провайдер отклонил серверный ключ' : 'Провайдер занят');
+    expect(alert.textContent).toContain(`HTTP ${providerStatus}`);
+    expect(alert.textContent).toContain('возврат квоты не гарантирован');
+    if (!auth) expect(alert.textContent).toContain('0 с');
+    expect(screen.queryByText('Гипотеза · не доказанный факт')).toBeNull();
+    expect(screen.queryByLabelText('Вопрос чату')).toBeNull();
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(86400001);
+    });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
+    await screen.findByText('Вопрос · failed');
+    expect(
+      (screen.getByRole('checkbox', { name: /Разрешаю один запрос чата/ }) as HTMLInputElement).checked,
+    ).toBe(false);
+    expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(screen.getByText('Исходный отчёт · UNKNOWN coverage · findings сохранны')).toBeTruthy();
+  },
+);
+
 it('discard invalid current-report citation; historical sources are marked unresolved rather than current facts', async () => {
   const api = chatApi();
   api.head = {

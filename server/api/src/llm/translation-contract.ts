@@ -77,11 +77,11 @@ function translatedField(value: unknown, original: string | null, ceiling: numbe
   if (original === null) { if (value !== null) return invalidReply(); return null; }
   if (typeof value !== 'string' || !safeText(value, ceiling) || /[`*#~[\]{}\\]/u.test(value) ||
       JSON.stringify(identifiers(value)) !== JSON.stringify(identifiers(original))) return invalidReply();
-  const prose = original.replace(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/g, '');
+  const prose = original.replace(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi, '');
   if (/\p{L}/u.test(prose)) {
     // A fail-closed script check, not proof of semantic fidelity or translation quality.
     const russian = value.match(/[А-Яа-яЁё]/gu)?.length ?? 0;
-    const latin = value.replace(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/g, '').match(/[A-Za-z]/g)?.length ?? 0;
+    const latin = value.replace(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi, '').match(/[A-Za-z]/g)?.length ?? 0;
     if (russian < 3 || russian < latin) return invalidReply();
   } else if (value !== original) return invalidReply();
   return value;

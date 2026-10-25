@@ -1,9 +1,15 @@
-import { z } from 'zod';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { BROWSER_SCANS_PATH } from './scanTransport';
-import { createChatClient } from './llmChatClient';
+import { ChatError, createChatClient } from './llmChatClient';
 import { chatBindingSchema } from './llmChatContract';
 import { assertPlainWire } from './vulnAdvisory';
+import {
+  llmJsonErrorSchema,
+  providerFailureDetails,
+  providerFailureSchema,
+  validLlmErrorStatus,
+  type ProviderFailure,
+} from './llmPublicContract';
 import {
   sameTranslationBinding,
   translationContextSchema,
@@ -15,8 +21,14 @@ import {
 } from './advisoryTranslationContract';
 
 export class TranslationError extends Error {
-  constructor(readonly code: string) {
+  readonly providerFailure?: ProviderFailure;
+  constructor(
+    readonly code: string,
+    providerFailure?: ProviderFailure,
+  ) {
     super('Перевод недоступен');
+    this.providerFailure =
+      providerFailure === undefined ? undefined : providerFailureSchema.parse(providerFailure);
   }
 }
 export function translationErrorMessage(error: unknown) {
@@ -27,6 +39,26 @@ export function translationErrorMessage(error: unknown) {
     return 'Отчёт, источник или политика изменились. Обновите условия и подтвердите согласие заново.';
   if (code === 'LLM_CONFIGURATION_UNAVAILABLE')
     return 'Перевод недоступен: ИИ выключен или серверная настройка не подтверждена. Не вводите ключи в интерфейс.';
+  const providerDetails =
+    error instanceof TranslationError ? providerFailureDetails(error.providerFailure) : '';
+  if (code === 'LLM_PROVIDER_RATE_LIMITED')
+    return (
+      'Провайдер занят или ограничил частоту запросов.' +
+      providerDetails +
+      ' Оригинал не изменён; автоматического повтора нет, возврат квоты не гарантирован. Повтор — только вручную после чтения условий и нового согласия.'
+    );
+  if (code === 'LLM_PROVIDER_AUTH_FAILED')
+    return (
+      'Провайдер отклонил серверный ключ. Обратитесь к оператору; не вводите ключ в интерфейс.' +
+      providerDetails +
+      ' Оригинал не изменён; автоматического повтора нет, возврат квоты не гарантирован. Новый запрос требует чтения условий и нового согласия.'
+    );
+  if (code === 'LLM_PROVIDER_UNAVAILABLE')
+    return (
+      'Провайдер недоступен или не вернул проверенный полный перевод.' +
+      providerDetails +
+      ' Оригинал не изменён; автоматического повтора нет. Обновите условия перед новым запросом.'
+    );
   if (['LLM_QUOTA_EXCEEDED', 'LLM_BUDGET_EXCEEDED', 'LLM_CAPACITY'].includes(code))
     return 'Достигнут лимит запросов или квоты. Оригинал доступен; автоматического повтора нет.';
   if (['TIMEOUT', 'ABORTED', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
@@ -114,8 +146,10 @@ export function createAdvisoryTranslationClient(session = scanSession(), fetcher
       assertPlainWire(value);
       if (!current() || controller.signal.aborted) throw new TranslationError('SESSION');
       if (!response.ok) {
-        const error = z.object({ errorCode: z.string().regex(/^[A-Z_]{1,64}$/) }).safeParse(value);
-        throw new TranslationError(error.success ? error.data.errorCode : 'UNAVAILABLE');
+        const error = llmJsonErrorSchema.safeParse(value);
+        if (!error.success || !validLlmErrorStatus(error.data, response.status))
+          throw new TranslationError('INVALID');
+        throw new TranslationError(error.data.errorCode, error.data.providerFailure);
       }
       return value;
     };
@@ -133,7 +167,15 @@ export function createAdvisoryTranslationClient(session = scanSession(), fetcher
   }
   return {
     current,
-    readiness: chat.readiness,
+    async readiness(scanId: string, signal: AbortSignal) {
+      try {
+        return await chat.readiness(scanId, signal);
+      } catch (error) {
+        throw error instanceof ChatError
+          ? new TranslationError(error.code, error.providerFailure)
+          : new TranslationError('INVALID');
+      }
+    },
     async context(scanId: string, selection: TranslationSelection, signal: AbortSignal) {
       const selected = translationSelectionSchema.parse(selection);
       const query = new URLSearchParams({

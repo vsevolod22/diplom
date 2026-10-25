@@ -260,20 +260,42 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
       assert.doesNotMatch(await response.text(), /Ошибка|Злоумышленник/); afterSend = undefined; renew();
     });
 
-    await t.test('final actual HTTP write rechecks authority after generation and releases shared capacity on refusal', async () => {
+    await t.test('final actual HTTP write rechecks policy/session/report/source/abort after generation without refund or leaked capacity', async () => {
       const operation = app!.get(LlmService).translation(), generate = operation.generate.bind(operation);
-      const before = sends, used = quota.snapshot(owner.id, scan.id).scan.used.input;
-      operation.generate = async (...args) => {
-        const result = await generate(...args);
-        currentPolicy = { ...policy, version: 'e'.repeat(64) };
-        return result;
-      };
-      try {
-        const response = await post(request(initial)); assert.equal(response.status, 409);
-        assert.deepEqual(await response.json(), { errorCode: 'LLM_STALE_POLICY' });
-        assert.equal(sends, before + 1); assert.equal(quota.snapshot(owner.id, scan.id).scan.used.input, used + 500);
-      } finally { operation.generate = generate; currentPolicy = policy; }
-      assert.equal((await post(request(initial))).status, 200, 'capacity released even when final write is refused');
+      const scans = app!.get(ScansService), originalStatus = scans.status.bind(scans), originalVuln = scans.vuln.bind(scans);
+      for (const reason of ['policy', 'auth', 'report', 'source', 'abort']) {
+        const before = sends, used = quota.snapshot(owner.id, scan.id).scan.used.input;
+        operation.generate = async (...args) => {
+          const controller = new AbortController();
+          const result = await generate(args[0], args[1], args[2], reason === 'abort' ? controller.signal : args[3]);
+          if (reason === 'policy') currentPolicy = { ...policy, version: 'e'.repeat(64) };
+          if (reason === 'auth') auth.revoke(cookie.slice('demo_session='.length));
+          if (reason === 'report') scans.status = (...input) => ({ ...originalStatus(...input), state: 'failed' });
+          if (reason === 'source') scans.vuln = (...input) => {
+            const page = originalVuln(...input);
+            if (page.outcome !== 'checked') return page;
+            return { ...page, findings: page.findings.map(f => {
+              const advisory = structuredClone(f.advisory!);
+              // Same egress text, changed provenance metadata must still invalidate publication.
+              advisory.assessments[scan.index].language = null;
+              return { ...f, advisory };
+            }) };
+          };
+          if (reason === 'abort') controller.abort();
+          return result;
+        };
+        try {
+          const response = await post(request(initial));
+          assert.equal(response.status, reason === 'auth' ? 503 : 409, reason + ': ' + await response.clone().text());
+          if (reason === 'policy') assert.deepEqual(await response.json(), { errorCode: 'LLM_STALE_POLICY' });
+          else assert.doesNotMatch(await response.text(), /Ошибка|Злоумышленник|machineTranslated/);
+          assert.equal(sends, before + 1); assert.equal(quota.snapshot(owner.id, scan.id).scan.used.input, used + 500);
+        } finally {
+          operation.generate = generate; currentPolicy = policy; scans.status = originalStatus; scans.vuln = originalVuln;
+          if (reason === 'auth') renew();
+        }
+        assert.equal((await post(request(initial))).status, 200, 'capacity released even when final write is refused: ' + reason);
+      }
     });
 
     await t.test('public-only registration and exact nginx routes; no legacy translation path', async () => {

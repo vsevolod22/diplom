@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { ORIGIN, SCANS, CHECKS, TARGETS, parseMode, fixedUrl, allowedGet, validIntent, eligibilityReady,
   EligibilityFence, awaitEligibility, consumePermit, partition, cancelVerdict, preservationVerdict, keyBoundaryAllowed, checkPage, readAllPages, loadContracts, safeMeta, ResultBook, GLOBAL_MS, WORKER_MS,
-    BROWSER_ARGS, safeMutationRequest, assertDeniedReply, assertChatUsage, renderedRowParts, paginationVerdict, evidenceDocuments, writeEvidence,
+    BROWSER_ARGS, safeMutationRequest, allowedApiGet, safeReadRequest, runtimeProbeRead, assertRuntimeOffReply, assertDeniedReply, assertChatUsage, renderedRowParts, paginationVerdict, evidenceDocuments, writeEvidence,
     SMOKE_MS, nativePlan, scanLaunchAllowed, smokeMutationAllowed, resultExitCode, assertAuthUser, failureMeta } from './public-product-live.mjs';
 
 const id = '12345678-1234-4234-8234-123456789abc';
@@ -17,7 +17,7 @@ const intent = target => ({ imageReference: target.reference, scope: 'image', ch
 test('default is not-run; full explicit GO/no-key-activation acknowledgements required', () => {
   assert.equal(parseMode([]), 'not-run');
   assert.equal(parseMode(['--self-test']), 'offline');
-  assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation']), 'native');
+  assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', id]), 'native');
   for (const args of [['--run'], ['--run', '--ack-coordinator-go'], ['--native-child'], ['--run-native'], ['--url', ORIGIN], ['--self-test', '--run'], ['--run', '--ack-coordinator-go', '--ack-no-key-activation', '--target=other']]) assert.throws(() => parseMode(args));
 });
 
@@ -33,7 +33,7 @@ test('auth user identity is the backend 32-hex ID, not a scan UUID, and remains 
 });
 
 test('one-scan smoke requires the exact run flag and both GO/no-key acknowledgements', () => {
-  assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation']), 'smoke');
+  assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', id]), 'smoke');
   for (const args of [
     ['--smoke-only'], ['--run', '--smoke-only'], ['--run', '--smoke-only', '--ack-coordinator-go'],
     ['--run', '--smoke-only', '--ack-no-key-activation'],
@@ -377,6 +377,70 @@ test('native mutation guard obtains complete headers, not the security-redacted 
   assert.ok(source.includes('const headers = await request.allHeaders();'));
   assert.equal(source.includes('safeMutationRequest(request.url(), request.headers())'), false);
   assert.ok(source.includes('stopped || fatalCode || !safeMutationRequest(request.url(), headers)'));
+});
+
+test('shared GET fence covers current report serializers, exact runtime-off probes and native read headers', async () => {
+  const { view } = await loadContracts();
+  for (const [kind, suffix, sorts, filters] of [
+    ['secret', 'results', ['ruleId:asc', 'ruleId:desc', 'line:asc', 'line:desc'], [{}, { ruleId: 'Rule-1', linePresence: 'known' }, { linePresence: 'unknown' }]],
+    ['sbom', 'sbom', ['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc'], [{}, { ecosystem: 'npm', name: '@scope/package' }]],
+    ['vuln', 'vuln', ['severity:asc', 'severity:desc'], [{}, { severity: ['HIGH', 'CRITICAL'] }]],
+  ]) for (const limit of [5, 10, 25, 50]) for (const sort of sorts) for (const filter of filters) for (const cursor of [undefined, 'opaque-next']) {
+    const query = view.reportViewSearch(kind, { view: 'report-v1', limit, sort, ...filter }, cursor);
+    const path = `${SCANS}/${id}/${suffix}?${query}`;
+    assert.equal(allowedGet(path, [id]), true, path);
+    assert.equal(allowedApiGet(ORIGIN + path, [id]), true);
+    for (const extra of ['&limit=25', '&sort=other', '&extra=1']) assert.equal(allowedGet(path + extra, [id]), false);
+  }
+  for (const suffix of ['capabilities', 'targets', 'captures']) {
+    const path = `/api/v1/browser/runtime/${suffix}`, url = ORIGIN + path;
+    assert.equal(allowedGet(path, []), true);
+    assert.equal(runtimeProbeRead(url), true);
+    assert.doesNotThrow(() => assertRuntimeOffReply(url, 'GET', 404));
+    for (const status of [200, 202, 401, 403, 500, 503]) assert.throws(() => assertRuntimeOffReply(url, 'GET', status));
+    for (const method of ['HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS']) assert.equal(allowedGet(path, [], method), false);
+    for (const extra of ['?', '?cursor=x', '?limit=100', '/extra']) assert.equal(allowedGet(path + extra, []), false);
+  }
+  for (const path of [`${SCANS}/${id}/sbom?view=report-v1&limit=25&sort=name:asc&query=x`, `${SCANS}/${id}/vuln?view=report-v1&limit=25&sort=severity:desc&name=x`, '/api/v1/browser/runtime/imports']) assert.equal(allowedGet(path, [id]), false);
+  const url = `${ORIGIN}${SCANS}/${id}/events`;
+  for (const headers of [{}, { accept: 'text/event-stream', 'last-event-id': '7' }, { cookie: 'ephemeral-browser-cookie', origin: ORIGIN }]) assert.equal(safeReadRequest(url, headers), true);
+  for (const headers of [{ Authorization: 'synthetic' }, { 'Proxy-Authorization': 'synthetic' }, { 'X-API-Key': 'synthetic' }, { origin: 'http://127.0.0.1:8080' }]) assert.equal(safeReadRequest(url, headers), false);
+});
+
+test('frontend request shapes remain covered without requiring auth headers or weakening mutation origin/JSON checks', () => {
+  const readSource = name => readFileSync(new URL(`../src/shared/api/scans/${name}`, import.meta.url), 'utf8');
+  const transport = readSource('httpScanTransport.ts');
+  assert.match(transport, /BROWSER_SCANS_PATH\}\?limit=100/);
+  assert.match(transport, /new EventSource\(path\)/);
+  assert.match(transport, /headers: body \? \{ 'Content-Type': 'application\/json'/);
+  for (const [name, accept] of [['llmChatClient.ts', 'application/x-ndjson'], ['advisoryTranslationClient.ts', null]]) {
+    const code = readSource(name);
+    assert.ok(code.includes("method: body ? 'POST' : 'GET'"));
+    assert.ok(code.includes("credentials: 'same-origin'"));
+    assert.ok(code.includes("redirect: 'error'"));
+    assert.ok(code.includes("'Content-Type': 'application/json'"));
+    if (accept) assert.ok(code.includes(accept));
+  }
+  const url = `${ORIGIN}${SCANS}/${id}/llm/chat`;
+  assert.equal(safeMutationRequest(url, { origin: ORIGIN, 'content-type': 'application/json', accept: 'application/x-ndjson' }), true);
+  const code = readFileSync(new URL('./public-product-live.mjs', import.meta.url), 'utf8');
+  assert.ok(code.includes('if (fixedUrl(response.url())) book.actual = true'));
+  assert.ok(code.includes('if (book.actual) { try { await writeEvidence(evidence)'));
+  assert.ok(code.includes('own.state.closing = true; await own.context.close()'));
+});
+
+test('new product attempts require UUID destinations and never select historical evidence paths', () => {
+  for (const mode of ['native', 'smoke']) {
+    const plan = nativePlan(mode, id);
+    assert.ok(plan.evidencePaths.every(path => path.includes(`/docs/public-final-${id}-${mode}.`)));
+    assert.equal(new ResultBook(mode, id).evidence().attemptId, id);
+    assert.throws(() => nativePlan(mode, '../attempt2'));
+  }
+  for (const args of [
+    ['--run', '--ack-coordinator-go', '--ack-no-key-activation'],
+    ['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation'],
+    ['--run', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', '../attempt3'],
+  ]) assert.throws(() => parseMode(args));
 });
 
 test('runner source has no response mocking, saved browser state, lifecycle or historical holders', () => {

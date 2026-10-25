@@ -4,6 +4,10 @@ import {
   freeProfileSchema,
   publicChatMetadataShape,
   publicReadinessShape,
+  providerFailureSchema,
+  validProviderError,
+  type ProviderErrorCode,
+  type ProviderFailure,
   validPublicChatMetadata,
   validPublicReadiness,
 } from './llmPublicContract';
@@ -345,12 +349,20 @@ export const chatFrameSchema = z.union([
     outcome: z.literal('duplicate'),
     state: duplicateSchema.shape.state,
   }),
-  z.strictObject({
-    ...frameBase,
-    type: z.literal('error'),
-    errorCode: z.literal('LLM_UNAVAILABLE'),
-    receipt: z.enum(['accepted', 'unavailable']),
-  }),
+  z
+    .strictObject({
+      ...frameBase,
+      type: z.literal('error'),
+      errorCode: z.enum([
+        'LLM_UNAVAILABLE',
+        'LLM_PROVIDER_RATE_LIMITED',
+        'LLM_PROVIDER_AUTH_FAILED',
+        'LLM_PROVIDER_UNAVAILABLE',
+      ]),
+      providerFailure: providerFailureSchema.optional(),
+      receipt: z.enum(['accepted', 'unavailable']),
+    })
+    .refine(validProviderError),
 ]);
 
 // Frames never reach a renderer. Publication requires clean EOF, whole-reply validation and durable reread.
@@ -363,7 +375,13 @@ export function createChatFrameParser(context: ChatContext, mutationId: string) 
     text = '';
   let usage: z.infer<typeof chatReceiptSchema> | undefined;
   const sources: ChatSource[] = [];
-  let terminal: ChatResult | { errorCode: 'LLM_UNAVAILABLE' } | undefined;
+  let terminal:
+    | ChatResult
+    | {
+        errorCode: 'LLM_UNAVAILABLE' | ProviderErrorCode;
+        providerFailure?: ProviderFailure;
+      }
+    | undefined;
   const invalid = (): never => {
     throw new Error('Invalid chat delivery');
   };
@@ -382,7 +400,12 @@ export function createChatFrameParser(context: ChatContext, mutationId: string) 
       tuple ??= { turnId: frame.turnId, revision: frame.revision };
       if (frame.type === 'error') {
         if ((frame.receipt === 'accepted') !== !!usage || frame.revision !== context.revision + 2) invalid();
-        terminal = { errorCode: frame.errorCode };
+        // Classified provider failures carry no answer fragments. Legacy delivery errors can follow partial writes.
+        if (frame.errorCode !== 'LLM_UNAVAILABLE' && (sources.length || deltaCount)) invalid();
+        terminal = {
+          errorCode: frame.errorCode,
+          ...(frame.providerFailure ? { providerFailure: frame.providerFailure } : {}),
+        };
       } else if (frame.type === 'usage') {
         if (frame.seq !== 0 || frame.revision !== context.revision + 2) invalid();
         usage = frame.usage;

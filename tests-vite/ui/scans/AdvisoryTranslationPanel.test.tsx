@@ -8,7 +8,9 @@ import {
   AdvisoryTranslationScope,
 } from '@/features/scans/AdvisoryTranslationPanel';
 import { VulnAdvisoryCard } from '@/pages/scans/VulnAdvisoryCard';
-import { transitionScanSession } from '@/shared/api/auth/scanSession';
+import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
+import { createAdvisoryTranslationClient } from '@/shared/api/scans/advisoryTranslationClient';
+import type { TranslationContext } from '@/shared/api/scans/advisoryTranslationContract';
 import type { VulnFinding } from '@/shared/api/scans/scanTransport';
 import { finding, replyFor, status, translationApi } from './advisoryTranslationFixtures';
 import { json } from './llmChatFixtures';
@@ -21,11 +23,12 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 const posts = (api: ReturnType<typeof translationApi>) =>
   api.requests.filter((request) => request.init.method === 'POST');
-function mount(api = translationApi(), value = finding) {
-  vi.stubGlobal('fetch', api.fetcher);
+function mount(api = translationApi(), value = finding, fetcher: typeof fetch = api.fetcher) {
+  vi.stubGlobal('fetch', fetcher);
   const view = render(
     <AdvisoryTranslationScope status={status}>
       <ul>
@@ -117,6 +120,47 @@ for (const errorCode of ['LLM_PROVIDER_UNAVAILABLE', 'LLM_QUOTA_EXCEEDED', 'LLM_
     expect(screen.getByText('The package contains a vulnerability.')).toBeVisible();
   });
 }
+
+it.each([429, 503, 401])(
+  'shows provider HTTP %s and its safe hint without retrying or replacing the original',
+  async (providerStatus) => {
+    const api = translationApi();
+    const auth = providerStatus === 401;
+    api.post = async () =>
+      json(
+        {
+          errorCode: auth ? 'LLM_PROVIDER_AUTH_FAILED' : 'LLM_PROVIDER_RATE_LIMITED',
+          providerFailure: {
+            kind: auth ? 'auth_failed' : 'rate_limited',
+            status: providerStatus,
+            ...(auth ? {} : { retryAfterSeconds: 0 }),
+          },
+        },
+        auth ? 503 : providerStatus,
+      );
+    mount(api);
+    await translate();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(auth ? 'Провайдер отклонил серверный ключ' : 'Провайдер занят');
+    expect(alert).toHaveTextContent(`HTTP ${providerStatus}`);
+    expect(alert).toHaveTextContent('возврат квоты не гарантирован');
+    if (!auth) expect(alert).toHaveTextContent('0 с');
+    expect(screen.queryByText('Пакет содержит уязвимость.')).toBeNull();
+    expect(screen.getByText('The package contains a vulnerability.')).toBeVisible();
+    expect(checkbox()).not.toBeChecked();
+    expect(send()).toBeDisabled();
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(86400001);
+    });
+    expect(posts(api)).toHaveLength(1);
+    vi.useRealTimers();
+    await open();
+    expect(checkbox()).not.toBeChecked();
+    expect(send()).toBeDisabled();
+    expect(posts(api)).toHaveLength(1);
+  },
+);
 
 for (const changed of ['policy', 'source', 'report', 'readiness'] as const) {
   it(`fresh ${changed} change before send prevents POST and requires new consent`, async () => {
@@ -285,6 +329,73 @@ it('cancel aborts pending delivery and requires manual conditions and new consen
   expect(send()).toBeDisabled();
   expect(screen.queryByText('Пакет содержит уязвимость.')).toBeNull();
   expect(posts(api)).toHaveLength(1);
+});
+
+it.each([
+  [401, 'Сессия изменилась'],
+  [403, 'Доступ к переводу этого отчёта не подтверждён'],
+])(
+  'shows the concrete readiness denial for HTTP %s without sending a translation',
+  async (statusCode, message) => {
+    const api = translationApi();
+    const fetcher: typeof fetch = (input, init) =>
+      String(input).endsWith('/readiness')
+        ? Promise.resolve(json({ diagnostic: 'private readiness diagnostic' }, statusCode))
+        : api.fetcher(input, init);
+    mount(api, finding, fetcher);
+    fireEvent.click(screen.getByRole('button', { name: 'Прочитать условия перевода' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    expect(document.body.textContent).not.toContain('private readiness diagnostic');
+    expect(checkbox()).not.toBeChecked();
+    expect(send()).toBeDisabled();
+    expect(posts(api)).toHaveLength(0);
+    expect(screen.getByText('The package contains a vulnerability.')).toBeVisible();
+  },
+);
+
+it('bounds a noncooperative read, discards its late result and recovers only on manual read without POST', async () => {
+  const api = translationApi();
+  let finish!: (context: TranslationContext) => void;
+  let requestSignal!: AbortSignal;
+  const client = createAdvisoryTranslationClient(scanSession(), api.fetcher);
+  const read = vi.spyOn(client, 'context').mockImplementationOnce((_scanId, _selection, signal) => {
+    requestSignal = signal;
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  });
+  vi.useFakeTimers();
+  render(
+    <AdvisoryTranslationScope status={status}>
+      <AdvisoryTranslationPanel
+        findingId={finding.findingId}
+        vulnerabilityId={finding.cveId}
+        assessmentIndex={0}
+        assessment={finding.advisory!.assessments[0]}
+        client={client}
+      />
+    </AdvisoryTranslationScope>,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Прочитать условия перевода' }));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(45001);
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent('Ожидание перевода остановлено');
+  expect(requestSignal.aborted).toBe(true);
+  expect(screen.getByRole('region', { name: /Перевод CVE/ })).toHaveAttribute('aria-busy', 'false');
+  expect(checkbox()).not.toBeChecked();
+  expect(send()).toBeDisabled();
+  await act(async () => {
+    finish(api.context);
+  });
+  expect(checkbox()).toBeDisabled();
+  expect(read).toHaveBeenCalledTimes(1);
+  vi.useRealTimers();
+  await open();
+  expect(checkbox()).not.toBeChecked();
+  expect(send()).toBeDisabled();
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(posts(api)).toHaveLength(0);
 });
 
 it('focus clears previous consent/translation and never dispatches automatically', async () => {

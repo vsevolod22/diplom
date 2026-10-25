@@ -12,6 +12,7 @@ import {
 } from './history-contract.js';
 import { safeHistoryFinding } from './history-sources.js';
 import { exact } from './response.js';
+import { safeProviderFailure, type ProviderFailureResponse } from './openrouter-provider.js';
 
 export const DELIVERY = Object.freeze({
   lineBytes: 8192,
@@ -31,8 +32,8 @@ type Binding = ReportBinding & { epoch: string; revision: number; mutationId: st
 export type ChatDelivery = Binding &
   (
     | { outcome: 'completed'; reply: ChatReply; usage: ChatReceipt }
-    | { outcome: 'failed'; usage: Readonly<ChatReceipt> }
-    | { outcome: 'failed'; receipt: 'unavailable' }
+    | { outcome: 'failed'; usage: Readonly<ChatReceipt>; failure?: ProviderFailureResponse }
+    | { outcome: 'failed'; receipt: 'unavailable'; failure?: ProviderFailureResponse }
     | { outcome: 'duplicate'; state: Turn['state'] }
   );
 export type DeliveryResult = { delivery: ChatDelivery; write(action: () => void): void; release(): void };
@@ -60,7 +61,11 @@ export function encodeDelivery(value: ChatDelivery) {
     value.platform !== 'linux/amd64'
   )
     throw unavailable();
-  const common = {
+  const failure = value.outcome === 'failed' && value.failure !== undefined ? safeProviderFailure(value.failure) : undefined;
+    if (value.outcome === 'failed' && value.failure !== undefined &&
+        (!failure || !exact(value.failure, ['errorCode', 'providerFailure']))) throw unavailable();
+    const errorPayload = failure ?? { errorCode: 'LLM_UNAVAILABLE' };
+    const common = {
     v: 1,
     deliveryMode: 'validated-completed-reply',
     nativeProviderStream: false,
@@ -98,10 +103,11 @@ export function encodeDelivery(value: ChatDelivery) {
         'turnId',
         'outcome',
         'receipt',
+        ...(failure ? ['failure'] : []),
       ])
     )
       throw unavailable();
-    add('error', { errorCode: 'LLM_UNAVAILABLE', receipt: 'unavailable' });
+    add('error', { ...errorPayload, receipt: 'unavailable' });
   } else {
     const { usage } = value;
     if (
@@ -126,11 +132,12 @@ export function encodeDelivery(value: ChatDelivery) {
           'turnId',
           'outcome',
           'usage',
+          ...(failure ? ['failure'] : []),
         ])
       )
         throw unavailable();
       add('usage', { usage });
-      add('error', { errorCode: 'LLM_UNAVAILABLE', receipt: 'accepted' });
+      add('error', { ...errorPayload, receipt: 'accepted' });
     } else {
       const { reply } = value;
       if (
@@ -180,7 +187,7 @@ export function encodeDelivery(value: ChatDelivery) {
   // Reserve room for a bounded terminal error if a pre-terminal write fails.
   const error = (seq: number) =>
     line(seq, 'error', {
-      errorCode: 'LLM_UNAVAILABLE',
+      ...errorPayload,
       receipt: 'usage' in value ? 'accepted' : 'unavailable',
     });
   const size = lines.reduce((n, s) => n + Buffer.byteLength(s), 0);

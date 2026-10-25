@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { normalizeAdvisory, omittedAdvisory } from '../../worker/vuln-advisory.js';
 import { policyFromEnvironment } from '../policy.js';
@@ -44,6 +45,21 @@ test('translation exact selection/body, separate consent, registered prepared wi
     assert.throws(() => prepareTranslation({ title: 'Memory issue', description: null }, { ...policy, model: 'apodex/apodex-1.1-mini:free', providers: ['novita/bf16'] }));
   assert.match(JSON.parse(prepareSummary(fixtureReport, policy).body).messages[0].content, /human-readable.*Russian/);
   assert.match(JSON.parse(prepareHistory({}, policy).body).messages[0].content, /human-readable.*Russian/);
+  for (const prepared of [prepareSummary(fixtureReport, policy), prepareHistory({}, policy), prepareTranslation({ title: 'Memory issue', description: null }, policy)]) {
+    const instructions = JSON.parse(prepared.body).messages[0].content;
+    assert.match(instructions, /technical names, package names, versions and identifiers exactly/);
+    assert.match(instructions, /Do not translate or transliterate/);
+  }
+});
+
+test('Russian prompt revision invalidates prior consent/cache policy identity without changing report binding', () => {
+  const { version, ...settings } = policy;
+  const previousVersion = createHash('sha256').update(JSON.stringify({ revision: fixtureEnv.LLM_POLICY_REVISION,
+    responseLanguageRevision: 'russian-prose-v1', ...settings })).digest('hex');
+  assert.notEqual(version, previousVersion);
+  assert.notEqual(translationPolicy(policy), translationPolicy({ ...policy, version: previousVersion }));
+  assert.equal(prepareSummary(fixtureReport, policy).policyVersion, policy.version);
+  assert.deepEqual(JSON.parse(JSON.parse(prepareSummary(fixtureReport, policy).body).messages[1].content), fixtureReport);
 });
 
 test('only bounded eligible original fields can egress, with no mutation or fabricated language', () => {
@@ -61,6 +77,35 @@ test('only bounded eligible original fields can egress, with no mutation or fabr
   assert.ok(Buffer.byteLength(bounded.text.title!) <= 512); assert.ok(Buffer.byteLength(bounded.text.description!) <= 4096);
   assert.equal(bounded.source.language, null); assert.deepEqual(advisory, before);
   assert.notEqual(selected({ Title: 'First text' }).sourceVersion, selected({ Title: 'Second text' }).sourceVersion);
+});
+
+test('source identity includes original field states and metadata even when the eligible egress text is identical', () => {
+  const advisory = normalizeAdvisory({ DataSource: { ID: 'nvd' }, Title: 'Memory flaw', Description: 'Details unavailable' }, ref, id);
+  const index = advisory.assessments.findIndex(a => a.title.value !== null);
+  const original = structuredClone(advisory), initial = selectedTranslation(advisory, index, id);
+  for (const mutate of [
+    (a: typeof advisory.assessments[number]) => { a.language = 'en'; },
+    (a: typeof advisory.assessments[number]) => { a.source = 'ghsa'; },
+    (a: typeof advisory.assessments[number]) => { a.provenanceRef = `target-${'c'.repeat(64)}`; },
+    (a: typeof advisory.assessments[number]) => { a.title.state = 'truncated'; },
+    (a: typeof advisory.assessments[number]) => { a.severity = 'HIGH'; },
+    (a: typeof advisory.assessments[number]) => { a.fixedVersion = '1.2.3'; },
+  ]) {
+    const changed = structuredClone(advisory); mutate(changed.assessments[index]);
+    const next = selectedTranslation(changed, index, id);
+    assert.deepEqual(next.text, initial.text);
+    assert.notEqual(next.sourceVersion, initial.sourceVersion);
+  }
+  assert.notEqual(selectedTranslation(advisory, index, 'TEMP-1234567-A1B2C3').sourceVersion, initial.sourceVersion);
+  assert.equal(initial.source.language, null); assert.deepEqual(advisory, original);
+});
+
+test('identifier-only input preserves exact original spelling without requiring invented Russian prose', () => {
+  for (const title of ['CVE-2026-1000', 'cve-2026-1000', 'TEMP-1234567-A1B2C3', 'temp-1234567-a1b2c3', '12345']) {
+    const text = { title, description: null };
+    assert.deepEqual(validateTranslationReply(text, text), text);
+    assert.throws(() => validateTranslationReply({ title: `Ошибка ${title}`, description: null }, text));
+  }
 });
 
 test('strict Russian translation output preserves field nulls/identifiers and rejects unsafe or invented content shape', () => {

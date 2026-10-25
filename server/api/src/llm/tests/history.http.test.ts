@@ -642,10 +642,11 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
   process.env.AUTH_ORIGIN = origin; process.env.AUTH_ALLOW_INSECURE_LOCAL_HTTP = 'true'; process.env.SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS = 'true';
   const app = await NestFactory.create(AppModule, { logger: false }); registerHistoryIngress(app);
   const history = new HistoryStore(join(dir, 'llm-history.sqlite'), true), quotaPath = join(dir, 'llm-usage.sqlite');
-  const quota = new FixtureQuotaLedger(quotaPath, quotaPolicy), db = new Database(quotaPath, { readonly: true });
+  // Extra refusal cases deliberately retain every dispatched reservation; give this disposable fixture room for all of them.
+    const quota = new FixtureQuotaLedger(quotaPath, { ...quotaPolicy, scan: { ...quotaPolicy.scan, input: 262144 } }), db = new Database(quotaPath, { readonly: true });
   const runtime = app.get(LlmRuntime), llm = app.get(LlmService), service = llm.history();
   runtime.policy = () => freePolicy; app.get(LlmQuotaRuntime).ledger = () => quota; service.runtime.store = () => history;
-  let mode: 'reject' | 'valid' | 'missing' | 'fault' = 'reject', sends = 0, owner = '', scanId = '', reservation = '', writes = 0;
+  let mode: 'reject' | 'valid' | 'missing' | 'fault' | 'http429' | 'http503' | 'http401' = 'reject', sends = 0, owner = '', scanId = '', reservation = '', writes = 0;
   let afterWrite: ((n: number) => void) | undefined, beforeFailure: (() => void) | undefined;
   const synthetic = Object.assign((async () => assert.fail('no actual provider or unguarded transport')) as typeof fetch, {
     sendGuarded: async (_url: string, init: RequestInit, guard: BodySendGuard) => {
@@ -657,6 +658,9 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
         assert.equal(wire.stream, false); assert.ok(wire.max_tokens <= 2048); assert.deepEqual(wire.provider.only, ['novita/bf16']);
         assert.deepEqual(wire.provider.max_price, { prompt: 0, completion: 0, request: 0 });
         if (mode === 'reject') { beforeFailure?.(); throw new Error('PRIVATE-before-receipt'); }
+                if (mode.startsWith('http')) {
+                  response = new Response('PRIVATE-provider-error-body', { status: Number(mode.slice(4)), headers: { 'retry-after': '60' } }); return;
+                }
         const usage = mode === 'missing' ? {} : { prompt_tokens: 500, completion_tokens: 32, cost: mode === 'fault' ? 0.01 : 0 };
         response = new Response(JSON.stringify({ model: freePolicy.model, usage, choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: mode === 'valid' ? JSON.stringify({ ...reportBinding(report), text: 'Safe hypothesis', citations: [report.findings[0].findingId] }) : '{PRIVATE-invalid-reply' } }] }), { headers: { 'content-type': 'application/json' } });
       }); return response;
@@ -719,6 +723,24 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
     assert.match(legacy.headers.get('content-type')!, /^application\/json/); assert.deepEqual(await legacy.json(), { errorCode: 'LLM_PROVIDER_UNAVAILABLE' }); acquire(owner)();
     mode = 'valid'; const valid = await post(await input()); assert.equal(valid.status, 200); await valid.text(); acquire(owner)();
     assert.equal((db.prepare("SELECT count(*) AS n FROM quota_attempt WHERE state='settled'").get() as { n: number }).n, 1);
+    for (const status of [429, 503, 401] as const) {
+      mode = `http${status}`;
+      const expected = { errorCode: status === 401 ? 'LLM_PROVIDER_AUTH_FAILED' : 'LLM_PROVIDER_RATE_LIMITED',
+        providerFailure: { kind: status === 401 ? 'auth_failed' : 'rate_limited', status, ...(status === 401 ? {} : { retryAfterSeconds: 60 }) } };
+      const request = await input(), response = await post(request), raw = await response.text();
+      assert.equal(response.status, 200);
+      const frames = raw.trimEnd().split('\n').map(line => JSON.parse(line)); assert.equal(frames.length, 1);
+      assert.equal(frames[0].type, 'error'); assert.equal(frames[0].seq, 0); assert.equal(frames[0].receipt, 'unavailable');
+      assert.equal(frames[0].errorCode, expected.errorCode); assert.deepEqual(frames[0].providerFailure, expected.providerFailure);
+      assert.equal(frames[0].mutationId, request.mutationId); assert.equal(frames[0].revision, request.revision + 2);
+      assert.doesNotMatch(raw, /PRIVATE|Bearer|requestHash|reservation|"usage"|"delta"|"done"/);
+      assert.equal((db.prepare('SELECT state,receipt FROM quota_attempt WHERE id=?').get(reservation) as { state: string; receipt: string | null }).state, 'dispatched');
+      const beforeReplay: number = sends; await (await post(request)).text(); assert.equal(sends, beforeReplay, 'failed attempt replay cannot resend');
+      const json = await post(await input(), 'application/json'); assert.equal(json.status, status === 401 ? 503 : status);
+      assert.deepEqual(await json.json(), expected); assert.equal(json.headers.get('cache-control'), 'no-store');
+      assert.equal(json.headers.get('retry-after'), status === 401 ? null : '60'); acquire(owner)();
+      assert.equal((db.prepare('SELECT state,receipt FROM quota_attempt WHERE id=?').get(reservation) as { state: string; receipt: string | null }).receipt, null);
+    }
     mode = 'missing'; await unavailable();
     assert.equal((db.prepare('SELECT state,receipt FROM quota_attempt WHERE id=?').get(reservation) as { state: string; receipt: string | null }).receipt, null, 'earlier settled row cannot establish this receipt');
     mode = 'reject'; beforeFailure = () => { runtime.policy = () => null; };

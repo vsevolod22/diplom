@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HttpException } from '@nestjs/common';
-import { OPENROUTER_ENDPOINT, productionProvider, OpenRouterProvider } from '../openrouter-provider.js';
+import { OPENROUTER_ENDPOINT, productionProvider, OpenRouterProvider, safeProviderFailure } from '../openrouter-provider.js';
 import { policyFromEnvironment } from '../policy.js';
 import { validateReply } from '../response.js';
 import { envelope, fakeKey, fixtureEnv, fixturePolicy, fixtureReport, reply } from './fixtures.js';
@@ -70,7 +70,18 @@ test('HTTP failure/redirect and oversized declared/streaming response cancel wit
     new Response('CANARY-private', { headers: { 'content-type': 'application/json', 'content-length': '999999999' } })]) {
     let calls = 0;
     const provider = productionProvider({ OPENROUTER_API_KEY: fakeKey }, transport(async () => { calls++; return response; }));
-    await assert.rejects(provider.summarize(fixtureReport, fixturePolicy, new AbortController().signal), errorCode('LLM_PROVIDER_UNAVAILABLE'));
+    await assert.rejects(provider.summarize(fixtureReport, fixturePolicy, new AbortController().signal), error => {
+      assert.ok(error instanceof HttpException);
+      if (response.status === 401 || response.status === 302) {
+        assert.deepEqual(safeProviderFailure(error.getResponse()), {
+          errorCode: response.status === 401 ? 'LLM_PROVIDER_AUTH_FAILED' : 'LLM_PROVIDER_UNAVAILABLE',
+          providerFailure: { kind: response.status === 401 ? 'auth_failed' : 'unavailable', status: response.status },
+        });
+        assert.equal(error.getStatus(), response.status === 401 ? 503 : 502);
+      } else assert.deepEqual(error.getResponse(), { errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
+      assert.doesNotMatch(JSON.stringify(error.getResponse()), /CANARY|private|location/);
+      return true;
+    });
     assert.equal(calls, 1); assert.ok(response.body?.locked === false);
   }
   let cancelled = false;

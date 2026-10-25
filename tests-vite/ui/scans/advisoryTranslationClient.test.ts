@@ -2,7 +2,11 @@ import { webcrypto } from 'node:crypto';
 import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
-import { createAdvisoryTranslationClient } from '@/shared/api/scans/advisoryTranslationClient';
+import {
+  createAdvisoryTranslationClient,
+  TranslationError,
+  translationErrorMessage,
+} from '@/shared/api/scans/advisoryTranslationClient';
 import {
   translationContextSchema,
   translationReplySchema,
@@ -193,6 +197,23 @@ for (const kind of ['content-type', 'oversize', 'length', 'utf8', 'redirect'] as
     expect(api.requests).toHaveLength(1);
   });
 }
+
+it.each([
+  [401, 'SESSION'],
+  [403, 'ACCESS'],
+  [404, 'REPORT_UNAVAILABLE'],
+  [503, 'LLM_HISTORY_UNAVAILABLE'],
+])('preserves the finite readiness error for HTTP %s in the translation client', async (status, code) => {
+  const fetcher = vi.fn<typeof fetch>(async () =>
+    json({ errorCode: code, diagnostic: 'private readiness diagnostic' }, status),
+  );
+  const client = createAdvisoryTranslationClient(scanSession(), fetcher);
+  const failure = await client.readiness(contextFor().scanId, signal()).catch((error) => error);
+  expect(failure).toBeInstanceOf(TranslationError);
+  expect(failure.code).toBe(code);
+  expect(translationErrorMessage(failure)).not.toContain('private readiness diagnostic');
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
 
 it('bounds noncooperative fetch timeout and never resends automatically', async () => {
   vi.useFakeTimers();

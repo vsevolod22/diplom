@@ -17,10 +17,23 @@ import {
   type ChatContext,
 } from './llmChatContract';
 import { assertPlainWire, serializedBytes } from './vulnAdvisory';
+import {
+  llmJsonErrorSchema,
+  providerFailureDetails,
+  providerFailureSchema,
+  validLlmErrorStatus,
+  type ProviderFailure,
+} from './llmPublicContract';
 
 export class ChatError extends Error {
-  constructor(readonly code: string) {
+  readonly providerFailure?: ProviderFailure;
+  constructor(
+    readonly code: string,
+    providerFailure?: ProviderFailure,
+  ) {
     super('Чат недоступен');
+    this.providerFailure =
+      providerFailure === undefined ? undefined : providerFailureSchema.parse(providerFailure);
   }
 }
 export function chatErrorMessage(error: unknown) {
@@ -39,8 +52,25 @@ export function chatErrorMessage(error: unknown) {
     return 'Обязательный контекст или история не помещаются. Подтверждённые решения не удалены; запрос не повторяется автоматически.';
   if (code === 'LLM_CONFIGURATION_UNAVAILABLE')
     return 'Серверный ключ или политика провайдера не настроены либо чат выключен. Точная причина не раскрывается; не вводите API-ключ в вопрос. Исходный отчёт сохранён.';
+  const providerDetails = error instanceof ChatError ? providerFailureDetails(error.providerFailure) : '';
+  if (code === 'LLM_PROVIDER_RATE_LIMITED')
+    return (
+      'Провайдер занят или ограничил частоту запросов.' +
+      providerDetails +
+      ' Автоматического повтора нет; возврат квоты не гарантирован. Сначала обновите историю; повтор — только вручную после нового согласия. Исходный отчёт сохранён.'
+    );
+  if (code === 'LLM_PROVIDER_AUTH_FAILED')
+    return (
+      'Провайдер отклонил серверный ключ. Обратитесь к оператору; не вводите ключ в интерфейс.' +
+      providerDetails +
+      ' Автоматического повтора нет; возврат квоты не гарантирован. Сначала обновите историю; новый запрос требует нового согласия. Исходный отчёт сохранён.'
+    );
   if (['LLM_PROVIDER_UNAVAILABLE', 'LLM_UNAVAILABLE'].includes(code))
-    return 'Провайдер недоступен или не вернул проверенный полный ответ. Сначала обновите историю: запрос уже мог быть учтён. Автоматического повтора нет; исходный отчёт сохранён.';
+    return (
+      'Провайдер недоступен или не вернул проверенный полный ответ.' +
+      providerDetails +
+      ' Сначала обновите историю: запрос уже мог быть учтён. Автоматического повтора нет; исходный отчёт сохранён.'
+    );
   if (code === 'LLM_HISTORY_UNAVAILABLE')
     return 'Хранилище истории недоступно. Доступность провайдера не подтверждена; исходный отчёт сохранён.';
   if (['LLM_REPORT_UNAVAILABLE', 'REPORT_UNAVAILABLE'].includes(code))
@@ -170,7 +200,7 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
       if (frames) {
         if (lineSize) throw new ChatError('INVALID');
         const value = frames.finish();
-        if ('errorCode' in value) throw new ChatError(value.errorCode);
+        if ('errorCode' in value) throw new ChatError(value.errorCode, value.providerFailure);
         return value;
       }
       const bytes = new Uint8Array(size);
@@ -183,8 +213,10 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
       assertPlainWire(value);
       if (!current() || controller.signal.aborted) throw new ChatError('SESSION');
       if (!response.ok) {
-        const error = z.object({ errorCode: z.string().regex(/^[A-Z_]{1,64}$/) }).safeParse(value);
-        throw new ChatError(error.success ? error.data.errorCode : 'UNAVAILABLE');
+        const error = llmJsonErrorSchema.safeParse(value);
+        if (!error.success || !validLlmErrorStatus(error.data, response.status))
+          throw new ChatError('INVALID');
+        throw new ChatError(error.data.errorCode, error.data.providerFailure);
       }
       return value;
     };

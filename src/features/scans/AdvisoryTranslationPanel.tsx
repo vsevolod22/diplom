@@ -136,11 +136,23 @@ function TranslationScope({
     const version = ++generation.current;
     request.current = controller;
     const live = () => generation.current === version && !controller.signal.aborted && client.current();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 45_000);
+    const stopped = new Promise<never>((_, reject) =>
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(new TranslationError(timedOut ? 'TIMEOUT' : 'ABORTED')),
+        { once: true },
+      ),
+    );
     setPending(true);
     setConsent(false);
     setResult(null);
     setMessage('');
-    try {
+    const run = async () => {
       const before = await readSnapshot(controller.signal);
       if (!live()) return;
       setSnapshot(before);
@@ -166,13 +178,17 @@ function TranslationScope({
         throw new TranslationError('STALE');
       setResult(reply);
       setShowTranslation(true);
+    };
+    try {
+      await Promise.race([run(), stopped]);
     } catch (error) {
-      if (live()) {
+      if (generation.current === version && client.current()) {
         setSnapshot(null);
         setResult(null);
         setMessage(translationErrorMessage(error));
       }
     } finally {
+      clearTimeout(timer);
       if (generation.current === version) {
         request.current = null;
         setPending(false);

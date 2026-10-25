@@ -7,6 +7,34 @@ const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const HOST = 'openrouter.ai';
 const PATH = '/api/v1/chat/completions';
 const unavailable = () => new Error('OpenRouter transport unavailable');
+export type ProviderHttpFailure = Readonly<{
+  kind: 'rate_limited' | 'auth_failed' | 'unavailable';
+  status: number;
+  retryAfterSeconds?: number;
+}>;
+export const MAX_PROVIDER_RETRY_SECONDS = 86400;
+// Retry hints are advisory metadata, never permission to resend or release liability.
+export function providerRetryAfter(value: string | null | undefined, now = Date.now()): number | undefined {
+  if (!value || value.length > 128) return undefined;
+  let seconds: number;
+  if (/^\d{1,10}$/.test(value)) seconds = Number(value);
+  else if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) {
+    const date = Date.parse(value);
+    if (!Number.isFinite(date)) return undefined;
+    seconds = Math.max(0, Math.ceil((date - now) / 1000));
+  } else return undefined;
+  return Math.min(MAX_PROVIDER_RETRY_SECONDS, seconds);
+}
+export class OpenRouterHttpFailure extends Error {
+  readonly failure: ProviderHttpFailure;
+  constructor(status: number, retryAfter?: string | null) {
+    super('OpenRouter transport unavailable');
+    if (!Number.isInteger(status) || status < 300 || status > 599) throw unavailable();
+    const kind = status === 429 || status === 503 ? 'rate_limited' : status === 401 ? 'auth_failed' : 'unavailable';
+    const retryAfterSeconds = kind === 'rate_limited' ? providerRetryAfter(retryAfter) : undefined;
+    this.failure = Object.freeze({ kind, status, ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}) });
+  }
+}
 export type BodySendGuard = (send: () => void) => void;
 export type GuardedTransport = typeof fetch & { sendGuarded(input: string, init: RequestInit, guard: BodySendGuard): Promise<Response> };
 
@@ -34,7 +62,7 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
         // Settle immediately, but release sockets after that native callback unwinds.
         setImmediate(() => { for (const resource of resources) resource.destroy(); });
       };
-      const fail = () => { if (!settled) { settled = true; cleanup(); reject(unavailable()); } };
+      const fail = (reason?: unknown) => { if (!settled) { settled = true; cleanup(); reject(reason instanceof OpenRouterHttpFailure ? reason : unavailable()); } };
       const abort = () => fail();
       if (signal?.aborted) { fail(); return; }
       signal?.addEventListener('abort', abort, { once: true });
@@ -65,6 +93,11 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
               resources.push(result);
               const length = result.headers['content-length'];
               if (settled) { result.destroy(); return; }
+              if (result.statusCode && result.statusCode >= 300 && result.statusCode <= 599) {
+                // Do not buffer, parse, log or retain an error body, even if it claims JSON.
+                fail(new OpenRouterHttpFailure(result.statusCode, typeof result.headers['retry-after'] === 'string' ? result.headers['retry-after'] : undefined));
+                return;
+              }
               if (!result.statusCode || result.statusCode < 200 || result.statusCode >= 300 ||
                   !/^application\/json(?:;|$)/i.test(result.headers['content-type'] ?? '') ||
                   length !== undefined && (!/^\d+$/.test(length) || Number(length) > CEILINGS.responseBytes)) { fail(); return; }
@@ -79,8 +112,10 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
               result.on('end', () => {
                 if (settled) return;
                 try {
+                  const retryAfterSeconds = providerRetryAfter(typeof result.headers['retry-after'] === 'string' ? result.headers['retry-after'] : undefined);
                   const reply = new Response(new Uint8Array(Buffer.concat(chunks)), {
-                    status: result.statusCode, headers: { 'content-type': result.headers['content-type']! } });
+                    status: result.statusCode, headers: { 'content-type': result.headers['content-type']!,
+                      ...(retryAfterSeconds !== undefined ? { 'retry-after': String(retryAfterSeconds) } : {}) } });
                   settled = true; cleanup(); resolve(reply);
                 } catch { fail(); }
               });

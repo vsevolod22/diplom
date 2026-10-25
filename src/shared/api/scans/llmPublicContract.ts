@@ -201,3 +201,75 @@ export function validPublicReadiness(value: z.infer<z.ZodObject<typeof publicRea
   );
 }
 export type ReadinessBlocker = z.infer<typeof readinessBlockerSchema>;
+
+export const providerFailureSchema = z
+  .strictObject({
+    kind: z.enum(['rate_limited', 'auth_failed', 'unavailable']),
+    status: z.number().int().min(300).max(599),
+    retryAfterSeconds: z.number().int().min(0).max(86400).optional(),
+  })
+  .refine((value) => {
+    const kind =
+      value.status === 429 || value.status === 503
+        ? 'rate_limited'
+        : value.status === 401
+          ? 'auth_failed'
+          : 'unavailable';
+    return value.kind === kind && (value.retryAfterSeconds === undefined || kind === 'rate_limited');
+  })
+  .readonly();
+export type ProviderFailure = z.infer<typeof providerFailureSchema>;
+export const providerErrorCodeSchema = z.enum([
+  'LLM_PROVIDER_RATE_LIMITED',
+  'LLM_PROVIDER_AUTH_FAILED',
+  'LLM_PROVIDER_UNAVAILABLE',
+]);
+export type ProviderErrorCode = z.infer<typeof providerErrorCodeSchema>;
+export function validProviderError(value: { errorCode: string; providerFailure?: ProviderFailure }) {
+  if (!value.providerFailure) return true;
+  const code =
+    value.providerFailure.kind === 'rate_limited'
+      ? 'LLM_PROVIDER_RATE_LIMITED'
+      : value.providerFailure.kind === 'auth_failed'
+        ? 'LLM_PROVIDER_AUTH_FAILED'
+        : 'LLM_PROVIDER_UNAVAILABLE';
+  return value.errorCode === code;
+}
+export const providerErrorSchema = z
+  .strictObject({
+    errorCode: providerErrorCodeSchema,
+    providerFailure: providerFailureSchema.optional(),
+  })
+  .refine(validProviderError);
+export const llmJsonErrorSchema = z.union([
+  providerErrorSchema,
+  // Legacy JSON diagnostics were ignored, never displayed. They cannot smuggle new provider metadata.
+  z.object({
+    errorCode: z
+      .string()
+      .regex(/^[A-Z_]{1,64}$/)
+      .refine((code) => code !== 'LLM_PROVIDER_RATE_LIMITED' && code !== 'LLM_PROVIDER_AUTH_FAILED'),
+    providerFailure: z.never().optional(),
+  }),
+]);
+export function validLlmErrorStatus(
+  value: { errorCode: string; providerFailure?: ProviderFailure },
+  status: number,
+) {
+  if (value.errorCode === 'LLM_PROVIDER_RATE_LIMITED')
+    return (
+      (status === 429 || status === 503) &&
+      (!value.providerFailure || value.providerFailure.status === status)
+    );
+  if (value.errorCode === 'LLM_PROVIDER_AUTH_FAILED') return status === 503;
+  return value.providerFailure === undefined || status === 502;
+}
+export function providerFailureDetails(failure: ProviderFailure | undefined): string {
+  if (!failure) return '';
+  return (
+    ` Статус провайдера: HTTP ${failure.status}.` +
+    (failure.retryAfterSeconds === undefined
+      ? ''
+      : ` Подсказка ожидания провайдера: ${failure.retryAfterSeconds} с; не гарантия доступности и не разрешение на повтор.`)
+  );
+}

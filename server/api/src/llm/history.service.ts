@@ -9,7 +9,7 @@ import { HISTORY, bytes, cleanText, hashValue, historyConflict, historyUnavailab
 import { PreparedContextCache, selectHistoryContext } from './history-context.js';
 import { historyBodyParsed } from './history-ingress.js';
 import { HistoryRuntime } from './history-runtime.js';
-import { OpenRouterProvider, configError, type LlmProvider } from './openrouter-provider.js';
+import { OpenRouterProvider, configError, providerFailureFromException, type LlmProvider } from './openrouter-provider.js';
 import { prepareHistory } from './prepared-request.js';
 import { disclosure, type LlmPolicy } from './policy.js';
 import type { LlmQuotaRuntime } from './quota-runtime.js';
@@ -249,12 +249,14 @@ export class HistoryService {
               return failed;
             });
           });
+          const failure = providerFailureFromException(error);
           const binding = { ...reportBinding(report), epoch: failed.epoch, revision: failed.revision,
+            ...(failure ? { failure } : {}),
             mutationId: expected.mutationId, turnId: id, outcome: 'failed' as const };
           const delivery: ChatDelivery = observation
             ? Object.freeze({ ...binding, usage: Object.freeze({ ...observation, source: 'server-validated-provider-reported-not-invoice' as const }) })
             : Object.freeze({ ...binding, receipt: 'unavailable' as const });
-          const result = this.result(access, report, failed, { errorCode: 'LLM_UNAVAILABLE' }, policy, signal);
+          const result = this.result(access, report, failed, failure ?? { errorCode: 'LLM_UNAVAILABLE' }, policy, signal);
           transferred = true;
           return { ...result, delivery, release };
         } catch { /* No proven current failed head: retain the safe exception path, never synthesize a delivery. */ }

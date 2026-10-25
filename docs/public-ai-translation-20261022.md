@@ -1,4 +1,6 @@
-# Public AI / ru advisory translation — implemented DEPLOYED READY, qualification BLOCKED
+# Public AI / ru advisory translation — historical22.10 DEPLOYED READY, qualification BLOCKED
+
+> **Operational status superseded25.10:** new rollout is in build HOLD, public8081HTTP000, separate Docker blob storage-I/O refusal during read-only recovery. New provider/UI/prompt fixes are source-tested, not deployed/accepted. Historical STOP below applied to22.10 scope; owner separately authorized new bounded qualification on25.10, but no new native attempt ran because infrastructure is blocked. DOC15/DOC16 are now v3; current full-body receipts and limits: [new handoff](public-product-handoff-20261025.md). Historical evidence below remains unchanged.
 
 ## Статус и разрешённая область
 

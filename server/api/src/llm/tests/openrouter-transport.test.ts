@@ -8,12 +8,26 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
-import { makeOpenRouterTransport } from '../openrouter-transport.js';
+import { makeOpenRouterTransport, OpenRouterHttpFailure, providerRetryAfter } from '../openrouter-transport.js';
 import { OPENROUTER_ENDPOINT } from '../openrouter-provider.js';
 import { fakeKey } from './fixtures.js';
 
 const options = (signal?: AbortSignal): RequestInit => ({ method: 'POST', redirect: 'error', body: '{}', signal,
   headers: { authorization: `Bearer ${fakeKey}`, 'content-type': 'application/json', accept: 'application/json' } });
+
+test('provider HTTP metadata retains only bounded status/kind/retry hints', () => {
+  const now = Date.UTC(2026, 9, 25, 12);
+  for (const value of [undefined, null, '', '-1', '1.5', 'NaN', 'Infinity', 'CANARY', '1'.repeat(129), '99999999999'])
+    assert.equal(providerRetryAfter(value, now), undefined);
+  assert.equal(providerRetryAfter('0', now), 0);
+  assert.equal(providerRetryAfter('9999999999', now), 86400);
+  assert.equal(providerRetryAfter('Sun, 25 Oct 2026 12:01:00 GMT', now), 60);
+  assert.equal(providerRetryAfter('Sun, 25 Oct 2026 11:59:00 GMT', now), 0);
+  assert.deepEqual(new OpenRouterHttpFailure(429, '60').failure, { kind: 'rate_limited', status: 429, retryAfterSeconds: 60 });
+  assert.deepEqual(new OpenRouterHttpFailure(401, '60').failure, { kind: 'auth_failed', status: 401 });
+  assert.deepEqual(new OpenRouterHttpFailure(403, '60').failure, { kind: 'unavailable', status: 403 });
+  for (const status of [200, 299, 600, NaN, 429.5]) assert.throws(() => new OpenRouterHttpFailure(status));
+});
 
 test('destination/path/header fences and pre-abort precede CONNECT; stalled tunnel is cancelled', async () => {
   const sockets = new Set<Duplex>(); let connects = 0;
@@ -47,8 +61,13 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
     requests++; assert.equal(req.method, 'POST'); assert.equal(req.url, '/api/v1/chat/completions');
     assert.equal(req.headers.authorization, `Bearer ${fakeKey}`);
     if (mode === 'headers') return;
+        if (['rate', 'busy', 'auth'].includes(mode)) {
+          res.writeHead(mode === 'rate' ? 429 : mode === 'busy' ? 503 : 401,
+            { 'content-type': 'text/plain', 'content-length': '999999999', 'retry-after': '9999999999', 'x-private': 'CANARY' });
+          res.flushHeaders(); res.write('CANARY-private-provider-body'); return;
+        }
     if (mode === 'redirect') { res.writeHead(302, { location: 'https://attacker.invalid' }); res.end(); return; }
-    res.writeHead(200, { 'content-type': 'application/json' });
+    res.writeHead(200, { 'content-type': 'application/json', ...(mode === 'hint' ? { 'retry-after': '9999999999', 'x-private': 'CANARY' } : {}) });
     if (mode === 'oversize') { res.end(Buffer.alloc(65537)); return; }
     if (mode === 'body') { res.flushHeaders(); res.write(' '); return; }
     let body = ''; req.on('data', chunk => { body += String(chunk); }); req.on('end', () => { assert.equal(body, '{}'); res.end('{}'); });
@@ -75,13 +94,16 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
       if (trusted) env.NODE_EXTRA_CA_CERTS = cert;
       // Host-only synthetic test CA, never a production TLS disable or secret file.
       const script = `import assert from 'node:assert/strict';
-        import {makeOpenRouterTransport} from ${JSON.stringify(new URL('../openrouter-transport.ts', import.meta.url).href)};
+        import {makeOpenRouterTransport,OpenRouterHttpFailure} from ${JSON.stringify(new URL('../openrouter-transport.ts', import.meta.url).href)};
         const t=makeOpenRouterTransport({host:'127.0.0.1',port:${(proxy.address() as { port: number }).port}});
         const init=${JSON.stringify(options())};init.signal=AbortSignal.timeout(400);
         process.stdout.write('synthetic-transport-started\\n');
         let guards=0;
                 const call=()=>${guarded ? `t.sendGuarded(${JSON.stringify(OPENROUTER_ENDPOINT)},init,send=>{guards++;${guarded === 'deny' ? 'throw Error("synthetic stale authority");' : 'send();'}})` : `t(${JSON.stringify(OPENROUTER_ENDPOINT)},init)`};
-                ${success ? `assert.equal(await (await call()).text(),'{}');` : `await assert.rejects(call(),/OpenRouter transport unavailable/);`}
+                ${success ? `const response=await call();assert.equal(await response.text(),'{}');assert.equal(response.headers.get('retry-after'),${mode === 'hint' ? `'86400'` : 'null'});assert.equal(response.headers.get('x-private'),null);` : ['rate', 'busy', 'auth'].includes(mode) ? `await assert.rejects(call(),error=>{
+                                  assert.ok(error instanceof OpenRouterHttpFailure);
+                                  assert.deepEqual(error.failure,${JSON.stringify(mode === 'auth' ? { kind: 'auth_failed', status: 401 } : { kind: 'rate_limited', status: mode === 'rate' ? 429 : 503, retryAfterSeconds: 86400 })});
+                                  assert.doesNotMatch(JSON.stringify(error),/CANARY|x-private|retry-after|Bearer/);return true;});` : `await assert.rejects(call(),/OpenRouter transport unavailable/);`}
                 assert.equal(guards,${guarded && trusted ? 1 : 0});
         process.stdout.write('synthetic-transport-settled\\n');`;
       await new Promise<void>((resolve, reject) => {
@@ -118,7 +140,9 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
     await run(false, false); assert.equal(requests, 1, 'untrusted TLS sends no credential HTTP');
     mode = 'denied'; await run(true, false); assert.equal(requests, 1, 'CONNECT denied, no fallback');
     for (const value of ['redirect', 'oversize', 'headers', 'body']) { mode = value; await run(true, false); }
-    assert.equal(requests, 5); assert.equal(connects, 13, 'one CONNECT per call, no retry');
+    for (const value of ['rate', 'busy', 'auth']) { mode = value; await run(true, false); }
+        mode = 'hint'; await run(true, true);
+        assert.equal(requests, 9); assert.equal(connects, 17, 'one CONNECT per call, no retry');
   } finally {
     for (const socket of sockets) socket.destroy();
     await Promise.all([new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => tls.close(() => resolve()))]);

@@ -1,5 +1,6 @@
 // PREPARED ONLY. Run only after an explicit coordinator READYGO for the deployed source.
-// node tests-e2e/public-ai-translation-live.mjs --run --ack-coordinator-readygo --ack-three-provider-requests --attempt-suffix attempt3
+// Full: --run --ack-coordinator-readygo --ack-three-provider-requests --attempt-id <new UUID>
+// Independent: --run --translation-only --ack-coordinator-readygo --ack-one-translation-request --attempt-id <new UUID>
 // Offline: node --test tests-e2e/public-ai-translation-live.test.mjs
 // No runtime lifecycle, key/config reads, saved credentials, cookie injection, mocks or debug artifacts.
 import assert from 'node:assert/strict';
@@ -13,20 +14,26 @@ import {
   ORIGIN, CHECKS, TARGETS, SCANS, WORKER_MS, BROWSER_ARGS, fixedUrl, validIntent,
   eligibilityReady, EligibilityFence, awaitEligibility, consumePermit, safeMutationRequest,
   assertAuthUser, assertDeniedReply, assertChatUsage, readAllPages, partition, loadContracts,
+    allowedApiGet, runtimeProbeRead, assertRuntimeOffReply, safeReadRequest,
 } from './public-product-live.mjs';
 
-export { ORIGIN, WORKER_MS };
+export { ORIGIN, WORKER_MS, allowedApiGet, runtimeProbeRead, assertRuntimeOffReply };
 export const GLOBAL_MS = 20 * 60_000;
 export const MODEL = 'xingchen-agi/xing4.0-29b-a4b:free';
 export const ENDPOINT = 'phala';
 export const CASES = Object.freeze(['tooling', 'owner_registration', 'native_scan', 'report', 'deployed_ui',
   'readiness', 'chat_1', 'chat_2', 'history_reload', 'fresh_login', 'history_fresh_login',
   'foreign_registration', 'foreign_denial', 'translation_context', 'translation', 'translation_toggle', 'preservation', 'safety']);
+  export function qualificationCases(scope = 'full') {
+    assert.ok(['full', 'translation'].includes(scope));
+    return scope === 'full' ? CASES : CASES.filter(name => !['readiness', 'chat_1', 'chat_2', 'history_reload', 'history_fresh_login'].includes(name));
+  }
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const EVIDENCE_PATHS = Object.freeze(['json', 'md'].map(ext => join(ROOT, `docs/public-ai-live-20261022.${ext}`)));
 export function evidencePaths(attemptSuffix = null) {
   if (attemptSuffix === null) return EVIDENCE_PATHS;
-  if (!['attempt2', 'attempt3'].includes(attemptSuffix)) throw new Fault('INVALID_ARGUMENTS');
+  if (UUID.test(attemptSuffix)) return ['json', 'md'].map(ext => join(ROOT, `docs/public-final-${attemptSuffix}-ai-translation.${ext}`));
+    if (!['attempt2', 'attempt3'].includes(attemptSuffix)) throw new Fault('INVALID_ARGUMENTS');
   return ['json', 'md'].map(ext => join(ROOT, `docs/public-ai-live-20261022.${attemptSuffix}.${ext}`));
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -39,7 +46,7 @@ const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'PREREQUISITE
   'UI_NOT_DEPLOYED', 'READINESS_BLOCKED', 'FIXED_POLICY_REQUIRED', 'CONTEXT_CHANGED', 'NO_ELIGIBLE_ASSESSMENT', 'LLM_HTTP_ERROR',
   'DELIVERY_UNCONFIRMED_NO_RETRY', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED',
   'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NOT_ACTUALLY_RUN', 'RUNTIME_NOT_OFF']);
-const HTTP_CODES = new Set(['LLM_CONFIGURATION_UNAVAILABLE', 'LLM_PROVIDER_UNAVAILABLE', 'LLM_PROVIDER_TIMEOUT', 'LLM_UNAVAILABLE', 'LLM_INVALID_RESPONSE',
+const HTTP_CODES = new Set(['LLM_CONFIGURATION_UNAVAILABLE', 'LLM_PROVIDER_UNAVAILABLE', 'LLM_PROVIDER_RATE_LIMITED', 'LLM_PROVIDER_AUTH_FAILED', 'LLM_PROVIDER_TIMEOUT', 'LLM_UNAVAILABLE', 'LLM_INVALID_RESPONSE',
   'LLM_QUOTA_EXCEEDED', 'LLM_BUDGET_EXCEEDED', 'LLM_CAPACITY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_HISTORY_CAPACITY',
   'LLM_HISTORY_UNAVAILABLE', 'LLM_HISTORY_CONFLICT', 'LLM_STALE_REPORT', 'LLM_STALE_SOURCE', 'LLM_STALE_POLICY',
   'LLM_TRANSLATION_UNAVAILABLE', 'LLM_RESPONSE_LIMIT', 'LLM_REQUEST_ABORTED', 'SCAN_NOT_FOUND', 'SCAN_ACCESS_DENIED', 'UNAUTHORIZED']);
@@ -53,10 +60,31 @@ export class Fault extends Error {
 export function parseMode(args) {
   if (!args.length) return 'not-run';
   if (isDeepStrictEqual(args, ['--self-test'])) return 'offline';
-  if (isDeepStrictEqual(args, ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests'])) return 'live';
-  if (isDeepStrictEqual(args, ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', 'attempt2'])) return 'live-attempt2';
-  if (isDeepStrictEqual(args, ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests', '--attempt-suffix', 'attempt3'])) return 'live-attempt3';
+  if (args.at(-2) === '--attempt-id' && UUID.test(args.at(-1))) {
+    const flags = args.slice(0, -2);
+    if (isDeepStrictEqual(flags, ['--run', '--ack-coordinator-readygo', '--ack-three-provider-requests'])) return 'live-final';
+    if (isDeepStrictEqual(flags, ['--run', '--translation-only', '--ack-coordinator-readygo', '--ack-one-translation-request'])) return 'translation-final';
+  }
   throw new Fault('INVALID_ARGUMENTS');
+}
+// Match the finite public provider-failure wire contract; never copy an upstream object.
+function providerFailureMeta(errorCode, failure) {
+  const hasRetry = failure !== null && typeof failure === 'object' && Object.hasOwn(failure, 'retryAfterSeconds');
+  if (!exact(failure, ['kind', 'status', ...(hasRetry ? ['retryAfterSeconds'] : [])])) return undefined;
+  const { status, kind, retryAfterSeconds } = failure;
+  if (!Number.isInteger(status) || status < 300 || status > 599) return undefined;
+  const expectedKind = status === 429 || status === 503 ? 'rate_limited' : status === 401 ? 'auth_failed' : 'unavailable';
+  const expectedCode = { rate_limited: 'LLM_PROVIDER_RATE_LIMITED', auth_failed: 'LLM_PROVIDER_AUTH_FAILED', unavailable: 'LLM_PROVIDER_UNAVAILABLE' }[expectedKind];
+  if (kind !== expectedKind || errorCode !== expectedCode) return undefined;
+  if (retryAfterSeconds !== undefined && (kind !== 'rate_limited' || !Number.isSafeInteger(retryAfterSeconds) || retryAfterSeconds < 0 || retryAfterSeconds > 86400)) return undefined;
+  return { kind, status, ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }) };
+}
+export function llmFailureMeta(httpStatus, value, deliveryKind) {
+  return projectMeta({ httpStatus, errorCode: value?.errorCode, deliveryKind, providerFailure: value?.providerFailure });
+}
+export function assertLlmSuccess(result) {
+  if (result.status !== 200) throw new Fault('LLM_HTTP_ERROR', llmFailureMeta(result.status, result.value, 'http-error'));
+  return result.value;
 }
 export function projectMeta(input = {}) {
   const out = {};
@@ -68,6 +96,8 @@ export function projectMeta(input = {}) {
   if (TERMINAL.has(input.state)) out.state = input.state;
   if (Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) out.httpStatus = input.httpStatus;
   if (HTTP_CODES.has(input.errorCode)) out.errorCode = input.errorCode;
+  const providerFailure = providerFailureMeta(out.errorCode, input.providerFailure);
+  if (providerFailure) out.providerFailure = providerFailure;
   if (['http-error', 'ndjson-error'].includes(input.deliveryKind)) out.deliveryKind = input.deliveryKind;
   for (const key of ['accountsCreated', 'scanLaunches', 'chatPosts', 'translationPosts', 'blockedRequests', 'pageErrors', 'ignoredEligibility',
     'completedTurns', 'pages', 'cve', 'debianTemp', 'vulnerabilities', 'assessmentIndex', 'input', 'output', 'costMicros', 'runnerLine', 'runtimeOffReads'])
@@ -133,12 +163,14 @@ export function recordFailure(book, name, error, fatal = null) {
     { ...failureMeta(error), ...(error instanceof Fault ? error.meta : {}) });
 }
 export function canRunTranslation(book) {
-  return ['native_scan', 'report', 'deployed_ui', 'readiness', 'fresh_login'].every(name => book.cases[name].status === 'PASS') &&
+  return ['native_scan', 'report', 'deployed_ui', 'fresh_login'].every(name => book.cases[name].status === 'PASS') &&
     !['chat_1', 'chat_2'].some(name => book.cases[name].status === 'FAIL') && book.guard.blockedRequests === 0;
 }
 export class ResultBook {
-  constructor(attemptSuffix = null) {
+  constructor(attemptSuffix = null, qualification = 'full') {
     evidencePaths(attemptSuffix);
+    this.qualification = qualification;
+    this.requiredCases = qualificationCases(qualification);
     this.attemptSuffix = attemptSuffix;
     this.guard = new GuardLedger();
     this.runId = randomUUID(); this.startedAt = new Date().toISOString(); this.finishedAt = null; this.actual = false;
@@ -151,16 +183,16 @@ export class ResultBook {
   }
   evidence() {
     return { schemaVersion: 1, scope: 'native-public8081-ai-translation', origin: ORIGIN, runId: this.runId,
-      startedAt: this.startedAt, finishedAt: this.finishedAt, actuallyRun: this.actual, attempt: this.attemptSuffix ?? 'original',
+      startedAt: this.startedAt, finishedAt: this.finishedAt, actuallyRun: this.actual, attempt: this.attemptSuffix ?? 'original', qualification: this.qualification, requiredCases: this.requiredCases,
       guard: this.guard.evidence(),
       requiredPolicy: { provider: 'OpenRouter', model: MODEL, endpoint: ENDPOINT, freeOnly: true, noFallback: true },
-      serverEgressIndependentlyObserved: false, billingIndependentlyVerified: false,
+      serverEgressIndependentlyObserved: false, billingIndependentlyVerified: false, semanticAccuracy: 'unverified',
       createdRuntimeDataAutomaticallyDeleted: false, credentialsPersisted: false, payloadArtifacts: false,
       cases: Object.fromEntries(CASES.map(name => [name, { status: this.cases[name].status, code: this.cases[name].code, ...projectMeta(this.cases[name]) }])) };
   }
 }
 export function exitCode(book) {
-  return CASES.some(name => book.cases[name].status === 'FAIL') ? 1 : CASES.every(name => book.cases[name].status === 'PASS') ? 0 : 2;
+  return CASES.some(name => book.cases[name].status === 'FAIL') ? 1 : book.requiredCases.every(name => book.cases[name].status === 'PASS') ? 0 : 2;
 }
 export function evidenceDocuments(book) {
   const evidence = book.evidence();
@@ -168,9 +200,13 @@ export function evidenceDocuments(book) {
     `Origin: ${ORIGIN}`, `Run: ${book.runId}`, `Actually attempted: ${book.actual}`, '',
     'Only a completed native browser attempt may produce these documents. Require the matching JSON; this summary alone is not acceptance.',
     'Any created disposable accounts/scan are retained (maximum two accounts and one native Node four-check scan). Credentials exist only in process/browser memory.',
-    'Maximum two sequential manual chat POSTs and one separately consented translation POST. No retry, alternate model, paid fallback, or lifecycle action.',
+    `Qualification: ${book.qualification}. Required cases: ${book.requiredCases.join(', ')}.`,
+        book.qualification === 'translation' ? 'Chat generation is NOT qualified or attempted. At most one separately consented translation POST.' : 'Maximum two sequential manual chat POSTs and one separately consented translation POST.',
+        'No retry, alternate model, paid fallback, or lifecycle action.',
     'The browser is restricted to loopback 8081. Server egress and billing are NOT independently observed; fixed free policy and server-validated receipts are checked.',
-    'No conversations, provider payloads, raw diagnostics, auth data, HAR, screenshots, traces or storage state are artifacts.', '',
+    'Semantic accuracy is unverified by this runner; schema/render/Cyrillic checks are not fidelity proof. Native semantic review is memory-only, without conversation artifacts.',
+        'Provider failure status/kind/bounded retry hints are metadata only, not permission to retry or refund unknown liability.',
+        'No conversations, provider payloads, raw diagnostics, auth data, HAR, screenshots, traces or storage state are artifacts.', '',
     '| Case | Result | Code |', '| --- | --- | --- |', ...CASES.map(name => `| ${name} | ${evidence.cases[name].status} | ${evidence.cases[name].code} |`), ''].join('\n')];
 }
 export async function writeEvidence(book, openFile = open) {
@@ -206,45 +242,14 @@ export function translationBody(context) {
   return { reportVersion: context.reportVersion, findingId: context.findingId, assessmentIndex: context.assessmentIndex,
     sourceVersion: context.sourceVersion, targetLanguage: 'ru', consent: { accepted: true, policyVersion: context.policyVersion } };
 }
-export function canDispatch(state, path, body) {
+export function canDispatch(state, path, body, qualification = 'full') {
+  if (!['full', 'translation'].includes(qualification) || qualification === 'translation' && path.endsWith('/llm/chat')) return false;
   if (!state.aiOwner || !state.permit || state.permit.used || !state.permit.context) return false;
   if (path.endsWith('/llm/chat')) return state.chatPosts < 2 && chatBodyMatches(body, state.permit.context, state.permit.question);
   if (path.endsWith('/llm/translation')) return state.translationPosts < 1 && isDeepStrictEqual(body, translationBody(state.permit.context));
   return false;
 }
-export function runtimeProbeRead(url, method = 'GET') {
-  if (method !== 'GET' || !fixedUrl(url)) return false;
-  const u = new URL(url);
-  return !u.search && ['/api/v1/browser/runtime/capabilities', '/api/v1/browser/runtime/targets', '/api/v1/browser/runtime/captures'].includes(u.pathname);
-}
-export function assertRuntimeOffReply(url, method, status) {
-  assert.ok(runtimeProbeRead(url, method));
-  assert.equal(status, 404);
-}
-export function allowedApiGet(url, knownIds, method = 'GET') {
-  const u = new URL(url);
-  if (!fixedUrl(url) || !['GET', 'HEAD'].includes(method)) return false;
-  if (u.pathname.startsWith('/api/v1/browser/runtime')) return runtimeProbeRead(url, method);
-  if (u.pathname === '/api/v1/auth/me') return !u.search;
-  if (u.pathname === SCANS) {
-    if (!u.search) return true;
-    const keys = [...u.searchParams.keys()];
-    const cursor = u.searchParams.get('cursor');
-    return u.searchParams.get('limit') === '100' &&
-      (keys.length === 1 && keys[0] === 'limit' || keys.length === 2 && keys.includes('limit') && keys.includes('cursor')) &&
-      (cursor === null || cursor.length > 0 && Buffer.byteLength(cursor, 'utf8') <= 512 && !/[\x00-\x20\x7f]/.test(cursor));
-  }
-  for (const id of knownIds) {
-    if (!UUID.test(id)) continue;
-    const base = `${SCANS}/${id}`;
-    if (['', '/events', '/llm/context', '/llm/usage', '/llm/readiness', '/llm/history', '/llm/chat/context', '/llm/chat/usage'].some(suffix => u.pathname === base + suffix)) return !u.search;
-    if (['/vuln', '/results', '/sbom'].some(suffix => u.pathname === base + suffix))
-      return [...u.searchParams.keys()].every(key => ['view', 'limit', 'sort', 'cursor', 'cveId', 'severity', 'ecosystem', 'query', 'ruleId'].includes(key));
-    if (u.pathname === `${base}/llm/translation/context`) return [...u.searchParams.keys()].sort().join(',') === 'assessmentIndex,findingId' &&
-      FINDING.test(u.searchParams.get('findingId') ?? '') && /^(?:[0-9]|1[0-5])$/.test(u.searchParams.get('assessmentIndex') ?? '');
-  }
-  return false;
-}
+
 export function eligibleAssessment(item) {
   const allowed = (field, ceiling) => field && ['available', 'truncated'].includes(field.state) && !field.redacted &&
     typeof field.value === 'string' && field.value.trim() && Buffer.byteLength(field.value, 'utf8') <= ceiling &&
@@ -285,13 +290,14 @@ function failureMeta(error) {
   const line = error?.stack?.match(/public-ai-translation-live\.mjs:([0-9]+):[0-9]+/);
   return line ? projectMeta({ runnerLine: Number(line[1]) }) : {};
 }
-async function runLive(attemptSuffix = null) {
+async function runLive(attemptSuffix, qualification = 'full') {
+  if (!UUID.test(attemptSuffix)) throw new Fault('INVALID_ARGUMENTS');
   if (['DEBUG', 'PWDEBUG', 'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'PLAYWRIGHT_TRACE_DIR', 'PLAYWRIGHT_BROWSERS_PATH'].some(name => process.env[name])) throw new Fault('UNSAFE_DEBUG_ENVIRONMENT');
   for (const path of evidencePaths(attemptSuffix)) {
     try { await lstat(path); } catch (error) { if (error.code === 'ENOENT') continue; throw new Fault('EVIDENCE_WRITE_FAILED'); }
     throw new Fault('EVIDENCE_ALREADY_EXISTS');
   }
-  const book = new ResultBook(attemptSuffix), handles = [], knownIds = new Set();
+  const book = new ResultBook(attemptSuffix, qualification), handles = [], knownIds = new Set();
   const stats = { accountsCreated: 0, scanLaunches: 0, chatPosts: 0, translationPosts: 0, blockedRequests: 0, pageErrors: 0, ignoredEligibility: 0, runtimeOffReads: 0 };
   const owner = { email: `ai-live-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
   const foreign = { email: `ai-live-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
@@ -345,10 +351,7 @@ async function runLive(attemptSuffix = null) {
       } finally { await reader.cancel().catch(() => {}); }
     }, path);
   };
-  const successful = result => {
-    if (result.status !== 200) throw new Fault('LLM_HTTP_ERROR', { httpStatus: result.status, errorCode: result.value?.errorCode, deliveryKind: 'http-error' });
-    return result.value;
-  };
+  const successful = assertLlmSuccess;
   const newPage = async (aiOwner = false) => {
     live();
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, reducedMotion: 'reduce', serviceWorkers: 'block', acceptDownloads: false });
@@ -370,6 +373,7 @@ async function runLive(attemptSuffix = null) {
         if (!fixedUrl(input)) return deny(routeCategory(input) === 'external' ? 'external-request' : 'local-url-shape');
         const u = new URL(input);
         if (['GET', 'HEAD'].includes(method)) {
+          if (method !== 'GET' || !safeReadRequest(input, await request.allHeaders())) return deny('mutation-shape');
           approvedRead = !u.pathname.startsWith('/api/') || allowedApiGet(input, knownIds, method);
           // A just-created scan may navigate before the observed create receipt is decoded.
           if (!approvedRead && activeLaunch && u.pathname.startsWith(`${SCANS}/`)) {
@@ -407,7 +411,8 @@ async function runLive(attemptSuffix = null) {
         const ai = u.pathname.endsWith('/llm/chat') || u.pathname.endsWith('/llm/translation');
         const auth = ['/api/v1/auth/register', '/api/v1/auth/login'].includes(u.pathname);
         if (!ai && !auth) return deny('mutation-not-permitted');
-        if ((ai && !canDispatch(state, u.pathname, body)) ||
+        if ((qualification === 'translation' && u.pathname.endsWith('/llm/chat')) ||
+                  (ai && !canDispatch(state, u.pathname, body, qualification)) ||
           (u.pathname.endsWith('/llm/chat') && stats.chatPosts >= 2) || (u.pathname.endsWith('/llm/translation') && stats.translationPosts >= 1)) return deny('ai-permit-or-limit');
         if (!consumePermit(state.permit, method, u.pathname, body)) return deny('mutation-not-permitted');
         if (u.pathname.endsWith('/llm/chat')) { state.chatPosts++; stats.chatPosts++; }
@@ -560,7 +565,8 @@ async function runLive(attemptSuffix = null) {
         await expect(region.getByRole('button', { name: 'Перевести на русский', exact: true })).toBeDisabled();
         await selectedOriginalVisible(own.page, selected, expect);
       })) return;
-      const readyOk = await step('readiness', async () => {
+      if (qualification === 'full') {
+            const readyOk = await step('readiness', async () => {
         panel = await openChat(own.page);
         const before = await readChat(own.page); await readyFor(own.page, before.context);
         assert.equal(before.history.turns.length, 0); assert.equal(before.history.decisions.length, 0);
@@ -595,7 +601,7 @@ async function runLive(attemptSuffix = null) {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(data); assert.ok(text.endsWith('\n'));
         for (const line of text.slice(0, -1).split('\n')) { assert.ok(Buffer.byteLength(line) < tools.chat.CHAT_DELIVERY.lineBytes); parser.accept(JSON.parse(line)); }
         const delivered = parser.finish();
-        if ('errorCode' in delivered) throw new Fault('LLM_HTTP_ERROR', { httpStatus: 200, errorCode: delivered.errorCode, deliveryKind: 'ndjson-error' });
+        if ('errorCode' in delivered) throw new Fault('LLM_HTTP_ERROR', llmFailureMeta(200, delivered, 'ndjson-error'));
         const after = await readChat(own.page);
         const turn = after.history.turns.find(turn => turn.mutationId === request.mutationId);
         assert.ok(turn?.state === 'completed' && turn.question === question); assert.deepEqual(turn.reply, delivered.reply);
@@ -614,14 +620,15 @@ async function runLive(attemptSuffix = null) {
         const current = await readChat(own.page); assert.deepEqual(current.history, savedHistory); await assertHistoryUi(panel, current.history);
         assert.equal(stats.chatPosts, before); return { meta: { ...historyMetadata(current.history), historyUnchanged: true, noAdditionalPosts: true } };
       });
-      const loginOk = await step('fresh_login', async () => {
+      }
+            const loginOk = await step('fresh_login', async () => {
         own.closing = true; await own.context.close(); own = await newPage(true);
         assert.equal((await own.context.cookies()).length, 0);
         await own.page.goto(`${ORIGIN}/login`);
         assert.equal((await http(own.page, `${SCANS}/${scanId}`)).status, 401);
         await auth(own, owner, 'login'); await own.page.goto(`${ORIGIN}/scans/${scanId}`);
       });
-      await step('history_fresh_login', async () => {
+      if (qualification === 'full') await step('history_fresh_login', async () => {
         if (!loginOk || !savedHistory || book.cases.chat_2.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
         panel = await openChat(own.page);
         const current = await readChat(own.page); assert.deepEqual(current.history, savedHistory); await assertHistoryUi(panel, current.history);
@@ -644,15 +651,14 @@ async function runLive(attemptSuffix = null) {
       let translationContext, translationRegion, translated;
       const contextOk = await step('translation_context', async () => {
         if (!loginOk || !selected || !canRunTranslation(book)) throw new Fault('PREREQUISITE_UNAVAILABLE');
-        const currentChat = await readChat(own.page);
-        if (currentChat.context.pending) throw new Fault('PREREQUISITE_UNAVAILABLE');
+        // Translation has its own context/readiness and never retries or depends on chat delivery.
         translationRegion = await translationPanel(own.page);
         await translationRegion.getByRole('button', { name: 'Прочитать условия перевода', exact: true }).click();
         translationContext = tools.translation.translationContextSchema.parse(successful(await http(own.page, translationPath())));
         await readyFor(own.page, translationContext);
         assert.equal(translationContext.findingId, selected.row.findingId); assert.equal(translationContext.assessmentIndex, selected.index);
         assert.deepEqual(translationContext.source, { source: selected.item.source, provenanceRef: selected.item.provenanceRef, language: selected.item.language });
-        assert.notEqual(translationContext.policyVersion, chatPin);
+        if (chatPin) assert.notEqual(translationContext.policyVersion, chatPin);
         const digest = hash(['selected-advisory-ru-v1', selected.row.cveId, selected.item]);
         assert.equal(translationContext.sourceVersion, digest);
         const consent = translationRegion.getByRole('checkbox', { name: /Разрешаю один запрос перевода:/ });
@@ -708,7 +714,7 @@ async function runLive(attemptSuffix = null) {
     stopped = true; for (const handle of handles) handle.closing = true; clearTimeout(deadline); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); process.removeListener('SIGHUP', signal);
     try { await bounded(Promise.allSettled(handles.map(handle => handle.context.close())), 10_000); if (browser) await bounded(browser.close(), 10_000); browserClosed = !browser || !browser.isConnected(); }
     catch { browserClosed = false; }
-    const bad = !browserClosed || stats.blockedRequests || stats.pageErrors || stats.accountsCreated > 2 || stats.scanLaunches > 1 || stats.chatPosts > 2 || stats.translationPosts > 1;
+    const bad = !browserClosed || stats.blockedRequests || stats.pageErrors || stats.accountsCreated > 2 || stats.scanLaunches > 1 || stats.chatPosts > (qualification === 'translation' ? 0 : 2) || stats.translationPosts > 1;
     book.record('safety', bad ? 'FAIL' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : bad ? 'ASSERTION_FAILED' : 'VERIFIED',
       { ...stats, browserClosed, nativeScanMayRemainActive: stats.scanLaunches > 0 && !snapshot });
     book.finishedAt = new Date().toISOString();
@@ -734,7 +740,7 @@ async function main() {
     assert.deepEqual(projectMeta({ password: 'synthetic', text: 'synthetic', apiKey: 'synthetic' }), {});
     console.log(JSON.stringify({ status: 'PASS', scope: 'OFFLINE_GUARDS_ONLY', actuallyRun: false, networkRequests: 0, evidenceWritten: false })); return 0;
   }
-  try { return await runLive(mode === 'live-attempt3' ? 'attempt3' : mode === 'live-attempt2' ? 'attempt2' : null); }
+  try { return await runLive(process.argv.at(-1), mode === 'translation-final' ? 'translation' : 'full'); }
   catch (error) { console.log(JSON.stringify({ status: 'BLOCKED', code: error instanceof Fault ? error.message : 'ASSERTION_FAILED', actuallyRun: false, rawDiagnosticsSuppressed: true })); return 2; }
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) process.exitCode = await main();

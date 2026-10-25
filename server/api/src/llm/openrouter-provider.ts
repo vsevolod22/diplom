@@ -1,8 +1,8 @@
-import { BadGatewayException, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, HttpException, ServiceUnavailableException } from '@nestjs/common';
 import type { LlmPolicy } from './policy.js';
 import { prepareSummary, checkedPrepared, type PreparedRequest } from './prepared-request.js';
 import { usageObservation, type QuotaPolicy, type UsageObservation } from './quota-policy.js';
-import { openRouterTransport, type BodySendGuard, type GuardedTransport } from './openrouter-transport.js';
+import { openRouterTransport, OpenRouterHttpFailure, MAX_PROVIDER_RETRY_SECONDS, type ProviderHttpFailure, type BodySendGuard, type GuardedTransport } from './openrouter-transport.js';
 import type { ReportContext } from './report-context.js';
 import { PUBLIC_OPENROUTER_KEY_FILE, readPublicProviderKey } from './public-key-file.js';
 import { object, invalidReply } from './response.js';
@@ -17,6 +17,38 @@ export interface LlmProvider {
 }
 const failed = () => new BadGatewayException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
 export const configError = () => new ServiceUnavailableException({ errorCode: 'LLM_CONFIGURATION_UNAVAILABLE' });
+export type ProviderFailureResponse = Readonly<{
+  errorCode: 'LLM_PROVIDER_RATE_LIMITED' | 'LLM_PROVIDER_AUTH_FAILED' | 'LLM_PROVIDER_UNAVAILABLE';
+  providerFailure: ProviderHttpFailure;
+}>;
+const failureCode = (kind: ProviderHttpFailure['kind']): ProviderFailureResponse['errorCode'] =>
+  kind === 'rate_limited' ? 'LLM_PROVIDER_RATE_LIMITED' : kind === 'auth_failed' ? 'LLM_PROVIDER_AUTH_FAILED' : 'LLM_PROVIDER_UNAVAILABLE';
+// Reconstruct only bounded scalars at every wire boundary; never spread provider diagnostics.
+export function safeProviderFailure(value: unknown): ProviderFailureResponse | undefined {
+  if (!object(value) || !object(value.providerFailure)) return undefined;
+  const failure = value.providerFailure, status = failure.status;
+  if (!Number.isInteger(status) || (status as number) < 300 || (status as number) > 599 ||
+      Object.keys(failure).some(key => !['kind', 'status', 'retryAfterSeconds'].includes(key))) return undefined;
+  const kind = status === 429 || status === 503 ? 'rate_limited' : status === 401 ? 'auth_failed' : 'unavailable';
+  if (failure.kind !== kind || value.errorCode !== failureCode(kind)) return undefined;
+  const retry = failure.retryAfterSeconds;
+  if (retry !== undefined && (kind !== 'rate_limited' || !Number.isSafeInteger(retry) || (retry as number) < 0 || (retry as number) > MAX_PROVIDER_RETRY_SECONDS)) return undefined;
+  return Object.freeze({ errorCode: failureCode(kind), providerFailure: Object.freeze({ kind, status: status as number,
+    ...(retry !== undefined ? { retryAfterSeconds: retry as number } : {}) }) });
+}
+class ProviderHttpException extends HttpException {
+  constructor(failure: ProviderHttpFailure) {
+    super({ errorCode: failureCode(failure.kind), providerFailure: failure },
+      failure.kind === 'rate_limited' ? failure.status : failure.kind === 'auth_failed' ? 503 : 502);
+  }
+}
+export function providerFailureFromException(error: unknown): ProviderFailureResponse | undefined {
+  return error instanceof ProviderHttpException ? safeProviderFailure(error.getResponse()) : undefined;
+}
+function envelopeFailure(value: unknown, retryAfter?: string | null): OpenRouterHttpFailure | undefined {
+  if (!object(value) || !Number.isInteger(value.code) || (value.code as number) < 400 || (value.code as number) > 599) return undefined;
+  return new OpenRouterHttpFailure(value.code as number, retryAfter);
+}
 
 
 export class OpenRouterProvider implements LlmProvider {
@@ -52,7 +84,13 @@ export class OpenRouterProvider implements LlmProvider {
         const response = await (guard ? (this.transport as GuardedTransport).sendGuarded(OPENROUTER_ENDPOINT, init, guard) :
           this.transport(OPENROUTER_ENDPOINT, init));
         if (controller.signal.aborted) { await response.body?.cancel(); throw failed(); }
-        if (!response.ok || response.redirected || response.status >= 300 ||
+        if (!response.ok || response.status >= 300) {
+          const failure = new OpenRouterHttpFailure(response.status, response.headers.get('retry-after'));
+          // Cancellation must not delay or overwrite the already authenticated HTTP status.
+          void response.body?.cancel().catch(() => {});
+          throw failure;
+        }
+        if (response.redirected ||
             !/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
           await response.body?.cancel(); throw failed();
         }
@@ -75,16 +113,21 @@ export class OpenRouterProvider implements LlmProvider {
         try { envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
         catch { return invalidReply(); }
         const matchingModel = object(envelope) && envelope.model === policy.model;
+        const errorChoice = object(envelope) && Array.isArray(envelope.choices) && envelope.choices.length === 1 && object(envelope.choices[0]) ? envelope.choices[0] : undefined;
+        const remoteFailure = envelopeFailure(object(envelope) && envelope.error !== undefined ? envelope.error : errorChoice?.error, response.headers.get('retry-after'));
         // Bound accounting to this invocation and exact model, before any content,
         // finish/citation or service publication validation can discard consumption.
-        if (receipt && object(envelope) && matchingModel) {
+        if (receipt && object(envelope) && matchingModel && (!remoteFailure || envelope.usage !== undefined)) {
           const observation = usageObservation(envelope.usage, request.reserve, receipt.policy);
-          receipt.observe(observation);
-          if (!observation.normal) return invalidReply();
+          try { receipt.observe(observation); }
+          catch (error) { throw remoteFailure ?? error; }
+          if (!observation.normal) { if (remoteFailure) throw remoteFailure; return invalidReply(); }
         }
+        if (object(envelope) && envelope.error !== undefined || errorChoice?.error !== undefined) throw remoteFailure ?? failed();
         if (!object(envelope) || !matchingModel || !Array.isArray(envelope.choices) ||
             envelope.choices.length !== 1 || !object(envelope.choices[0])) return invalidReply();
         const choice = envelope.choices[0];
+
         if (choice.finish_reason !== 'stop' || !object(choice.message) ||
                     Object.keys(choice.message).some(k => !['role', 'content', 'refusal', 'reasoning', 'annotations'].includes(k)) ||
                     choice.message.refusal != null || choice.message.reasoning != null ||
@@ -97,7 +140,10 @@ export class OpenRouterProvider implements LlmProvider {
         try { return JSON.parse(choice.message.content); } catch { return invalidReply(); }
       };
       return await Promise.race([operation(), stopped]);
-    } catch { throw failed(); }
+    } catch (error) {
+      if (error instanceof OpenRouterHttpFailure) throw new ProviderHttpException(error.failure);
+      throw failed();
+    }
     finally {
       clearTimeout(timeout); signal.removeEventListener('abort', abort); controller.abort();
       if (reader) void reader.cancel().catch(() => {});

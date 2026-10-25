@@ -323,6 +323,29 @@ const failed: ChatDelivery = Object.freeze({
   outcome: 'failed',
   usage: Object.freeze({ ...outcome.usage }),
 });
+test('typed provider errors survive both receipt shapes without content or unbounded metadata', () => {
+  const failure = { errorCode: 'LLM_PROVIDER_RATE_LIMITED' as const,
+    providerFailure: { kind: 'rate_limited' as const, status: 429, retryAfterSeconds: 60 } };
+  for (const base of [failed, { ...binding, epoch: outcome.epoch, revision: outcome.revision,
+    mutationId: outcome.mutationId, turnId: outcome.turnId, outcome: 'failed' as const, receipt: 'unavailable' as const }]) {
+    const delivery = { ...base, failure };
+    const plan = encodeDelivery(delivery), frames = plan.lines.map(frame), error = frames.at(-1)!;
+    assert.equal(error.type, 'error'); assert.equal(error.errorCode, failure.errorCode);
+    assert.deepEqual(error.providerFailure, failure.providerFailure);
+    assert.equal(error.receipt, 'usage' in base ? 'accepted' : 'unavailable');
+    assert.deepEqual(frames.map(f => f.type), 'usage' in base ? ['usage', 'error'] : ['error']);
+    for (const bad of [
+      { ...failure, raw: 'PRIVATE' },
+      { ...failure, providerFailure: { ...failure.providerFailure, raw: 'PRIVATE' } },
+      { ...failure, providerFailure: { ...failure.providerFailure, retryAfterSeconds: 86401 } },
+      { ...failure, providerFailure: { ...failure.providerFailure, status: 401 } },
+      { ...failure, errorCode: 'LLM_PROVIDER_AUTH_FAILED' },
+    ]) assert.throws(() => encodeDelivery({ ...delivery, failure: bad } as ChatDelivery));
+    assert.ok(plan.lines.every(line => Buffer.byteLength(line) <= DELIVERY.lineBytes));
+    assert.doesNotMatch(plan.lines.join(''), /PRIVATE|"delta"|"citation"|"done"/);
+  }
+});
+
 test('TASK16 R4 failed codec emits exact usage/error only; rejects content and untrusted receipt shapes', () => {
   const plan = encodeDelivery(failed),
     frames = plan.lines.map(frame);

@@ -1,8 +1,8 @@
 // Native acceptance only. No stand lifecycle, fixture server, mock response or saved credentials.
 // LIVE (only after coordinator GO; key activation must stay fenced throughout this run):
-// node tests-e2e/public-product-live.mjs --run --ack-coordinator-go --ack-no-key-activation
+// node tests-e2e/public-product-live.mjs --run --ack-coordinator-go --ack-no-key-activation --attempt-id <new UUID>
 // ONE-SCAN SMOKE (same GO fence, no LLM mutations):
-// node tests-e2e/public-product-live.mjs --run --smoke-only --ack-coordinator-go --ack-no-key-activation
+// node tests-e2e/public-product-live.mjs --run --smoke-only --ack-coordinator-go --ack-no-key-activation --attempt-id <new UUID>
 // OFFLINE: node tests-e2e/public-product-live.mjs --self-test
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -34,19 +34,21 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const TERMINAL = new Set(['completed', 'partial', 'failed', 'cancelled']);
 const OUTCOMES = new Set(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']);
 const BLOCKERS = new Set(['configuration-required', 'public-key-required', 'public-key-unsafe', 'quota-store-unavailable', 'history-store-unavailable', 'provider-profile-unavailable']);
-const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'STAND_OR_BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED', 'PREREQUISITE_UNAVAILABLE', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED', 'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NO_SECOND_PAGE', 'SSE_NOT_OBSERVED', 'CANCEL_RACE', 'NO_COMPLETED_SUBSET_OBSERVED', 'SUBSET_CAPTURE_CHANGED', 'UNSAFE_DEBUG_ENVIRONMENT', 'KEY_ABSENT', 'KEY_NOT_ABSENT_NO_POST', 'LLM_STORES_OR_CONTEXT_UNAVAILABLE', 'NO_EVIDENCE', 'CONTEXT_LIMIT', 'GENERATION_NOT_AUTHORIZED', 'QUOTA_WINDOW_CHANGED', 'QUOTA_UNAVAILABLE', 'INCOMPLETE_PAGINATION_COVERAGE']);
+const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'STAND_OR_BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED', 'PREREQUISITE_UNAVAILABLE', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED', 'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NO_SECOND_PAGE', 'SSE_NOT_OBSERVED', 'CANCEL_RACE', 'NO_COMPLETED_SUBSET_OBSERVED', 'SUBSET_CAPTURE_CHANGED', 'UNSAFE_DEBUG_ENVIRONMENT', 'KEY_ABSENT', 'KEY_NOT_ABSENT_NO_POST', 'LLM_STORES_OR_CONTEXT_UNAVAILABLE', 'NO_EVIDENCE', 'CONTEXT_LIMIT', 'GENERATION_NOT_AUTHORIZED', 'QUOTA_WINDOW_CHANGED', 'QUOTA_UNAVAILABLE', 'INCOMPLETE_PAGINATION_COVERAGE', 'RUNTIME_NOT_OFF']);
 const CASES = ['tooling', 'registration', ...TARGETS.flatMap(t => ['scan', 'report', 'pagination', 'filters', 'events', 'reload'].map(s => `${t.name}.${s}`)), 'scan_history', 'foreign_registration', 'ownership', 'anonymous', 'ownership_mutations', 'anonymous_mutations', 'llm_readiness', 'llm_no_consent', 'llm_missing_key', 'llm_manual_history', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'cancel', 'cancel_preservation', 'cancel_history', 'cancel_fresh_login', 'safety'];
 const SMOKE_CASES = ['tooling', 'registration', 'node.scan', 'node.report', 'node.filters', 'node.reload', 'scan_history', 'llm_readiness', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'safety'];
 const EVIDENCE = ['public-product-browser-20261021.json', 'public-product-browser-20261021.md'].map(name => join(ROOT, 'docs', name));
 const SMOKE_EVIDENCE_ROOT = 'docs/public8081launch-20261022.attempt2';
 const SMOKE_EVIDENCE = ['json', 'md'].map(extension => join(ROOT, `${SMOKE_EVIDENCE_ROOT}.${extension}`));
-export function nativePlan(mode = 'native') {
+export function nativePlan(mode = 'native', attemptId = null) {
   assert.ok(['native', 'smoke'].includes(mode));
   const smokeOnly = mode === 'smoke';
+  if (attemptId !== null && !UUID.test(attemptId)) throw new Error('INVALID_ARGUMENTS');
+  const finalRoot = attemptId === null ? null : `docs/public-final-${attemptId}-${mode}`;
   return Object.freeze({ mode, smokeOnly, targets: Object.freeze(smokeOnly ? [TARGETS[0]] : [...TARGETS]),
     maxScans: smokeOnly ? 1 : 3, globalMs: smokeOnly ? SMOKE_MS : GLOBAL_MS,
-    evidenceRoot: smokeOnly ? SMOKE_EVIDENCE_ROOT : 'docs/public-product-browser-20261021',
-    cases: Object.freeze([...(smokeOnly ? SMOKE_CASES : CASES)]), evidencePaths: Object.freeze([...(smokeOnly ? SMOKE_EVIDENCE : EVIDENCE)]) });
+    attemptId, evidenceRoot: finalRoot ?? (smokeOnly ? SMOKE_EVIDENCE_ROOT : 'docs/public-product-browser-20261021'),
+    cases: Object.freeze([...(smokeOnly ? SMOKE_CASES : CASES)]), evidencePaths: Object.freeze(finalRoot ? ['json', 'md'].map(ext => join(ROOT, `${finalRoot}.${ext}`)) : [...(smokeOnly ? SMOKE_EVIDENCE : EVIDENCE)]) });
 }
 export function scanLaunchAllowed(plan, target, launches) {
   return plan.targets.includes(target) && Number.isSafeInteger(launches) && launches >= 0 && launches < plan.maxScans;
@@ -59,8 +61,11 @@ const DECISION = 'Проверить приоритеты находок вру�
 
 export function parseMode(args) {
   if (isDeepStrictEqual(args, ['--self-test'])) return 'offline';
-  if (isDeepStrictEqual(args, ['--run', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'native';
-  if (isDeepStrictEqual(args, ['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'smoke';
+  if (args.length >= 2 && args.at(-2) === '--attempt-id' && UUID.test(args.at(-1))) {
+    const flags = args.slice(0, -2);
+    if (isDeepStrictEqual(flags, ['--run', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'native';
+    if (isDeepStrictEqual(flags, ['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation'])) return 'smoke';
+  }
   if (!args.length) return 'not-run';
   throw new Error('INVALID_ARGUMENTS');
 }
@@ -68,10 +73,60 @@ export function fixedUrl(input) {
   try { const u = new URL(input); return input.startsWith(`${ORIGIN}/`) && u.origin === ORIGIN && !u.username && !u.password && !u.hash; }
   catch { return false; }
 }
-export function allowedGet(path, ids) {
-  if (path === '/api/v1/auth/me' || path === SCANS) return true;
-  for (const id of ids) if (UUID.test(id) && ['', '/events', '/results', '/sbom', '/vuln', '/llm/context', '/llm/usage', '/llm/readiness', '/llm/history', '/llm/chat/context', '/llm/chat/usage'].some(suffix => path === `${SCANS}/${id}${suffix}`)) return true;
+export function runtimeProbeRead(input, method = 'GET') {
+  if (method !== 'GET' || !fixedUrl(input)) return false;
+  const url = new URL(input);
+  return !input.includes('?') && !url.search && ['/api/v1/browser/runtime/capabilities', '/api/v1/browser/runtime/targets', '/api/v1/browser/runtime/captures'].includes(url.pathname);
+}
+export function assertRuntimeOffReply(input, method, status) {
+  assert.ok(runtimeProbeRead(input, method));
+  assert.equal(status, 404);
+}
+// Derived from httpScanTransport/reportView/advisoryTranslationClient, not a route-prefix bypass.
+export function allowedApiGet(input, ids, method = 'GET') {
+  if (!fixedUrl(input) || method !== 'GET') return false;
+  const url = new URL(input), path = url.pathname, params = url.searchParams;
+  const keys = [...params.keys()];
+  if (new Set(keys).size !== keys.length) return false;
+  const cursor = params.get('cursor');
+  if (cursor !== null && (!cursor.length || cursor.length > 512 || /[\x00-\x20\x7f]/.test(cursor))) return false;
+  if (path.startsWith('/api/v1/browser/runtime')) return runtimeProbeRead(input, method);
+  if (path === '/api/v1/auth/me') return !url.search;
+  if (path === SCANS) return !url.search || params.get('limit') === '100' && keys.every(key => ['limit', 'cursor'].includes(key));
+  for (const id of ids) {
+    if (!UUID.test(id)) continue;
+    const base = `${SCANS}/${id}`;
+    if (['', '/events', '/llm/context', '/llm/usage', '/llm/readiness', '/llm/history', '/llm/chat/context', '/llm/chat/usage'].some(suffix => path === base + suffix)) return !url.search;
+    if (path === `${base}/llm/translation/context`) return keys.length === 2 &&
+      /^vuln-[a-f0-9]{64}$/.test(params.get('findingId') ?? '') && /^(?:[0-9]|1[0-5])$/.test(params.get('assessmentIndex') ?? '');
+    const kind = ({ [`${base}/results`]: 'secret', [`${base}/sbom`]: 'sbom', [`${base}/vuln`]: 'vuln' })[path];
+    if (!kind) continue;
+    if (!url.search) return true;
+    if (!params.has('view')) return params.get('limit') === '50' && keys.every(key => ['limit', 'cursor'].includes(key)) && (cursor === null || /^(0|[1-9]\d{0,5})$/.test(cursor));
+    const fields = { secret: ['ruleId', 'linePresence'], sbom: ['ecosystem', 'name'], vuln: ['severity'] }[kind];
+    if (!keys.every(key => ['view', 'limit', 'sort', 'cursor', ...fields].includes(key)) || params.get('view') !== 'report-v1' ||
+      !['5', '10', '25', '50'].includes(params.get('limit'))) return false;
+    if (!({ secret: ['ruleId:asc', 'ruleId:desc', 'line:asc', 'line:desc'], sbom: ['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc'], vuln: ['severity:asc', 'severity:desc'] })[kind].includes(params.get('sort'))) return false;
+    if (params.has('ruleId') && !/^[A-Za-z0-9._-]{1,80}$/.test(params.get('ruleId'))) return false;
+    if (params.has('linePresence') && !['known', 'unknown'].includes(params.get('linePresence'))) return false;
+    if (params.has('name') && !/^[A-Za-z0-9@._+:/-]{1,128}$/.test(params.get('name'))) return false;
+    if (params.has('ecosystem') && !['apk', 'deb', 'rpm', 'npm', 'pypi', 'gem', 'gomod', 'cargo', 'maven', 'composer', 'nuget'].includes(params.get('ecosystem'))) return false;
+    if (params.has('severity')) {
+      const selected = params.get('severity').split(',');
+      if (selected.length > 5 || new Set(selected).size !== selected.length || !selected.every(value => ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(value))) return false;
+    }
+    return true;
+  }
   return false;
+}
+export function allowedGet(path, ids, method = 'GET') {
+  return path.startsWith('/') && !path.startsWith('//') && allowedApiGet(`${ORIGIN}${path}`, ids, method);
+}
+export function safeReadRequest(input, headers = {}) {
+  if (!fixedUrl(input)) return false;
+  const values = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
+  return !['authorization', 'proxy-authorization', 'x-api-key'].some(key => key in values) &&
+    (!('origin' in values) || values.origin === ORIGIN);
 }
 const exact = (value, keys) => !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 export const sameChecks = value => isDeepStrictEqual(value, CHECKS);
@@ -233,14 +288,14 @@ export function safeMeta(input = {}) {
   return out;
 }
 export class ResultBook {
-  constructor(mode = 'native') { this.plan = nativePlan(mode); this.runId = randomUUID(); this.startedAt = new Date().toISOString(); this.finishedAt = null; this.cases = Object.fromEntries(this.plan.cases.map(id => [id, { status: 'BLOCKED', code: 'NOT_RUN', failure: false }])); }
+  constructor(mode = 'native', attemptId = null) { this.plan = nativePlan(mode, attemptId); this.actual = false; this.runId = randomUUID(); this.startedAt = new Date().toISOString(); this.finishedAt = null; this.cases = Object.fromEntries(this.plan.cases.map(id => [id, { status: 'BLOCKED', code: 'NOT_RUN', failure: false }])); }
   record(id, status, code, meta = {}, failure = code === 'ASSERTION_FAILED') {
     assert.ok(this.plan.cases.includes(id) && ['PASS', 'BLOCKED', 'INCONCLUSIVE'].includes(status) && CODES.has(code));
     if (this.cases[id].failure && !failure) return; // A later successful probe must not hide an earlier violation.
     this.cases[id] = { status, code, failure: !!failure, ...safeMeta(meta) };
   }
   evidence() {
-    return { schema: 1, mode: this.plan.mode, evidenceRoot: this.plan.evidenceRoot, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: this.plan.smokeOnly ? 'native-public8081-one-scan-smoke' : 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: this.plan.smokeOnly ? 'readiness-only-no-llm-posts' : 'negative-boundary-only',
+    return { schema: 1, actuallyRun: this.actual, mode: this.plan.mode, attemptId: this.plan.attemptId, evidenceRoot: this.plan.evidenceRoot, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: this.plan.smokeOnly ? 'native-public8081-one-scan-smoke' : 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: this.plan.smokeOnly ? 'readiness-only-no-llm-posts' : 'negative-boundary-only',
       providerDispatchIndependentlyObserved: false, credentialPersistence: false, screenshots: false, har: false, trace: false,
       lifecycleOperations: 0, syntheticResponses: false, cases: structuredClone(this.cases) };
   }
@@ -276,7 +331,7 @@ export async function writeEvidence(evidence, openFile = open) {
   try {
     // Acquire both exclusive destinations before writing anything. A second-path
     // collision must not leave a valid-looking JSON receipt from a failed run.
-    for (const path of nativePlan(evidence.mode ?? 'native').evidencePaths) files.push(await openFile(path, 'wx', 0o600));
+    for (const path of nativePlan(evidence.mode ?? 'native', evidence.attemptId ?? null).evidencePaths) files.push(await openFile(path, 'wx', 0o600));
     for (const index of [1, 0]) { await files[index].writeFile(documents[index]); await files[index].sync(); }
   } finally { await Promise.all(files.map(file => file.close())); }
 }
@@ -296,12 +351,13 @@ export async function loadContracts() {
   return { decoder, view, metadata, chat };
 }
 
-async function runNative(mode = 'native') {
-  const plan = nativePlan(mode);
+async function runNative(mode = 'native', attemptId) {
+  if (!UUID.test(attemptId)) throw new Fault('INVALID_ARGUMENTS');
+  const plan = nativePlan(mode, attemptId);
   await absentEvidence(plan); // Refuse before registration/browser launch; never replace earlier evidence.
   if (['DEBUG', 'PWDEBUG', 'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'PLAYWRIGHT_TRACE_DIR', 'PLAYWRIGHT_BROWSERS_PATH'].some(key => process.env[key])) throw new Fault('UNSAFE_DEBUG_ENVIRONMENT');
   process.env.TSX_DISABLE_CACHE = '1'; // Transpile in memory, not into a new disk cache.
-  const book = new ResultBook(mode);
+  const book = new ResultBook(mode, attemptId);
   book.record('llm_generation', 'BLOCKED', 'GENERATION_NOT_AUTHORIZED');
   const contexts = [], contextStates = new Map(), scans = new Map();
   const stats = { scanLaunches: 0, accountsCreated: 0, pageErrors: 0, blockedRequests: 0, ignoredEligibility: 0 };
@@ -371,19 +427,24 @@ async function runNative(mode = 'native') {
     ensureLive();
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, reducedMotion: 'reduce', serviceWorkers: 'block', acceptDownloads: false });
     contexts.push(context);
-    const state = { context, permit: null, generationPosts: 0, fence: new EligibilityFence(), eligibilityPending: Promise.resolve(), target: null };
+    const state = { context, closing: false, permit: null, generationPosts: 0, fence: new EligibilityFence(), eligibilityPending: Promise.resolve(), target: null };
     contextStates.set(context, state);
     await context.route('**/*', async route => {
+      const request = route.request();
+      let approvedRead = false;
       try {
-        const request = route.request(), u = new URL(request.url()), method = request.method();
+        const u = new URL(request.url()), method = request.method();
         const deny = async () => { stats.blockedRequests++; await route.abort(); };
-        if (stopped || !fixedUrl(request.url())) return deny();
+        if (!fixedUrl(request.url())) return deny();
         if (['GET', 'HEAD'].includes(method)) {
+          if (method !== 'GET' || !safeReadRequest(request.url(), await request.allHeaders())) return deny();
           if (u.pathname.startsWith(`${SCANS}/`) && activeLaunch && !scans.has(u.pathname.split('/')[5])) await bounded(pendingCreation, 45_000).catch(() => {});
-          if (!u.pathname.startsWith('/api/') || allowedGet(u.pathname, scans.keys())) return route.continue();
-          return deny();
+          approvedRead = !u.pathname.startsWith('/api/') || allowedGet(u.pathname + u.search, scans.keys(), method);
+          if (!approvedRead) return deny();
+          if (stopped || state.closing) return route.abort();
+          return await route.continue();
         }
-        if (method !== 'POST') return deny();
+        if (stopped || state.closing || method !== 'POST') return deny();
         const headers = await request.allHeaders();
         if (stopped || fatalCode || !safeMutationRequest(request.url(), headers)) return deny();
         if (plan.smokeOnly && !smokeMutationAllowed(u.pathname)) return deny();
@@ -392,6 +453,7 @@ async function runNative(mode = 'native') {
           const target = state.target;
           if (!target || body?.imageReference !== target.reference) { stats.ignoredEligibility++; return route.abort(); }
           if (!exact(body, ['checks', 'imageReference']) || !Array.isArray(body.checks) || !body.checks.length || !body.checks.every((x, i) => CHECKS.includes(x) && (i === 0 || CHECKS.indexOf(body.checks[i - 1]) < CHECKS.indexOf(x)))) return deny();
+          approvedRead = true;
           const sequence = state.fence.start();
           state.eligibilityPending = (async () => {
             await route.continue();
@@ -423,10 +485,21 @@ async function runNative(mode = 'native') {
           await route.continue(); return;
         }
         return deny();
-      } catch { stats.blockedRequests++; await route.abort().catch(() => {}); }
+      } catch (error) {
+              const aborted = request.failure()?.errorText === 'net::ERR_ABORTED' || error?.name === 'AbortError';
+              if (!approvedRead || !(state.closing || aborted)) stats.blockedRequests++;
+              await route.abort().catch(() => {});
+            }
     });
     context.on('request', request => { if (!fixedUrl(request.url())) { stats.blockedRequests++; interrupt('REQUEST_GUARD'); } });
-    context.on('response', response => { if (response.status() >= 300 && response.status() < 400) { stats.blockedRequests++; interrupt('REQUEST_GUARD'); } });
+    context.on('response', response => {
+      if (fixedUrl(response.url())) book.actual = true;
+      if (runtimeProbeRead(response.url(), response.request().method())) {
+            try { assertRuntimeOffReply(response.url(), response.request().method(), response.status()); }
+            catch { book.record('safety', 'BLOCKED', 'RUNTIME_NOT_OFF', { httpStatus: response.status() }, true); interrupt('RUNTIME_NOT_OFF'); }
+          }
+          if (response.status() >= 300 && response.status() < 400) { stats.blockedRequests++; interrupt('REQUEST_GUARD'); }
+        });
     await context.routeWebSocket('**/*', socket => { stats.blockedRequests++; socket.close(); });
     const page = await context.newPage(); page.setDefaultTimeout(15_000); page.setDefaultNavigationTimeout(20_000);
     page.on('pageerror', () => { stats.pageErrors++; });
@@ -718,7 +791,7 @@ async function runNative(mode = 'native') {
       };
       // Shared fresh-login proof; neither mode injects cookies or inherits storage.
       const freshLogin = async () => {
-        await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
+        own.state.closing = true; await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
         return step('fresh_login', async () => {
           assert.equal((await http(own.page, `${SCANS}/${completed[0].scanId}`)).status, 401);
           await auth(own, owner, 'login'); await history(own.page, completed);
@@ -896,7 +969,7 @@ async function runNative(mode = 'native') {
         });
         await step('cancel_history', () => history(own.page, [...completed, cancelled.after]));
         await step('cancel_fresh_login', async () => {
-          await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
+          own.state.closing = true; await own.context.close(); own = await newPage(); await own.page.goto(`${ORIGIN}/login`);
           assert.equal((await http(own.page, `${SCANS}/${cancelled.after.scanId}`)).status, 401);
           await auth(own, owner, 'login'); await history(own.page, [...completed, cancelled.after]);
           await own.page.goto(`${ORIGIN}/scans/${cancelled.after.scanId}`);
@@ -909,7 +982,7 @@ async function runNative(mode = 'native') {
     const code = fatalCode ?? (e instanceof Fault ? e.message : 'ASSERTION_FAILED');
     book.record(currentCase, 'BLOCKED', code, failureMeta(e), !(e instanceof Fault) || e.failure);
   } finally {
-    stopped = true; clearTimeout(globalTimer); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); process.removeListener('SIGHUP', signal);
+    stopped = true; for (const state of contextStates.values()) state.closing = true; clearTimeout(globalTimer); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); process.removeListener('SIGHUP', signal);
     try { await bounded(Promise.allSettled(contexts.map(context => context.close())), 10_000); if (browser) await bounded(browser.close(), 10_000); browserClosed = !browser || !browser.isConnected(); }
     catch { browserClosed = false; }
     const smokeMutationViolation = plan.smokeOnly && (stats.scanLaunches > 1 || stats.accountsCreated > 1 || contexts.some(context => contextStates.get(context)?.generationPosts > 0));
@@ -918,7 +991,7 @@ async function runNative(mode = 'native') {
     book.finishedAt = new Date().toISOString();
     const evidence = book.evidence();
     // Only our projected cases go to stdout/disk, never caught exceptions or Playwright diagnostics.
-    try { await writeEvidence(evidence); } catch { book.record('safety', 'BLOCKED', 'EVIDENCE_WRITE_FAILED', {}, true); }
+    if (book.actual) { try { await writeEvidence(evidence); } catch { book.record('safety', 'BLOCKED', 'EVIDENCE_WRITE_FAILED', {}, true); } }
     console.log(JSON.stringify(book.evidence(), null, 2));
   }
   return resultExitCode(book);
@@ -933,8 +1006,8 @@ export function resultExitCode(book) {
 export function offlineSelfTest() {
   assert.equal(parseMode([]), 'not-run'); assert.equal(parseMode(['--self-test']), 'offline');
   assert.throws(() => parseMode(['--run']));
-  assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation']), 'native');
-  assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation']), 'smoke');
+  assert.equal(parseMode(['--run', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', randomUUID()]), 'native');
+  assert.equal(parseMode(['--run', '--smoke-only', '--ack-coordinator-go', '--ack-no-key-activation', '--attempt-id', randomUUID()]), 'smoke');
   assert.throws(() => parseMode(['--run', '--smoke-only']));
   assert.ok(scanLaunchAllowed(nativePlan('smoke'), TARGETS[0], 0));
   assert.ok(!scanLaunchAllowed(nativePlan('smoke'), TARGETS[0], 1));
@@ -953,7 +1026,7 @@ async function main() {
   try { mode = parseMode(process.argv.slice(2)); } catch { console.log(JSON.stringify({ status: 'BLOCKED', code: 'INVALID_ARGUMENTS', browserLaunched: false })); return 2; }
   if (mode === 'offline') { offlineSelfTest(); return 0; }
   if (mode === 'not-run') { console.log(JSON.stringify({ status: 'BLOCKED', code: 'NOT_RUN', browserLaunched: false, requiresCoordinatorGo: true, requiresNoConcurrentKeyActivation: true })); return 2; }
-  try { return await runNative(mode); }
+  try { return await runNative(mode, process.argv.at(-1)); }
   catch (e) { console.log(JSON.stringify({ status: 'BLOCKED', code: e instanceof Fault ? e.message : 'ASSERTION_FAILED', rawDiagnosticsSuppressed: true })); return 1; }
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) process.exitCode = await main();
