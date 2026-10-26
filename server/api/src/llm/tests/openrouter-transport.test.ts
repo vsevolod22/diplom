@@ -95,6 +95,7 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
       // Host-only synthetic test CA, never a production TLS disable or secret file.
       const script = `import assert from 'node:assert/strict';
         import {makeOpenRouterTransport,OpenRouterHttpFailure} from ${JSON.stringify(new URL('../openrouter-transport.ts', import.meta.url).href)};
+        import {diagnostic} from ${JSON.stringify(new URL('../provider-diagnostic.ts', import.meta.url).href)};
         const t=makeOpenRouterTransport({host:'127.0.0.1',port:${(proxy.address() as { port: number }).port}});
         const init=${JSON.stringify(options())};init.signal=AbortSignal.timeout(400);
         process.stdout.write('synthetic-transport-started\\n');
@@ -103,7 +104,10 @@ test('real loopback CONNECT and verified TLS POST: no proxy secret, no direct fa
                 ${success ? `const response=await call();assert.equal(await response.text(),'{}');assert.equal(response.headers.get('retry-after'),${mode === 'hint' ? `'86400'` : 'null'});assert.equal(response.headers.get('x-private'),null);` : ['rate', 'busy', 'auth'].includes(mode) ? `await assert.rejects(call(),error=>{
                                   assert.ok(error instanceof OpenRouterHttpFailure);
                                   assert.deepEqual(error.failure,${JSON.stringify(mode === 'auth' ? { kind: 'auth_failed', status: 401 } : { kind: 'rate_limited', status: mode === 'rate' ? 429 : 503, retryAfterSeconds: 86400 })});
-                                  assert.doesNotMatch(JSON.stringify(error),/CANARY|x-private|retry-after|Bearer/);return true;});` : `await assert.rejects(call(),/OpenRouter transport unavailable/);`}
+                                  assert.deepEqual(diagnostic(error),{phase:'headers',reason:'http_error'});
+                                                                    assert.doesNotMatch(JSON.stringify(error),/CANARY|x-private|retry-after|Bearer/);return true;});` : `await assert.rejects(call(),error=>{
+                                                    assert.match(error.message,/OpenRouter transport unavailable/);
+                                                    assert.deepEqual(diagnostic(error),${JSON.stringify(!trusted ? { phase: 'tls', reason: 'io_error' } : guarded === 'deny' ? { phase: 'dispatch_guard', reason: 'rejected' } : mode === 'denied' ? { phase: 'connect', reason: 'rejected' } : mode === 'redirect' ? { phase: 'headers', reason: 'http_error' } : mode === 'oversize' ? { phase: 'body', reason: 'limit' } : { phase: 'caller_abort', reason: 'aborted' })});return true;});`}
                 assert.equal(guards,${guarded && trusted ? 1 : 0});
         process.stdout.write('synthetic-transport-settled\\n');`;
       await new Promise<void>((resolve, reject) => {

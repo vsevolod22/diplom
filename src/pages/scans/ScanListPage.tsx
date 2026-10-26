@@ -5,6 +5,7 @@ import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanShell } from '@/features/scans/ScanShell';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { ScanScene } from '@/features/scans/ScanScene';
+import { ScanProgressPanel } from '@/features/scans/ScanProgressPanel';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
@@ -106,10 +107,7 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
                     </span>
                     <div className="scan-a1__record-facts min-w-0">
                       <h3>{scan.targetLabel}</h3>
-                      <p className="mt-2 text-sm">
-                        Этап: {scan.stage || 'не предоставлен'} · Прогресс:{' '}
-                        {scan.percent == null ? 'неизвестен' : `${scan.percent}%`}
-                      </p>
+                      <ScanProgressPanel scan={scan} compact />
                       {demo ? (
                         <p className="mt-1 text-xs">Вымышленные данные · не результат реальной проверки</p>
                       ) : null}

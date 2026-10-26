@@ -1,6 +1,17 @@
 # Public report chat UI — 2026-10-20
 
-## Scope and status
+## Current status / historical scope — 2026-10-26
+
+This implementation/test report is **historical; superseded for current status by [public-progress-20261026-final.md](public-progress-20261026-final.md)**. Preserve the source proofs and synthetic test results below; they are not current deployed UX or native AI acceptance. In particular, the historical checkbox-based consent descriptions below are superseded by the final summary's explicit buttons/visible egress notes without permission-checkbox.
+
+- Public **http://127.0.0.1:8081 — HTTP200**, no maintenance in progress, per the current handoff; no new probe was made here.
+- Latest native attempt `324479cf-07ee-4d99-983b-2be9d6c000eb`: **12 PASS / 6 BLOCKED / 0 FAIL**, not full AI success. Chat returned HTTP200 failed NDJSON with `LLM_PROVIDER_RATE_LIMITED`, provider `rate_limited/status429`, no retry hint. Translation returned application HTTP502 `LLM_INVALID_RESPONSE`, `content/invalid_content`; exact predicate UNKNOWN, not established upstream HTTP502. Successful grounded reply, second turn, successful history reload/fresh-login persistence and translation/toggle remain blocked. Owner login PASS is not successful conversation persistence PASS.
+- Separate native progress/cancel qualification is **10 PASS / 0 BLOCKED / 0 FAIL**, not AI-generation evidence. Current progress is indeterminate with durable counts, no invented percent or ETA.
+- Changed CVE release `e1af977c…` is active with aggregate four-store preservation. Scheduler is installed/loaded and separately status-qualified at **6 hours**; a successful periodic run remains unproven. See the [CVE receipt](public-progress-20261025-cve-receipt.md) and final summary for evidence limits.
+
+**No new attempts, retries, maintenance or token replay are authorized.** This finalization changes documentation only and reruns no tests or runtime checks.
+
+## Historical scope and status
 
 Implemented in the existing chat, not a second chat system. Code/test writes stay in `src/**` and `tests-vite/**`. After explicit user permission in the P1 follow-up, this report was moved from `tests-vite/ui/scans/` to `docs/public-chat-ui-20261020.md`. No backend/scripts/deploy edits, Docker operations, private-state access, 8080 requests, deployment, commits or provider/live-8081 requests were performed by this UI work. Concurrent backend/scripts changes belong to other agents and were not reverted or included as UI-owned work.
 
@@ -56,7 +67,7 @@ pnpm exec vitest run \
   --maxWorkers=1 --no-file-parallelism
 ```
 
-Current P1 follow-up result: typecheck PASS; 7 files / **145 tests PASS** (35 panel, 44 client, 24 summary, 5 page, 28 public-chat UI, 4 public-identifier, 5 backend-wire regressions). Earlier pre-review result was 6 files / 128 tests, superseded by this run. New focused coverage includes explicit wait and continuation, repeated submit, failed-question preparation, manual error recovery with renewed consent, non-JSON 401/403 usage denial, unknown quota, duplicate-only recovery, all public source pages and whole-report partition mismatch, honest unknown coverage, public TEMP response + durable reload and malformed public source projections. Existing panel tests continue to cover cancellation, timeout, pending, historical/current citations and owner/session/report/policy fences.
+Historical P1 follow-up result: typecheck PASS; 7 files / **145 tests PASS** (35 panel, 44 client, 24 summary, 5 page, 28 public-chat UI, 4 public-identifier, 5 backend-wire regressions). Earlier pre-review result was 6 files / 128 tests, superseded by this run. New focused coverage includes explicit wait and continuation, repeated submit, failed-question preparation, manual error recovery with renewed consent, non-JSON 401/403 usage denial, unknown quota, duplicate-only recovery, all public source pages and whole-report partition mismatch, honest unknown coverage, public TEMP response + durable reload and malformed public source projections. Existing panel tests continue to cover cancellation, timeout, pending, historical/current citations and owner/session/report/policy fences.
 
 Scoped ESLint passed. Whitespace checks cover `src`, `tests-vite` and this report. An initial own type narrowing error was fixed; an added error case exposed an ambiguous test selector, fixed by selecting the exact retained scanner report text. No unresolved failure from those intermediate runs remains.
 

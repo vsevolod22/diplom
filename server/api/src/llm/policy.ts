@@ -60,7 +60,7 @@ export function policyFromEnvironment(env: NodeJS.ProcessEnv = process.env): Llm
       inputPricePerMillion: price('LLM_INPUT_PRICE_PER_MILLION_USD', CEILINGS.pricePerMillion),
       outputPricePerMillion: price('LLM_OUTPUT_PRICE_PER_MILLION_USD', CEILINGS.pricePerMillion),
     };
-    const version = createHash('sha256').update(JSON.stringify({ revision, responseLanguageRevision: 'russian-prose-v2', ...settings })).digest('hex');
+    const version = createHash('sha256').update(JSON.stringify({ revision, responseLanguageRevision: 'russian-prose-v3-grounded', ...settings })).digest('hex');
     return Object.freeze({ version, ...settings });
   } catch { return null; }
 }

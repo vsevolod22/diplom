@@ -71,12 +71,27 @@ function mockApi(
       if (path.endsWith('/llm/summary')) return summary();
       if (path.includes('/results')) {
         const url = new URL(path, window.location.origin);
-        if (url.searchParams.get('view') === 'report-v1') return json({
-          findings: [0, 1].map(index => ({ findingId: `secret-0-${index}`, ruleId: 'rule-0000000000000000', line: 1, evidenceRef: `result-0-secret-${index}` })),
-          nextCursor: null,
-          coverage,
-          page: { version: 1, limit: 25, offset: 0, returnedCount: 2, totalCount: 2, matchedCount: 2, sort: 'ruleId:asc', filters: { ruleId: null, linePresence: null } },
-        });
+        if (url.searchParams.get('view') === 'report-v1')
+          return json({
+            findings: [0, 1].map((index) => ({
+              findingId: `secret-0-${index}`,
+              ruleId: 'rule-0000000000000000',
+              line: 1,
+              evidenceRef: `result-0-secret-${index}`,
+            })),
+            nextCursor: null,
+            coverage,
+            page: {
+              version: 1,
+              limit: 25,
+              offset: 0,
+              returnedCount: 2,
+              totalCount: 2,
+              matchedCount: 2,
+              sort: 'ruleId:asc',
+              filters: { ruleId: null, linePresence: null },
+            },
+          });
         // Citation resolution deliberately retains the separate legacy scanner API.
         const late = path.includes('cursor=1');
         return json({
@@ -126,7 +141,6 @@ function mount() {
 }
 async function generate() {
   await screen.findByText(/Бесплатный режим не подтверждён/);
-  fireEvent.click(screen.getByRole('checkbox'));
   fireEvent.click(screen.getByRole('button', { name: 'Получить сводку' }));
 }
 it('terminal ScanDetail replaces placeholder; hidden current category and late-page source remain reachable', async () => {
@@ -149,22 +163,28 @@ it('terminal ScanDetail replaces placeholder; hidden current category and late-p
 it('owner report navigation reaches the existing chat independently of a failed summary, without provider calls', async () => {
   mockApi('completed', undefined, { invalid: true });
   const scannerFetch = globalThis.fetch;
-  vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
-    if (path.endsWith('/llm/chat/context')) return json({ ...chatContext, ...tuple });
-    if (path.endsWith('/llm/history')) return json({ ...chatHistory, ...tuple });
-    if (path.endsWith('/llm/chat/usage')) return json({ ...tuple, available: false, admission: { status: 'unavailable' } });
-    return scannerFetch(path, init);
-  }));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string, init?: RequestInit) => {
+      if (path.endsWith('/llm/chat/context')) return json({ ...chatContext, ...tuple });
+      if (path.endsWith('/llm/history')) return json({ ...chatHistory, ...tuple });
+      if (path.endsWith('/llm/chat/usage'))
+        return json({ ...tuple, available: false, admission: { status: 'unavailable' } });
+      return scannerFetch(path, init);
+    }),
+  );
   mount();
   const entry = await screen.findByRole('link', { name: /Чат по отчёту/ });
   expect(entry.getAttribute('href')).toBe('#scan-report-chat');
   const target = document.getElementById('scan-report-chat');
   expect(target?.getAttribute('tabindex')).toBe('-1');
   expect(screen.getByRole('region', { name: 'Чат по отчёту' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
   await screen.findByLabelText('Вопрос чату');
-  expect(screen.getByRole('status', { name: 'Состояние подключения чата' }).textContent).toContain('История подключена');
-  expect(requests.some(request => request.init?.method === 'POST')).toBe(false);
+  expect(screen.getByRole('status', { name: 'Состояние подключения чата' }).textContent).toContain(
+    'История подключена',
+  );
+  expect(requests.some((request) => request.init?.method === 'POST')).toBe(false);
   expect(screen.getByRole('heading', { name: 'Покрытие проверок' })).toBeTruthy();
 });
 it('queued ScanDetail has no context request or summary POST', async () => {
@@ -180,13 +200,13 @@ it('malformed/offline summary context leaves original status, coverage and findi
   mount();
   await screen.findByText(/Не удалось безопасно получить сводку/);
   expect(await screen.findByText('ID: secret-0-0')).toBeTruthy();
-    expect(screen.getByText('Полный итог Secrets: 2')).toBeTruthy();
-    expect(screen.queryByText(/Прежние данные и cursors сброшены/)).toBeNull();
+  expect(screen.getByText('Полный итог Secrets: 2')).toBeTruthy();
+  expect(screen.queryByText(/Прежние данные и cursors сброшены/)).toBeNull();
   expect(screen.getByRole('heading', { name: 'Покрытие проверок' })).toBeTruthy();
   expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
   expect(requests.some((request) => request.init?.method === 'POST')).toBe(false);
 });
-it('actual route change aborts pending summary and resets consent before another report', async () => {
+it('actual route change aborts pending summary and requires new intent before another report', async () => {
   let resolve!: (value: Response) => void;
   mockApi(
     'completed',
@@ -205,5 +225,5 @@ it('actual route change aborts pending summary and resets consent before another
   resolve(json(reply));
   await screen.findByText(/Условия передачи пока не подтверждены/);
   expect(screen.queryByText('Late-page hypothesis')).toBeNull();
-  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
+  expect(screen.queryByRole('checkbox')).toBeNull();
 });

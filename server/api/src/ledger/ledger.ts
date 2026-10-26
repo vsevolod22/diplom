@@ -53,6 +53,14 @@ const sbomObject = (value: unknown, keys: string[]): value is Record<string, unk
 type FailureCode = 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'SCAN_UNAVAILABLE';
 type LegacyCheck = 'secret' | 'sbom' | 'vuln';
 type CheckName = LegacyCheck | 'config';
+type ProgressOutcome = 'checked' | 'failed' | 'unsupported' | 'skipped' | 'not_authorized';
+export type ScanProgress = {
+  basis: 'durable-outcomes-v1';
+  requestedChecks: CheckName[];
+  outcomes: Partial<Record<CheckName, ProgressOutcome | null>>;
+  resolvedChecks: number;
+  checkedChecks: number;
+};
 type CheckedPayload =
   | { check: 'secret'; outcome: 'checked'; findings: SecretFinding[]; scannerVersion: '0.69.3' }
   | { check: 'sbom'; outcome: 'checked'; sbom: ImageSbom; scannerVersion: '0.69.3' }
@@ -1393,6 +1401,47 @@ export class ScanLedger {
       .get(scanId, subject) as { checks: string } | undefined;
     if (row) this.cvePolicy(scanId);
     return row ? canonicalChecks(row.checks) ?? [] : [];
+  }
+
+  /** Metadata only: never publish checkpoint reports or acquire a writer lock on GET. */
+  progress(scanId: string, subject: string): ScanProgress | undefined {
+    return this.readReportSnapshot(() => {
+      // Deny foreign/missing IDs before touching checkpoints or their payloads.
+      const snapshot = this.snapshot(scanId, subject);
+      if (!snapshot) return undefined;
+      const requestedChecks = [...this.requestedChecks(scanId, subject)];
+      if (!requestedChecks.length) return undefined; // Legacy scans without a declared check set.
+      const outcomes: ScanProgress['outcomes'] = Object.fromEntries(requestedChecks.map(check => [check, null]));
+      const accept = (check: CheckName, outcome: unknown) => {
+        if (!requestedChecks.includes(check) || !['checked', 'failed', 'unsupported', 'skipped', 'not_authorized'].includes(outcome as string))
+          throw new TypeError('Invalid progress outcome');
+        outcomes[check] = outcome as ProgressOutcome;
+      };
+      if (snapshot.state === 'running') {
+        for (const row of this.checkpointRows(scanId)) {
+          const { payload } = this.validatedCheckpoint(scanId, row);
+          const outcome = row.kind === 'config' ? (payload as ImageConfigResult).config.outcome
+            : row.kind === 'combined' ? (payload as CombinedOutcome).outcome
+              : (payload as ArchiveScanReport)[row.check as LegacyCheck]?.outcome;
+          accept(row.check, outcome);
+        }
+      } else if (['completed', 'partial', 'failed', 'cancelled'].includes(snapshot.state)) {
+        // Terminal metadata comes from published results, never abandoned checkpoints.
+        const archive = this.archiveResult(scanId, subject);
+        for (const check of requestedChecks) {
+          const outcome = check === 'config' ? this.configResult(scanId, subject)?.config.outcome
+            : archive ? archive[check]?.outcome
+              : check === 'secret' ? this.result(scanId, subject)?.outcome
+                : check === 'sbom' ? this.sbom(scanId, subject)?.outcome
+                  : this.vuln(scanId, subject, 0, 1)?.outcome;
+          if (outcome !== undefined) accept(check, outcome);
+        }
+      }
+      const values = Object.values(outcomes);
+      return { basis: 'durable-outcomes-v1', requestedChecks, outcomes,
+        resolvedChecks: values.filter(value => value !== null).length,
+        checkedChecks: values.filter(value => value === 'checked').length };
+    });
   }
 
   /** Direct pinned identity lookup; ownership is part of the query, including queued/config-only scans. */

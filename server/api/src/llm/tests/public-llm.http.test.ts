@@ -72,7 +72,7 @@ test('public 8081 reuses owner/report/summary and durable chat with whole counts
     llm.history().runtime.store = () => history!; app.get(LlmQuotaRuntime).ledger = () => quota;
     runtime.policy = () => policy;
     let sends = 0, factories = 0, invalid = false;
-    let replyText = 'This is a cited hypothesis; omitted evidence remains unresolved.';
+    let replyText = 'Находка сохранена сканером; отсутствующие сведения остаются неизвестными.';
     const wires: Array<{ report: ReportContext; history?: unknown }> = [];
     const response = async (_url: unknown, init?: RequestInit) => {
       sends++;
@@ -85,7 +85,7 @@ test('public 8081 reuses owner/report/summary and durable chat with whole counts
       const binding = { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion };
       const ids = [invalid ? 'foreign-finding' : (report.findings.find(f => f.identifierKind === 'debian-temp') ?? report.findings.at(-1)!).findingId];
       const content = context.report ? { ...binding, text: replyText, citations: ids } :
-        { ...binding, hypotheses: [{ text: 'This selected evidence is a hypothesis, not a complete assessment.', citations: ids }] };
+        { ...binding, hypotheses: [{ text: 'Выбрана часть находок; это не полная оценка безопасности.', citations: ids }] };
       return new Response(JSON.stringify({ model: policy.model, usage: { prompt_tokens: 500, completion_tokens: 32, cost: 0 },
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(content) } }] }),
       { headers: { 'content-type': 'application/json' } });
@@ -229,7 +229,7 @@ test('public 8081 reuses owner/report/summary and durable chat with whole counts
           assert.equal(denied.status, 502); assert.equal(denied.headers.get('cache-control'), 'no-store');
           assert.deepEqual(await denied.json(), { errorCode: 'LLM_INVALID_RESPONSE' });
         }
-      } finally { replyText = 'This is a cited hypothesis; omitted evidence remains unresolved.'; }
+      } finally { replyText = 'Находка сохранена сканером; отсутствующие сведения остаются неизвестными.'; }
       assert.equal(finish.mock.calls.length, 0);
       const after = history!.snapshot(owner.id, id);
       assert.deepEqual(after.turns.slice(0, before.turns.length), before.turns);

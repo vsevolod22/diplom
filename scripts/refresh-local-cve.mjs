@@ -5,8 +5,8 @@ import * as fs from 'node:fs';
 import { createHash, createHmac } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { manifestDescriptor } from '../server/deploy/trust/fetch-db-layer.mjs';
-import { acquireStandLock, childEnvironment, runChild, existingLocalCveKeyPair,
+import { manifestDescriptor, transportFailureDetails } from '../server/deploy/trust/fetch-db-layer.mjs';
+import { acquireStandLock, childEnvironment, runChild, cveTimeout, cveChildFailure, existingLocalCveKeyPair,
   loadCveActivation, directory, layout, readBounded, writeExclusive, syncDirectory, localPaths } from './setup-local-cve.mjs';
 import { PROJECT, LABEL, composeArguments, composeEnvironment, dockerEnvironment,
   runDocker, validateConfig, validateCveRelease, inspectNamespace, validateNamespaceMounts, declaredBindMatches, loadSecret } from './local-stand.mjs';
@@ -37,13 +37,21 @@ const FAILURE_CHECKPOINTS = Object.freeze({
   'hold-acceptance': ['journal', 'status', 'activation', 'usability', 'namespace', 'bindings', 'runtime-profile', 'writers', 'created-before-start', 'readiness', 'recheck', 'archive', 'audit-recheck', 'release', 'receipt'],
 });
 const publicFailures = new WeakMap();
-const fail = (phase = 'preflight', checkpoint = 'validation') => {
+export function cveRefreshDiagnostic(error) {
+  const child = cveChildFailure(error), transport = transportFailureDetails(error);
+  return child ?? (transport ? Object.freeze({ cause: 'TRANSPORT_VALIDATION', transport }) : null);
+}
+export function cveCheckpoint(phase, checkpoint) {
+  return Object.hasOwn(FAILURE_CHECKPOINTS, phase) && FAILURE_CHECKPOINTS[phase].includes(checkpoint) ? checkpoint : 'validation';
+}
+const fail = (phase = 'preflight', checkpoint = 'validation', diagnostic = null) => {
   if (!Object.hasOwn(FAILURE_CHECKPOINTS, phase) || !FAILURE_CHECKPOINTS[phase].includes(checkpoint)) {
     phase = 'preflight'; checkpoint = 'validation';
   }
-  const message = `LOCAL CVE refresh refused/HOLD; phase=${phase}; checkpoint=${checkpoint}. No automatic recovery or cleanup.`;
+  const detail = diagnostic ? ` cause=${diagnostic.cause}${diagnostic.transport ? ` transport=${diagnostic.transport.boundary}/${diagnostic.transport.cause}${diagnostic.transport.status ? ` status=${diagnostic.transport.status}` : ''}` : ''};` : '';
+  const message = `LOCAL CVE refresh refused/HOLD; phase=${phase}; checkpoint=${checkpoint}.${detail} No automatic recovery or cleanup.`;
   const error = new Error(message);
-  const details = Object.freeze({ phase, checkpoint, message });
+  const details = Object.freeze({ phase, checkpoint, message, ...(diagnostic ? { diagnostic } : {}) });
   publicFailures.set(error, details);
   return error;
 };
@@ -641,7 +649,7 @@ export async function refreshLocalCve(argv = [], { root = ROOT, run = runChild, 
     }
   };
   let deadline;
-  const remaining = cap => { const t = Math.ceil(Math.min(cap, deadline - now())); requireSafe(t > 0); return t; };
+  const remaining = cap => cveTimeout(cap, deadline, now());
   try {
     requireSafe(argv.length === 0 || equal(argv, ['--stage-only']));
     deadline = now() + 900_000;
@@ -919,7 +927,7 @@ export async function refreshLocalCve(argv = [], { root = ROOT, run = runChild, 
     fs.unlinkSync(journalPath); journalPath = undefined; fs.unlinkSync(override); hold = false;
     log('LOCAL CVE activated: authenticated DB, backend chain and LOCAL worker/cache ready; API/worker only, prior releases preserved. Not a live scanner finding proof.');
     return { outcome: 'activated', manifest };
-  } catch { throw fail(phase, checkpoint); }
+  } catch (error) { throw fail(phase, checkpoint, cveRefreshDiagnostic(error)); }
   finally {
     // A journal or an ambiguous Docker mutation means HOLD, even after SIGKILL.
     // No automatic rollback: never point running containers at a guessed release.

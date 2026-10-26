@@ -3,6 +3,8 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, tim
 import * as fs from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cveTimeout, parseTransportFailureReceipt } from '../server/deploy/trust/fetch-db-layer.mjs';
+export { cveTimeout };
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Absolute end assertions also reject a trailing newline (unlike JavaScript's $).
@@ -147,12 +149,28 @@ export function loadCveActivation(root = ROOT) {
 export function childEnvironment() {
   return { PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', TZ: 'UTC' };
 }
-export function runChild(executable, args, { cwd, env, timeout }) {
+const childFailures = new WeakMap();
+const ownChildValue = (v, k) => v && typeof v === 'object' ? Object.getOwnPropertyDescriptor(v, k)?.value : undefined;
+export function cveChildFailure(error) { return childFailures.get(error) ?? null; }
+export function runChild(executable, args, { cwd, env, timeout }, execute = execFile) {
   return new Promise((resolveOutput, reject) => {
-    execFile(executable, args, { cwd, env, timeout, killSignal: 'SIGKILL', maxBuffer: 65536,
-      encoding: 'utf8', shell: false }, (error, stdout) => {
-      if (error) reject(failure()); else resolveOutput(stdout);
-    });
+    const refused = (error, stderr) => {
+      const code = ownChildValue(error, 'code');
+      const cause = code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'CHILD_OUTPUT_LIMIT' : ownChildValue(error, 'killed') ? 'CHILD_TIMEOUT' :
+        code === 'ENOENT' ? 'CHILD_SPAWN' : 'CHILD_EXIT_NONZERO';
+      const transport = executable === process.execPath && args[0] === join(cwd, 'server/deploy/trust/fetch-db-layer.mjs') && code === 1 ? parseTransportFailureReceipt(stderr) : null;
+      const safeError = failure();
+      childFailures.set(safeError, Object.freeze({ cause, ...(transport ? { transport } : {}) })); reject(safeError);
+    };
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 2147483647) {
+      const error = failure(); childFailures.set(error, Object.freeze({ cause: 'CHILD_TIMEOUT_INVALID' })); reject(error); return;
+    }
+    try {
+      execute(executable, args, { cwd, env, timeout, killSignal: 'SIGKILL', maxBuffer: 65536,
+        encoding: 'utf8', shell: false }, (error, stdout, stderr) => {
+        if (error) refused(error, stderr); else resolveOutput(stdout);
+      });
+    } catch (error) { refused(error); }
   });
 }
 // Shared by setup, refresh and launcher lifecycle operations. Never steal a stale
@@ -217,9 +235,8 @@ export async function setupLocalCve(argv, { root = ROOT, run = runChild,
     const keys = keyPair(paths.trust, generatePair);
     const deadline = performance.now() + 120_000;
     const child = async argv => {
-      const timeout = Math.ceil(deadline - performance.now());
-      requireSafe(timeout > 0);
-      return run(process.execPath, argv, { cwd: root, env: childEnvironment(), timeout: Math.min(timeout, 120_000) });
+      const timeout = cveTimeout(120_000, deadline, performance.now());
+      return run(process.execPath, argv, { cwd: root, env: childEnvironment(), timeout });
     };
     await child([join(root, 'server/deploy/trust/sign-offline-db.mjs'), release, keys.privatePath, keys.publicPath,
       args.manifest, args.bundle, args.db]);

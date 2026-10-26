@@ -12,9 +12,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import {
   ORIGIN, CHECKS, TARGETS, SCANS, WORKER_MS, BROWSER_ARGS, fixedUrl, validIntent,
-  eligibilityReady, EligibilityFence, awaitEligibility, consumePermit, safeMutationRequest,
+  eligibilityReady, EligibilityFence, awaitEligibility, awaitStableUiEligibility, readLaunchForm, uiLaunchReady, consumePermit, safeMutationRequest,
   assertAuthUser, assertDeniedReply, assertChatUsage, readAllPages, partition, loadContracts,
     allowedApiGet, runtimeProbeRead, assertRuntimeOffReply, safeReadRequest,
+  BrowserReadError, browserReadFailureMeta, trackBrowserReadPage, readBrowserJson, settleReportNavigation, settleAuthNavigation,
 } from './public-product-live.mjs';
 
 export { ORIGIN, WORKER_MS, allowedApiGet, runtimeProbeRead, assertRuntimeOffReply };
@@ -45,11 +46,29 @@ const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'PREREQUISITE
   'BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED',
   'UI_NOT_DEPLOYED', 'READINESS_BLOCKED', 'FIXED_POLICY_REQUIRED', 'CONTEXT_CHANGED', 'NO_ELIGIBLE_ASSESSMENT', 'LLM_HTTP_ERROR',
   'DELIVERY_UNCONFIRMED_NO_RETRY', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED',
-  'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NOT_ACTUALLY_RUN', 'RUNTIME_NOT_OFF']);
+  'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NOT_ACTUALLY_RUN', 'RUNTIME_NOT_OFF', 'BROWSER_READ_FAILED']);
 const HTTP_CODES = new Set(['LLM_CONFIGURATION_UNAVAILABLE', 'LLM_PROVIDER_UNAVAILABLE', 'LLM_PROVIDER_RATE_LIMITED', 'LLM_PROVIDER_AUTH_FAILED', 'LLM_PROVIDER_TIMEOUT', 'LLM_UNAVAILABLE', 'LLM_INVALID_RESPONSE',
   'LLM_QUOTA_EXCEEDED', 'LLM_BUDGET_EXCEEDED', 'LLM_CAPACITY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_HISTORY_CAPACITY',
   'LLM_HISTORY_UNAVAILABLE', 'LLM_HISTORY_CONFLICT', 'LLM_STALE_REPORT', 'LLM_STALE_SOURCE', 'LLM_STALE_POLICY',
-  'LLM_TRANSLATION_UNAVAILABLE', 'LLM_RESPONSE_LIMIT', 'LLM_REQUEST_ABORTED', 'SCAN_NOT_FOUND', 'SCAN_ACCESS_DENIED', 'UNAUTHORIZED']);
+  'LLM_TRANSLATION_UNAVAILABLE', 'LLM_RESPONSE_LIMIT', 'LLM_REQUEST_ABORTED', 'SCAN_NOT_FOUND', 'SCAN_ACCESS_DENIED', 'UNAUTHORIZED',
+  'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_REPORT_UNAVAILABLE', 'LLM_QUOTA_UNAVAILABLE', 'SCAN_ACCESS_DISABLED',
+  'INVALID_BROWSER_REQUEST', 'INVALID_ORIGIN', 'INVALID_CONTENT_TYPE', 'AUTH_UNAVAILABLE']);
+// Mirrors the actual factory-bound header contract; offline tests compare the
+// complete finite sets with provider-diagnostic.ts. Bodies/messages cannot add it.
+export const DIAGNOSTIC_PHASES = Object.freeze(['request', 'connect', 'tls', 'dispatch_guard', 'headers', 'body', 'json', 'model',
+  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort', 'language', 'grounding']);
+export const DIAGNOSTIC_REASONS = Object.freeze(['invalid_request', 'rejected', 'io_error', 'timeout', 'aborted', 'http_error',
+  'invalid_type', 'limit', 'invalid_json', 'mismatch', 'invalid_shape', 'invalid_finish', 'invalid_content', 'invalid_receipt',
+  'observation_failed', 'not_russian', 'unknown_identifier', 'finish_length', 'finish_content_filter',
+    'finish_tool_calls', 'finish_error', 'finish_unknown']);
+function safeDiagnostic(value) {
+  return exact(value, ['phase', 'reason']) && DIAGNOSTIC_PHASES.includes(value.phase) && DIAGNOSTIC_REASONS.includes(value.reason)
+    ? { phase: value.phase, reason: value.reason } : undefined;
+}
+export function diagnosticFromHeaders(headers) {
+  const get = name => typeof headers?.get === 'function' ? headers.get(name) : headers?.[name.toLowerCase()] ?? headers?.[name];
+  return safeDiagnostic({ phase: get('X-LLM-Failure-Phase'), reason: get('X-LLM-Failure-Reason') });
+}
 const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
   isDeepStrictEqual(Object.keys(value).sort(), [...keys].sort());
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -79,15 +98,15 @@ function providerFailureMeta(errorCode, failure) {
   if (retryAfterSeconds !== undefined && (kind !== 'rate_limited' || !Number.isSafeInteger(retryAfterSeconds) || retryAfterSeconds < 0 || retryAfterSeconds > 86400)) return undefined;
   return { kind, status, ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }) };
 }
-export function llmFailureMeta(httpStatus, value, deliveryKind) {
-  return projectMeta({ httpStatus, errorCode: value?.errorCode, deliveryKind, providerFailure: value?.providerFailure });
+export function llmFailureMeta(httpStatus, value, deliveryKind, providerDiagnostic) {
+  return projectMeta({ httpStatus, errorCode: value?.errorCode, deliveryKind, providerFailure: value?.providerFailure, providerDiagnostic });
 }
 export function assertLlmSuccess(result) {
-  if (result.status !== 200) throw new Fault('LLM_HTTP_ERROR', llmFailureMeta(result.status, result.value, 'http-error'));
+  if (result.status !== 200) throw new Fault('LLM_HTTP_ERROR', llmFailureMeta(result.status, result.value, 'http-error', result.providerDiagnostic));
   return result.value;
 }
 export function projectMeta(input = {}) {
-  const out = {};
+  const out = { ...browserReadFailureMeta(input) };
   for (const key of ['scanId', 'turnId']) if (UUID.test(input[key])) out[key] = input[key];
   if (FINDING.test(input.findingId)) out.findingId = input.findingId;
   for (const key of ['reportVersion', 'sourceVersion', 'policyVersion', 'historyFingerprint']) if (HASH.test(input[key])) out[key] = input[key];
@@ -96,13 +115,16 @@ export function projectMeta(input = {}) {
   if (TERMINAL.has(input.state)) out.state = input.state;
   if (Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) out.httpStatus = input.httpStatus;
   if (HTTP_CODES.has(input.errorCode)) out.errorCode = input.errorCode;
+  if (input.launchHttpStatus === 202) out.launchHttpStatus = 202;
   const providerFailure = providerFailureMeta(out.errorCode, input.providerFailure);
   if (providerFailure) out.providerFailure = providerFailure;
+  const providerDiagnostic = safeDiagnostic(input.providerDiagnostic);
+  if (providerDiagnostic) out.providerDiagnostic = providerDiagnostic;
   if (['http-error', 'ndjson-error'].includes(input.deliveryKind)) out.deliveryKind = input.deliveryKind;
   for (const key of ['accountsCreated', 'scanLaunches', 'chatPosts', 'translationPosts', 'blockedRequests', 'pageErrors', 'ignoredEligibility',
     'completedTurns', 'pages', 'cve', 'debianTemp', 'vulnerabilities', 'assessmentIndex', 'input', 'output', 'costMicros', 'runnerLine', 'runtimeOffReads'])
     if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 10_000_000) out[key] = input[key];
-  for (const key of ['browserClosed', 'nativeScanMayRemainActive', 'historyUnchanged', 'countsUnchanged', 'originalUnchanged', 'explicitConsent', 'noAdditionalPosts', 'initialUsageZero'])
+  for (const key of ['browserClosed', 'nativeScanMayRemainActive', 'historyUnchanged', 'countsUnchanged', 'originalUnchanged', 'explicitConsent', 'noAdditionalPosts', 'initialUsageZero', 'transferNoteVisible', 'buttonOnlyTrigger', 'contextReadOnly', 'receiptAccepted', 'freshContextCookiesEmpty', 'ownerIdentityVerified', 'loginThroughUi', 'reportUiSettled', 'preAuthScanProbe'])
     if (typeof input[key] === 'boolean') out[key] = input[key];
   if (input.credential === 'metadata-valid') out.credential = input.credential;
   return out;
@@ -158,9 +180,10 @@ export class GuardLedger {
 export function recordFailure(book, name, error, fatal = null) {
   const previous = book.cases[name];
   const preserve = previous.code !== 'NOT_RUN' && previous.status !== 'PASS';
-  book.record(name, preserve ? previous.status : error instanceof Fault && !error.failure ? 'BLOCKED' : 'FAIL',
-    preserve ? previous.code : fatal ?? (error instanceof Fault ? error.message : 'ASSERTION_FAILED'),
-    { ...failureMeta(error), ...(error instanceof Fault ? error.meta : {}) });
+  const readFailure = error instanceof BrowserReadError;
+  book.record(name, preserve ? previous.status : readFailure || error instanceof Fault && !error.failure ? 'BLOCKED' : 'FAIL',
+    preserve ? previous.code : fatal ?? (readFailure ? 'BROWSER_READ_FAILED' : error instanceof Fault ? error.message : 'ASSERTION_FAILED'),
+    { ...failureMeta(error), ...(readFailure || error instanceof Fault ? error.meta : {}) });
 }
 export function canRunTranslation(book) {
   return ['native_scan', 'report', 'deployed_ui', 'fresh_login'].every(name => book.cases[name].status === 'PASS') &&
@@ -172,6 +195,7 @@ export class ResultBook {
     this.qualification = qualification;
     this.requiredCases = qualificationCases(qualification);
     this.attemptSuffix = attemptSuffix;
+    this.scanReceipt = null;
     this.guard = new GuardLedger();
     this.runId = randomUUID(); this.startedAt = new Date().toISOString(); this.finishedAt = null; this.actual = false;
     this.cases = Object.fromEntries(CASES.map(name => [name, { status: 'BLOCKED', code: 'NOT_RUN' }]));
@@ -181,15 +205,49 @@ export class ResultBook {
     if (this.cases[name].status === 'FAIL') return;
     this.cases[name] = { status, code, ...projectMeta(this.cases[name]), ...projectMeta(meta) };
   }
+  recordScanReceipt(status, value) {
+    assert.ok(status === 202 && UUID.test(value?.scanId));
+    assert.ok(!this.scanReceipt || this.scanReceipt.scanId === value.scanId);
+    this.scanReceipt = projectMeta({ scanId: value.scanId, launchHttpStatus: 202, receiptAccepted: true });
+    this.cases.native_scan = { ...this.cases.native_scan, ...this.scanReceipt };
+    return value.scanId;
+  }
   evidence() {
     return { schemaVersion: 1, scope: 'native-public8081-ai-translation', origin: ORIGIN, runId: this.runId,
       startedAt: this.startedAt, finishedAt: this.finishedAt, actuallyRun: this.actual, attempt: this.attemptSuffix ?? 'original', qualification: this.qualification, requiredCases: this.requiredCases,
-      guard: this.guard.evidence(),
+      guard: this.guard.evidence(), ...(this.scanReceipt ? { scanReceipt: projectMeta(this.scanReceipt) } : {}),
       requiredPolicy: { provider: 'OpenRouter', model: MODEL, endpoint: ENDPOINT, freeOnly: true, noFallback: true },
       serverEgressIndependentlyObserved: false, billingIndependentlyVerified: false, semanticAccuracy: 'unverified',
+      freshLoginScope: 'fresh-owner-ui-login-and-report-not-anonymous401',
       createdRuntimeDataAutomaticallyDeleted: false, credentialsPersisted: false, payloadArtifacts: false,
       cases: Object.fromEntries(CASES.map(name => [name, { status: this.cases[name].status, code: this.cases[name].code, ...projectMeta(this.cases[name]) }])) };
   }
+}
+export async function settleAcceptedScan(book, page, active) {
+  const receipt = book.scanReceipt;
+  if (!exact(receipt, ['scanId', 'launchHttpStatus', 'receiptAccepted']) || !UUID.test(receipt.scanId) ||
+      receipt.launchHttpStatus !== 202 || receipt.receiptAccepted !== true) throw new Fault('LAUNCH_UNCONFIRMED_NO_RETRY');
+  await settleReportNavigation(page, receipt.scanId, active);
+  return receipt.scanId;
+}
+export async function completeFreshOwnerLogin(book, handle, ownerSubject, authenticate, active) {
+  const scanId = book.scanReceipt?.scanId;
+  if (!UUID.test(scanId) || !/^[a-f0-9]{32}$/.test(ownerSubject ?? '') || !active() || handle.aiOwner !== true)
+    throw new Fault('PREREQUISITE_UNAVAILABLE');
+  const freshContextCookiesEmpty = (await handle.context.cookies()).length === 0;
+  if (!freshContextCookiesEmpty || handle.page.url() !== 'about:blank')
+    throw new Fault('CONTEXT_CHANGED', { freshContextCookiesEmpty, preAuthScanProbe: false });
+  // This case proves a fresh owner UI login, not anonymous401. The real auth
+  // action fills/submits the UI, awaits /account, and verifies auth/me identity.
+  // No scan GET is evaluated while the login page's initial session read hydrates.
+  const subject = await authenticate();
+  if (!active() || subject !== ownerSubject || handle.page.url() !== `${ORIGIN}/account`)
+    throw new Fault('CONTEXT_CHANGED', { freshContextCookiesEmpty, ownerIdentityVerified: false, preAuthScanProbe: false });
+  const session = handle.readSession;
+  await handle.page.goto(`${ORIGIN}/scans/${scanId}`);
+  await settleAcceptedScan(book, handle.page, () => active() && handle.readSession === session);
+  return { meta: { freshContextCookiesEmpty, ownerIdentityVerified: true, loginThroughUi: true,
+    reportUiSettled: true, preAuthScanProbe: false } };
 }
 export function exitCode(book) {
   return CASES.some(name => book.cases[name].status === 'FAIL') ? 1 : book.requiredCases.every(name => book.cases[name].status === 'PASS') ? 0 : 2;
@@ -203,6 +261,7 @@ export function evidenceDocuments(book) {
     `Qualification: ${book.qualification}. Required cases: ${book.requiredCases.join(', ')}.`,
         book.qualification === 'translation' ? 'Chat generation is NOT qualified or attempted. At most one separately consented translation POST.' : 'Maximum two sequential manual chat POSTs and one separately consented translation POST.',
         'No retry, alternate model, paid fallback, or lifecycle action.',
+    'fresh_login qualifies only a new empty browser context, owner UI login/identity and settled own report; it does not qualify anonymous401. Denial evidence is independent.',
     'The browser is restricted to loopback 8081. Server egress and billing are NOT independently observed; fixed free policy and server-validated receipts are checked.',
     'Semantic accuracy is unverified by this runner; schema/render/Cyrillic checks are not fidelity proof. Native semantic review is memory-only, without conversation artifacts.',
         'Provider failure status/kind/bounded retry hints are metadata only, not permission to retry or refund unknown liability.',
@@ -279,7 +338,8 @@ export async function loadTranslationContracts() {
   const manifest = require('tsx/package.json');
   const { tsImport } = await import(pathToFileURL(join(dirname(require.resolve('tsx/package.json')), manifest.exports['./esm/api'].import.default)).href);
   const translation = await tsImport(join(ROOT, 'src/shared/api/scans/advisoryTranslationContract.ts'), { parentURL: import.meta.url, tsconfig: false });
-  return { ...base, translation };
+  const diagnostics = await tsImport(join(ROOT, 'server/api/src/llm/provider-diagnostic.ts'), { parentURL: import.meta.url, tsconfig: false });
+  return { ...base, translation, diagnostics };
 }
 async function bounded(promise, ms, code = 'GLOBAL_DEADLINE') {
   let timer;
@@ -332,24 +392,11 @@ async function runLive(attemptSuffix, qualification = 'full') {
     if (bytes.byteLength > 4 * 1024 * 1024) throw new Fault('ASSERTION_FAILED', {}, true);
     let value = null;
     try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { /* Raw body is never emitted. */ }
-    return { status: response.status(), value };
+    return { status: response.status(), value, providerDiagnostic: diagnosticFromHeaders(response.headers()) };
   };
   const http = async (page, path) => {
-    live(); assert.ok(allowedApiGet(`${ORIGIN}${path}`, knownIds));
-    return page.evaluate(async path => {
-      const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(40_000) });
-      if (!/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) return { status: response.status, value: null };
-      const reader = response.body?.getReader(), chunks = []; let size = 0;
-      if (!reader) return { status: response.status, value: null };
-      try {
-        for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength;
-          if (size > 4 * 1024 * 1024) return { status: response.status, value: null }; chunks.push(part.value); }
-        const bytes = new Uint8Array(size); let offset = 0;
-        for (const part of chunks) { bytes.set(part, offset); offset += part.byteLength; }
-        let value = null; try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { /* No diagnostics. */ }
-        return { status: response.status, value };
-      } finally { await reader.cancel().catch(() => {}); }
-    }, path);
+    live();
+    return readBrowserJson(page, path, knownIds);
   };
   const successful = assertLlmSuccess;
   const newPage = async (aiOwner = false) => {
@@ -396,7 +443,10 @@ async function runLive(attemptSuffix, qualification = 'full') {
           approvedRead = true;
           const sequence = state.fence.start();
           state.eligibilityPending = (async () => { await route.continue(); const response = await request.response();
-            if (response?.status() === 200) state.fence.accept(sequence, body, (await readResponse(response)).value, target); })();
+            const value = response?.status() === 200 ? (await readResponse(response)).value : null;
+            if (response?.status() === 200) state.fence.accept(sequence, body, value, target);
+            if (sequence === state.fence.sequence) state.eligibilityResult = { sequence, httpStatus: response?.status() ?? null,
+              refused: isDeepStrictEqual(body.checks, CHECKS) && (response?.status() !== 200 || !eligibilityReady(value, target)) }; })();
           await state.eligibilityPending; return;
         }
         if (u.pathname === SCANS) {
@@ -405,7 +455,13 @@ async function runLive(attemptSuffix, qualification = 'full') {
           if (!await awaitEligibility(state.fence, launch.sequence, state.eligibilityPending, () => !stopped && activeLaunch === launch && launch.armed && stats.scanLaunches === 0)) return deny('scan-not-authorized');
           launch.armed = false; stats.scanLaunches++;
           pendingCreation = (async () => { await route.continue(); const response = await request.response();
-            if (response?.status() === 202) { const result = await readResponse(response); if (UUID.test(result.value?.scanId)) knownIds.add(result.value.scanId); } })();
+            if (response?.status() === 202) {
+              const result = await readResponse(response);
+              if (UUID.test(result.value?.scanId)) {
+                scanId = book.recordScanReceipt(response.status(), result.value);
+                knownIds.add(scanId);
+              }
+            } })();
           await pendingCreation; return;
         }
         const ai = u.pathname.endsWith('/llm/chat') || u.pathname.endsWith('/llm/translation');
@@ -432,10 +488,14 @@ async function runLive(attemptSuffix, qualification = 'full') {
       if (response.status() >= 300 && response.status() < 400) note(response.request(), 'redirect'); });
     await context.routeWebSocket('**/*', socket => { book.guard.record('websocket', socket.url(), 'OTHER'); stats.blockedRequests = book.guard.blockedRequests; stop('REQUEST_GUARD'); socket.close(); });
     context.on('page', page => { page.on('pageerror', () => { stats.pageErrors++; }); page.on('download', download => { book.guard.record('download', page.url(), 'GET'); stats.blockedRequests = book.guard.blockedRequests; stop('REQUEST_GUARD'); void download.cancel().catch(() => {}); }); });
-    state.page = await context.newPage(); state.page.setDefaultTimeout(15_000); state.page.setDefaultNavigationTimeout(20_000);
+    state.page = await context.newPage();
+    state.readSession = 0;
+    trackBrowserReadPage(state.page, { active: () => !stopped && !fatal && !state.closing, sessionVersion: () => state.readSession });
+    state.page.setDefaultTimeout(15_000); state.page.setDefaultNavigationTimeout(20_000);
     return state;
   };
   const auth = async (handle, account, action) => {
+    handle.readSession++;
     await handle.page.goto(`${ORIGIN}/${action}`);
     await handle.page.getByLabel('Email', { exact: true }).fill(account.email);
     await handle.page.getByLabel('Пароль', { exact: true }).fill(account.password);
@@ -446,8 +506,10 @@ async function runLive(attemptSuffix, qualification = 'full') {
     const response = await pending;
     assert.equal(response?.status(), action === 'register' ? 201 : 200);
     if (action === 'register') stats.accountsCreated++;
+    await settleAuthNavigation(handle.page, () => !stopped && !fatal && !handle.closing);
     const me = await http(handle.page, '/api/v1/auth/me'); assert.equal(me.status, 200);
     account.subject = assertAuthUser(me.value, account.email, account.subject);
+    return account.subject;
   };
   const readStatus = async page => {
     const response = await http(page, `${SCANS}/${scanId}`); assert.equal(response.status, 200);
@@ -486,9 +548,12 @@ async function runLive(attemptSuffix, qualification = 'full') {
   };
   const openChat = async page => {
     const region = page.getByRole('region', { name: 'Чат по отчёту', exact: true });
-    await region.getByRole('button', { name: 'Открыть чат и прочитать условия', exact: true }).click();
+    const before = stats.chatPosts + stats.translationPosts;
+    await region.getByRole('button', { name: 'Открыть чат', exact: true }).click();
     await expect(region.getByRole('textbox', { name: 'Вопрос чату', exact: true })).toBeVisible();
-    await expect(region.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).not.toBeChecked();
+    await expect(region.locator('#scan-chat-send-help')).toBeVisible();
+    await expect(region.locator('#scan-chat-send-help')).toContainText('Нажимая «Отправить вопрос», вы разрешаете один запрос:');
+    assert.equal(stats.chatPosts + stats.translationPosts, before);
     return region;
   };
   const assertHistoryUi = async (region, history) => {
@@ -496,21 +561,23 @@ async function runLive(attemptSuffix, qualification = 'full') {
       const article = region.locator('article').filter({ has: region.getByText(turn.question, { exact: true }) });
       await expect(article).toHaveCount(1);
       if (turn.state === 'completed') {
-        await expect(article.getByRole('heading', { name: 'Гипотеза · не доказанный факт', exact: true })).toBeVisible();
+        await expect(article.getByRole('heading', { name: 'Ответ ИИ · требует проверки', exact: true })).toBeVisible();
         // The copy control is inside the rendered SafeMarkdown message, not inside citations.
         const message = article.getByRole('button', { name: 'Скопировать текст', exact: true }).locator('..');
         assert.ok(renderedReplyMatches(turn.reply.text, await message.innerText()));
         for (const source of turn.reply.sources) await expect(article.getByRole('link', { name: `Находка ${source.finding.findingId}`, exact: true })).toBeVisible();
       }
     }
-    await expect(region.getByRole('heading', { name: 'Гипотеза · не доказанный факт', exact: true })).toHaveCount(history.turns.filter(turn => turn.state === 'completed').length);
+    await expect(region.getByRole('heading', { name: 'Ответ ИИ · требует проверки', exact: true })).toHaveCount(history.turns.filter(turn => turn.state === 'completed').length);
   };
   const translationPath = () => `${SCANS}/${scanId}/llm/translation/context?findingId=${selected.row.findingId}&assessmentIndex=${selected.index}`;
   const translationPanel = async page => {
     const row = page.locator('li.scan-vuln-row').filter({ hasText: `ID находки: ${selected.row.findingId}` });
     if (!await row.count()) throw new Fault('NO_ELIGIBLE_ASSESSMENT');
     await row.locator('details.scan-vuln-row__details > summary').click();
-    return row.getByRole('region', { name: `Перевод ${selected.row.cveId}, источник ${selected.item.source}, оценка ${selected.index + 1}`, exact: true });
+    const region = row.getByRole('region', { name: `Перевод ${selected.row.cveId}, источник ${selected.item.source}, оценка ${selected.index + 1}`, exact: true });
+    await expect(region).toBeVisible();
+    return region;
   };
   let own, chatPin;
   try {
@@ -526,20 +593,31 @@ async function runLive(attemptSuffix, qualification = 'full') {
       if (!await step('owner_registration', () => auth(own, owner, 'register'))) return;
       const scanOk = await step('native_scan', async () => {
         own.scanTarget = target;
+        const after = own.fence.sequence;
         await own.page.goto(`${ORIGIN}/scans/new`);
+        const form = own.page.getByRole('form', { name: 'Параметры скана', exact: true });
+        await expect(form).toBeVisible();
         await own.page.getByRole('textbox', { name: 'Canonical reference Docker Hub', exact: true }).fill(target.reference);
         for (const check of CHECKS) await own.page.locator(`input[name="checks"][value="${check}"]`).check();
-        await bounded(own.eligibilityPending, 35_000);
+        const read = () => readLaunchForm(form, target);
+        const authority = () => !stopped && !fatal && !own.closing && own.scanTarget === target && own.page.url() === `${ORIGIN}/scans/new`;
+        const stable = await awaitStableUiEligibility(own, after, read, authority);
+        assert.ok(uiLaunchReady(await read()) && authority() && own.fence.sequence === stable.sequence && own.fence.fresh(after));
         const consent = own.page.getByRole('checkbox', { name: /Подтверждаю выбранную цель и область/ });
-        await expect(consent).not.toBeChecked(); await consent.check();
         const submit = own.page.getByRole('button', { name: 'Запустить скан', exact: true });
-        await expect(submit).toBeEnabled();
+        await expect(consent).not.toBeChecked(); await expect(submit).toBeDisabled();
+        await consent.check(); await expect(submit).toBeEnabled();
+        assert.ok(uiLaunchReady(await read(), true) && authority() && own.fence.sequence === stable.sequence && own.fence.fresh(after));
         activeLaunch = { state: own, armed: true, sequence: own.fence.sequence };
         const pending = responseFor(own.page, SCANS); await submit.click();
         const response = await pending; await pendingCreation.catch(() => {});
         if (response?.status() !== 202) throw new Fault('LAUNCH_UNCONFIRMED_NO_RETRY');
-        const receipt = await readResponse(response); scanId = receipt.value?.scanId;
-        assert.ok(UUID.test(scanId) && knownIds.has(scanId)); activeLaunch = null;
+        assert.ok(UUID.test(scanId) && knownIds.has(scanId) && book.scanReceipt?.receiptAccepted);
+        activeLaunch = null;
+        // A 202 is not a committed report route. Wait for the native UI before
+        // evaluating the first status GET; this is not a retry of a failed read.
+        const session = own.readSession;
+        scanId = await settleAcceptedScan(book, own.page, () => !stopped && !fatal && !own.closing && own.readSession === session);
         const end = Date.now() + WORKER_MS;
         do { live(); const value = await readStatus(own.page); if (TERMINAL.has(value.state)) break; await pause(1500); } while (Date.now() < end);
         if (!snapshot) throw new Fault('WORKER_DEADLINE_NO_RELAUNCH', { scanId });
@@ -561,8 +639,10 @@ async function runLive(attemptSuffix, qualification = 'full') {
       if (!await step('deployed_ui', async () => {
         if (!selected) throw new Fault('NO_ELIGIBLE_ASSESSMENT');
         const region = await translationPanel(own.page);
-        if (!await region.getByRole('button', { name: 'Прочитать условия перевода', exact: true }).count()) throw new Fault('UI_NOT_DEPLOYED');
-        await expect(region.getByRole('button', { name: 'Перевести на русский', exact: true })).toBeDisabled();
+        const button = region.getByRole('button', { name: 'Перевести на русский', exact: true });
+        if (!await button.count()) throw new Fault('UI_NOT_DEPLOYED');
+        await expect(region.getByText(/Нажимая «Перевести на русский», вы разрешаете один запрос:/)).toBeVisible();
+        assert.equal(stats.chatPosts + stats.translationPosts, 0);
         await selectedOriginalVisible(own.page, selected, expect);
       })) return;
       if (qualification === 'full') {
@@ -585,9 +665,11 @@ async function runLive(attemptSuffix, qualification = 'full') {
           book.record('readiness', 'PASS', 'VERIFIED', { ...book.cases.readiness, initialUsageZero: true });
         }
         await panel.getByRole('textbox', { name: 'Вопрос чату', exact: true }).fill(question);
-        const consent = panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ });
         const submit = panel.getByRole('button', { name: 'Отправить вопрос', exact: true });
-        await expect(consent).not.toBeChecked(); await expect(submit).toBeDisabled(); await consent.check(); await expect(submit).toBeEnabled();
+        await expect(panel.locator('#scan-chat-send-help')).toBeVisible();
+        await expect(submit).toHaveAttribute('aria-describedby', 'scan-chat-send-help');
+        await expect(submit).toBeEnabled();
+        assert.equal(stats.chatPosts, index); // Filling/reading conditions must not dispatch.
         const path = `${SCANS}/${scanId}/llm/chat`;
         arm(own, path, body => chatBodyMatches(body, before.context, question), { context: before.context, question });
         const pending = responseFor(own.page, path); await submit.click(); const response = await pending;
@@ -601,18 +683,21 @@ async function runLive(attemptSuffix, qualification = 'full') {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(data); assert.ok(text.endsWith('\n'));
         for (const line of text.slice(0, -1).split('\n')) { assert.ok(Buffer.byteLength(line) < tools.chat.CHAT_DELIVERY.lineBytes); parser.accept(JSON.parse(line)); }
         const delivered = parser.finish();
-        if ('errorCode' in delivered) throw new Fault('LLM_HTTP_ERROR', llmFailureMeta(200, delivered, 'ndjson-error'));
+        if ('errorCode' in delivered) throw new Fault('LLM_HTTP_ERROR', llmFailureMeta(200, delivered, 'ndjson-error', diagnosticFromHeaders(response.headers())));
         const after = await readChat(own.page);
         const turn = after.history.turns.find(turn => turn.mutationId === request.mutationId);
         assert.ok(turn?.state === 'completed' && turn.question === question); assert.deepEqual(turn.reply, delivered.reply);
         assert.equal(after.context.policyVersion, chatPin); assert.equal(after.history.turns.length, index + 1);
-        await expect(panel.getByRole('heading', { name: 'Гипотеза · не доказанный факт', exact: true })).toHaveCount(index + 1, { timeout: 45_000 });
-        await assertHistoryUi(panel, after.history); await expect(consent).not.toBeChecked(); await expect(submit).toBeDisabled();
+        await expect(panel.getByRole('heading', { name: 'Ответ ИИ · требует проверки', exact: true })).toHaveCount(index + 1, { timeout: 45_000 });
+        await assertHistoryUi(panel, after.history);
+        await expect(panel.getByRole('textbox', { name: 'Вопрос чату', exact: true })).toHaveValue('');
+        await expect(submit).toBeDisabled();
+        assert.equal(stats.chatPosts, index + 1);
         const usageAfter = await usageFor(own.page, after.context);
         for (const scope of ['user', 'scan']) { assert.equal(usageBefore[scope].used.costMicros, 0); assert.equal(usageAfter[scope].used.costMicros, 0); }
         savedHistory = after.history;
         return { meta: { ...historyMetadata(savedHistory), turnId: turn.id, input: delivered.usage.input, output: delivered.usage.output,
-          costMicros: delivered.usage.costMicros, explicitConsent: true } };
+          costMicros: delivered.usage.costMicros, explicitConsent: true, transferNoteVisible: true, buttonOnlyTrigger: true } };
       });
       await step('history_reload', async () => {
         if (!savedHistory || book.cases.chat_2.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
@@ -621,18 +706,17 @@ async function runLive(attemptSuffix, qualification = 'full') {
         assert.equal(stats.chatPosts, before); return { meta: { ...historyMetadata(current.history), historyUnchanged: true, noAdditionalPosts: true } };
       });
       }
-            const loginOk = await step('fresh_login', async () => {
+      const loginOk = await step('fresh_login', async () => {
         own.closing = true; await own.context.close(); own = await newPage(true);
-        assert.equal((await own.context.cookies()).length, 0);
-        await own.page.goto(`${ORIGIN}/login`);
-        assert.equal((await http(own.page, `${SCANS}/${scanId}`)).status, 401);
-        await auth(own, owner, 'login'); await own.page.goto(`${ORIGIN}/scans/${scanId}`);
+        return completeFreshOwnerLogin(book, own, owner.subject, () => auth(own, owner, 'login'),
+          () => !stopped && !fatal && !own.closing);
       });
       if (qualification === 'full') await step('history_fresh_login', async () => {
         if (!loginOk || !savedHistory || book.cases.chat_2.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
         panel = await openChat(own.page);
         const current = await readChat(own.page); assert.deepEqual(current.history, savedHistory); await assertHistoryUi(panel, current.history);
-        await expect(panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).not.toBeChecked();
+        await expect(panel.getByRole('textbox', { name: 'Вопрос чату', exact: true })).toHaveValue('');
+        await expect(panel.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeDisabled();
         return { meta: { ...historyMetadata(current.history), historyUnchanged: true, noAdditionalPosts: true } };
       });
       const other = await newPage(false);
@@ -653,7 +737,8 @@ async function runLive(attemptSuffix, qualification = 'full') {
         if (!loginOk || !selected || !canRunTranslation(book)) throw new Fault('PREREQUISITE_UNAVAILABLE');
         // Translation has its own context/readiness and never retries or depends on chat delivery.
         translationRegion = await translationPanel(own.page);
-        await translationRegion.getByRole('button', { name: 'Прочитать условия перевода', exact: true }).click();
+        const beforePosts = stats.chatPosts + stats.translationPosts;
+        await expect(translationRegion.getByText(/Нажимая «Перевести на русский», вы разрешаете один запрос:/)).toBeVisible();
         translationContext = tools.translation.translationContextSchema.parse(successful(await http(own.page, translationPath())));
         await readyFor(own.page, translationContext);
         assert.equal(translationContext.findingId, selected.row.findingId); assert.equal(translationContext.assessmentIndex, selected.index);
@@ -661,33 +746,36 @@ async function runLive(attemptSuffix, qualification = 'full') {
         if (chatPin) assert.notEqual(translationContext.policyVersion, chatPin);
         const digest = hash(['selected-advisory-ru-v1', selected.row.cveId, selected.item]);
         assert.equal(translationContext.sourceVersion, digest);
-        const consent = translationRegion.getByRole('checkbox', { name: /Разрешаю один запрос перевода:/ });
-        await expect(consent).toBeEnabled(); await expect(consent).not.toBeChecked();
-        await expect(translationRegion.getByRole('button', { name: 'Перевести на русский', exact: true })).toBeDisabled();
+        await expect(translationRegion.getByRole('button', { name: 'Перевести на русский', exact: true })).toBeEnabled();
+        assert.equal(stats.chatPosts + stats.translationPosts, beforePosts);
         return { meta: { findingId: selected.row.findingId, assessmentIndex: selected.index, sourceVersion: digest,
-          reportVersion: translationContext.reportVersion, policyVersion: translationContext.policyVersion } };
+          reportVersion: translationContext.reportVersion, policyVersion: translationContext.policyVersion, contextReadOnly: true, transferNoteVisible: true } };
       });
       const translatedOk = await step('translation', async () => {
         if (!contextOk) throw new Fault('PREREQUISITE_UNAVAILABLE');
         const before = tools.translation.translationContextSchema.parse(successful(await http(own.page, translationPath())));
         assert.deepEqual(before, translationContext); await readyFor(own.page, before);
                 const usageBefore = await usageFor(own.page, before);
-        const consent = translationRegion.getByRole('checkbox', { name: /Разрешаю один запрос перевода:/ });
-        await expect(consent).not.toBeChecked(); await consent.check();
+        const submit = translationRegion.getByRole('button', { name: 'Перевести на русский', exact: true });
+        await expect(translationRegion.getByText(/Нажимая «Перевести на русский», вы разрешаете один запрос:/)).toBeVisible();
+        const describedBy = await submit.getAttribute('aria-describedby');
+        assert.ok(describedBy?.includes(`translation-send-${before.findingId}-${before.assessmentIndex}`));
+        await expect(submit).toBeEnabled();
+        assert.equal(stats.translationPosts, 0);
         const path = `${SCANS}/${scanId}/llm/translation`;
         arm(own, path, body => isDeepStrictEqual(body, translationBody(before)), { context: before });
         const pending = responseFor(own.page, path);
-        await translationRegion.getByRole('button', { name: 'Перевести на русский', exact: true }).click();
+        await submit.click();
         translated = tools.translation.translationReplySchema.parse(successful(await readResponse(await pending)));
         assert.ok(tools.translation.sameTranslationBinding(translated, before)); assert.equal(translated.model, MODEL); assert.equal(translated.provider, 'OpenRouter');
         assert.ok(/[А-Яа-яЁё]{3}/u.test([translated.translation.title, translated.translation.description].filter(Boolean).join(' ')));
         await expect(translationRegion).toContainText('Машинный перевод на русский · не официальный текст NVD или БДУ', { timeout: 45_000 });
         for (const text of Object.values(translated.translation).filter(value => value !== null)) await expect(translationRegion).toContainText(text);
         await selectedOriginalVisible(own.page, selected, expect);
-        await expect(consent).not.toBeChecked();
+        assert.equal(stats.translationPosts, 1);
         const usageAfter = await usageFor(own.page, before);
         for (const scope of ['user', 'scan']) { assert.equal(usageBefore[scope].used.costMicros, 0); assert.equal(usageAfter[scope].used.costMicros, 0); }
-        return { meta: { findingId: before.findingId, assessmentIndex: before.assessmentIndex, sourceVersion: before.sourceVersion, explicitConsent: true, originalUnchanged: true } };
+        return { meta: { findingId: before.findingId, assessmentIndex: before.assessmentIndex, sourceVersion: before.sourceVersion, explicitConsent: true, transferNoteVisible: true, buttonOnlyTrigger: true, originalUnchanged: true } };
       });
       await step('translation_toggle', async () => {
         if (!translatedOk) throw new Fault('PREREQUISITE_UNAVAILABLE');
@@ -716,7 +804,7 @@ async function runLive(attemptSuffix, qualification = 'full') {
     catch { browserClosed = false; }
     const bad = !browserClosed || stats.blockedRequests || stats.pageErrors || stats.accountsCreated > 2 || stats.scanLaunches > 1 || stats.chatPosts > (qualification === 'translation' ? 0 : 2) || stats.translationPosts > 1;
     book.record('safety', bad ? 'FAIL' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : bad ? 'ASSERTION_FAILED' : 'VERIFIED',
-      { ...stats, browserClosed, nativeScanMayRemainActive: stats.scanLaunches > 0 && !snapshot });
+      { ...stats, scanId, browserClosed, nativeScanMayRemainActive: stats.scanLaunches > 0 && !snapshot });
     book.finishedAt = new Date().toISOString();
     if (book.actual) { try { await writeEvidence(book); } catch { book.record('safety', 'FAIL', 'EVIDENCE_WRITE_FAILED'); } }
     console.log(JSON.stringify(book.evidence(), null, 2));

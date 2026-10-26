@@ -1,0 +1,197 @@
+{
+  "schemaVersion": 1,
+  "scope": "native-public8081-ai-translation",
+  "origin": "http://127.0.0.1:8081",
+  "runId": "ccbe6b75-d249-441e-bff7-bde2a048ef4b",
+  "startedAt": "2026-10-26T14:07:32.545Z",
+  "finishedAt": "2026-10-26T14:10:00.794Z",
+  "actuallyRun": true,
+  "attempt": "324479cf-07ee-4d99-983b-2be9d6c000eb",
+  "qualification": "full",
+  "requiredCases": [
+    "tooling",
+    "owner_registration",
+    "native_scan",
+    "report",
+    "deployed_ui",
+    "readiness",
+    "chat_1",
+    "chat_2",
+    "history_reload",
+    "fresh_login",
+    "history_fresh_login",
+    "foreign_registration",
+    "foreign_denial",
+    "translation_context",
+    "translation",
+    "translation_toggle",
+    "preservation",
+    "safety"
+  ],
+  "guard": {
+    "blockedRequests": 0,
+    "benignAborts": 0,
+    "overflow": 0,
+    "events": []
+  },
+  "scanReceipt": {
+    "scanId": "a62c374b-066d-4caf-81e0-8b1acfa5f479",
+    "launchHttpStatus": 202,
+    "receiptAccepted": true
+  },
+  "requiredPolicy": {
+    "provider": "OpenRouter",
+    "model": "xingchen-agi/xing4.0-29b-a4b:free",
+    "endpoint": "phala",
+    "freeOnly": true,
+    "noFallback": true
+  },
+  "serverEgressIndependentlyObserved": false,
+  "billingIndependentlyVerified": false,
+  "semanticAccuracy": "unverified",
+  "freshLoginScope": "fresh-owner-ui-login-and-report-not-anonymous401",
+  "createdRuntimeDataAutomaticallyDeleted": false,
+  "credentialsPersisted": false,
+  "payloadArtifacts": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "owner_registration": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "native_scan": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "scanId": "a62c374b-066d-4caf-81e0-8b1acfa5f479",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "completed",
+      "launchHttpStatus": 202,
+      "receiptAccepted": true
+    },
+    "report": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "pages": 4,
+      "cve": 161,
+      "debianTemp": 0,
+      "vulnerabilities": 161
+    },
+    "deployed_ui": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "readiness": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "reportVersion": "9a34da18aa2ddec41859166b89a8bc41b34633f9ae8bf302402123b3a6292846",
+      "policyVersion": "bb4c90a6233f00542d9d700f3d9bb84777903d59370fa9b1aa489cb64ccadc25",
+      "initialUsageZero": true,
+      "credential": "metadata-valid"
+    },
+    "chat_1": {
+      "status": "BLOCKED",
+      "code": "LLM_HTTP_ERROR",
+      "httpStatus": 200,
+      "errorCode": "LLM_PROVIDER_RATE_LIMITED",
+      "providerFailure": {
+        "kind": "rate_limited",
+        "status": 429
+      },
+      "providerDiagnostic": {
+        "phase": "headers",
+        "reason": "http_error"
+      },
+      "deliveryKind": "ndjson-error",
+      "runnerLine": 684
+    },
+    "chat_2": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 656
+    },
+    "history_reload": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 701
+    },
+    "fresh_login": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "freshContextCookiesEmpty": true,
+      "ownerIdentityVerified": true,
+      "loginThroughUi": true,
+      "reportUiSettled": true,
+      "preAuthScanProbe": false
+    },
+    "history_fresh_login": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 713
+    },
+    "foreign_registration": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "foreign_denial": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "httpStatus": 404,
+      "noAdditionalPosts": true
+    },
+    "translation_context": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "findingId": "vuln-2b93104a1a17afaab6e1dfbe889a8cb64f73a7d612180303bc7b1969ed923293",
+      "reportVersion": "9a34da18aa2ddec41859166b89a8bc41b34633f9ae8bf302402123b3a6292846",
+      "sourceVersion": "9ee5d71fabcd7d2588976592433c3c3b63f9e7ba51a059c7380db8443fae7d87",
+      "policyVersion": "6b54b6f3dd5176ece9944a534a6b771e42cac15a33b11b36e9e229433f65f11f",
+      "assessmentIndex": 0,
+      "transferNoteVisible": true,
+      "contextReadOnly": true
+    },
+    "translation": {
+      "status": "BLOCKED",
+      "code": "LLM_HTTP_ERROR",
+      "httpStatus": 502,
+      "errorCode": "LLM_INVALID_RESPONSE",
+      "providerDiagnostic": {
+        "phase": "content",
+        "reason": "invalid_content"
+      },
+      "deliveryKind": "http-error",
+      "runnerLine": 105
+    },
+    "translation_toggle": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 779
+    },
+    "preservation": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "cve": 161,
+      "debianTemp": 0,
+      "countsUnchanged": true,
+      "originalUnchanged": true
+    },
+    "safety": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "scanId": "a62c374b-066d-4caf-81e0-8b1acfa5f479",
+      "accountsCreated": 2,
+      "scanLaunches": 1,
+      "chatPosts": 1,
+      "translationPosts": 1,
+      "blockedRequests": 0,
+      "pageErrors": 0,
+      "ignoredEligibility": 0,
+      "runtimeOffReads": 3,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

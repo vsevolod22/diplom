@@ -3,6 +3,7 @@ import { APP_FILTER, BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
 import type { ServerResponse } from 'node:http';
 import { quotaDenial } from './quota-policy.js';
 import { safeProviderFailure } from './openrouter-provider.js';
+import { diagnosticHeaders } from './provider-diagnostic.js';
 
 const safeCodes = new Set(['LLM_UNAVAILABLE', 'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_STALE_REPORT',
   'LLM_STALE_POLICY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_CAPACITY', 'LLM_REQUEST_ABORTED', 'LLM_RESPONSE_LIMIT',
@@ -38,6 +39,7 @@ export class LlmExceptionFilter extends BaseExceptionFilter {
         errorCode = body.errorCode;
     }
     response.setHeader('Cache-Control', 'no-store');
+    for (const [name, value] of Object.entries(diagnosticHeaders(exception))) response.setHeader(name, value);
     const admission = status === 429 && errorCode === 'LLM_QUOTA_EXCEEDED' ? quotaDenial(exception) : undefined;
     const failure = exception instanceof HttpException ? safeProviderFailure(exception.getResponse()) : undefined;
     if (failure?.providerFailure.retryAfterSeconds !== undefined && [429, 503].includes(status))

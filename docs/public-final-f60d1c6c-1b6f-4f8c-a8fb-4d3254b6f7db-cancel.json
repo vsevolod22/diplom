@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "actuallyRun": true,
+  "mode": "cancel",
+  "attemptId": "f60d1c6c-1b6f-4f8c-a8fb-4d3254b6f7db",
+  "evidenceRoot": "docs/public-final-f60d1c6c-1b6f-4f8c-a8fb-4d3254b6f7db-cancel",
+  "runId": "c6cffe69-9d7c-4d97-8ea8-0bc90ab4a155",
+  "startedAt": "2026-10-25T21:03:55.955Z",
+  "finishedAt": "2026-10-25T21:04:23.016Z",
+  "scope": "native-public8081-one-scan-cancel",
+  "origin": "http://127.0.0.1:8081",
+  "providerGenerationQualified": false,
+  "generationPolicy": "all-llm-posts-denied",
+  "providerDispatchIndependentlyObserved": false,
+  "credentialPersistence": false,
+  "screenshots": false,
+  "har": false,
+  "trace": false,
+  "lifecycleOperations": 0,
+  "syntheticResponses": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "registration": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false
+    },
+    "cancel": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanId": "e5e6ddd4-4c0a-471f-98f9-5d221a92c037",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "cancelled",
+      "phase": "cancel-terminal",
+      "progress": {
+        "basis": "durable-outcomes-v1",
+        "requestedChecks": [
+          "secret",
+          "sbom",
+          "vuln",
+          "config"
+        ],
+        "outcomes": {
+          "secret": null,
+          "sbom": null,
+          "vuln": null,
+          "config": "checked"
+        },
+        "resolvedChecks": 1,
+        "checkedChecks": 1
+      },
+      "preCancelProgress": {
+        "basis": "durable-outcomes-v1",
+        "requestedChecks": [
+          "secret",
+          "sbom",
+          "vuln",
+          "config"
+        ],
+        "outcomes": {
+          "secret": null,
+          "sbom": null,
+          "vuln": null,
+          "config": "checked"
+        },
+        "resolvedChecks": 1,
+        "checkedChecks": 1
+      },
+      "phaseElapsedMs": 13,
+      "httpStatus": 200,
+      "preCancelReportUiEmpty": true,
+      "preCancelFindingsRead": false,
+      "preCancelByteComparison": false,
+      "observedCompletedChecks": [
+        "config"
+      ],
+      "counts": {
+        "secret": null,
+        "sbom": null,
+        "vuln": null,
+        "config": 1
+      },
+      "checks": {
+        "secret": null,
+        "sbom": null,
+        "vuln": null,
+        "config": "checked"
+      }
+    },
+    "cancel_progress": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "phase": "progress-snapshot",
+      "phaseElapsedMs": 147,
+      "progressObserved": true,
+      "progressIndeterminate": true,
+      "progressActive": true
+    },
+    "cancel_report": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanId": "e5e6ddd4-4c0a-471f-98f9-5d221a92c037",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "cancelled",
+      "phase": "cancel-report",
+      "progress": {
+        "basis": "durable-outcomes-v1",
+        "requestedChecks": [
+          "secret",
+          "sbom",
+          "vuln",
+          "config"
+        ],
+        "outcomes": {
+          "secret": null,
+          "sbom": null,
+          "vuln": null,
+          "config": "checked"
+        },
+        "resolvedChecks": 1,
+        "checkedChecks": 1
+      },
+      "phaseElapsedMs": 429,
+      "checkedSets": 0,
+      "progressObserved": true,
+      "progressIndeterminate": true,
+      "progressActive": false,
+      "counts": {
+        "secret": null,
+        "sbom": null,
+        "vuln": null,
+        "config": 1
+      },
+      "checks": {
+        "secret": null,
+        "sbom": null,
+        "vuln": null,
+        "config": "checked"
+      }
+    },
+    "cancel_preservation": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "phase": "cancel-preservation",
+      "preCancelProgress": {
+        "basis": "durable-outcomes-v1",
+        "requestedChecks": [
+          "secret",
+          "sbom",
+          "vuln",
+          "config"
+        ],
+        "outcomes": {
+          "secret": null,
+          "sbom": null,
+          "vuln": null,
+          "config": "checked"
+        },
+        "resolvedChecks": 1,
+        "checkedChecks": 1
+      },
+      "preservationBasis": "post-cancel-published-baseline-v1",
+      "phaseElapsedMs": 2043,
+      "preCancelFindingsRead": false,
+      "preCancelByteComparison": false,
+      "postCancelBaselineVerified": true,
+      "observedCompletedChecks": [
+        "config"
+      ]
+    },
+    "cancel_reload": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanId": "e5e6ddd4-4c0a-471f-98f9-5d221a92c037",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "cancelled",
+      "phase": "cancel-reload",
+      "progress": {
+        "basis": "durable-outcomes-v1",
+        "requestedChecks": [
+          "secret",
+          "sbom",
+          "vuln",
+          "config"
+        ],
+        "outcomes": {
+          "secret": null,
+          "sbom": null,
+          "vuln": null,
+          "config": "checked"
+        },
+        "resolvedChecks": 1,
+        "checkedChecks": 1
+      },
+      "phaseElapsedMs": 2472,
+      "historyUnchanged": true,
+      "progressObserved": true,
+      "progressIndeterminate": true,
+      "progressActive": false,
+      "counts": {
+        "secret": null,
+        "sbom": null,
+        "vuln": null,
+        "config": 1
+      },
+      "checks": {
+        "secret": null,
+        "sbom": null,
+        "vuln": null,
+        "config": "checked"
+      }
+    },
+    "cancel_history": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "phase": "cancel-history",
+      "phaseElapsedMs": 411,
+      "checkedSets": 1
+    },
+    "cancel_fresh_login": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "state": "cancelled",
+      "phase": "cancel-fresh-login",
+      "phaseElapsedMs": 2239,
+      "historyUnchanged": true,
+      "progressObserved": true,
+      "progressIndeterminate": true,
+      "progressActive": false
+    },
+    "safety": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "failure": false,
+      "scanLaunches": 1,
+      "cancelPosts": 1,
+      "accountsCreated": 1,
+      "pageErrors": 0,
+      "blockedRequests": 0,
+      "ignoredEligibility": 0,
+      "noGenerationPosts": true,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}

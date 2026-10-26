@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import type { AuthStore, SessionSnapshot } from '../auth/auth.store.js';
+import { abortDiagnostic, diagnose, stoppedDiagnostic } from './provider-diagnostic.js';
 import { originForRequest, tokenFrom } from '../auth/auth.controller.js';
 import type { Identity } from '../security/identity.js';
 import { browserIdentity, type BrowserRequest, type BrowserScanLocalOrigin } from './browser-identity.js';
@@ -46,7 +47,10 @@ export class TranslationService {
   private current<T>(access: Access, initial: TranslationSnapshot, policy: LlmPolicy | null, signal: AbortSignal | undefined,
     action: () => T): T {
     return this.guard(access, () => {
-      if (signal?.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+      if (signal?.aborted) {
+        const error = new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+        stoppedDiagnostic(signal, error); throw error;
+      }
       const fresh = this.runtime.policy();
       if ((fresh?.version ?? null) !== (policy?.version ?? null) || !!fresh?.freeOnly !== !!policy?.freeOnly)
         throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
@@ -79,10 +83,10 @@ export class TranslationService {
     const releaseCapacity = this.acquire(access.identity.subject);
     let transferred = false, released = false;
     const release = () => { if (!released) { released = true; releaseCapacity(); } };
-    const controller = new AbortController(), abort = () => controller.abort();
+    const controller = new AbortController(), abort = () => abortDiagnostic(controller, 'caller_abort');
     signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) controller.abort();
-    const deadline = setTimeout(abort, policy.timeoutMs);
+    if (signal.aborted) abort();
+    const deadline = setTimeout(() => abortDiagnostic(controller, 'deadline'), policy.timeoutMs);
     let ledger: QuotaLedger | undefined, reservation: string | undefined;
     try {
       this.current(access, snapshot, policy, controller.signal, () => undefined);
@@ -118,7 +122,12 @@ export class TranslationService {
       transferred = true;
       return { value, write: action => this.current(access, snapshot, policy, signal, action), release };
     } catch (error) {
-      if (error instanceof HttpException) throw error;
+      if (error instanceof HttpException) {
+        const value = error.getResponse();
+        if (value && typeof value === 'object' && 'errorCode' in value && value.errorCode === 'LLM_INVALID_RESPONSE')
+          diagnose(error, 'content', 'invalid_content');
+        throw error;
+      }
       throw new ServiceUnavailableException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
     } finally {
       if (ledger && reservation) { try { ledger.release(reservation); } catch { /* Dispatched liability is never refunded. */ } }

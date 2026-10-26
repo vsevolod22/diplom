@@ -1,3 +1,4 @@
+import '@testing-library/jest-dom/vitest';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -86,11 +87,10 @@ function mount(sourceTransport = transport(), value = status) {
     </>,
   );
 }
-async function consentAndGenerate() {
-  const checkbox = await screen.findByRole('checkbox');
-  await waitFor(() => expect((checkbox as HTMLInputElement).disabled).toBe(false));
-  fireEvent.click(checkbox);
-  fireEvent.click(screen.getByRole('button', { name: 'Получить сводку' }));
+async function generate() {
+  const button = screen.getByRole('button', { name: 'Получить сводку' });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(button);
 }
 beforeEach(() => {
   requests.length = 0;
@@ -102,23 +102,23 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it('mount/focus only GET, disclosure is explicit, absent free field never implies free and consent starts unchecked', async () => {
+it('mount/focus only GET, disclosure is explicit, absent free field never implies free and generation requires only its explicit button', async () => {
   mockApi();
   mount();
   await screen.findByText(/Бесплатный режим не подтверждён/);
-  expect(screen.getByText(/global: регион не ограничен/)).toBeTruthy();
+  expect(screen.getByText(/регион не ограничен/)).toBeTruthy();
   expect(screen.getByText(/декларация не доказывают/)).toBeTruthy();
-  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
-  expect((screen.getByRole('button', { name: 'Получить сводку' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByRole('checkbox')).toBeNull();
+  expect((screen.getByRole('button', { name: 'Получить сводку' }) as HTMLButtonElement).disabled).toBe(false);
   fireEvent.focus(window);
   await waitFor(() => expect(requests.length).toBe(2));
   expect(requests.every((request) => request.init?.method === 'GET')).toBe(true);
 });
-it('exact opt-in POST DTO, pending double-click prevention, per-request consent reset and late-page finding link', async () => {
+it('exact opt-in POST DTO, pending double-click prevention, fresh per-request consent and late-page finding link', async () => {
   mockApi();
   const source = transport();
   mount(source);
-  await consentAndGenerate();
+  await generate();
   fireEvent.click(screen.getByRole('button', { name: 'Получить сводку' }));
   await screen.findByText('Проверьте исходную находку');
   const post = requests.filter((request) => request.init?.method === 'POST');
@@ -131,11 +131,11 @@ it('exact opt-in POST DTO, pending double-click prevention, per-request consent 
   expect(post[0].init).toMatchObject({ cache: 'no-store', credentials: 'same-origin', redirect: 'error' });
   expect(source.results).toHaveBeenCalledTimes(2);
   const link = screen.getByRole('link', { name: 'Находка secret-0-1' });
-  expect(document.getElementById(link.getAttribute('href')!.slice(1))?.textContent).toContain('Secrets');
-  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
+  expect(document.getElementById(link.getAttribute('href')!.slice(1))?.textContent).toContain('Секреты');
+  expect(screen.queryByRole('checkbox')).toBeNull();
 });
 for (const change of ['policy', 'report', 'disclosure', 'disabled'] as const) {
-  it(`context ${change} change before POST resets consent with zero POST`, async () => {
+  it(`context ${change} change before POST requires fresh intent with zero POST`, async () => {
     let current = context;
     mockApi(() => current);
     mount();
@@ -148,17 +148,78 @@ for (const change of ['policy', 'report', 'disclosure', 'disabled'] as const) {
           : change === 'disclosure'
             ? { ...context, disclosure: { ...context.disclosure!, model: 'vendor/new' } }
             : { ...context, enabled: false, policyVersion: null, disclosure: null };
-    await consentAndGenerate();
+    await generate();
     await screen.findByRole('alert');
     expect(requests.some((request) => request.init?.method === 'POST')).toBe(false);
-    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
+    expect(screen.queryByRole('checkbox')).toBeNull();
   });
 }
+it('a changed policy consumes no generation intent; only a new click accepts the newly displayed policy', async () => {
+  let current = context;
+  mockApi(() => current);
+  mount();
+  await screen.findByText(/Бесплатный режим не подтверждён/);
+  current = { ...context, policyVersion: 'd'.repeat(64) };
+  await generate();
+  await screen.findByRole('alert');
+  expect(requests.filter((request) => request.init?.method === 'POST')).toHaveLength(0);
+  expect(screen.getByText(/Привязка запроса/).parentElement).toHaveTextContent(current.policyVersion!);
+  await act(async () => {});
+  expect(requests.filter((request) => request.init?.method === 'POST')).toHaveLength(0);
+  await generate();
+  await screen.findByText('Проверьте исходную находку');
+  const posts = requests.filter((request) => request.init?.method === 'POST');
+  expect(posts).toHaveLength(1);
+  expect(JSON.parse(String(posts[0].init?.body)).consent).toEqual({
+    accepted: true,
+    policyVersion: current.policyVersion,
+  });
+});
+
+it('a real failure stays visible across GET refresh; one new click sends fresh consent and never labels all output as hypotheses', async () => {
+  let current = context;
+  let failing = true;
+  mockApi(
+    () => current,
+    () =>
+      failing ? json({ errorCode: 'LLM_PROVIDER_UNAVAILABLE', message: 'PRIVATE_CANARY' }, 503) : json(reply),
+  );
+  mount();
+  await generate();
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('Не удалось безопасно получить сводку');
+  expect(screen.queryByLabelText('Сводка ИИ · требует проверки')).toBeNull();
+  current = { ...context, policyVersion: 'd'.repeat(64) };
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  const button = screen.getByRole('button', { name: 'Получить сводку' });
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(screen.getByRole('alert')).toBe(alert);
+  expect(requests.filter((request) => request.init?.method === 'POST')).toHaveLength(1);
+  expect(button).toHaveAccessibleDescription(/очищенные находки и покрытие этого отчёта/);
+  expect(button).toHaveAccessibleDescription(/OpenRouter/);
+  expect(button).toHaveAccessibleDescription(/Бесплатность не подтверждена/);
+  failing = false;
+  fireEvent.click(button);
+  fireEvent.click(button);
+  await screen.findByText('Проверьте исходную находку');
+  const posts = requests.filter((request) => request.init?.method === 'POST');
+  expect(posts).toHaveLength(2);
+  expect(JSON.parse(String(posts[1].init?.body)).consent).toEqual({
+    accepted: true,
+    policyVersion: current.policyVersion,
+  });
+  expect(screen.getByRole('heading', { name: 'Пункт 1 · интерпретация ИИ' })).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Основания ответа' })).toBeVisible();
+  expect(screen.queryByRole('checkbox')).toBeNull();
+  expect(document.body.textContent).not.toMatch(/Гипотеза|Sanitized scanner|scanner results|PRIVATE_CANARY/);
+});
+
 it('policy changes after POST discard the result and retain original report', async () => {
   let reads = 0;
   mockApi(() => (++reads > 2 ? { ...context, policyVersion: 'd'.repeat(64) } : context));
   mount();
-  await consentAndGenerate();
+  await generate();
   await screen.findByRole('alert');
   expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
   expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
@@ -173,7 +234,7 @@ for (const [code, message] of [
   it(`safe ${code} does not echo raw diagnostic or hide scanner report`, async () => {
     mockApi(undefined, () => json({ errorCode: code, message: 'PRIVATE_CANARY' }, 503));
     mount();
-    await consentAndGenerate();
+    await generate();
     expect((await screen.findByRole('alert')).textContent).toMatch(message);
     expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
     expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeTruthy();
@@ -189,15 +250,49 @@ it('cancel aborts POST and ignores a late response even if transport ignores abo
       }),
   );
   mount();
-  await consentAndGenerate();
+  await generate();
   await waitFor(() => expect(requests.some((request) => request.init?.method === 'POST')).toBe(true));
   const signal = requests.find((request) => request.init?.method === 'POST')!.init!.signal!;
   fireEvent.click(screen.getByRole('button', { name: 'Отменить запрос сводки' }));
   expect(signal.aborted).toBe(true);
   await act(async () => resolve(json(reply)));
   expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
-  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false);
+  expect(screen.queryByRole('checkbox')).toBeNull();
 });
+it('cancelled noncooperative generation cannot overwrite a newer explicit request or continue reading sources', async () => {
+  mockApi();
+  const client = createSummaryClient(scanSession());
+  vi.spyOn(client, 'context').mockResolvedValue(context);
+  let finish!: (value: SummaryReply) => void;
+  const summary = vi
+    .spyOn(client, 'summary')
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValueOnce(reply);
+  const source = transport();
+  render(<ScanSummaryPanel status={status} transport={source} client={client} />);
+  await generate();
+  await waitFor(() => expect(summary).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole('button', { name: 'Отменить запрос сводки' }));
+  expect(summary.mock.calls[0][1].aborted).toBe(true);
+  await generate();
+  await screen.findByText('Проверьте исходную находку');
+  await act(async () => {
+    finish({
+      ...reply,
+      hypotheses: [{ ...reply.hypotheses[0], text: 'Поздний ответ отменённого запроса' }],
+    });
+  });
+  expect(screen.queryByText('Поздний ответ отменённого запроса')).toBeNull();
+  expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
+  expect(summary).toHaveBeenCalledTimes(2);
+  expect(source.results).toHaveBeenCalledTimes(2);
+});
+
 it('same-subject session generation change aborts immediately and clears consent/result', async () => {
   let resolve!: (response: Response) => void;
   mockApi(
@@ -208,7 +303,7 @@ it('same-subject session generation change aborts immediately and clears consent
       }),
   );
   mount();
-  await consentAndGenerate();
+  await generate();
   await waitFor(() => expect(requests.some((request) => request.init?.method === 'POST')).toBe(true));
   const signal = requests.find((request) => request.init?.method === 'POST')!.init!.signal!;
   act(() => transitionScanSession('alice', new QueryClient(), true));
@@ -227,7 +322,7 @@ it('route/status remount aborts old request and drops its response', async () =>
       }),
   );
   const view = mount();
-  await consentAndGenerate();
+  await generate();
   await waitFor(() => expect(requests.some((request) => request.init?.method === 'POST')).toBe(true));
   const signal = requests.find((request) => request.init?.method === 'POST')!.init!.signal!;
   view.unmount();
@@ -235,6 +330,69 @@ it('route/status remount aborts old request and drops its response', async () =>
   await act(async () => resolve(json(reply)));
   expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
 });
+it('bounds a noncooperative context read at 45 seconds without POST and ignores its late result', async () => {
+  mockApi();
+  const client = createSummaryClient(scanSession());
+  let finish!: (value: SummaryContext) => void;
+  let signal!: AbortSignal;
+  const read = vi.spyOn(client, 'context').mockImplementationOnce((_id, requestSignal) => {
+    signal = requestSignal;
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  });
+  vi.useFakeTimers();
+  render(<ScanSummaryPanel status={status} transport={transport()} client={client} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(45001);
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent('Сводка не получена вовремя');
+  expect(signal.aborted).toBe(true);
+  expect(screen.getByRole('button', { name: 'Получить сводку' })).toBeDisabled();
+  await act(async () => {
+    finish(context);
+  });
+  expect(screen.getByRole('button', { name: 'Получить сводку' })).toBeDisabled();
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(requests.filter((request) => request.init?.method === 'POST')).toHaveLength(0);
+});
+
+it('bounds a noncooperative generation at 45 seconds and cannot publish or continue reads after late completion', async () => {
+  mockApi();
+  const client = createSummaryClient(scanSession());
+  vi.spyOn(client, 'context').mockResolvedValue(context);
+  let finish!: (value: SummaryReply) => void;
+  const summary = vi.spyOn(client, 'summary').mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const source = transport();
+  render(<ScanSummaryPanel status={status} transport={source} client={client} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Получить сводку' })).toBeEnabled());
+  vi.useFakeTimers();
+  fireEvent.click(screen.getByRole('button', { name: 'Получить сводку' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Получить сводку' }));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(44999);
+  });
+  expect(summary).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('alert')).toBeNull();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2);
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent('Сводка не получена вовремя');
+  expect(summary.mock.calls[0][1].aborted).toBe(true);
+  await act(async () => {
+    finish(reply);
+    await vi.advanceTimersByTimeAsync(86400001);
+  });
+  expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
+  expect(source.results).not.toHaveBeenCalled();
+  expect(summary).toHaveBeenCalledTimes(1);
+});
+
 it('bounded timeout finishes even when fetch ignores abort', async () => {
   vi.useFakeTimers();
   vi.stubGlobal(
@@ -294,7 +452,7 @@ it('hostile generated text remains literal plaintext, not HTML, Markdown, URL or
     }),
   );
   mount();
-  await consentAndGenerate();
+  await generate();
   await screen.findByText(/<img src=x/);
   expect(document.querySelector('img')).toBeNull();
   expect(screen.queryByRole('link', { name: 'evil' })).toBeNull();
@@ -382,7 +540,7 @@ it('config hash citation resolves a local source anchor without URL decoding mis
   );
   const sources = transport();
   mount(sources, configStatus);
-  await consentAndGenerate();
+  await generate();
   const link = await screen.findByRole('link', { name: `Находка ${digest}` });
   expect(
     document.getElementById(decodeURIComponent(link.getAttribute('href')!.slice(1)))?.textContent,

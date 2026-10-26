@@ -1,0 +1,277 @@
+{
+  "status": "SIX_APPLIED_AND_SAVED_FULL_DOCUMENTS_VALIDATED",
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "apply_hold": false,
+  "policy": {
+    "spec_mode": "strict",
+    "require_proposal_approval": false,
+    "spec_first": false,
+    "profile": "full",
+    "execution_order": "parallel",
+    "completion_flow": "direct"
+  },
+  "verification_note": "Actual validate_spec calls sent complete raw bodies. Tool returns valid:true without receipt ID or server hash; local hashes identify intended submitted text/mirror, not a machine-computed remote comparison. Strict proposal ops were read and contain zero removed/renamed. No runtime/provider suites run. Before apply: fresh full policy/doc/delta/base/source/body/ops reads matched. All six successful apply receipts retained below; post-apply validate_spec by saved doc slug returned valid:true for all six entire current documents. No validator receipt ID, version or server digest is returned. Pending review_status remains legitimate under require_proposal_approval=false; no approval tool was called.",
+  "preserved_work": "41081c06-0977-40c7-8394-b8f44e7284c9",
+  "records": [
+    {
+      "doc": 1,
+      "base_version": 6,
+      "source": "DIP-TASK-9",
+      "old_delta_id": null,
+      "old_state": null,
+      "new_delta_id": "a5b66f4c-40fb-44da-a8c4-5aa2f3b8300a",
+      "new_state": "applied",
+      "review_status": "pending",
+      "applied": true,
+      "local_fullbody_path": "docs/public-progress-20261025-doc1-reconciled-full.md",
+      "utf8_bytes": 73423,
+      "local_sha256": "7a5def2a96c2c9c5e54bd07ac82bae6e0a5f9c473fea21bace0ae062edb1467b",
+      "requirements": 40,
+      "scenarios": 56,
+      "raw_fullbody_validate_spec_response": {
+        "valid": true
+      },
+      "ops": {
+        "added": 1,
+        "modified": 0,
+        "removed": 0,
+        "renamed": 0
+      },
+      "pre_apply_state": {
+        "state": "proposed",
+        "review_status": "pending",
+        "applied": false
+      },
+      "version_no": 7,
+      "applied_at": "2026-10-25 20:57:45.264439+00",
+      "post_apply_validate_spec": {
+        "inputs": {
+          "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+          "doc_slug": "DIP-DOC-1"
+        },
+        "response": {
+          "valid": true
+        },
+        "scope": "Entire saved current document; version associated with successful apply receipt, not a version or digest returned by validate_spec."
+      }
+    },
+    {
+      "doc": 2,
+      "base_version": 8,
+      "source": "DIP-TASK-9",
+      "old_delta_id": "a8f60d6f-3d4c-429f-9e0e-1d2cdf5339b7",
+      "old_state": "discarded",
+      "new_delta_id": "13b160a7-edfe-40a4-93d0-b902efc2b860",
+      "new_state": "applied",
+      "review_status": "pending",
+      "applied": true,
+      "local_fullbody_path": "docs/public-progress-20261025-doc2-reconciled-full.md",
+      "utf8_bytes": 56612,
+      "local_sha256": "87be1b5524f78f1f22f29a315e12c503b46ce95536437070e4f3116aa5a5686c",
+      "requirements": 32,
+      "scenarios": 52,
+      "raw_fullbody_validate_spec_response": {
+        "valid": true
+      },
+      "ops": {
+        "added": 3,
+        "modified": 0,
+        "removed": 0,
+        "renamed": 0
+      },
+      "pre_apply_state": {
+        "state": "proposed",
+        "review_status": "pending",
+        "applied": false
+      },
+      "version_no": 9,
+      "applied_at": "2026-10-25 20:57:45.409735+00",
+      "post_apply_validate_spec": {
+        "inputs": {
+          "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+          "doc_slug": "DIP-DOC-2"
+        },
+        "response": {
+          "valid": true
+        },
+        "scope": "Entire saved current document; version associated with successful apply receipt, not a version or digest returned by validate_spec."
+      }
+    },
+    {
+      "doc": 8,
+      "base_version": 3,
+      "source": "DIP-TASK-42",
+      "old_delta_id": "f1f39780-e53d-4d18-a3d9-e345312c67fb",
+      "old_state": "discarded",
+      "new_delta_id": "3a28d6a0-1923-4aaa-92ae-20e0d31b3b78",
+      "new_state": "applied",
+      "review_status": "pending",
+      "applied": true,
+      "local_fullbody_path": "docs/public-progress-20261025-doc8-reconciled-full.md",
+      "utf8_bytes": 28983,
+      "local_sha256": "d8860560a007137de5b369a11db392f83069f7ab3f0d27a6a60c22f56a7e533f",
+      "requirements": 10,
+      "scenarios": 23,
+      "raw_fullbody_validate_spec_response": {
+        "valid": true
+      },
+      "ops": {
+        "added": 2,
+        "modified": 2,
+        "removed": 0,
+        "renamed": 0
+      },
+      "pre_apply_state": {
+        "state": "proposed",
+        "review_status": "pending",
+        "applied": false
+      },
+      "version_no": 4,
+      "applied_at": "2026-10-25 20:57:45.560525+00",
+      "post_apply_validate_spec": {
+        "inputs": {
+          "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+          "doc_slug": "DIP-DOC-8"
+        },
+        "response": {
+          "valid": true
+        },
+        "scope": "Entire saved current document; version associated with successful apply receipt, not a version or digest returned by validate_spec."
+      }
+    },
+    {
+      "doc": 9,
+      "base_version": 2,
+      "source": "DIP-TASK-42",
+      "old_delta_id": "e41fc1f0-0703-4d6d-b888-a97fc91a5232",
+      "old_state": "discarded",
+      "new_delta_id": "3c665278-064e-452d-b78a-e4ae8952208d",
+      "new_state": "applied",
+      "review_status": "pending",
+      "applied": true,
+      "local_fullbody_path": "docs/public-progress-20261025-doc9-proposed-full.md",
+      "utf8_bytes": 14898,
+      "local_sha256": "85e8f91b43df59b35495bba618d4befce912f2480ff979bdecb265d9deff5436",
+      "requirements": 7,
+      "scenarios": 12,
+      "raw_fullbody_validate_spec_response": {
+        "valid": true
+      },
+      "ops": {
+        "added": 0,
+        "modified": 4,
+        "removed": 0,
+        "renamed": 0
+      },
+      "transcription_erratum": "Non-goals reference contains Cyrillic U+0422 in DIP-ТASK-16 instead of ASCII T. Intended reconciled file remains untouched; proposed-full file mirrors actual submitted complete body, separately raw-validated after proposal. Requirements unchanged; no unauthorized pending edit or extra proposal.",
+      "pre_apply_state": {
+        "state": "proposed",
+        "review_status": "pending",
+        "applied": false
+      },
+      "version_no": 3,
+      "applied_at": "2026-10-25 20:57:45.686785+00",
+      "post_apply_validate_spec": {
+        "inputs": {
+          "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+          "doc_slug": "DIP-DOC-9"
+        },
+        "response": {
+          "valid": true
+        },
+        "scope": "Entire saved current document; version associated with successful apply receipt, not a version or digest returned by validate_spec."
+      }
+    },
+    {
+      "doc": 15,
+      "base_version": 3,
+      "source": "DIP-TASK-42",
+      "old_delta_id": "51d4cad7-64e8-4813-bcfb-c33ee8f15df7",
+      "old_state": "discarded",
+      "new_delta_id": "7b25f2c3-96cc-4a48-a560-7e4113fdb9af",
+      "new_state": "applied",
+      "review_status": "pending",
+      "applied": true,
+      "local_fullbody_path": "docs/public-progress-20261025-doc15-reconciled-full.md",
+      "utf8_bytes": 27056,
+      "local_sha256": "32541b31a72fd16fc5daff4e307a8a3eddfe012d56bca524248338776e523c9d",
+      "requirements": 13,
+      "scenarios": 23,
+      "raw_fullbody_validate_spec_response": {
+        "valid": true
+      },
+      "ops": {
+        "added": 2,
+        "modified": 2,
+        "removed": 0,
+        "renamed": 0
+      },
+      "pre_apply_state": {
+        "state": "proposed",
+        "review_status": "pending",
+        "applied": false
+      },
+      "version_no": 4,
+      "applied_at": "2026-10-25 20:57:45.828902+00",
+      "post_apply_validate_spec": {
+        "inputs": {
+          "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+          "doc_slug": "DIP-DOC-15"
+        },
+        "response": {
+          "valid": true
+        },
+        "scope": "Entire saved current document; version associated with successful apply receipt, not a version or digest returned by validate_spec."
+      }
+    },
+    {
+      "doc": 16,
+      "base_version": 3,
+      "source": "DIP-TASK-42",
+      "old_delta_id": "5dbc70b3-0514-4991-a780-1b4e9ed8dc79",
+      "old_state": "discarded",
+      "new_delta_id": "2ed46b13-da37-474b-9e46-ccf89339b04e",
+      "new_state": "applied",
+      "review_status": "pending",
+      "applied": true,
+      "local_fullbody_path": "docs/public-progress-20261025-doc16-reconciled-full.md",
+      "utf8_bytes": 32548,
+      "local_sha256": "769b090065cff27c6b4d9d67abc93345726c156e287d20aaca6bd47957d56eb6",
+      "requirements": 15,
+      "scenarios": 21,
+      "raw_fullbody_validate_spec_response": {
+        "valid": true
+      },
+      "ops": {
+        "added": 1,
+        "modified": 4,
+        "removed": 0,
+        "renamed": 0
+      },
+      "pre_apply_state": {
+        "state": "proposed",
+        "review_status": "pending",
+        "applied": false
+      },
+      "version_no": 4,
+      "applied_at": "2026-10-25 20:57:45.948392+00",
+      "post_apply_validate_spec": {
+        "inputs": {
+          "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+          "doc_slug": "DIP-DOC-16"
+        },
+        "response": {
+          "valid": true
+        },
+        "scope": "Entire saved current document; version associated with successful apply receipt, not a version or digest returned by validate_spec."
+      }
+    }
+  ],
+  "previous_disposition": {
+    "status": "SIX_FULL_BODIES_VALIDATED_AND_PROPOSED_NOT_APPLIED",
+    "apply_hold": true
+  },
+  "authorization": "Explicit owner authorization after owner-reported ONE normal rollout READY/exit0, preservation of accounts/reports/JWT/history/quota and final independent production-source GO. These operational claims are attributed, not independently tested by this spec lane.",
+  "native_acceptance": "PENDING: no native AI/progress, provider, semantic, privacy, billing or runtime PASS asserted; no task lifecycle/content/progress/closure changes.",
+  "historical_authoring_notes": "APPLY HOLD/TARGET/rework wording preserved in fullbody documents records authoring-time history. Explicit owner rollout/source GO supersedes HOLD only for these six applied revisions, not native qualification. Historical FAIL evidence and completed H7 work remain unchanged."
+}

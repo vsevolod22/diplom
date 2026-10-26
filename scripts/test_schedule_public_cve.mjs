@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fixture, ROOT } from './public-refresh-cve-fixtures.mjs';
+import { createCveScheduler } from './schedule-local-cve.mjs';
 import {
   publicCveScheduler,
   agentPlist,
@@ -233,4 +234,102 @@ test('installer is fixture-only, no overwrite or restart/adoption of foreign pli
   fs.writeFileSync(path, 'foreign', { mode: 0o600 });
   await assert.rejects(scheduler.scheduleCve(['install'], options));
   assert.equal(fs.readFileSync(path, 'utf8'), 'foreign');
+});
+
+test('status accepts exact launchd metadata with no receipt and only prints the existing fixture job', async (t) => {
+  const f = fixture(t), scheduler = publicCveScheduler({ integration: f.integration });
+  const home = join(f.root, 'home'), node = fs.realpathSync(process.execPath);
+  fs.mkdirSync(home, { mode: 0o700 });
+  fs.mkdirSync(join(home, 'Library'), { mode: 0o700 });
+  fs.mkdirSync(join(home, 'Library/LaunchAgents'), { mode: 0o700 });
+  const path = join(home, 'Library/LaunchAgents', `${LABEL}.plist`);
+  const plist = scheduler.agentPlist({ root: f.root, home, node });
+  fs.writeFileSync(path, plist, { mode: 0o600 });
+  const identity = fs.lstatSync(path), calls = [], logs = [];
+  await scheduler.scheduleCve(['status'], {
+    root: f.root, home, node, platform: 'darwin', uid: 501, log: text => logs.push(text),
+    run: async (exe, args) => {
+      assert.equal(exe, '/bin/launchctl');
+      assert.deepEqual(args, ['print', `gui/501/${LABEL}`]);
+      calls.push(args);
+      return loaded({ root: f.root, home, node }).replace('TZ => UTC', `TZ => UTC\nXPC_SERVICE_NAME => ${LABEL}\nOSLogRateLimit => 64`);
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(logs, [`PUBLIC CVE schedule loaded: ${LABEL}, every 6 hours.`]);
+  assert.equal(fs.readFileSync(path, 'utf8'), plist);
+  assert.equal(fs.lstatSync(path).ino, identity.ino);
+  assert.equal(fs.existsSync(join(f.stand, 'cve-refresh-status.json')), false);
+  assert.equal(fs.existsSync(join(f.stand, '.cve-schedule.lock')), false);
+  assert.equal(f.calls.length, 0);
+});
+
+const metadataOptions = { root: '/fixture/repo', home: '/fixture/home', node: '/fixture/node' };
+const metadataIdentity = { ...metadataOptions, path: join(metadataOptions.home, 'Library/LaunchAgents', `${LABEL}.plist`) };
+const withMetadata = lines => loaded(metadataOptions).replace('TZ => UTC', 'TZ => UTC\n' + lines.join('\n'));
+for (const lines of [[], [`XPC_SERVICE_NAME => ${LABEL}`], ['OSLogRateLimit => 64'], [`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64']]) {
+  test('public accepts only present exact optional launchd metadata: ' + lines.length + ' fields', () => {
+    validateLoadedAgent(withMetadata(lines), metadataIdentity);
+  });
+}
+for (const lines of [
+  ['UNREVIEWED_METADATA => 64'], ['OPENROUTER_API_KEY => PRIVATE-SYNTHETIC'],
+  ['XPC_SERVICE_NAME => io.diplom.local-full.cve-refresh'], ['XPC_SERVICE_NAME =>'],
+  ['OSLogRateLimit => 0'], ['OSLogRateLimit => 63'], ['OSLogRateLimit => 64.0'], ['OSLogRateLimit => +64'],
+  [`XPC_SERVICE_NAME => ${LABEL}`, `XPC_SERVICE_NAME => ${LABEL}`], ['OSLogRateLimit => 64', 'OSLogRateLimit => 64'],
+  [`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64', 'EXTRA => PRIVATE-SYNTHETIC'],
+]) test('public rejects unknown/mismatched/duplicate metadata without weakening the exact count', () => {
+  assert.throws(() => validateLoadedAgent(withMetadata(lines), metadataIdentity), error => !error.message.includes('PRIVATE-SYNTHETIC'));
+});
+for (const key of ['HOME', 'PATH', 'LANG', 'TZ']) test('optional launchd metadata never substitutes required ' + key, () => {
+  const valid = withMetadata([`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64']);
+  const line = valid.split('\n').find(s => s.startsWith(key + ' => '));
+  assert.throws(() => validateLoadedAgent(valid.replace(line + '\n', ''), metadataIdentity));
+  assert.throws(() => validateLoadedAgent(valid.replace(line, key + ' => PRIVATE-SYNTHETIC'), metadataIdentity));
+});
+for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'DYLD_INSERT_LIBRARIES', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+  for (const block of ['environment', 'inherited environment', 'default environment']) test('public still rejects dangerous ' + name + ' in ' + block, () => {
+    const line = name + ' => PRIVATE-SYNTHETIC';
+    const text = block === 'environment' ? withMetadata([`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64', line]) :
+      loaded(metadataOptions).replace('environment = {', block + ' = {\n' + line + '\n}\nenvironment = {');
+    assert.throws(() => validateLoadedAgent(text, metadataIdentity), error => !error.message.includes('PRIVATE-SYNTHETIC'));
+  });
+}
+for (const control of ['\0', '\x07', '\x0b', '\x0c', '\x1b', '\x7f']) test('public rejects control characters rather than trimming hidden metadata into authority', () => {
+  assert.throws(() => validateLoadedAgent(withMetadata(['OSLogRateLimit => 64' + control]), metadataIdentity));
+});
+test('legitimate launchctl indentation and CRLF remain accepted', () => {
+  const text = withMetadata([`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64']).split('\n').map(line => '\t' + line).join('\r\n');
+  validateLoadedAgent(text, metadataIdentity);
+});
+for (const text of [
+  withMetadata(['OSLogRateLimit=64']), withMetadata(['nested = {', 'OSLogRateLimit => 64', '}']),
+  withMetadata(['OSLogRateLimit => 64']).slice(0, -1), withMetadata(['OSLogRateLimit => 64']) + '\n}',
+  withMetadata(['OSLogRateLimit => 64']).replace('arguments = {', 'environment = {'),
+]) test('public rejects malformed loaded metadata/structure', () => {
+  assert.throws(() => validateLoadedAgent(text, metadataIdentity));
+});
+test('optional metadata is explicit opt-in; strict shared default does not admit it', () => {
+  const shared = createCveScheduler({ label: LABEL, script: 'schedule-public-cve.mjs', strictLoadedEnvironment: true });
+  shared.validateLoadedAgent(loaded(metadataOptions), metadataIdentity);
+  assert.throws(() => shared.validateLoadedAgent(withMetadata([`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64']), metadataIdentity));
+});
+test('metadata hook rejects getters, unknown keys, required overrides and malformed values without evaluating them', () => {
+  let getterCalls = 0;
+  const getter = Object.defineProperty({}, 'OSLogRateLimit', { enumerable: true, get() { getterCalls++; throw Error('PRIVATE'); } });
+  const stringifier = { toString() { assert.fail('must not coerce metadata values'); } };
+  for (const metadata of [getter, null, [], 'PRIVATE', new Map(), { HOME: '/foreign' }, { NODE_OPTIONS: 'PRIVATE' },
+    { XPC_SERVICE_NAME: 'foreign' }, { OSLogRateLimit: '0' }, { OSLogRateLimit: stringifier }, { [Symbol('foreign')]: '64' }]) {
+    assert.throws(() => createCveScheduler({ label: LABEL, strictLoadedEnvironment: true, loadedEnvironmentMetadata: metadata }));
+  }
+  assert.equal(getterCalls, 0);
+  assert.throws(() => createCveScheduler({ label: LABEL, loadedEnvironmentMetadata: { OSLogRateLimit: '64' } }));
+});
+test('hook is captured, not a later-mutable environment permission; raw output objects are never coerced', () => {
+  const metadata = { XPC_SERVICE_NAME: LABEL, OSLogRateLimit: '64' };
+  const shared = createCveScheduler({ label: LABEL, script: 'schedule-public-cve.mjs', strictLoadedEnvironment: true, loadedEnvironmentMetadata: metadata });
+  metadata.OSLogRateLimit = '0'; metadata.EXTRA = 'PRIVATE';
+  shared.validateLoadedAgent(withMetadata([`XPC_SERVICE_NAME => ${LABEL}`, 'OSLogRateLimit => 64']), metadataIdentity);
+  assert.throws(() => shared.validateLoadedAgent(withMetadata(['OSLogRateLimit => 0']), metadataIdentity));
+  assert.throws(() => shared.validateLoadedAgent({ toString() { assert.fail('raw output coercion'); } }, metadataIdentity));
 });

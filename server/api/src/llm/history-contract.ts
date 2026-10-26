@@ -3,6 +3,9 @@ import { BadRequestException, ConflictException, ServiceUnavailableException } f
 import type { ReportContext, SafeFinding } from './report-context.js';
 import { exact, invalidReply, object } from './response.js';
 import { safeHistoryFinding } from './history-sources.js';
+import { groundedIdentifiers, russianHumanText } from './russian-text.js';
+import { diagnose } from './provider-diagnostic.js';
+import { BadGatewayException } from '@nestjs/common';
 
 export const HISTORY = Object.freeze({ version: 'owner-history-v1', questionBytes: 2048, bodyBytes: 8192,
   scopeBytes: 524288, turns: 256, decisions: 128, references: 4096, heads: 128,
@@ -60,7 +63,7 @@ const budgetBinding: ReportBinding = Object.freeze({ scanId: '00000000-0000-0000
 export function historyProjection(head: HistoryHead, binding: ReportBinding = budgetBinding) {
   return { ...binding, ...publicHistory(head) };
 }
-export function validateChatReply(value: unknown, report: ReportContext): ChatReply {
+export function validateChatReply(value: unknown, report: ReportContext, requireRussian = false): ChatReply {
   if (!exact(value, ['scanId', 'digest', 'platform', 'reportVersion', 'text', 'citations']) ||
     !Object.entries(reportBinding(report)).every(([key, entry]) => value[key] === entry) ||
     !Array.isArray(value.citations) || value.citations.length < 1 || value.citations.length > HISTORY.citations ||
@@ -74,6 +77,11 @@ export function validateChatReply(value: unknown, report: ReportContext): ChatRe
     if (bytes(source) > HISTORY.citationBytes) return invalidReply();
     return source;
   });
+  const evidence = sources.map(source => source.finding);
+  if (requireRussian && !groundedIdentifiers(text, evidence))
+    throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), 'grounding', 'unknown_identifier');
+  if (requireRussian && !russianHumanText(text, JSON.stringify(evidence)))
+    throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), 'language', 'not_russian');
   return { ...reportBinding(report), kind: 'hypothesis', text, sources };
 }
 export function validateHead(value: unknown): asserts value is HistoryHead {

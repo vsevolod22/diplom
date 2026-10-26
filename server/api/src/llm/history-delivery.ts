@@ -13,6 +13,7 @@ import {
 import { safeHistoryFinding } from './history-sources.js';
 import { exact } from './response.js';
 import { safeProviderFailure, type ProviderFailureResponse } from './openrouter-provider.js';
+import { diagnosticHeaders } from './provider-diagnostic.js';
 
 export const DELIVERY = Object.freeze({
   lineBytes: 8192,
@@ -246,6 +247,7 @@ export async function writeDelivery(result: DeliveryResult, response: ServerResp
         'content-type': 'application/x-ndjson; charset=utf-8',
         'cache-control': 'no-store, no-transform',
         'x-content-type-options': 'nosniff',
+        ...(result.delivery.outcome === 'failed' ? diagnosticHeaders(result.delivery) : {}),
       });
       started = true;
     });

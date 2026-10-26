@@ -19,12 +19,16 @@ import type { ReportContext, ReportReader } from './report-context.js';
 import { exact } from './response.js';
 import type { IncomingMessage } from 'node:http';
 import type { ChatDelivery } from './history-delivery.js';
+import { abortDiagnostic, carryDiagnostic, stoppedDiagnostic } from './provider-diagnostic.js';
 
 type Runtime = { policy(): LlmPolicy | null; provider(): LlmProvider };
 type Access = { request: BrowserRequest; identity: Identity; session: SessionSnapshot };
 export type HistoryResult = { value: unknown; write(action: () => void): void; delivery?: ChatDelivery; release?(): void };
 const chatPolicy = (policy: LlmPolicy) => hashValue([policy.version, HISTORY.version, 'question-history-decisions-retained-no-output-cache']);
-const stopped = (): never => { throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' }); };
+const stopped = (signal: AbortSignal): never => {
+  const error = new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+  stoppedDiagnostic(signal, error); throw error;
+};
 
 export class HistoryService {
   readonly runtime = new HistoryRuntime();
@@ -51,7 +55,7 @@ export class HistoryService {
     }, Math.min(busyMs, HISTORY.busyMs));
   }
   private current(access: Access, report: ReportBinding, policy?: LlmPolicy | null, signal?: AbortSignal) {
-    if (signal?.aborted) return stopped();
+    if (signal?.aborted) return stopped(signal);
     if (policy !== undefined) {
       const freshPolicy = this.providerRuntime.policy();
       if ((freshPolicy?.version ?? null) !== (policy?.version ?? null) || !!freshPolicy?.freeOnly !== !!policy?.freeOnly)
@@ -154,10 +158,10 @@ export class HistoryService {
     const releaseCapacity = this.acquire(access.identity.subject);
     let transferred = false, released = false;
     const release = () => { if (!released) { released = true; releaseCapacity(); } };
-    const controller = new AbortController(), abort = () => controller.abort();
+    const controller = new AbortController(), abort = () => abortDiagnostic(controller, 'caller_abort');
     signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) controller.abort();
-    const deadline = setTimeout(abort, policy.timeoutMs);
+    if (signal.aborted) abort();
+    const deadline = setTimeout(() => abortDiagnostic(controller, 'deadline'), policy.timeoutMs);
     let ledger: QuotaLedger | undefined, reservation: string | undefined, turnId: string | undefined;
         let observation: Vector | undefined;
         let admitted: { epoch: string; revision: number; requestHash: string; reservation: string } | undefined;
@@ -214,7 +218,7 @@ export class HistoryService {
         });
       }, boundLedger.policy.busyMs));
       if (!observation) throw quotaUnavailable();
-      const reply = validateChatReply(raw, context.report);
+      const reply = validateChatReply(raw, context.report, true);
       const completed = this.guard(access, () => {
         this.current(access, report, policy, controller.signal);
         return store.finish(access.identity.subject, scanId, pending.epoch, pending.revision, id, reply);
@@ -257,6 +261,7 @@ export class HistoryService {
             ? Object.freeze({ ...binding, usage: Object.freeze({ ...observation, source: 'server-validated-provider-reported-not-invoice' as const }) })
             : Object.freeze({ ...binding, receipt: 'unavailable' as const });
           const result = this.result(access, report, failed, failure ?? { errorCode: 'LLM_UNAVAILABLE' }, policy, signal);
+          carryDiagnostic(error, delivery);
           transferred = true;
           return { ...result, delivery, release };
         } catch { /* No proven current failed head: retain the safe exception path, never synthesize a delivery. */ }

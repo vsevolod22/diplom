@@ -37,10 +37,10 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const TERMINAL = new Set(['completed', 'partial', 'failed', 'cancelled']);
 const OUTCOMES = new Set(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']);
 const BLOCKERS = new Set(['configuration-required', 'public-key-required', 'public-key-unsafe', 'quota-store-unavailable', 'history-store-unavailable', 'provider-profile-unavailable']);
-const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'STAND_OR_BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED', 'PREREQUISITE_UNAVAILABLE', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED', 'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NO_SECOND_PAGE', 'SSE_NOT_OBSERVED', 'CANCEL_RACE', 'NO_COMPLETED_SUBSET_OBSERVED', 'SUBSET_CAPTURE_CHANGED', 'UNSAFE_DEBUG_ENVIRONMENT', 'KEY_ABSENT', 'KEY_NOT_ABSENT_NO_POST', 'LLM_STORES_OR_CONTEXT_UNAVAILABLE', 'NO_EVIDENCE', 'CONTEXT_LIMIT', 'GENERATION_NOT_AUTHORIZED', 'QUOTA_WINDOW_CHANGED', 'QUOTA_UNAVAILABLE', 'INCOMPLETE_PAGINATION_COVERAGE', 'RUNTIME_NOT_OFF']);
+const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'STAND_OR_BROWSER_UNAVAILABLE', 'ELIGIBILITY_NOT_READY', 'LAUNCH_UNCONFIRMED_NO_RETRY', 'WORKER_DEADLINE_NO_RELAUNCH', 'REQUIRED_CHECK_NOT_CHECKED', 'PREREQUISITE_UNAVAILABLE', 'ASSERTION_FAILED', 'REQUEST_GUARD', 'GLOBAL_DEADLINE', 'INTERRUPTED', 'CLEANUP_FAILED', 'PAGE_ERRORS', 'EVIDENCE_ALREADY_EXISTS', 'EVIDENCE_WRITE_FAILED', 'NO_SECOND_PAGE', 'SSE_NOT_OBSERVED', 'CANCEL_RACE', 'NO_COMPLETED_SUBSET_OBSERVED', 'SUBSET_CAPTURE_CHANGED', 'UNSAFE_DEBUG_ENVIRONMENT', 'KEY_ABSENT', 'KEY_NOT_ABSENT_NO_POST', 'LLM_STORES_OR_CONTEXT_UNAVAILABLE', 'NO_EVIDENCE', 'CONTEXT_LIMIT', 'GENERATION_NOT_AUTHORIZED', 'QUOTA_WINDOW_CHANGED', 'QUOTA_UNAVAILABLE', 'INCOMPLETE_PAGINATION_COVERAGE', 'RUNTIME_NOT_OFF', 'PROGRESS_NOT_OBSERVED', 'BROWSER_READ_FAILED']);
 const CASES = ['tooling', 'registration', ...TARGETS.flatMap(t => ['scan', 'report', 'pagination', 'filters', 'events', 'reload'].map(s => `${t.name}.${s}`)), 'scan_history', 'foreign_registration', 'ownership', 'anonymous', 'ownership_mutations', 'anonymous_mutations', 'llm_readiness', 'llm_no_consent', 'llm_missing_key', 'llm_manual_history', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'cancel', 'cancel_preservation', 'cancel_history', 'cancel_fresh_login', 'safety'];
 const SMOKE_CASES = ['tooling', 'registration', 'node.scan', 'node.report', 'node.filters', 'node.reload', 'scan_history', 'llm_readiness', 'llm_reload', 'fresh_login', 'llm_fresh_login', 'llm_generation', 'safety'];
-const CANCEL_CASES = ['tooling', 'registration', 'cancel', 'cancel_report', 'cancel_preservation', 'cancel_reload', 'cancel_history', 'cancel_fresh_login', 'safety'];
+const CANCEL_CASES = ['tooling', 'registration', 'cancel', 'cancel_progress', 'cancel_report', 'cancel_preservation', 'cancel_reload', 'cancel_history', 'cancel_fresh_login', 'safety'];
 const EVIDENCE = ['public-product-browser-20261021.json', 'public-product-browser-20261021.md'].map(name => join(ROOT, 'docs', name));
 const SMOKE_EVIDENCE_ROOT = 'docs/public8081launch-20261022.attempt2';
 const SMOKE_EVIDENCE = ['json', 'md'].map(extension => join(ROOT, `${SMOKE_EVIDENCE_ROOT}.${extension}`));
@@ -69,8 +69,34 @@ export function cancelMutationAllowed(path, ids) {
 export function completedChecks(snapshot) {
   return CHECKS.filter(key => snapshot?.perCheck?.[key]?.outcome === 'checked');
 }
+export function durableProgress(value) {
+  assert.ok(exact(value, ['basis', 'requestedChecks', 'outcomes', 'resolvedChecks', 'checkedChecks']));
+  assert.equal(value.basis, 'durable-outcomes-v1'); assert.ok(sameChecks(value.requestedChecks));
+  assert.ok(value.outcomes && typeof value.outcomes === 'object' && !Array.isArray(value.outcomes));
+  assert.ok(Object.keys(value.outcomes).every(key => CHECKS.includes(key) && (value.outcomes[key] === null || OUTCOMES.has(value.outcomes[key]))));
+  const outcomes = Object.fromEntries(CHECKS.filter(key => Object.hasOwn(value.outcomes, key)).map(key => [key, value.outcomes[key]]));
+  assert.equal(value.resolvedChecks, Object.values(outcomes).filter(outcome => outcome !== null).length);
+  assert.equal(value.checkedChecks, Object.values(outcomes).filter(outcome => outcome === 'checked').length);
+  return { basis: 'durable-outcomes-v1', requestedChecks: [...CHECKS], outcomes, resolvedChecks: value.resolvedChecks, checkedChecks: value.checkedChecks };
+}
+export function checkpointChecks(snapshot) {
+  const progress = snapshot?.progress ? durableProgress(snapshot.progress) : null;
+  return progress ? CHECKS.filter(key => progress.outcomes[key] === 'checked') : [];
+}
 export function cancelObservation(snapshot) {
-  return TERMINAL.has(snapshot?.state) ? 'terminal' : completedChecks(snapshot).length ? 'ready' : 'waiting';
+  return TERMINAL.has(snapshot?.state) ? 'terminal' : checkpointChecks(snapshot).length ? 'ready' : 'waiting';
+}
+export function assertCancelOutcomePreservation(before, after) {
+  assert.equal(before.state, 'running'); assert.equal(after.state, 'cancelled');
+  for (const key of ['scanId', 'imageReference', 'digest', 'platform']) assert.equal(after[key], before[key]);
+  assert.ok(Object.values(before.perCheck ?? {}).every(value => value == null));
+  assert.equal(before.config, undefined);
+  const earlier = durableProgress(before.progress), published = durableProgress(after.progress);
+  assert.ok(earlier.checkedChecks > 0);
+  for (const key of CHECKS) {
+    if (earlier.outcomes[key] != null) assert.equal(published.outcomes[key], earlier.outcomes[key]);
+    assert.equal(published.outcomes[key] ?? null, after.perCheck?.[key]?.outcome ?? null);
+  }
 }
 const QUESTION = 'Какие ограничения покрытия этого отчёта нужно учесть при ручной проверке?';
 const DECISION = 'Проверить приоритеты находок вручную; это решение пользователя, не вывод сканера.';
@@ -145,6 +171,123 @@ export function safeReadRequest(input, headers = {}) {
   return !['authorization', 'proxy-authorization', 'x-api-key'].some(key => key in values) &&
     (!('origin' in values) || values.origin === ORIGIN);
 }
+export const BROWSER_READ_STAGES = Object.freeze(['authority', 'auth-navigation', 'report-navigation', 'evaluate', 'fetch', 'headers', 'body', 'decode', 'json']);
+export const BROWSER_READ_CAUSES = Object.freeze(['navigation', 'execution-context-destroyed', 'page-closed', 'authority-changed', 'origin-mismatch', 'request-not-approved', 'caller-abort', 'timeout', 'network', 'content-type', 'missing-body', 'body-limit', 'invalid-utf8', 'invalid-json', 'unknown']);
+const READ_TARGETS = new Set(['auth', 'scan-list', 'scan-status', 'report', 'llm-read', 'runtime', 'other-approved']);
+export function browserReadFailureMeta(input = {}) {
+  if (!BROWSER_READ_STAGES.includes(input.readStage) || !BROWSER_READ_CAUSES.includes(input.readCause)) return {};
+  const out = { readStage: input.readStage, readCause: input.readCause };
+  if (READ_TARGETS.has(input.readTarget)) out.readTarget = input.readTarget;
+  if (UUID.test(input.scanId)) out.scanId = input.scanId;
+  if (Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) out.httpStatus = input.httpStatus;
+  return out;
+}
+export function classifyBrowserReadFailure(error) {
+  // Known browser/DOM signatures are inspected only in memory. Never emit text,
+  // stacks, errno, URLs, response bodies or arbitrary Error.name values.
+  const text = typeof error?.message === 'string' ? error.message.slice(0, 2048) : '';
+  if (/Execution context was destroyed|Cannot find context with specified id/.test(text)) return 'execution-context-destroyed';
+  if (/Target page, context or browser has been closed|Page closed/.test(text)) return 'page-closed';
+  if (/Frame was detached|Navigation interrupted by another one/.test(text)) return 'navigation';
+  if (error?.name === 'TimeoutError') return 'timeout';
+  if (error?.name === 'AbortError') return 'caller-abort';
+  if (/Failed to fetch|NetworkError when attempting to fetch resource/.test(text)) return 'network';
+  return 'unknown';
+}
+export class BrowserReadError extends Error {
+  constructor(meta) { super('BROWSER_READ_FAILED'); this.meta = browserReadFailureMeta(meta); }
+}
+const readPages = new WeakMap();
+export function trackBrowserReadPage(page, { active, sessionVersion }) {
+  const scope = { active, sessionVersion, epoch: 0, pending: false };
+  const mainRequest = request => request.isNavigationRequest() && request.frame() === page.mainFrame();
+  page.on('request', request => { if (mainRequest(request)) { scope.pending = true; scope.epoch++; } });
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) { scope.pending = false; scope.epoch++; } });
+  page.on('requestfailed', request => { if (mainRequest(request)) { scope.pending = false; scope.epoch++; } });
+  readPages.set(page, scope);
+}
+function captureReadPage(page, meta) {
+  const scope = readPages.get(page);
+  if (page.isClosed()) throw new BrowserReadError({ ...meta, readStage: 'authority', readCause: 'page-closed' });
+  if (!scope || !scope.active()) throw new BrowserReadError({ ...meta, readStage: 'authority', readCause: 'authority-changed' });
+  if (!fixedUrl(page.url().split('#')[0])) throw new BrowserReadError({ ...meta, readStage: 'authority', readCause: 'origin-mismatch' });
+  if (scope.pending) throw new BrowserReadError({ ...meta, readStage: 'authority', readCause: 'navigation' });
+  const epoch = scope.epoch, session = scope.sessionVersion(), url = page.url();
+  return () => page.isClosed() ? 'page-closed' : !scope.active() || scope.sessionVersion() !== session ? 'authority-changed' :
+    scope.pending || scope.epoch !== epoch || page.url() !== url ? 'navigation' : null;
+}
+async function settleNavigation(page, url, active, meta, waitForUi) {
+  const scope = readPages.get(page), session = scope?.sessionVersion();
+  if (!scope || !active()) throw new BrowserReadError({ ...meta, readCause: 'authority-changed' });
+  try {
+    // Wait for the SPA commit AND UI before evaluating in its execution context.
+    // This orders the first read; it never resends a failed read or mutation.
+    await page.waitForURL(url, { timeout: 20_000, waitUntil: 'domcontentloaded' });
+    if (!active() || scope.sessionVersion() !== session || page.url() !== url) throw new BrowserReadError({ ...meta, readCause: 'authority-changed' });
+    await waitForUi();
+    const current = captureReadPage(page, meta), changed = current();
+    if (!active() || scope.sessionVersion() !== session || changed) throw new BrowserReadError({ ...meta, readCause: changed ?? 'authority-changed' });
+  } catch (error) {
+    if (error instanceof BrowserReadError) throw error;
+    throw new BrowserReadError({ ...meta, readCause: classifyBrowserReadFailure(error) });
+  }
+}
+export async function settleReportNavigation(page, scanId, active) {
+  const meta = { scanId, readTarget: 'scan-status', readStage: 'report-navigation' };
+  if (!UUID.test(scanId)) throw new BrowserReadError({ ...meta, readCause: 'authority-changed' });
+  await settleNavigation(page, `${ORIGIN}/scans/${scanId}`, active, meta,
+    () => page.getByRole('group', { name: `Ход сканирования ${scanId}`, exact: true }).waitFor({ state: 'visible', timeout: 15_000 }));
+}
+export async function settleAuthNavigation(page, active) {
+  await settleNavigation(page, `${ORIGIN}/account`, active, { readTarget: 'auth', readStage: 'auth-navigation' },
+    () => page.getByRole('heading', { name: 'Вы вошли', exact: true }).waitFor({ state: 'visible', timeout: 15_000 }));
+}
+export async function readBrowserJson(page, path, knownIds) {
+  const ids = [...knownIds], match = path.match(/^\/api\/v1\/browser\/scans\/([a-f0-9-]{36})(?:\/|$)/);
+  const scanId = match && ids.includes(match[1]) && UUID.test(match[1]) ? match[1] : undefined;
+  const clean = path.split('?')[0];
+  const readTarget = clean === '/api/v1/auth/me' ? 'auth' : clean === SCANS ? 'scan-list' :
+    scanId && clean === `${SCANS}/${scanId}` ? 'scan-status' : clean.includes('/llm/') ? 'llm-read' :
+      /\/(results|sbom|vuln)$/.test(clean) ? 'report' : clean.startsWith('/api/v1/browser/runtime/') ? 'runtime' : 'other-approved';
+  const meta = { scanId, readTarget };
+  if (!allowedGet(path, ids)) throw new BrowserReadError({ ...meta, readStage: 'authority', readCause: 'request-not-approved' });
+  const current = captureReadPage(page, meta);
+  let result;
+  try {
+    result = await page.evaluate(async path => {
+      let stage = 'fetch', status;
+      const signal = AbortSignal.timeout(40_000);
+      const failed = cause => ({ readFailure: { readStage: stage, readCause: cause, ...(status ? { httpStatus: status } : {}) } });
+      try {
+        const response = await fetch(path, { method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal });
+        status = response.status; stage = 'headers';
+        if (!/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) return failed('content-type');
+        stage = 'body'; const reader = response.body?.getReader();
+        if (!reader) return failed('missing-body');
+        const chunks = []; let size = 0;
+        try {
+          for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength;
+            if (size > 4 * 1024 * 1024) return failed('body-limit'); chunks.push(part.value); }
+        } finally { await reader.cancel().catch(() => {}); }
+        const bytes = new Uint8Array(size); let offset = 0;
+        for (const part of chunks) { bytes.set(part, offset); offset += part.byteLength; }
+        stage = 'decode'; let text;
+        try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return failed('invalid-utf8'); }
+        stage = 'json';
+        try { return { status, value: JSON.parse(text) }; } catch { return failed('invalid-json'); }
+      } catch (error) {
+        return failed(signal.aborted || error?.name === 'TimeoutError' ? 'timeout' : error?.name === 'AbortError' ? 'caller-abort' :
+          typeof error?.message === 'string' && /Failed to fetch|NetworkError when attempting to fetch resource/.test(error.message.slice(0, 2048)) ? 'network' : 'unknown');
+      }
+    }, path);
+  } catch (error) {
+    throw new BrowserReadError({ ...meta, readStage: 'evaluate', readCause: current() ?? classifyBrowserReadFailure(error) });
+  }
+  const changed = current();
+  if (changed) throw new BrowserReadError({ ...meta, readStage: 'evaluate', readCause: changed });
+  if (result?.readFailure) throw new BrowserReadError({ ...meta, ...browserReadFailureMeta(result.readFailure) });
+  return result;
+}
 const exact = (value, keys) => !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 export const sameChecks = value => isDeepStrictEqual(value, CHECKS);
 export function validIntent(body, target) {
@@ -170,6 +313,72 @@ export class EligibilityFence {
 export async function awaitEligibility(fence, after, pending, active, timeoutMs = 35_000) {
   await bounded(pending, timeoutMs);
   return active() && fence.fresh(after);
+}
+// A network grant is necessary, not sufficient: React must have committed the same
+// full-check target. Two matching observations fence debounce/render scheduling;
+// create still requires a distinct fresh post-arm eligibility response below.
+export function uiLaunchReady(value, confirmed = false) {
+  return ['formPresent', 'referenceMatches', 'inputEnabled', 'inputValid', 'checksMatch', 'checksEnabled', 'consentEnabled', 'uiEligibilityReady'].every(key => value?.[key] === true) &&
+    value.consentChecked === confirmed && value.submitEnabled === confirmed && value.hasAlert === false && value.waitActive === false;
+}
+export function readLaunchForm(form, target) {
+  return form.evaluate((element, { reference, checks }) => {
+    const input = element.querySelector('#image-reference');
+    const selected = [...element.querySelectorAll('input[name="checks"]:checked')].map(item => item.value);
+    const inputs = [...element.querySelectorAll('input[name="checks"]')];
+    const confirmation = [...element.querySelectorAll('label')].find(label => label.textContent.includes('Подтверждаю выбранную цель и область'))?.querySelector('input');
+    const button = element.querySelector('button[type="submit"]');
+    const statuses = [...element.querySelectorAll('[role="status"]')];
+    return { formPresent: element.isConnected, referenceMatches: input?.value === reference,
+      inputEnabled: !!input && !input.disabled, inputValid: input?.validity.valid === true,
+      checksMatch: JSON.stringify(selected) === JSON.stringify(checks), checksEnabled: inputs.length === checks.length && inputs.every(item => !item.disabled),
+      consentEnabled: !!confirmation && !confirmation.disabled, consentChecked: confirmation?.checked === true,
+      submitEnabled: !!button && !button.disabled,
+      uiEligibilityReady: statuses.some(item => item.textContent.trim() === 'Серверный допуск подтверждён; перед новым запуском проверяется повторно.'),
+      hasAlert: !!element.querySelector('[role="alert"]'),
+      waitActive: !!element.querySelector('[role="status"][aria-label="Ожидание сервера"]') };
+  }, { reference: target.reference, checks: CHECKS });
+}
+export async function awaitStableUiEligibility(state, after, read, active, observe = () => {}, options = {}) {
+  const { timeoutMs = 35_000, now = Date.now, pause = () => wait(50) } = options;
+  const deadline = now() + timeoutMs;
+  let previousSequence = null;
+  while (now() < deadline) {
+    if (!active()) throw new Fault('ELIGIBILITY_NOT_READY');
+    const sequence = state.fence.sequence;
+    const snapshot = await bounded(read(), Math.max(1, deadline - now()));
+    observe(snapshot);
+    if (!active()) throw new Fault('ELIGIBILITY_NOT_READY');
+    if (sequence === state.fence.sequence && state.eligibilityResult?.sequence === sequence && state.eligibilityResult.refused) throw new Fault('ELIGIBILITY_NOT_READY');
+    const current = sequence === state.fence.sequence && state.fence.fresh(after, now()) && uiLaunchReady(snapshot);
+    if (current && previousSequence === sequence) return { sequence, snapshot };
+    previousSequence = current ? sequence : null;
+    await bounded(pause(), Math.max(1, deadline - now()));
+  }
+  throw new Fault('ELIGIBILITY_NOT_READY');
+}
+const PHASES = new Set(['progress-snapshot', 'form-navigation', 'target-fill', 'checks-select', 'ui-eligibility', 'consent-fresh', 'consent-check', 'submit-enabled', 'launch-arm', 'launch-click', 'launch-receipt', 'report-navigation', 'subset-observation', 'subset-capture', 'cancel-available', 'cancel-click', 'cancel-receipt', 'cancel-terminal', 'cancel-report', 'cancel-preservation', 'cancel-reload', 'cancel-history', 'cancel-fresh-login']);
+// Completed-check counts are NOT elapsed-work percent or an ETA. The public
+// decoder currently supplies percent:null, including after SSE reconnect.
+export function progressExpectation(snapshot) {
+  assert.ok(snapshot && sameChecks(snapshot.checks) && ['queued', 'running', ...TERMINAL].includes(snapshot.state));
+  const active = ['queued', 'running'].includes(snapshot.state);
+  const progress = snapshot.progress ? durableProgress(snapshot.progress) : null;
+  const resolved = progress ? progress.resolvedChecks : active ? 0 : CHECKS.filter(key => snapshot.perCheck?.[key]?.check === key).length;
+  const checked = progress ? progress.checkedChecks : active ? 0 : completedChecks(snapshot).length;
+  return { active, hasCheckSnapshot: !!progress || !active && snapshot.perCheck !== undefined, total: CHECKS.length, resolved, checked,
+    remaining: CHECKS.length - resolved,
+    percent: active && typeof snapshot.percent === 'number' && Number.isFinite(snapshot.percent) && snapshot.percent >= 0 && snapshot.percent <= 100 ? snapshot.percent : null };
+}
+export function progressSampleMatches(sample) {
+  return ['stateMatches', 'barMatches', 'countsMatch', 'remainingMatch', 'percentMatches', 'timeHonest'].every(key => sample?.[key] === true);
+}
+export class PhaseEvidence {
+  constructor(now = Date.now) { this.now = now; this.reset(); }
+  reset() { this.phase = null; this.at = this.now(); this.observation = {}; }
+  enter(phase) { assert.ok(PHASES.has(phase)); this.phase = phase; this.at = this.now(); this.observation = {}; }
+  observe(value) { this.observation = safeMeta(value); }
+  meta() { return this.phase ? safeMeta({ ...this.observation, phase: this.phase, phaseElapsedMs: Math.max(0, this.now() - this.at) }) : {}; }
 }
 export function partition(rows) {
   const counts = { cve: 0, debianTemp: 0 };
@@ -288,14 +497,21 @@ export function failureMeta(error) {
 }
 // Closed projection: no free-form strings from HTTP/errors/DOM are emitted.
 export function safeMeta(input = {}) {
-  const out = {};
+  const out = { ...browserReadFailureMeta(input) };
   if (UUID.test(input.scanId)) out.scanId = input.scanId;
   if (DIGEST.test(input.digest)) out.digest = input.digest;
   if (input.platform === 'linux/amd64') out.platform = input.platform;
   if (['queued', 'running', ...TERMINAL].includes(input.state)) out.state = input.state;
+  if (PHASES.has(input.phase)) out.phase = input.phase;
+  for (const key of ['progress', 'preCancelProgress']) if (input[key] !== undefined) {
+    try { out[key] = durableProgress(input[key]); } catch { /* Unknown/malformed metadata is not a progress receipt. */ }
+  }
+  if (input.preservationBasis === 'post-cancel-published-baseline-v1') out.preservationBasis = input.preservationBasis;
+  if (Number.isSafeInteger(input.phaseElapsedMs) && input.phaseElapsedMs >= 0 && input.phaseElapsedMs <= 2_520_000) out.phaseElapsedMs = input.phaseElapsedMs;
   if (Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599) out.httpStatus = input.httpStatus;
+  if (input.launchHttpStatus === 202) out.launchHttpStatus = 202;
   for (const key of ['pages', 'checkedSets', 'observedEvents', 'scanLaunches', 'cancelPosts', 'accountsCreated', 'pageErrors', 'blockedRequests', 'ignoredEligibility', 'runnerLine']) if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 100000) out[key] = input[key];
-  for (const key of ['allChecksChecked', 'noGenerationPosts', 'historyUnchanged', 'quotaUnchanged', 'browserClosed', 'nativeScanMayRemainActive']) if (typeof input[key] === 'boolean') out[key] = input[key];
+  for (const key of ['allChecksChecked', 'noGenerationPosts', 'historyUnchanged', 'quotaUnchanged', 'browserClosed', 'nativeScanMayRemainActive', 'formPresent', 'referenceMatches', 'inputEnabled', 'inputValid', 'checksMatch', 'checksEnabled', 'consentEnabled', 'consentChecked', 'submitEnabled', 'uiEligibilityReady', 'hasAlert', 'waitActive', 'progressObserved', 'progressIndeterminate', 'progressActive', 'preCancelReportUiEmpty', 'preCancelFindingsRead', 'preCancelByteComparison', 'postCancelBaselineVerified', 'receiptAccepted']) if (typeof input[key] === 'boolean') out[key] = input[key];
   if (['unconfigured', 'missing', 'unsafe', 'metadata-valid'].includes(input.credential)) out.credential = input.credential;
   if (Array.isArray(input.blockers)) out.blockers = [...new Set(input.blockers.filter(x => BLOCKERS.has(x)))];
   if (Array.isArray(input.observedCompletedChecks)) out.observedCompletedChecks = CHECKS.filter(x => input.observedCompletedChecks.includes(x));
@@ -314,7 +530,11 @@ export class ResultBook {
   record(id, status, code, meta = {}, failure = code === 'ASSERTION_FAILED') {
     assert.ok(this.plan.cases.includes(id) && ['PASS', 'BLOCKED', 'INCONCLUSIVE'].includes(status) && CODES.has(code));
     if (this.cases[id].failure && !failure) return; // A later successful probe must not hide an earlier violation.
-    this.cases[id] = { status, code, failure: !!failure, ...safeMeta(meta) };
+    this.cases[id] = { status, code, failure: !!failure, ...safeMeta(this.cases[id]), ...safeMeta(meta) };
+  }
+  recordScanReceipt(id, status, value) {
+    assert.ok(this.plan.cases.includes(id) && status === 202 && UUID.test(value?.scanId));
+    this.cases[id] = { ...this.cases[id], ...safeMeta({ scanId: value.scanId, launchHttpStatus: 202, receiptAccepted: true }) };
   }
   evidence() {
     return { schema: 1, actuallyRun: this.actual, mode: this.plan.mode, attemptId: this.plan.attemptId, evidenceRoot: this.plan.evidenceRoot, runId: this.runId, startedAt: this.startedAt, finishedAt: this.finishedAt, scope: this.plan.cancelOnly ? 'native-public8081-one-scan-cancel' : this.plan.smokeOnly ? 'native-public8081-one-scan-smoke' : 'native-public8081-browser-only', origin: ORIGIN, providerGenerationQualified: false, generationPolicy: this.plan.cancelOnly ? 'all-llm-posts-denied' : this.plan.smokeOnly ? 'readiness-only-no-llm-posts' : 'negative-boundary-only',
@@ -343,7 +563,7 @@ export function evidenceDocuments(evidence) {
   const markdown = [cancelOnly ? '# Public 8081 one-scan cancel qualification' : smokeOnly ? '# Public 8081 one-scan browser smoke — 2026-10-22' : '# Public product browser qualification — 2026-10-21', '', `Origin: ${ORIGIN}`, `Evidence root: ${evidence.evidenceRoot}`, '',
     `Run: ${evidence.runId}. Provisional summary only: require the matching complete JSON and a successful evidence write; this Markdown alone is not acceptance.`,
         'Native generation is NOT qualified. No key is sought or persisted. Provider dispatch is not independently observed.',
-    cancelOnly ? 'One account and at most one native four-check scan are retained. All LLM POSTs are denied, including manual history; key presence is irrelevant and no key-absent/readiness probe is required. Terminal races and absent subset evidence never qualify cancellation. No relaunch.' : smokeOnly ? 'One account and at most one scan are retained; no LLM POST or manual decision is authorized. Credentials exist only in runner/browser memory.' : 'Accounts/scans/decisions are retained in the public stand; credentials exist only in runner/browser memory.',
+    cancelOnly ? 'One account and at most one native four-check scan are retained. All LLM POSTs are denied, including manual history; key presence is irrelevant and no key-absent/readiness probe is required. Terminal races and absent checked durable-outcome metadata never qualify cancellation. Pre-cancel findings are not read or byte-compared; published post-cancel datasets form the baseline for late-write/reload/fresh-login checks. No relaunch.' : smokeOnly ? 'One account and at most one scan are retained; no LLM POST or manual decision is authorized. Credentials exist only in runner/browser memory.' : 'Accounts/scans/decisions are retained in the public stand; credentials exist only in runner/browser memory.',
     'PASS is per assertion; BLOCKED is not success; cancel races and unavailable pagination/subset observations are INCONCLUSIVE.', '',
     '| Case | Result | Code |', '| --- | --- | --- |', ...Object.entries(evidence.cases).map(([id, item]) => `| ${id} | ${item.status} | ${item.code} |`), ''].join('\n');
   return [JSON.stringify(evidence, null, 2) + '\n', markdown];
@@ -392,15 +612,17 @@ async function runNative(mode = 'native', attemptId) {
   const signal = () => interrupt('INTERRUPTED');
   process.once('SIGINT', signal); process.once('SIGTERM', signal); process.once('SIGHUP', signal);
   const ensureLive = () => { if (stopped || fatalCode) throw new Fault(fatalCode ?? 'INTERRUPTED'); };
+  const phase = new PhaseEvidence();
   const step = async (id, operation) => {
-    ensureLive(); currentCase = id;
+    ensureLive(); currentCase = id; phase.reset();
     try {
       const result = await operation();
       assert.ok(result && typeof result === 'object');
-      book.record(id, result?.status ?? 'PASS', result?.code ?? 'VERIFIED', result?.meta ?? {});
+      book.record(id, result?.status ?? 'PASS', result?.code ?? 'VERIFIED', { ...phase.meta(), ...result?.meta });
       return result?.value;
     } catch (e) {
-      book.record(id, 'BLOCKED', e instanceof Fault ? e.message : 'ASSERTION_FAILED', failureMeta(e), e instanceof Fault ? e.failure : true);
+      book.record(id, 'BLOCKED', e instanceof BrowserReadError ? 'BROWSER_READ_FAILED' : e instanceof Fault ? e.message : 'ASSERTION_FAILED',
+        { ...phase.meta(), ...failureMeta(e), ...(e instanceof BrowserReadError ? e.meta : {}) }, e instanceof BrowserReadError ? false : e instanceof Fault ? e.failure : true);
       if (fatalCode || stats.blockedRequests) throw e;
       return undefined;
     }
@@ -413,6 +635,7 @@ async function runNative(mode = 'native', attemptId) {
   // Only real page-origin fetches. SSE probes cancel the reader rather than waiting for EOF.
   const http = async (page, path, body, event = false) => {
     ensureLive(); assert.ok(fixedUrl(`${ORIGIN}${path}`));
+    if (body === undefined && !event) return readBrowserJson(page, path, scans.keys());
     return page.evaluate(async ({ path, body, event }) => {
       const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(event ? 12_000 : 40_000),
         ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
@@ -483,7 +706,10 @@ async function runNative(mode = 'native', attemptId) {
           state.eligibilityPending = (async () => {
             await route.continue();
             const response = await request.response();
-            if (response?.status() === 200) state.fence.accept(sequence, body, await response.json(), target);
+            const value = response?.status() === 200 ? await response.json() : null;
+            if (response?.status() === 200) state.fence.accept(sequence, body, value, target);
+            if (sequence === state.fence.sequence) state.eligibilityResult = { sequence, httpStatus: response?.status() ?? null,
+              refused: sameChecks(body.checks) && (response?.status() !== 200 || !eligibilityReady(value, target)) };
           })();
           await state.eligibilityPending;
           return;
@@ -500,7 +726,10 @@ async function runNative(mode = 'native', attemptId) {
             await route.continue(); const response = await request.response();
             if (response?.status() === 202) {
               const value = await response.json();
-              if (UUID.test(value?.scanId)) scans.set(value.scanId, { target: state.target, launchAt: Date.now(), terminal: false });
+              if (UUID.test(value?.scanId)) {
+                              scans.set(value.scanId, { target: state.target, launchAt: Date.now(), terminal: false });
+                              book.recordScanReceipt(currentCase, response.status(), value);
+                            }
             }
           })();
           await pendingCreation; return;
@@ -527,13 +756,17 @@ async function runNative(mode = 'native', attemptId) {
           if (response.status() >= 300 && response.status() < 400) { stats.blockedRequests++; interrupt('REQUEST_GUARD'); }
         });
     await context.routeWebSocket('**/*', socket => { stats.blockedRequests++; socket.close(); });
-    const page = await context.newPage(); page.setDefaultTimeout(15_000); page.setDefaultNavigationTimeout(20_000);
+    const page = await context.newPage();
+    state.readSession = 0;
+    trackBrowserReadPage(page, { active: () => !stopped && !fatalCode && !state.closing, sessionVersion: () => state.readSession });
+    page.setDefaultTimeout(15_000); page.setDefaultNavigationTimeout(20_000);
     page.on('pageerror', () => { stats.pageErrors++; });
     return { ...state, page, state };
   };
   let decoder, reportViewSearch, validateCveMetadata, cveMetadataIdentity, chat;
   const auth = async (handle, account, action) => {
     const { page, state } = handle;
+    state.readSession++;
     await page.goto(`${ORIGIN}/${action}`);
     await page.getByLabel('Email', { exact: true }).fill(account.email);
     await page.getByLabel('Пароль', { exact: true }).fill(account.password);
@@ -542,30 +775,59 @@ async function runNative(mode = 'native', attemptId) {
     await page.getByRole('button', { name: action === 'register' ? 'Создать аккаунт' : 'Войти', exact: true }).click();
     assert.equal((await pending)?.status(), action === 'register' ? 201 : 200);
     if (action === 'register') stats.accountsCreated++;
+    await settleAuthNavigation(page, () => !stopped && !fatalCode && !state.closing);
     const me = await http(page, '/api/v1/auth/me'); assert.equal(me.status, 200);
     account.subject = assertAuthUser(me.value, account.email, account.subject);
     const session = (await handle.context.cookies(ORIGIN)).find(item => item.name === 'demo_session');
     assert.ok(session?.httpOnly && session.sameSite === 'Lax');
   };
   const launch = async (handle, target) => {
-    handle.state.target = target;
-    await handle.page.goto(`${ORIGIN}/scans/new`);
-    await handle.page.getByRole('textbox', { name: 'Canonical reference Docker Hub' }).fill(target.reference);
-    for (const check of CHECKS) await handle.page.locator(`input[name="checks"][value="${check}"]`).check();
-    assert.ok(sameChecks(await handle.page.locator('input[name="checks"]:checked').evaluateAll(inputs => inputs.map(input => input.value))));
-    const eligible = await http(handle.page, `${SCANS}/images/eligibility`, { imageReference: target.reference, checks: CHECKS });
-    if (eligible.status !== 200 || !eligibilityReady(eligible.value, target)) throw new Fault('ELIGIBILITY_NOT_READY');
-    const consent = handle.page.getByRole('checkbox', { name: /Подтверждаю выбранную цель и область/ });
-    const submit = handle.page.getByRole('button', { name: 'Запустить скан', exact: true });
-    await expect(consent).not.toBeChecked(); await expect(submit).toBeDisabled();
-    await consent.check(); await expect(submit).toBeEnabled();
-    activeLaunch = { state: handle.state, target, sequence: handle.state.fence.sequence, armed: true };
-    const pending = waitResponse(handle.page, SCANS, 'POST'); await submit.click(); const response = await pending;
+    const { page, state } = handle;
+    state.target = target;
+    const after = state.fence.sequence;
+    phase.enter('form-navigation');
+    await page.goto(`${ORIGIN}/scans/new`);
+    const form = page.getByRole('form', { name: 'Параметры скана', exact: true });
+    // Require the mounted form; the gate below also catches later mount-effect resets.
+    await expect(form).toBeVisible();
+    phase.enter('target-fill');
+    await page.getByRole('textbox', { name: 'Canonical reference Docker Hub' }).fill(target.reference);
+    phase.enter('checks-select');
+    for (const check of CHECKS) await page.locator(`input[name="checks"][value="${check}"]`).check();
+    const consent = page.getByRole('checkbox', { name: /Подтверждаю выбранную цель и область/ });
+    const submit = page.getByRole('button', { name: 'Запустить скан', exact: true });
+    const read = () => readLaunchForm(form, target);
+    const authority = () => !stopped && !fatalCode && !state.closing && state.target === target && page.url() === `${ORIGIN}/scans/new`;
+    const observe = snapshot => phase.observe({ ...snapshot, httpStatus: state.eligibilityResult?.httpStatus });
+    phase.enter('ui-eligibility');
+    const stable = await awaitStableUiEligibility(state, after, read, authority, observe);
+    phase.enter('consent-fresh');
+    const fresh = await read(); observe(fresh);
+    assert.ok(uiLaunchReady(fresh) && authority() && state.fence.sequence === stable.sequence && state.fence.fresh(after));
+    await expect(consent).not.toBeChecked();
+    await expect(submit).toBeDisabled();
+    phase.enter('consent-check');
+    observe(await read());
+    await consent.check();
+    phase.enter('submit-enabled');
+    observe(await read());
+    await expect(submit).toBeEnabled();
+    const confirmed = await read(); observe(confirmed);
+    assert.ok(uiLaunchReady(confirmed, true) && authority() && state.fence.sequence === stable.sequence && state.fence.fresh(after));
+    phase.enter('launch-arm');
+    activeLaunch = { state, target, sequence: state.fence.sequence, armed: true };
+    const pending = waitResponse(page, SCANS, 'POST');
+    phase.enter('launch-click');
+    await submit.click();
+    phase.enter('launch-receipt');
+    const response = await pending;
     await pendingCreation.catch(() => {});
+    phase.observe({ httpStatus: response?.status() });
     if (!response || response.status() !== 202) throw new Fault('LAUNCH_UNCONFIRMED_NO_RETRY');
     const body = await response.json(); assert.ok(UUID.test(body.scanId) && scans.has(body.scanId));
     activeLaunch = null;
-    await expect(handle.page).toHaveURL(`${ORIGIN}/scans/${body.scanId}`);
+    phase.enter('report-navigation');
+    await settleReportNavigation(page, body.scanId, () => !stopped && !fatalCode && !state.closing);
     return body.scanId;
   };
   const status = async (page, id) => {
@@ -592,7 +854,39 @@ async function runNative(mode = 'native', attemptId) {
     }
     return value;
   };
-  const statusMeta = snapshot => ({ scanId: snapshot.scanId, state: snapshot.state, digest: snapshot.digest, platform: snapshot.platform,
+  const observeProgress = async (page, id, requireActive = false) => {
+    const deadline = Date.now() + 5000;
+    let last;
+    do {
+      ensureLive();
+      const before = await status(page, id), expected = progressExpectation(before);
+      if (requireActive && !expected.active) return { status: 'INCONCLUSIVE', code: 'PROGRESS_NOT_OBSERVED' };
+      const group = page.getByRole('group', { name: `Ход сканирования ${id}`, exact: true });
+      if (await group.count() === 1) {
+        const sample = await group.evaluate((element, { expected, state }) => {
+          const text = element.textContent;
+          const progress = element.querySelector('progress');
+          const counts = expected.hasCheckSnapshot ? `Получены итоги: ${expected.resolved} из ${expected.total}. Успешно выполнено: ${expected.checked}.` : 'Счётчики проверок не предоставлены сервером.';
+          return { stateMatches: element.getAttribute('data-state') === state,
+            barMatches: expected.active ? !!progress && progress.getAttribute('max') === '100' &&
+              (expected.percent === null ? !progress.hasAttribute('value') : Number(progress.getAttribute('value')) === expected.percent) : !progress,
+            countsMatch: text.includes(counts),
+            remainingMatch: !expected.hasCheckSnapshot || text.includes(`${expected.active ? 'Без подтверждённого итога' : 'Без сохранённого итога'}: ${expected.remaining}.`),
+            percentMatches: text.includes(`Прогресс: ${expected.percent === null ? 'неизвестен' : `${expected.percent}%`}`),
+            timeHonest: text.includes(expected.active ? 'Точное оставшееся время неизвестно. Полученные итоги не показывают длительность этапов.' : 'Скан больше не выполняется. Отсутствующие итоги не считаются успешными проверками.') };
+        }, { expected, state: before.state });
+        const after = await status(page, id);
+        // A changed snapshot is not a UI mismatch. Observe boundedly, never freeze a worker.
+        if (isDeepStrictEqual(before, after)) {
+          last = sample;
+          if (progressSampleMatches(sample)) return { status: 'PASS', code: 'VERIFIED', meta: { progressObserved: true, progressIndeterminate: expected.percent === null, progressActive: expected.active } };
+        }
+      }
+      await wait(100);
+    } while (Date.now() < deadline);
+    return last ? { status: 'BLOCKED', code: 'ASSERTION_FAILED', failure: true } : { status: 'INCONCLUSIVE', code: 'PROGRESS_NOT_OBSERVED' };
+  };
+  const statusMeta = snapshot => ({ scanId: snapshot.scanId, state: snapshot.state, digest: snapshot.digest, platform: snapshot.platform, ...(snapshot.progress ? { progress: snapshot.progress } : {}),
     checks: Object.fromEntries(CHECKS.map(key => [key, snapshot.perCheck?.[key]?.outcome ?? null])),
     counts: { ...Object.fromEntries(CHECKS.map(key => [key, snapshot.perCheck?.[key]?.outcome === 'checked' ? count(key === 'sbom' ? snapshot.perCheck[key].componentCount : snapshot.perCheck[key].findingCount) : null])), ...(snapshot.identifierCounts ? { cve: count(snapshot.identifierCounts.cve), debianTemp: count(snapshot.identifierCounts.debianTemp) } : {}) } });
   const terminalStatus = async (page, id) => {
@@ -807,8 +1101,8 @@ async function runNative(mode = 'native', attemptId) {
       const llmPath = `${SCANS}/${report.scanId}/llm`;
       const openChat = async page => {
         const panel = page.getByRole('region', { name: 'Чат по отчёту', exact: true });
-        await panel.getByRole('button', { name: 'Открыть чат и прочитать условия', exact: true }).click();
-        await expect(panel.getByRole('region', { name: 'Готовность генерации', exact: true })).toContainText('generationVerified: false');
+        await panel.getByRole('button', { name: 'Открыть чат', exact: true }).click();
+        await expect(panel.getByRole('region', { name: 'Готовность генерации', exact: true })).toContainText('Генерация не проверена.');
         return panel;
       };
       const readChat = async page => {
@@ -844,8 +1138,7 @@ async function runNative(mode = 'native', attemptId) {
         if (ready.history === 'available') {
           await expect(panel.getByLabel('Вопрос чату', { exact: true })).toBeVisible();
           await panel.getByLabel('Вопрос чату', { exact: true }).fill(QUESTION);
-          await expect(panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).not.toBeChecked();
-          await expect(panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).toBeDisabled();
+          await expect(panel.locator('#scan-chat-send-help')).toBeVisible();
           await expect(panel.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeDisabled();
         }
         await expect(own.page.getByRole('heading', { name: 'Image config · только метаданные образа', exact: true })).toBeVisible();
@@ -870,7 +1163,7 @@ async function runNative(mode = 'native', attemptId) {
           const fresh = chat.chatReadinessSchema.parse(response.value);
           if (!keyBoundaryAllowed(fresh, current.context)) throw new Fault(fresh.credential !== 'missing' ? 'KEY_NOT_ABSENT_NO_POST' : 'LLM_STORES_OR_CONTEXT_UNAVAILABLE');
           assert.deepEqual(current.saved, saved);
-          await expect(panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).not.toBeChecked();
+          await expect(panel.locator('#scan-chat-send-help')).toBeVisible();
           await expect(panel.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeDisabled();
           assert.equal(own.state.generationPosts, 0);
           return ok(undefined, { credential: fresh.credential, historyUnchanged: true, noGenerationPosts: true });
@@ -935,7 +1228,7 @@ async function runNative(mode = 'native', attemptId) {
         if (!savedHistory) throw new Fault('PREREQUISITE_UNAVAILABLE');
         await own.page.goto(`${ORIGIN}/scans/${report.scanId}`); panel = await openChat(own.page);
         assert.deepEqual((await readChat(own.page)).saved, savedHistory); await expect(panel.getByText(DECISION, { exact: true })).toBeVisible();
-        await expect(panel.getByRole('checkbox', { name: /Разрешаю один запрос чата:/ })).not.toBeChecked();
+        await expect(panel.locator('#scan-chat-send-help')).toBeVisible();
         assert.equal(own.state.generationPosts, 0); return ok(undefined, { historyUnchanged: true, noGenerationPosts: true });
       });
       // Repeat denial after a real durable decision exists, not only against an empty history.
@@ -952,77 +1245,101 @@ async function runNative(mode = 'native', attemptId) {
       async function runCancellation() {
       const cancelled = await step('cancel', async () => {
         if (stats.scanLaunches !== scans.size || [...scans.values()].some(record => !record.terminal)) throw new Fault('PREREQUISITE_UNAVAILABLE');
-        const id = await launch(own, TARGETS[0]); let before = await status(own.page, id);
-        // Observe real subset publication if it happens; never add artificial worker barriers.
+        const id = await launch(own, TARGETS[0]);
+        // Observation never dispatches/cancels; failure must not prevent the one
+        // authorized cancellation from proceeding to its durable checks.
+        if (plan.cancelOnly) {
+          phase.enter('progress-snapshot');
+          let progress;
+          try { progress = await observeProgress(own.page, id, true); }
+          catch (error) { progress = { status: 'BLOCKED', code: 'ASSERTION_FAILED', failure: true, meta: failureMeta(error) }; }
+          book.record('cancel_progress', progress.status, progress.code, { ...phase.meta(), ...progress.meta }, progress.failure);
+        }
+        phase.enter('subset-observation');
+        let before = await status(own.page, id);
+        phase.observe(statusMeta(before));
+        // Only durable outcome metadata is public while running. Never collect
+        // private checkpoint findings/datasets, even when checkedChecks is positive.
         const observationDeadline = Date.now() + (plan.cancelOnly ? WORKER_MS : 20_000);
-        while (!TERMINAL.has(before.state) && (plan.cancelOnly ? cancelObservation(before) === 'waiting' : !CHECKS.some(key => before.perCheck?.[key] != null)) && Date.now() < observationDeadline) { ensureLive(); await wait(500); before = await status(own.page, id); }
-        if (plan.cancelOnly && cancelObservation(before) === 'waiting') return { status: 'INCONCLUSIVE', code: 'NO_COMPLETED_SUBSET_OBSERVED', meta: statusMeta(before) };
-        const observed = plan.cancelOnly ? completedChecks(before) : CHECKS.filter(key => before.perCheck?.[key] != null);
-        const subsets = {}; let subsetChanged = false;
-        if (!TERMINAL.has(before.state)) for (const kind of observed.filter(key => key !== 'config' && before.perCheck[key].outcome === 'checked')) {
-          try { subsets[kind] = await collect(own.page, before, kind); }
-          catch (error) {
+        while (cancelObservation(before) === 'waiting' && Date.now() < observationDeadline) {
+          ensureLive(); await wait(500); before = await status(own.page, id); phase.observe(statusMeta(before));
+        }
+        if (cancelObservation(before) === 'waiting') return { status: 'INCONCLUSIVE', code: 'NO_COMPLETED_SUBSET_OBSERVED', meta: statusMeta(before) };
+        const observed = checkpointChecks(before);
+        if (!TERMINAL.has(before.state)) {
+          assert.ok(Object.values(before.perCheck ?? {}).every(value => value == null));
+          assert.equal(before.config, undefined);
+          const visibleRows = await own.page.locator('ul.scan-report-inventory > li, li.scan-vuln-row').count();
+          if (visibleRows > 0) {
             const current = await status(own.page, id);
-            if (isDeepStrictEqual(current, before)) throw error;
-            subsetChanged = true; // A real advancing cursor/snapshot, not preserved-row proof.
+            if (TERMINAL.has(current.state)) before = current; // Legitimate terminal publication won the race.
+            else assert.equal(visibleRows, 0); // No private row content is read, even on this violation.
           }
         }
+        phase.enter('cancel-available');
         let httpStatus = null;
-        const stillActive = !TERMINAL.has(before.state) && (!plan.cancelOnly || !TERMINAL.has((await status(own.page, id)).state));
+        const stillActive = !TERMINAL.has(before.state) && !TERMINAL.has((await status(own.page, id)).state);
         if (stillActive) {
           const button = own.page.getByRole('button', { name: 'Отменить скан', exact: true });
           if (await button.isVisible()) {
             const path = `${SCANS}/${id}/cancel`; permit(own.state, path, body => exact(body, []));
             const pending = waitResponse(own.page, path, 'POST');
             own.page.once('dialog', dialog => dialog.type() === 'confirm' && dialog.message() === 'Отменить скан? Сохранённые результаты завершённых проверок останутся доступны. Остальные проверки не будут завершены.' ? dialog.accept() : dialog.dismiss());
+            phase.enter('cancel-click');
             try { await button.click({ timeout: 2000 }); }
             catch (error) { if (!TERMINAL.has((await status(own.page, id)).state)) throw error; }
+            phase.enter('cancel-receipt');
             const response = await pending; httpStatus = response?.status() ?? null;
+            phase.observe({ httpStatus });
             if (httpStatus === 200) assert.deepEqual(await response.json(), { scanId: id, state: 'cancelled' });
           }
         }
+        phase.enter('cancel-terminal');
         const after = await terminalStatus(own.page, id), verdict = cancelVerdict(after.state, httpStatus);
-        return { ...verdict, value: { before, after, observed, subsets, subsetChanged }, meta: { ...statusMeta(after), ...(httpStatus ? { httpStatus } : {}), observedCompletedChecks: observed } };
+        return { ...verdict, value: { before, after, observed }, meta: { ...statusMeta(after), ...(httpStatus ? { httpStatus } : {}), observedCompletedChecks: observed,
+          preCancelProgress: before.progress, preCancelFindingsRead: false, preCancelByteComparison: false, ...(!TERMINAL.has(before.state) ? { preCancelReportUiEmpty: true } : {}) } };
       });
       if (cancelled) {
         let focusedReports;
         if (plan.cancelOnly) focusedReports = await step('cancel_report', async () => {
+          phase.enter('cancel-report');
           if (cancelled.after.state !== 'cancelled') return { status: 'INCONCLUSIVE', code: 'CANCEL_RACE' };
           await own.page.goto(`${ORIGIN}/scans/${cancelled.after.scanId}`);
           const reports = await verifyReport(own.page, cancelled.after);
-          return ok(reports, { ...statusMeta(cancelled.after), checkedSets: Object.keys(reports).length });
+          const progress = await observeProgress(own.page, cancelled.after.scanId);
+          return { ...progress, value: reports, meta: { ...statusMeta(cancelled.after), checkedSets: Object.keys(reports).length, ...progress.meta } };
         });
         await step('cancel_preservation', async () => {
-          const { before, after, observed, subsets, subsetChanged } = cancelled;
+          phase.enter('cancel-preservation');
+          const { before, after, observed } = cancelled;
           if (after.state !== 'cancelled') return { status: 'INCONCLUSIVE', code: 'CANCEL_RACE' };
-          for (const key of observed) assert.deepEqual(after.perCheck[key], before.perCheck[key]);
-          if (observed.includes('config')) assert.deepEqual(after.config, before.config);
+          assertCancelOutcomePreservation(before, after);
           if (plan.cancelOnly && !focusedReports) throw new Fault('PREREQUISITE_UNAVAILABLE');
           const persisted = plan.cancelOnly ? focusedReports : await verifyReport(own.page, after);
-          for (const [kind, original] of Object.entries(subsets)) {
-            assert.deepEqual(persisted[kind].rows, original.rows); assert.deepEqual(persisted[kind].baseline, original.baseline);
-          }
-          if (!plan.cancelOnly) {
-            await own.page.reload(); assert.deepEqual(await status(own.page, after.scanId), after); assert.deepEqual(await verifyReport(own.page, after), persisted);
-            await wait(2000); // Bounded late-publication observation, not a guarantee about all future writes.
-            const final = await status(own.page, after.scanId);
-            for (const key of CHECKS.filter(key => !observed.includes(key))) assert.deepEqual(final.perCheck[key], after.perCheck[key]);
-          }
-          return { ...preservationVerdict(before, observed, subsets, subsetChanged), meta: { observedCompletedChecks: observed } };
+          await wait(2000); // Bounded observation, not a guarantee about all future writes.
+          assert.deepEqual(await status(own.page, after.scanId), after);
+          assert.deepEqual(await verifyReport(own.page, after), persisted);
+          return { status: 'PASS', code: 'VERIFIED', meta: { observedCompletedChecks: observed,
+            preCancelProgress: before.progress, preCancelFindingsRead: false, preCancelByteComparison: false,
+            postCancelBaselineVerified: true, preservationBasis: 'post-cancel-published-baseline-v1' } };
         });
         if (plan.cancelOnly) await step('cancel_reload', async () => {
+          phase.enter('cancel-reload');
           const { after } = cancelled;
           if (after.state !== 'cancelled') return { status: 'INCONCLUSIVE', code: 'CANCEL_RACE' };
           if (!focusedReports) throw new Fault('PREREQUISITE_UNAVAILABLE');
           await own.page.reload(); assert.deepEqual(await status(own.page, after.scanId), after);
           assert.deepEqual(await verifyReport(own.page, after), focusedReports);
+          const progress = await observeProgress(own.page, after.scanId);
           await wait(2000);
           const final = await status(own.page, after.scanId);
-          assert.deepEqual(final.perCheck, after.perCheck); assert.deepEqual(final.config, after.config);
-          return ok(undefined, { ...statusMeta(final), historyUnchanged: true });
+          assert.deepEqual(final, after);
+          assert.deepEqual(await verifyReport(own.page, final), focusedReports);
+          return { ...progress, meta: { ...statusMeta(final), historyUnchanged: true, ...progress.meta } };
         });
-        await step('cancel_history', () => history(own.page, [...completed, cancelled.after]));
+        await step('cancel_history', () => { phase.enter('cancel-history'); return history(own.page, [...completed, cancelled.after]); });
         await step('cancel_fresh_login', async () => {
+          phase.enter('cancel-fresh-login');
           own.state.closing = true; await own.context.close(); own = await newPage();
           assert.equal((await own.context.cookies()).length, 0);
           await own.page.goto(`${ORIGIN}/login`);
@@ -1032,15 +1349,16 @@ async function runNative(mode = 'native', attemptId) {
           assert.deepEqual(await status(own.page, cancelled.after.scanId), cancelled.after);
           const reports = await verifyReport(own.page, cancelled.after);
           if (plan.cancelOnly && focusedReports) assert.deepEqual(reports, focusedReports);
-          return ok(undefined, { state: cancelled.after.state, historyUnchanged: true });
+          const progress = plan.cancelOnly ? await observeProgress(own.page, cancelled.after.scanId) : { status: 'PASS', code: 'VERIFIED' };
+          return { ...progress, meta: { state: cancelled.after.state, historyUnchanged: true, ...progress.meta } };
         });
       }
       }
       await runCancellation();
     })()]);
   } catch (e) {
-    const code = fatalCode ?? (e instanceof Fault ? e.message : 'ASSERTION_FAILED');
-    book.record(currentCase, 'BLOCKED', code, failureMeta(e), !(e instanceof Fault) || e.failure);
+    const code = fatalCode ?? (e instanceof BrowserReadError ? 'BROWSER_READ_FAILED' : e instanceof Fault ? e.message : 'ASSERTION_FAILED');
+    book.record(currentCase, 'BLOCKED', code, { ...phase.meta(), ...failureMeta(e), ...(e instanceof BrowserReadError ? e.meta : {}) }, e instanceof BrowserReadError ? false : !(e instanceof Fault) || e.failure);
   } finally {
     stopped = true; for (const state of contextStates.values()) state.closing = true; clearTimeout(globalTimer); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal); process.removeListener('SIGHUP', signal);
     try { await bounded(Promise.allSettled(contexts.map(context => context.close())), 10_000); if (browser) await bounded(browser.close(), 10_000); browserClosed = !browser || !browser.isConnected(); }

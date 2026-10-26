@@ -22,7 +22,7 @@ import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport
 import type { LlmUsage } from '@/shared/api/scans/llmUsageClient';
 import { utf8Bytes } from '@/shared/api/scans/vulnAdvisory';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
-import { identifierCountLabel, isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
+import { isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
 
@@ -51,6 +51,54 @@ function readinessMatchesContext(ready: ChatReadiness, context: ChatContext) {
     ready.provider.model === context.disclosure?.model &&
     ready.provider.endpoint === context.disclosure?.providers[0]
   );
+}
+const checkLabels = { secret: 'Секреты', vuln: 'Уязвимости', config: 'Конфигурация' };
+const severityLabels: Record<string, string> = {
+  CRITICAL: 'Критическая',
+  HIGH: 'Высокая',
+  MEDIUM: 'Средняя',
+  LOW: 'Низкая',
+  INFO: 'Информационная',
+  UNKNOWN: 'Неизвестна',
+};
+function coverageLabel(outcome?: string) {
+  const labels: Record<string, string> = {
+    checked: 'проверено',
+    unsupported: 'не поддерживается',
+    failed: 'ошибка проверки',
+    skipped: 'пропущено',
+    cancelled: 'отменено',
+    not_checked: 'не проверено',
+    unknown: 'неизвестно',
+    not_authorized: 'не разрешено',
+  };
+  return outcome ? (labels[outcome] ?? 'неизвестно') : 'неизвестно';
+}
+function coverageReason(reason: string) {
+  const labels: Record<string, string> = {
+    SCAN_FAILED: 'ошибка сканирования',
+    SCAN_TIMEOUT: 'истекло время сканирования',
+    DB_UNAVAILABLE: 'база уязвимостей недоступна',
+    OS_EOL: 'поддержка ОС завершена',
+    OS_UNKNOWN: 'ОС не определена',
+    NODE_INVENTORY_ABSENT: 'состав пакетов Node.js отсутствует',
+    NODE_INVENTORY_UNKNOWN: 'состав пакетов Node.js не установлен',
+  };
+  return labels[reason] ?? 'причина не установлена';
+}
+function sourceLabel(label: string) {
+  return label
+    .split(' · ')
+    .map(
+      (part) =>
+        severityLabels[part] ??
+        (part === 'Secrets'
+          ? 'Секреты'
+          : part === 'Debian advisory (не CVE)'
+            ? 'Уведомление Debian (не CVE)'
+            : part),
+    )
+    .join(' · ');
 }
 const sessionKey = () => JSON.stringify(scanSession());
 const policyFence = (v: ChatContext) =>
@@ -84,7 +132,7 @@ function SourceList({
   return (
     <>
       <p>
-        Источники гипотезы или решения:{' '}
+        Основания ответа/решения:{' '}
         {sources.map((source) => (
           <a key={source.finding.findingId} href={`#${prefix}-${source.finding.findingId}`}>
             Находка {source.finding.findingId}{' '}
@@ -95,18 +143,18 @@ function SourceList({
         {sources.map((source) => (
           <li key={source.finding.findingId} id={`${prefix}-${source.finding.findingId}`} tabIndex={-1}>
             <strong>
-              {source.finding.check} · {source.finding.severity}
+              {checkLabels[source.finding.check]} · {severityLabels[source.finding.severity] ?? 'Неизвестна'}
             </strong>{' '}
             · {source.finding.findingId}
             {source.finding.check === 'vuln' ? (
               <p>
                 {source.finding.cveId} ·{' '}
-                {isDebianTempId(source.finding.cveId) ? 'Debian advisory (не CVE)' : 'CVE'}
+                {isDebianTempId(source.finding.cveId) ? 'Уведомление Debian (не CVE)' : 'CVE'}
               </p>
             ) : null}
             <p>
               {sameChatBinding(source, current)
-                ? 'Источник текущего отчёта, проверен по scanner results.'
+                ? 'Источник текущего отчёта, проверен по результатам сканирования.'
                 : 'Исторический источник — не разрешён как находка текущего отчёта.'}
             </p>
             <small>
@@ -127,7 +175,6 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   const [question, setQuestion] = useState('');
   const [decision, setDecision] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [consent, setConsent] = useState(false);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
   const [receipt, setReceipt] = useState<Extract<ChatResult, { reply: unknown }>['usage'] | null>(null);
@@ -144,7 +191,6 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   function cancel() {
     invalidate();
     setPending(false);
-    setConsent(false);
     setSnapshot(null);
     setReceipt(null);
     setSelectedIds([]);
@@ -240,8 +286,6 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     request.current = controller;
     const version = ++generation.current;
     setPending(true);
-    setMessage('');
-    setConsent(false);
     setReceipt(null);
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -301,7 +345,6 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       invalidate();
       setSnapshot(null);
       setReadiness(null);
-      setConsent(false);
       setReceipt(null);
       setSelectedIds([]);
       setPending(false);
@@ -320,7 +363,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       pending ||
       accepted.context.pending ||
       !client.current() ||
-      (kind === 'chat' && (!consent || !accepted.context.enabled || (publicReport && !readiness?.localReady)))
+      (kind === 'chat' && (!accepted.context.enabled || (publicReport && !readiness?.localReady)))
     )
       return;
     const value = kind === 'chat' ? question : decision;
@@ -330,6 +373,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     }
     if (request.current) return;
     setOperation(kind);
+    setMessage('');
     const mutationId = crypto.randomUUID();
     const ids = [...selectedIds];
     void operate(async (signal, publish) => {
@@ -349,8 +393,8 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
         throw new ChatError('STALE');
       const result =
         kind === 'chat'
-          ? await client.chat(accepted.context, value, mutationId, signal)
-          : await client.decision(accepted.context, value, ids, mutationId, signal);
+          ? await client.chat(before, value, mutationId, signal)
+          : await client.decision(before, value, ids, mutationId, signal);
       if (signal.aborted || !client.current()) throw new ChatError('STALE');
       if ('reply' in result && !verifiedChatSources(result.reply, accepted.sources))
         throw new ChatError('INVALID');
@@ -426,16 +470,16 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
         {connection}
       </p>
       <p>
-        ИИ предлагает гипотезы, не факты сканирования. Findings и coverage основного отчёта остаются
-        доступными при любой ошибке или квоте.
+        Находки и покрытие — результаты сканирования в основном отчёте. Ответ ИИ — отдельная интерпретация:
+        предположения и рекомендации требуют проверки по источникам. Ошибка ИИ не меняет отчёт.
       </p>
       <p>
-        Провайдер stream:false. Сервер передаёт проверенный и сохранённый полный ответ ограниченными
-        NDJSON-кадрами, не нативным потоком токенов. Публикуем ответ только после usage, citation, delta,
-        done, завершения передачи и проверки долговечной истории; промежуточный текст не показываем.
+        Провайдер возвращает полный ответ, а не поток токенов. Показываем его только после завершения
+        передачи, проверки учёта расхода, ссылок на находки и совпадения с сохранённой историей. Промежуточный
+        текст не показываем.
       </p>
       <Button type="button" variant="secondary" disabled={pending || !client.current()} onClick={refresh}>
-        {opened ? 'Обновить историю и условия чата' : 'Открыть чат и прочитать условия'}
+        {opened ? 'Обновить историю и условия чата' : 'Открыть чат'}
       </Button>
       {pending ? (
         <>
@@ -464,8 +508,8 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                 ))}
               </ul>
               <p>
-                Генерация не проверена (generationVerified: false). Каталог не подтверждает успешный вызов.
-                Согласие требуется отдельно; ключи в интерфейсе не принимаются.
+                Генерация не проверена. Каталог не подтверждает успешный вызов. Новый запрос отправляется
+                только кнопкой «Отправить вопрос»; ключи в интерфейсе не принимаются.
               </p>
             </>
           ) : (
@@ -484,22 +528,22 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       {snapshot && context ? (
         <>
           {status.profile === PUBLIC_IMAGE_PROFILE ? (
-            <div aria-label="Границы public отчёта в чате">
+            <div aria-label="Границы отчёта публичного образа в чате">
               <p>
                 Весь сохранённый отчёт:{' '}
                 {status.identifierCounts
-                  ? identifierCountLabel(status.identifierCounts)
-                  : 'число CVE и Debian advisories неизвестно'}
+                  ? `CVE: ${status.identifierCounts.cve}; уведомления Debian: ${status.identifierCounts.debianTemp}`
+                  : 'число CVE и уведомлений Debian неизвестно'}
                 . Debian TEMP — не CVE.
               </p>
               <p>
-                Покрытие уязвимостей: {status.perCheck?.vuln?.outcome ?? 'неизвестно'}; OS:{' '}
-                {status.perCheck?.vuln?.os?.outcome ?? 'неизвестно'}; Node:{' '}
-                {status.perCheck?.vuln?.node?.outcome ?? 'неизвестно'}
+                Покрытие уязвимостей: {coverageLabel(status.perCheck?.vuln?.outcome)}; ОС:{' '}
+                {coverageLabel(status.perCheck?.vuln?.os?.outcome)}; Node.js:{' '}
+                {coverageLabel(status.perCheck?.vuln?.node?.outcome)}
                 {status.perCheck?.vuln?.node?.outcome === 'unsupported'
-                  ? ` · ${status.perCheck.vuln.node.reason}`
+                  ? ` · ${coverageReason(status.perCheck.vuln.node.reason)}`
                   : ''}
-                . Непроверенное не означает ноль; checked не гарантирует безопасность.
+                . Непроверенное не означает ноль; выполненная проверка не гарантирует безопасность.
               </p>
             </div>
           ) : null}
@@ -513,7 +557,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
             <div>
               <dt>История</dt>
               <dd>
-                Владелец + scan · epoch {context.epoch} · ревизия {context.revision}
+                Владелец + скан · поколение {context.epoch} · ревизия {context.revision}
               </dd>
             </div>
           </dl>
@@ -524,17 +568,17 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
           {context.disclosure ? (
             <>
               <p>
-                OpenRouter · {context.disclosure.model} · {context.disclosure.providers.join(', ')} · global:
-                регион не ограничен.
+                OpenRouter · {context.disclosure.model} · {context.disclosure.providers.join(', ')} · регион
+                не ограничен.
               </p>
               <p>
-                Только бесплатный профиль, все ценовые caps 0, без платного fallback и автоматических
-                повторов. Серверный текущий output ≤2048 токенов; это не фактический счёт.
+                Только бесплатный профиль, все ценовые пределы равны нулю, без платной замены и автоматических
+                повторов. Текущий предел ответа — 2048 токенов; это не фактический счёт.
               </p>
               <p>
-                Провайдер декларирует отсутствие хранения и обучения (no-storage, deny, ZDR); декларация и
-                одобрение оператора не доказывают соблюдение. Передаются очищенный вопрос, все
-                пользовательские сообщения и решения, выбранные findings и полное coverage, не raw evidence.
+                Провайдер декларирует отсутствие хранения и обучения; декларация и одобрение оператора не
+                доказывают соблюдение. Передаются очищенный вопрос, все пользовательские сообщения и решения,
+                выбранные находки и полное покрытие, без исходных свидетельств.
               </p>
               <small>Политика чата {context.policyVersion}</small>
             </>
@@ -558,12 +602,13 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                 {(['user', 'scan'] as const).map((scope) =>
                   snapshot.usage?.available ? (
                     <p key={scope}>
-                      {scope === 'user' ? 'Владелец' : 'Scan'}: остаток input{' '}
-                      {snapshot.usage[scope].remaining.input}, output {snapshot.usage[scope].remaining.output}
-                      ; использовано {snapshot.usage[scope].used.input}/{snapshot.usage[scope].used.output},
-                      удержано {snapshot.usage[scope].held.input}/{snapshot.usage[scope].held.output},
-                      перенесено {snapshot.usage[scope].carried.input}/{snapshot.usage[scope].carried.output};
-                      costMicros {snapshot.usage[scope].used.costMicros}.
+                      {scope === 'user' ? 'Владелец' : 'Скан'}: остаток входных токенов{' '}
+                      {snapshot.usage[scope].remaining.input}, выходных токенов{' '}
+                      {snapshot.usage[scope].remaining.output}; использовано{' '}
+                      {snapshot.usage[scope].used.input}/{snapshot.usage[scope].used.output}, удержано{' '}
+                      {snapshot.usage[scope].held.input}/{snapshot.usage[scope].held.output}, перенесено{' '}
+                      {snapshot.usage[scope].carried.input}/{snapshot.usage[scope].carried.output}; учтённая
+                      стоимость в миллионных долях доллара: {snapshot.usage[scope].used.costMicros}.
                       {snapshot.usage[scope].exhausted
                         ? ' Квота исчерпана.'
                         : snapshot.usage[scope].warning
@@ -573,7 +618,8 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                   ) : null,
                 )}
                 <p>
-                  Допуск запроса неизвестен до точного вопроса и полного wire. Остаток не гарантирует допуск.
+                  Допуск запроса неизвестен до точного вопроса и полного запроса. Остаток не гарантирует
+                  допуск.
                 </p>
               </>
             ) : (
@@ -583,14 +629,16 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
             )}
             {receipt ? (
               <p>
-                Последний ответ: input {receipt.input}, output {receipt.output}, costMicros{' '}
-                {receipt.costMicros}. Проверенное сервером сообщение провайдера, не счёт.
+                Последний ответ: входных токенов {receipt.input}, выходных токенов {receipt.output}, учтённая
+                стоимость в миллионных долях доллара: {receipt.costMicros}. Проверенное сервером сообщение
+                провайдера, не счёт.
               </p>
             ) : null}
           </section>
           {snapshot.history.turns.length ? (
             <p>
-              Продолжите чат новым вопросом. История входит в следующий запрос только после нового согласия.
+              Продолжите чат новым вопросом. История входит в следующий запрос только при новом нажатии
+              «Отправить вопрос».
             </p>
           ) : null}
           <form
@@ -610,29 +658,22 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                 value={question}
                 disabled={pending}
                 rows={3}
-                onChange={(e) => {
-                  setQuestion(e.target.value);
-                  setConsent(false);
-                }}
+                onChange={(e) => setQuestion(e.target.value)}
                 style={{ width: '100%' }}
               />
             </label>
             <small id="scan-chat-input-help">
-              {utf8Bytes(question)} / 2048 UTF-8 байт. Без URL, секретов и raw evidence.
+              {utf8Bytes(question)} / 2048 UTF-8 байт. Без ссылок, секретов и исходных свидетельств.
             </small>
-            <label>
-              <input
-                type="checkbox"
-                checked={consent}
-                disabled={!available || !generationAllowed}
-                onChange={(e) => setConsent(e.target.checked)}
-              />{' '}
-              Разрешаю один запрос чата: отправить этот вопрос, очищенную историю, решения, findings и
-              coverage по указанной политике текущего отчёта.
-            </label>
+            <p id="scan-chat-send-help">
+              Нажимая «Отправить вопрос», вы разрешаете один запрос: очищенный вопрос, историю, решения,
+              выбранные находки и покрытие — указанным выше модели и провайдеру OpenRouter. Только бесплатный
+              профиль, без платной замены и автоповтора. Условия проверяются заново перед отправкой.
+            </p>
             <Button
               type="submit"
-              disabled={!available || !consent || !generationAllowed || !validChatText(question)}
+              aria-describedby="scan-chat-send-help"
+              disabled={!available || !generationAllowed || !validChatText(question)}
             >
               Отправить вопрос
             </Button>
@@ -643,11 +684,22 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
           ) : null}
           {snapshot.history.turns.map((turn) => (
             <article key={turn.id}>
-              <h5>Вопрос · {turn.state}</h5>
+              <h5>
+                Вопрос ·{' '}
+                {
+                  {
+                    pending: 'ожидает ответа',
+                    completed: 'ответ сохранён',
+                    failed: 'ошибка',
+                    cancelled: 'отменён',
+                    interrupted: 'прерван',
+                  }[turn.state]
+                }
+              </h5>
               <p style={{ whiteSpace: 'pre-wrap' }}>{turn.question}</p>
               {turn.state === 'completed' ? (
                 <>
-                  <h5>Гипотеза · не доказанный факт</h5>
+                  <h5>Ответ ИИ · требует проверки</h5>
                   <SafeMarkdown text={turn.reply.text} />
                   <SourceList sources={turn.reply.sources} current={context} prefix={`chat-${turn.id}`} />
                 </>
@@ -661,7 +713,6 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                       disabled={!available || !generationAllowed}
                       onClick={() => {
                         setQuestion(turn.question);
-                        setConsent(false);
                         questionInput.current?.focus();
                       }}
                     >
@@ -690,10 +741,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
               <textarea
                 value={decision}
                 rows={3}
-                onChange={(e) => {
-                  setDecision(e.target.value);
-                  setConsent(false);
-                }}
+                onChange={(e) => setDecision(e.target.value)}
                 style={{ width: '100%' }}
               />
             </label>
@@ -702,7 +750,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
               источников).
             </small>
             <details>
-              <summary>Источники решения</summary>
+              <summary>Основания решения</summary>
               {snapshot.sources.map((source) => (
                 <label key={source.findingId} style={{ display: 'block' }}>
                   <input
@@ -710,7 +758,6 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                     checked={selectedIds.includes(source.findingId)}
                     disabled={!selectedIds.includes(source.findingId) && selectedIds.length >= 32}
                     onChange={(e) => {
-                      setConsent(false);
                       setSelectedIds((ids) =>
                         e.target.checked
                           ? [...ids, source.findingId]
@@ -718,7 +765,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
                       );
                     }}
                   />
-                  {source.label} · {source.findingId}
+                  {sourceLabel(source.label)} · {source.findingId}
                 </label>
               ))}
             </details>

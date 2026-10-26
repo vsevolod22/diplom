@@ -17,6 +17,7 @@ import { ScanShell, controlClass } from '@/features/scans/ScanShell';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { ScanScene } from '@/features/scans/ScanScene';
 import { ScanStatusAnnouncement } from '@/features/scans/ScanStatusAnnouncement';
+import { ScanProgressPanel } from '@/features/scans/ScanProgressPanel';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
@@ -28,6 +29,7 @@ import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import { identifierCountLabel } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 
 const unavailableScope = ['live-scans', 'unavailable'] as const;
+const terminalStates = new Set<ScanStatus['state']>(['completed', 'partial', 'failed', 'cancelled']);
 
 const coverageLabels: Record<ScanCoverage['status'], string> = {
   checked: 'Выполнено (не гарантия безопасности)',
@@ -70,7 +72,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
   const queryClient = useQueryClient();
   const scope = live?.scope ?? unavailableScope;
   const streamKey = `${scope.join(':')}:${scanId}`;
-  const [connectedStream, setConnectedStream] = useState<string | null>(null);
+
   const [realtime, setRealtime] = useState<'connecting' | 'connected' | 'reconnecting' | 'polling'>('polling');
   const cancellation = useMutation({
     mutationFn: (id: string) => transport.cancel(id),
@@ -83,16 +85,27 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
       ]);
     },
   });
+  const scanQueryKey = demo ? ['scan', 'fixture', scanId] : [...scope, 'scan', scanId];
   const scan = useQuery({
-    queryKey: demo ? ['scan', 'fixture', scanId] : [...(live?.scope ?? ['live-scans', 'unavailable']), 'scan', scanId],
-    queryFn: ({ signal }) => transport.get(scanId, signal),
+    queryKey: scanQueryKey,
+    queryFn: async ({ signal }) => {
+      const next = await transport.get(scanId, signal);
+      if (signal.aborted || next.scanId !== scanId) throw new Error('Снимок скана устарел');
+      const current = queryClient.getQueryState<ScanStatus>(scanQueryKey);
+      if (current?.error instanceof ScanAccessError) throw current.error;
+      // An older in-flight poll must not reopen a scan after another GET confirmed its terminal state.
+      if (current?.data?.scanId === scanId && terminalStates.has(current.data.state) && next.state !== current.data.state)
+        return current.data;
+      return next;
+    },
     enabled,
     retry: false,
     refetchOnWindowFocus: false,
     refetchInterval: demo ? false : (query) => {
       if (query.state.error instanceof ScanAccessError) return false;
       const snapshot = query.state.data as ScanStatus | undefined;
-      return snapshot && ['queued', 'running', 'cancelling'].includes(snapshot.state) && connectedStream !== streamKey ? 2000 : false;
+      // Durable checkpoints do not emit SSE events; poll while active even when the stream is connected.
+      return snapshot && ['queued', 'running', 'cancelling'].includes(snapshot.state) ? 2000 : false;
     },
   });
   const requested = scan.data?.checks ?? (scan.data?.check ? [scan.data.check] : []);
@@ -135,13 +148,13 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
       close = transport.subscribeEvents(scanId, refresh,
         () => {
           if (!mounted) return;
-          setConnectedStream(null); setRealtime('reconnecting');
+          setRealtime('reconnecting');
           reconnectTimer ??= setTimeout(() => { if (mounted) setRealtime('polling'); }, 15_000);
         },
         () => {
           if (!mounted) return;
           clearTimeout(reconnectTimer); reconnectTimer = undefined;
-          setConnectedStream(streamKey); setRealtime('connected'); refresh();
+          setRealtime('connected'); refresh();
         });
     } catch {
       // Invalid ID or unavailable EventSource: keep polling the GET snapshot.
@@ -186,7 +199,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
             <div className="scan-a1__summary">
               <Badge tone={stateTone[scan.data.state]}>{stateLabels[scan.data.state]}</Badge>
               <span>Текущая фаза: {stateLabels[scan.data.state]}</span>
-              <span>Прогресс: {scan.data.percent == null ? 'неизвестен' : `${scan.data.percent}%`}</span>
+              <ScanProgressPanel scan={scan.data} />
               {!demo ? <span role="status" aria-label="Состояние realtime">{active ? {
                 connecting: 'SSE: подключаемся; статус обновляется через GET',
                 connected: 'SSE: подключён; этап подтверждается GET',

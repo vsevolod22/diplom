@@ -68,7 +68,7 @@ test('actual cookie Nest → durable history → current report/cache → real a
           await afterSend?.();
           return new Response(JSON.stringify({ model: freePolicy.model, usage: { prompt_tokens: 500, completion_tokens: 32, cost: 0 },
             choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ scanId: report.scanId,
-              digest: report.digest, platform: report.platform, reportVersion: report.reportVersion, text: 'This is a cited hypothesis, not a scanner fact.',
+              digest: report.digest, platform: report.platform, reportVersion: report.reportVersion, text: 'Находка сохранена сканером. Интерпретация требует отдельной проверки.',
               citations: [badCitation ? 'foreign' : report.findings[0].findingId] }) } }] }), { headers: { 'content-type': 'application/json' } });
         })();
       });
@@ -340,7 +340,7 @@ test('full HTTP history C/C+1 rollback, maximum completion, durable original rep
       const h = history.snapshot(owner, completionId), p = history.begin(owner, completionId, h.epoch, h.revision, t, fixturePending(t));
       return history.finish(owner, completionId, p.epoch, p.revision, t.id, { ...cb, kind: 'hypothesis', text, sources: cs.slice(0, 1) });
     };
-    const largeText = '"'.repeat(15000) + ' '.repeat(1384); assert.equal(Buffer.byteLength(largeText), HISTORY.replyBytes);
+    const largeText = 'Проверка' + '"'.repeat(15000) + ' '.repeat(1368); assert.equal(Buffer.byteLength(largeText), HISTORY.replyBytes);
     for (let n = 0; n < 12; n++) seed(fixtureTurn(), largeText);
     const question = 'Explain the current findings.', prospective = { ...fixtureTurn(), question }, pp = fixturePending(prospective), filler = fixtureTurn();
     const beforeFiller = history.snapshot(owner, completionId);
@@ -491,7 +491,7 @@ test('TASK16 R4 real cookie/service/controller admitted failure frames preserve 
         assert.equal(wire.stream, false); assert.ok(wire.max_tokens <= 2048); assert.deepEqual(wire.provider.only, ['novita/bf16']);
         assert.deepEqual(wire.provider.max_price, { prompt: 0, completion: 0, request: 0 });
         response = new Response(JSON.stringify({ model: freePolicy.model, usage: invalid === 'missing-usage' ? {} : { prompt_tokens: 500, completion_tokens: 32, cost: 0 }, choices: [{ finish_reason: 'stop',
-          message: { role: 'assistant', content: invalid === 'malformed' ? '{PRIVATE-attacker' : JSON.stringify({ ...reportBinding(report), text: invalid === 'script' ? '<script>attacker</script>' : '- ```js\n  Unfinished safe hypothesis', citations: [report.findings[0].findingId] }) } }] }), { headers: { 'content-type': 'application/json' } });
+          message: { role: 'assistant', content: invalid === 'malformed' ? '{PRIVATE-attacker' : JSON.stringify({ ...reportBinding(report), text: invalid === 'script' ? '<script>attacker</script>' : '- ```\n  Неподтверждённая интерпретация', citations: [report.findings[0].findingId] }) } }] }), { headers: { 'content-type': 'application/json' } });
       }); return response;
     },
   }) as GuardedTransport;
@@ -628,6 +628,7 @@ test('TASK16 R4 real cookie/service/controller admitted failure frames preserve 
         assert.equal(unavailable[0].receipt, 'unavailable'); assert.equal('usage' in unavailable[0], false);
         assert.equal(quota.snapshot(owner, scanId).scan.used.input, 5000, 'earlier settled attempts do NOT establish the current receipt');
         assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'failed'); acquire(owner)();
+
   } finally {
     receiptDb.close(); history.close(); quota.close(); await app.close(); rmSync(dir, { recursive: true, force: true });
     names.forEach((n, i) => { if (previous[i] === undefined) delete process.env[n]; else process.env[n] = previous[i]; });
@@ -662,7 +663,7 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
                   response = new Response('PRIVATE-provider-error-body', { status: Number(mode.slice(4)), headers: { 'retry-after': '60' } }); return;
                 }
         const usage = mode === 'missing' ? {} : { prompt_tokens: 500, completion_tokens: 32, cost: mode === 'fault' ? 0.01 : 0 };
-        response = new Response(JSON.stringify({ model: freePolicy.model, usage, choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: mode === 'valid' ? JSON.stringify({ ...reportBinding(report), text: 'Safe hypothesis', citations: [report.findings[0].findingId] }) : '{PRIVATE-invalid-reply' } }] }), { headers: { 'content-type': 'application/json' } });
+        response = new Response(JSON.stringify({ model: freePolicy.model, usage, choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: mode === 'valid' ? JSON.stringify({ ...reportBinding(report), text: 'Находка требует проверки оператором', citations: [report.findings[0].findingId] }) : '{PRIVATE-invalid-reply' } }] }), { headers: { 'content-type': 'application/json' } });
       }); return response;
     },
   }) as GuardedTransport;
@@ -729,6 +730,8 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
         providerFailure: { kind: status === 401 ? 'auth_failed' : 'rate_limited', status, ...(status === 401 ? {} : { retryAfterSeconds: 60 }) } };
       const request = await input(), response = await post(request), raw = await response.text();
       assert.equal(response.status, 200);
+      assert.equal(response.headers.get('x-llm-failure-phase'), 'headers');
+      assert.equal(response.headers.get('x-llm-failure-reason'), 'http_error');
       const frames = raw.trimEnd().split('\n').map(line => JSON.parse(line)); assert.equal(frames.length, 1);
       assert.equal(frames[0].type, 'error'); assert.equal(frames[0].seq, 0); assert.equal(frames[0].receipt, 'unavailable');
       assert.equal(frames[0].errorCode, expected.errorCode); assert.deepEqual(frames[0].providerFailure, expected.providerFailure);
@@ -738,6 +741,8 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
       const beforeReplay: number = sends; await (await post(request)).text(); assert.equal(sends, beforeReplay, 'failed attempt replay cannot resend');
       const json = await post(await input(), 'application/json'); assert.equal(json.status, status === 401 ? 503 : status);
       assert.deepEqual(await json.json(), expected); assert.equal(json.headers.get('cache-control'), 'no-store');
+      assert.equal(json.headers.get('x-llm-failure-phase'), 'headers');
+      assert.equal(json.headers.get('x-llm-failure-reason'), 'http_error');
       assert.equal(json.headers.get('retry-after'), status === 401 ? null : '60'); acquire(owner)();
       assert.equal((db.prepare('SELECT state,receipt FROM quota_attempt WHERE id=?').get(reservation) as { state: string; receipt: string | null }).receipt, null);
     }

@@ -4,6 +4,7 @@ import { normalizePlain, type AdvisoryAssessment, type AdvisoryV1 } from '../wor
 import { cleanText } from './history-contract.js';
 import { disclosure, PUBLIC_FREE_MODEL, PUBLIC_FREE_PROVIDER, type LlmPolicy } from './policy.js';
 import { exact, invalidReply } from './response.js';
+import { russianHumanText, technicalIdentifiers, withoutPreservedIdentifiers, withoutRuntimeBrand } from './russian-text.js';
 
 export const TRANSLATION = Object.freeze({ revision: 'selected-advisory-ru-v1', bodyBytes: 1024, busyMs: 100,
   titleBytes: 512, descriptionBytes: 4096, replyTitleBytes: 2048, replyDescriptionBytes: 16384 });
@@ -42,7 +43,7 @@ export function translationRequest(body: unknown) {
 function safeText(value: string, ceiling: number): boolean {
   try {
     if (cleanText(value, ceiling) !== value || normalizePlain(value, ceiling).value !== value ||
-        /https?:|mailto:|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b|\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/iu.test(value)) return false;
+        /https?:|mailto:|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b|\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/iu.test(withoutRuntimeBrand(value))) return false;
     return true;
   } catch { return false; }
 }
@@ -75,14 +76,13 @@ export function translationBinding(snapshot: TranslationSnapshot): TranslationBi
 const identifiers = (text: string) => [...new Set(text.match(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi) ?? [])].sort();
 function translatedField(value: unknown, original: string | null, ceiling: number): string | null {
   if (original === null) { if (value !== null) return invalidReply(); return null; }
-  if (typeof value !== 'string' || !safeText(value, ceiling) || /[`*#~[\]{}\\]/u.test(value) ||
+  if (typeof value !== 'string' || !safeText(value, ceiling) || /[`*#~[\]{}\\]/u.test(withoutPreservedIdentifiers(value, original)) ||
       JSON.stringify(identifiers(value)) !== JSON.stringify(identifiers(original))) return invalidReply();
-  const prose = original.replace(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi, '');
+  const supplied = technicalIdentifiers(original), returned = technicalIdentifiers(value);
+  if (supplied.some(token => !returned.includes(token)) || returned.some(token => !supplied.includes(token))) return invalidReply();
+  const prose = withoutPreservedIdentifiers(original, original);
   if (/\p{L}/u.test(prose)) {
-    // A fail-closed script check, not proof of semantic fidelity or translation quality.
-    const russian = value.match(/[А-Яа-яЁё]/gu)?.length ?? 0;
-    const latin = value.replace(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi, '').match(/[A-Za-z]/g)?.length ?? 0;
-    if (russian < 3 || russian < latin) return invalidReply();
+    if (!russianHumanText(value, original)) return invalidReply();
   } else if (value !== original) return invalidReply();
   return value;
 }

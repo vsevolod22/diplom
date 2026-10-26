@@ -1,5 +1,7 @@
 import { BadGatewayException } from '@nestjs/common';
 import type { ReportContext } from './report-context.js';
+import { groundedIdentifiers, russianHumanText } from './russian-text.js';
+import { diagnose } from './provider-diagnostic.js';
 
 export const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(v));
@@ -14,7 +16,7 @@ function plainText(value: unknown): string {
   return value;
 }
 
-export function validateReply(value: unknown, report: ReportContext) {
+export function validateReply(value: unknown, report: ReportContext, requireRussian = false) {
   if (!exact(value, ['scanId', 'digest', 'platform', 'reportVersion', 'hypotheses']) ||
       value.scanId !== report.scanId || value.digest !== report.digest || value.platform !== report.platform ||
       value.reportVersion !== report.reportVersion || !Array.isArray(value.hypotheses) ||
@@ -24,7 +26,13 @@ export function validateReply(value: unknown, report: ReportContext) {
     if (!exact(item, ['text', 'citations']) || !Array.isArray(item.citations) || !item.citations.length ||
         item.citations.length > 20 || new Set(item.citations).size !== item.citations.length ||
         item.citations.some(id => typeof id !== 'string' || !allowed.has(id))) return invalidReply();
-    return { kind: 'hypothesis' as const, text: plainText(item.text), citations: item.citations as string[] };
+    const text = plainText(item.text);
+    const evidence = report.findings.filter(finding => (item.citations as string[]).includes(finding.findingId));
+    if (requireRussian && !groundedIdentifiers(text, evidence))
+      throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), 'grounding', 'unknown_identifier');
+    if (requireRussian && !russianHumanText(text, JSON.stringify(evidence)))
+      throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), 'language', 'not_russian');
+    return { kind: 'hypothesis' as const, text, citations: item.citations as string[] };
   });
   // Membership proves the source exists, not the model's inference. Facts come only from the server.
   return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,

@@ -16,6 +16,7 @@ import { selectSummaryReport } from './summary-context.js';
 import type { QuotaLedger } from './quota-ledger.js';
 import { publicCredentialStatus, publicReadiness } from './public-readiness.js';
 import { PUBLIC_OPENROUTER_KEY_FILE } from './public-key-file.js';
+import { abortDiagnostic, stoppedDiagnostic } from './provider-diagnostic.js';
 
 @Injectable()
 export class LlmRuntime {
@@ -106,9 +107,9 @@ export class LlmService {
       throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
     const releaseCapacity = this.acquire(identity.subject);
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    const abort = () => abortDiagnostic(controller, 'caller_abort');
     signal.addEventListener('abort', abort, { once: true });
-    const deadline = setTimeout(abort, policy.timeoutMs);
+    const deadline = setTimeout(() => abortDiagnostic(controller, 'deadline'), policy.timeoutMs);
     let ledger: QuotaLedger | undefined;
     let reservation: string | undefined;
     let sentReport = report;
@@ -118,9 +119,14 @@ export class LlmService {
       // cannot support a reply; refuse locally, not after a paid/impossible request.
       if (!report.findings.length) throw new ConflictException({ errorCode: 'LLM_NO_EVIDENCE' });
       const provider = this.runtime.provider();
-      if (signal.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
-      const stopped = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () =>
-        reject(new ServiceUnavailableException({ errorCode: 'LLM_REQUEST_ABORTED' })), { once: true }));
+      if (signal.aborted) {
+        const error = new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+        stoppedDiagnostic(signal, error); throw error;
+      }
+      const stopped = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => {
+        const error = new ServiceUnavailableException({ errorCode: 'LLM_REQUEST_ABORTED' });
+        stoppedDiagnostic(controller.signal, error); reject(error);
+      }, { once: true }));
       // Admission can throw before Promise.race attaches its rejection handler.
       void stopped.catch(() => {});
       let operation: Promise<unknown>;
@@ -150,7 +156,7 @@ export class LlmService {
       } else operation = provider.summarize(report, policy, controller.signal);
       const reply = await Promise.race([operation, stopped]);
       this.current(authorize, identity, report, policy, signal);
-      const result = validateReply(reply, sentReport);
+      const result = validateReply(reply, sentReport, policy.freeOnly);
             const selection = sentReport.contextSelection;
             const response = selection ? { ...result, findingCount: report.findingCount, identifierCounts: report.identifierCounts,
               findingCounts: report.findingCounts, coverage: report.coverage, contextSelection: selection } : result;
@@ -168,7 +174,10 @@ export class LlmService {
     }
   }
   private current(authorize: () => Identity, initial: Identity, report: ReportContext, policy: LlmPolicy, signal: AbortSignal) {
-    if (signal.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+    if (signal.aborted) {
+      const error = new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+      stoppedDiagnostic(signal, error); throw error;
+    }
     const currentIdentity = authorize();
     if (currentIdentity.subject !== initial.subject || !currentIdentity.scope.includes('scan:read'))
       throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });

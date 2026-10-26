@@ -237,9 +237,15 @@ export class ScansService {
   status(identity: Identity, scanId: string) {
     if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException();
     const ledger = this.ledgerStore.ledger;
-    const snapshot = ledger?.snapshot(scanId, identity.subject);
+    if (!ledger) throw new NotFoundException();
+    return ledger.readReportSnapshot(() => this.statusSnapshot(ledger, identity, scanId));
+  }
+
+  private statusSnapshot(ledger: ScanLedger, identity: Identity, scanId: string) {
+    const snapshot = ledger.snapshot(scanId, identity.subject);
     if (!snapshot) throw new NotFoundException();
-    const config = ledger!.configResult(scanId, identity.subject);
+    const progress = ledger.progress(scanId, identity.subject);
+    const config = ledger.configResult(scanId, identity.subject);
     const configCoverage = config ? { check: 'config', coverage: 'image', ...config.config,
       checksVersion: config.checksVersion, resourcePolicyVersion: config.resourcePolicyVersion,
       supportedRuleIds: config.supportedRuleIds, completedRuleIds: config.completedRuleIds,
@@ -262,7 +268,7 @@ export class ScansService {
       }));
       const executionProfile = ledger!.executionProfile(scanId);
       const qualified = !!executionProfile && localReceiptMatches(archive.receipt, archive.scannerVersion);
-      return { scanId, ...snapshot, imageReference: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
+      return { scanId, ...snapshot, ...(progress ? { progress } : {}), imageReference: `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`,
         checks, perCheck, ...(config ? { config } : {}), result: checks.length === 1 ? perCheck[checks[0]] : null,
         imageProfile: { version: archive.receipt.profileVersion, configDigest: archive.receipt.configDigest,
           resourcePolicyVersion: archive.receipt.resourcePolicyVersion, qualified },
@@ -289,7 +295,7 @@ export class ScansService {
     const perCheck = Object.fromEntries(checks.map(check => [check,
       check === 'secret' ? secret ?? null : check === 'sbom' ? sbomCoverage : check === 'vuln' ? vulnCoverage : configCoverage]));
     const check = checks.length === 1 ? checks[0] : undefined;
-    return { scanId, ...snapshot, ...(config ? { config } : {}), ...(checks.length ? { checks, perCheck } : {}), ...(check ? { check } : {}),
+    return { scanId, ...snapshot, ...(progress ? { progress } : {}), ...(config ? { config } : {}), ...(checks.length ? { checks, perCheck } : {}), ...(check ? { check } : {}),
       result: checks.length === 1 ? perCheck[checks[0]] : null };
   }
 

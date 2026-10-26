@@ -35,16 +35,15 @@ function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher) {
   return render(<ScanChatPanel status={status} transport={sourceTransport()} client={client} />);
 }
 async function open() {
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
   await screen.findByLabelText('Вопрос чату');
 }
 function prepare(question = 'Что проверить дальше?') {
   fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: question } });
-  fireEvent.click(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ }));
 }
 const connection = () => screen.getByRole('status', { name: 'Состояние подключения чата' });
 
-it('announces manual connection, request wait and continuation; submitting twice dispatches once and requires fresh consent for the next turn', async () => {
+it('announces manual connection, request wait and continuation; submitting twice dispatches once and requires a fresh send for the next turn', async () => {
   const api = chatApi();
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -78,7 +77,7 @@ it('announces manual connection, request wait and continuation; submitting twice
   fireEvent.submit(screen.getByRole('form', { name: 'Отправка вопроса по отчёту' }));
   fireEvent.submit(screen.getByRole('form', { name: 'Отправка вопроса по отчёту' }));
   expect(connection()).toHaveTextContent('Ожидаем проверенный полный ответ');
-  expect(screen.queryByText('Гипотеза · не доказанный факт')).toBeNull();
+  expect(screen.queryByText('Ответ ИИ · требует проверки')).toBeNull();
   await act(async () => finish());
   await screen.findByText(/Последний ответ/);
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
@@ -94,11 +93,11 @@ it('announces manual connection, request wait and continuation; submitting twice
     consent: { accepted: true, policyVersion: context.policyVersion },
   });
   await screen.findByText('Как проверить исправление?');
-  expect(screen.getAllByText('Гипотеза · не доказанный факт')).toHaveLength(2);
-  expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).not.toBeChecked();
+  expect(screen.getAllByText('Ответ ИИ · требует проверки')).toHaveLength(2);
+  expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
 });
 
-it('prepares a failed question without POST, focuses the composer and requires a new one-request consent', async () => {
+it('prepares a failed question without POST, focuses the composer and requires an explicit send', async () => {
   const api = chatApi();
   api.head = {
     ...history,
@@ -119,8 +118,8 @@ it('prepares a failed question without POST, focuses the composer and requires a
   fireEvent.click(screen.getByRole('button', { name: 'Подготовить повтор вопроса' }));
   expect(screen.getByLabelText('Вопрос чату')).toHaveValue('Как проверить находку?');
   expect(screen.getByLabelText('Вопрос чату')).toHaveFocus();
-  expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).not.toBeChecked();
-  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
+  expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeEnabled();
   expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
 });
 
@@ -148,8 +147,8 @@ it.each([
     expect(connection()).toHaveTextContent('Подключение не подтверждено');
     fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
     await screen.findByLabelText('Вопрос чату');
-    expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).not.toBeChecked();
-    expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
+    expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeEnabled();
     expect(vi.mocked(fetcher).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   },
 );
@@ -164,7 +163,7 @@ it.each([401, 403])(
         : api.fetcher(path, init),
     );
     mount(api, fetcher);
-    fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(
       code === 401 ? 'Сессия изменилась или истекла' : 'Доступ к чату этого отчёта не подтверждён',
@@ -199,7 +198,7 @@ it('shows duplicate-only delivery as recovery, not an answer; rereads history on
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Запрос уже зарегистрирован');
   expect(client.chat).toHaveBeenCalledTimes(1);
-  expect(screen.queryByText('Гипотеза · не доказанный факт')).toBeNull();
+  expect(screen.queryByText('Ответ ИИ · требует проверки')).toBeNull();
   const reads = api.requests.length;
   fireEvent.focus(window);
   expect(api.requests).toHaveLength(reads);
@@ -278,11 +277,11 @@ it('reads every public page through the existing cookie transport, preserving CV
   const client = createChatClient(scanSession(), api.fetcher);
   render(<ScanChatPanel status={publicStatus} transport={transport} client={client} />);
   await open();
-  const scope = within(screen.getByLabelText('Границы public отчёта в чате'));
-  expect(scope.getByText(/51 CVE, 1 Debian advisories/)).toBeVisible();
-  expect(scope.getByText(/Node: unsupported · NODE_INVENTORY_UNKNOWN/)).toBeVisible();
+  const scope = within(screen.getByLabelText('Границы отчёта публичного образа в чате'));
+  expect(scope.getByText(/CVE: 51; уведомления Debian: 1/)).toBeVisible();
+  expect(scope.getByText(/Node.js: не поддерживается · состав пакетов Node.js не установлен/)).toBeVisible();
   expect(
-    screen.getByRole('checkbox', { name: /TEMP-1234567-ABCDEF · Debian advisory \(не CVE\)/ }),
+    screen.getByRole('checkbox', { name: /TEMP-1234567-ABCDEF · Уведомление Debian \(не CVE\)/ }),
   ).toBeInTheDocument();
   expect(pages).toEqual([
     `/api/v1/browser/scans/${binding.scanId}/vuln?limit=50`,
@@ -337,7 +336,7 @@ it('publishes a public TEMP citation only after framed completion and matching h
   prepare();
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByText(/Последний ответ/);
-  expect(screen.getByText('TEMP-1234567-ABCDEF · Debian advisory (не CVE)')).toBeVisible();
+  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
   const link = screen.getByRole('link', { name: `Находка ${rows[51].findingId}` });
   expect(document.getElementById(link.getAttribute('href')!.slice(1))).toHaveTextContent(
     'Источник текущего отчёта',
@@ -352,8 +351,8 @@ it('publishes a public TEMP citation only after framed completion and matching h
     />,
   );
   await open();
-  expect(screen.getByText('TEMP-1234567-ABCDEF · Debian advisory (не CVE)')).toBeVisible();
-  expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).not.toBeChecked();
+  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
+  expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
 });
 
@@ -423,7 +422,7 @@ it.each([
     await open();
     expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(reason);
     expect(connection()).toHaveTextContent('Готовность генерации не подтверждена');
-    expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
     fireEvent.submit(screen.getByRole('form', { name: 'Отправка вопроса по отчёту' }));
     expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(0);
     fireEvent.change(screen.getByLabelText('Текст решения'), {
@@ -454,7 +453,7 @@ it('keeps public readiness blockers visible even when the history store prevents
       client={createChatClient(scanSession(), fetcher)}
     />,
   );
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
   await screen.findByRole('alert');
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Хранилище истории недоступно',
@@ -475,11 +474,11 @@ it('local public readiness is explicitly unverified generation, not a provider s
   );
   await open();
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
-    'Генерация не проверена (generationVerified: false)',
+    'Генерация не проверена.',
   );
   expect(screen.getByText(/xingchen-agi\/xing4.0-29b-a4b:free/)).toHaveTextContent('phala');
   expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
-  expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).not.toBeChecked();
+  expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
 });
 
@@ -502,7 +501,7 @@ it('malformed readiness remains unknown without hiding valid history or revealin
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Готовность генерации неизвестна',
   );
-  expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
   expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
 });
 
@@ -552,7 +551,7 @@ it('allows public history with absent generation policy while showing configurat
   const status = screen.getByRole('region', { name: 'Готовность генерации' });
   expect(status).toHaveTextContent('Требуется настройка политики генерации');
   expect(status).toHaveTextContent('Профиль провайдера недоступен');
-  expect(screen.getByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
   expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
 });
 
@@ -568,7 +567,7 @@ it.each([401, 403, 404])(
         client={createChatClient(scanSession(), fetcher)}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
     await screen.findByRole('alert');
     expect(screen.queryByLabelText('Вопрос чату')).toBeNull();
     expect(vi.mocked(fetcher).mock.calls).toHaveLength(1);
@@ -591,7 +590,7 @@ it('rejects readiness for a different report revision even when its local setup 
       client={createChatClient(scanSession(), fetcher)}
     />,
   );
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат и прочитать условия' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
   await screen.findByRole('alert');
   expect(screen.queryByLabelText('Вопрос чату')).toBeNull();
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
@@ -611,9 +610,9 @@ it('never reconstructs unknown public counts as checked zero when vulnerability 
     />,
   );
   await open();
-  expect(screen.getByText(/число CVE и Debian advisories неизвестно/)).toBeVisible();
+  expect(screen.getByText(/число CVE и уведомлений Debian неизвестно/)).toBeVisible();
   expect(
-    screen.getByText(/Покрытие уязвимостей: неизвестно; OS: неизвестно; Node: неизвестно/),
+    screen.getByText(/Покрытие уязвимостей: неизвестно; ОС: неизвестно; Node.js: неизвестно/),
   ).toBeVisible();
   expect(transport.results).not.toHaveBeenCalled();
 });

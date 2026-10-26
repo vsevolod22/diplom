@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 import { refreshLocalCve, DISK_POLICY, checkDisk, DRAIN_PROBE, READY_PROBE, WEB_PROBE, publicRefreshFailure, validateStorageContinuity, validateRuntimeProfile } from './refresh-local-cve.mjs';
-import { acquireStandLock, setupLocalCve, childEnvironment, runChild } from './setup-local-cve.mjs';
+import { acquireStandLock, setupLocalCve, childEnvironment, runChild, cveChildFailure, cveTimeout } from './setup-local-cve.mjs';
 import { localStand, PROJECT, LABEL, expectedEnvironment } from './local-stand.mjs';
 import { verifyLocalCve } from './verify-local-cve.mjs';
 import { scheduledRun } from './schedule-local-cve.mjs';
@@ -989,4 +989,55 @@ test('namespace and drain failures have distinct fixed diagnostics without chang
     assert.equal(fs.existsSync(join(f.lock, 'refresh.json')), target === 'drain');
     assert.deepEqual(f.current(), f.activation);
   });
+});
+
+for (const [code, killed, cause] of [['ENOENT', false, 'CHILD_SPAWN'], ['ERR_CHILD_PROCESS_STDIO_MAXBUFFER', true, 'CHILD_OUTPUT_LIMIT'], [1, true, 'CHILD_TIMEOUT'], [1, false, 'CHILD_EXIT_NONZERO']]) {
+  test('child adapter records only trusted finite cause: ' + cause, async () => {
+    let calls = 0;
+    await assert.rejects(runChild(process.execPath, ['synthetic.mjs'], { cwd: ROOT, env: {}, timeout: 1000 }, (_exe, _args, _options, done) => {
+      calls++; done(Object.assign(Error('PRIVATE-ARGV-URL'), { code, killed, stdout: 'PRIVATE', stderr: 'PRIVATE', cause: Error('PRIVATE') }), 'PRIVATE', 'PRIVATE');
+    }), error => {
+      assert.deepEqual(cveChildFailure(error), { cause }); assert(!error.message.includes('PRIVATE'));
+      assert(!JSON.stringify(error).includes('PRIVATE')); assert(!Object.hasOwn(error, 'cause')); return true;
+    });
+    assert.equal(calls, 1);
+  });
+}
+test('only exact transport child plus canonical finite stderr receipt can pass diagnostics; never a forged error label', async () => {
+  const transport = join(ROOT, 'server/deploy/trust/fetch-db-layer.mjs');
+  const receipt = 'CVE_TRANSPORT_FAILURE ' + JSON.stringify({ version: 1, boundary: 'blob-request', cause: 'HTTP_STATUS', status: 503 }) + '\n';
+  for (const [args, stderr, accepted] of [[[transport, 'discover'], receipt, true], [['other.mjs'], receipt, false], [[transport, 'discover'], receipt + 'PRIVATE', false]]) {
+    await assert.rejects(runChild(process.execPath, args, { cwd: ROOT, env: {}, timeout: 1000 }, (_exe, _args, _options, done) => {
+      done(Object.assign(Error('PRIVATE'), { code: 1, phase: 'PRIVATE', checkpoint: 'PRIVATE' }), '', stderr);
+    }), error => {
+      const d = cveChildFailure(error); assert.equal(Boolean(d.transport), accepted);
+      if (accepted) assert.equal(d.transport.status, 503); assert(!JSON.stringify(d).includes('PRIVATE')); return true;
+    });
+  }
+  assert.equal(cveChildFailure(Object.assign(Error('PRIVATE'), { cause: 'CHILD_TIMEOUT' })), null);
+});
+for (const timeout of [0, -1, 0.25, NaN, Infinity]) test('invalid native child timeout refuses before execute: ' + timeout, async () => {
+  let calls = 0;
+  await assert.rejects(runChild(process.execPath, [], { cwd: ROOT, env: {}, timeout }, () => { calls++; }), error => cveChildFailure(error)?.cause === 'CHILD_TIMEOUT_INVALID');
+  assert.equal(calls, 0);
+});
+test('shared CVE child clock is floored, finite, never renewed or accidentally disabled', () => {
+  assert.equal(cveTimeout(240000, 1000.75, 1.25), 999);
+  for (const input of [[100, 1, 1], [100, 1, 0.5], [Infinity, 10, 0], [100, NaN, 0]]) assert.throws(() => cveTimeout(...input));
+});
+test('LOCAL compatibility: exact transport cause propagates without changing pins, signing or namespace', async t => {
+  const f = fixture(t), prior = f.current();
+  const run = async (exe, args, options) => {
+    if (args[0]?.endsWith('/fetch-db-layer.mjs') && args[1] !== 'discover') {
+      const stderr = 'CVE_TRANSPORT_FAILURE ' + JSON.stringify({ version: 1, boundary: 'blob-body', cause: 'TIMEOUT' }) + '\n';
+      return runChild(exe, args, options, (_exe, _args, _options, done) => done({ code: 1 }, '', stderr));
+    }
+    return f.run(exe, args, options);
+  };
+  await assert.rejects(f.refresh([], { run }), error => {
+    const d = publicRefreshFailure(error); assert.equal(d.phase, 'download'); assert.equal(d.checkpoint, 'fetch');
+    assert.equal(d.diagnostic.transport.boundary, 'blob-body'); assert.equal(d.diagnostic.transport.cause, 'TIMEOUT'); return true;
+  });
+  assert.deepEqual(f.current(), prior); assert.equal(mutations(f).length, 0); assert(!fs.existsSync(f.lock));
+  assert(fs.existsSync(join(f.stand, '.cve-refresh-work')));
 });

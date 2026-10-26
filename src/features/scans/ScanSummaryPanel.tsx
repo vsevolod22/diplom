@@ -18,11 +18,21 @@ import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { LlmUsagePanel } from './LlmUsagePanel';
 import { ScanChatPanel } from './ScanChatPanel';
 
+const sourceLabels: Record<string, string> = {
+  Secrets: 'Секреты',
+  CRITICAL: 'Критическая',
+  HIGH: 'Высокая',
+  MEDIUM: 'Средняя',
+  LOW: 'Низкая',
+  INFO: 'Информационная',
+  UNKNOWN: 'Неизвестна',
+  'Debian advisory (не CVE)': 'Уведомление Debian (не CVE)',
+};
 type Props = { status: ScanStatus; transport: ScanTransport; client?: SummaryClient };
 export function ScanSummaryPanel({ status, transport, client: providedClient }: Props) {
   const client = useMemo(() => providedClient ?? createSummaryClient(scanSession()), [providedClient]);
   const [context, setContext] = useState<SummaryContext | null>(null);
-  const [consent, setConsent] = useState(false);
+
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
   const [usageRefreshVersion, setUsageRefreshVersion] = useState(0);
@@ -39,7 +49,6 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
   function stop() {
     invalidateRequest();
     setPending(false);
-    setConsent(false);
     setResult(null);
   }
   function checkContext(next: SummaryContext) {
@@ -47,16 +56,26 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
       throw new SummaryError('STALE');
   }
   async function refresh() {
-    if (request.current) return;
+    if (request.current || !client.current()) return;
     const controller = new AbortController();
     request.current = controller;
     const version = ++generation.current;
     setPending(true);
-    setMessage('');
-    setConsent(false);
     setResult(null);
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 45_000);
+    const stopped = new Promise<never>((_, reject) =>
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(new SummaryError(timedOut ? 'TIMEOUT' : 'ABORTED')),
+        { once: true },
+      ),
+    );
     try {
-      const next = await client.context(status.scanId, controller.signal);
+      const next = await Promise.race([client.context(status.scanId, controller.signal), stopped]);
       checkContext(next);
       if (generation.current !== version || controller.signal.aborted || !client.current()) return;
       contextRef.current = next;
@@ -67,6 +86,8 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
       setContext(null);
       setMessage(summaryErrorMessage(error));
     } finally {
+      clearTimeout(deadline);
+      controller.abort();
       if (generation.current === version) {
         request.current = null;
         setPending(false);
@@ -79,7 +100,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
       stop();
       contextRef.current = null;
       setContext(null);
-      setMessage('Сессия изменилась. Сводка и согласие сброшены.');
+      setMessage('Сессия изменилась. Сводка скрыта; войдите и откройте отчёт заново.');
     });
     // Revalidate only GET on focus; never regenerate implicitly.
     const focus = () => {
@@ -97,12 +118,18 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
 
   async function generate() {
     const accepted = contextRef.current;
-    if (!consent || !accepted?.enabled || request.current || !client.current()) return;
+    if (
+      !accepted?.enabled ||
+      !accepted.policyVersion ||
+      !accepted.disclosure ||
+      request.current ||
+      !client.current()
+    )
+      return;
     const controller = new AbortController();
     const version = ++generation.current;
     request.current = controller;
     setPending(true);
-    setConsent(false);
     setResult(null);
     setMessage('');
     let timedOut = false;
@@ -129,9 +156,13 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
       }
       if (controller.signal.aborted || !client.current() || generation.current !== version)
         throw new SummaryError('STALE');
-      const reply = await client.summary(accepted, controller.signal);
+      const reply = await client.summary(before, controller.signal);
+      if (controller.signal.aborted || !client.current() || generation.current !== version)
+        throw new SummaryError('STALE');
       const sources = await collectSummarySources(transport, status, controller.signal);
       const verified = verifiedSummarySources(reply, sources);
+      if (controller.signal.aborted || !client.current() || generation.current !== version)
+        throw new SummaryError('STALE');
       const after = await client.context(status.scanId, controller.signal);
       checkContext(after);
       if (contextFence(after) !== contextFence(accepted)) {
@@ -169,8 +200,8 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
           <Sparkles size={24} aria-hidden="true" /> Сводка отчёта
         </h3>
         <p>
-          ИИ предлагает гипотезы, а не результаты сканирования. Покрытие и исходные находки выше остаются
-          основным отчётом.
+          Находки и покрытие — результаты сканирования в основном отчёте. Сводка ИИ — отдельная интерпретация:
+          предположения и рекомендации требуют проверки по исходным находкам.
         </p>
         {policy ? (
           <dl className="scan-a1__facts">
@@ -182,7 +213,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
             </div>
             <div>
               <dt>Маршрутизация</dt>
-              <dd>{policy.providers.join(', ')} · global: регион не ограничен</dd>
+              <dd>{policy.providers.join(', ')} · регион не ограничен</dd>
             </div>
             <div>
               <dt>Стоимость</dt>
@@ -198,7 +229,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
             </div>
             <div>
               <dt>Данные</dt>
-              <dd>{policy.data}</dd>
+              <dd>Очищенные находки и покрытие проверок; без исходных свидетельств и учётных данных.</dd>
             </div>
             <div>
               <dt>Обработка</dt>
@@ -210,7 +241,7 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
               </dd>
             </div>
             <div>
-              <dt>Привязка согласия</dt>
+              <dt>Привязка запроса</dt>
               <dd>
                 Отчёт {context?.reportVersion} · политика {context?.policyVersion}
               </dd>
@@ -225,22 +256,21 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
         )}
       </div>
       <div className="scan-a1__compose">
-        <label>
-          <input
-            type="checkbox"
-            checked={consent}
-            disabled={pending || !context?.enabled || !policy || !client.current()}
-            onChange={(event) => {
-              setConsent(event.target.checked);
-              setResult(null);
-            }}
-          />{' '}
-          Разрешаю отправить очищенные findings и coverage этого отчёта указанной модели OpenRouter по
-          раскрытой политике только для одного запроса сводки.
-        </label>
+        <p id="scan-summary-send-help">
+          Нажимая «Получить сводку», вы разрешаете один запрос: очищенные находки и покрытие этого отчёта —
+          указанным выше модели и провайдеру OpenRouter.{' '}
+          {policy?.freeOnly === true
+            ? 'Только бесплатный профиль.'
+            : policy?.freeOnly === false
+              ? 'Бесплатность выключена.'
+              : 'Бесплатность не подтверждена.'}{' '}
+          Бюджет указан выше. Без автоматического повтора или замены модели; условия проверяются заново перед
+          отправкой.
+        </p>
         <Button
           type="button"
-          disabled={pending || !consent || !context?.enabled || !client.current()}
+          aria-describedby="scan-summary-send-help"
+          disabled={pending || !context?.enabled || !policy || !client.current()}
           onClick={() => void generate()}
         >
           Получить сводку
@@ -267,8 +297,8 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
           </Button>
         )}
         <small>
-          Согласие сбрасывается после каждого запроса, отмены или изменения условий. Чат и история открываются
-          отдельно ниже и требуют собственного согласия. Остаток квот не меняет согласие сводки.
+          Каждое нажатие разрешает только один запрос. После ошибки, отмены или изменения условий нужна новая
+          отправка вручную. Чтение условий и остатка квот не запускает генерацию.
         </small>
         {message ? (
           <Alert role="alert" tone="warning">
@@ -290,10 +320,10 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
         refreshVersion={usageRefreshVersion}
       />
       {result ? (
-        <div aria-label="ИИ-гипотезы">
+        <div aria-label="Сводка ИИ · требует проверки">
           {result.reply.hypotheses.map((hypothesis, index) => (
             <article key={index}>
-              <h4>Гипотеза {index + 1} · не доказанный факт</h4>
+              <h4>Пункт {index + 1} · интерпретация ИИ</h4>
               <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{hypothesis.text}</p>
               <ul>
                 {hypothesis.citations.map((id) => (
@@ -304,17 +334,23 @@ export function ScanSummaryPanel({ status, transport, client: providedClient }: 
               </ul>
             </article>
           ))}
-          <h4>Проверенные ссылки на исходные находки</h4>
+          <h4>Основания ответа</h4>
           <p>
-            Источники найдены в авторизованных scanner results, включая другие категории и страницы. Наличие
-            источника не доказывает вывод ИИ; checked не означает безопасность.
+            Источники найдены в авторизованных результатах сканирования, включая другие категории и страницы.
+            Наличие источника не доказывает вывод ИИ; выполненная проверка не гарантирует безопасность.
           </p>
           <ul>
             {result.sources.map((source) => (
               <li id={`ai-source-${source.findingId}`} tabIndex={-1} key={source.findingId}>
-                <strong>{source.label}</strong>
+                <strong>
+                  {source.label
+                    .split(' · ')
+                    .map((part) => sourceLabels[part] ?? part)
+                    .join(' · ')}
+                </strong>
                 <p>
-                  {source.check} · ID: {source.findingId}
+                  {{ secret: 'Секреты', vuln: 'Уязвимости', config: 'Конфигурация' }[source.check]} · ID:{' '}
+                  {source.findingId}
                 </p>
               </li>
             ))}

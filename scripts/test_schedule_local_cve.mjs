@@ -156,6 +156,26 @@ test('loaded job rejects same-label different config, missing args and dangerous
   }
 });
 
+test('LOCAL keeps its non-strict benign metadata policy without the PUBLIC opt-in', () => {
+  const options = { root: '/repo', home: '/Users/local', node: '/node/bin/node' };
+  const identity = { ...options, path: join(options.home, 'Library/LaunchAgents', `${LABEL}.plist`) };
+  for (const extra of ['', `\nXPC_SERVICE_NAME => ${LABEL}\nOSLogRateLimit => 64`,
+    '\nXPC_SERVICE_NAME => synthetic-local-value\nOSLogRateLimit => 32\nBENIGN_METADATA => synthetic']) {
+    validateLoadedAgent(loaded(options).replace('TZ => UTC', 'TZ => UTC' + extra), identity);
+  }
+});
+
+for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'DYLD_INSERT_LIBRARIES', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+  for (const block of ['environment', 'inherited environment', 'default environment']) test('LOCAL still rejects dangerous ' + name + ' in ' + block, () => {
+    const options = { root: '/repo', home: '/Users/local', node: '/node/bin/node' };
+    const identity = { ...options, path: join(options.home, 'Library/LaunchAgents', `${LABEL}.plist`) };
+    const line = name + ' => PRIVATE-SYNTHETIC';
+    const text = block === 'environment' ? loaded(options).replace('TZ => UTC', 'TZ => UTC\n' + line) :
+      loaded(options).replace('environment = {', block + ' = {\n' + line + '\n}\nenvironment = {');
+    assert.throws(() => validateLoadedAgent(text, identity), error => !error.message.includes('PRIVATE-SYNTHETIC'));
+  });
+}
+
 test('installer refuses other platform and unsupported operations', async () => {
   await assert.rejects(scheduleLocalCve(['install'], { platform: 'linux' }));
   await assert.rejects(scheduleLocalCve(['uninstall']));

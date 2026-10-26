@@ -1,0 +1,356 @@
+{
+  "status": "FULL_DOC8_FINISH_ENUM_APPLIED_V5_SAVED_FULL_DOCUMENT_VALIDATED",
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "source": "DIP-TASK-42",
+  "fresh_policy": {
+    "profile": "full",
+    "spec_mode": "strict",
+    "require_proposal_approval": false,
+    "spec_first": false,
+    "execution_order": "parallel",
+    "completion_flow": "direct"
+  },
+  "fresh_full_documents": [
+    {
+      "doc": "DIP-DOC-8",
+      "version": 4,
+      "finding": "Explicit old 17-reason enum requires five-value extension."
+    },
+    {
+      "doc": "DIP-DOC-15",
+      "version": 4,
+      "finding": "Closed enum and absence semantics reference DOC8; no duplicated literal reason list. No separate delta."
+    },
+    {
+      "doc": "DIP-DOC-16",
+      "version": 4,
+      "finding": "Finite enum and absence semantics reference DOC8; no duplicated literal reason list. No separate delta."
+    }
+  ],
+  "duplicate_check": {
+    "doc8_proposed_list_response": {},
+    "task42_proposed_list_response": {},
+    "existing_preparation_superseded": false
+  },
+  "delta_id": "39e2a254-d3d4-4a86-834e-ba107d726bab",
+  "base_version": 4,
+  "created_at": "2026-10-26 13:57:27.153888+00",
+  "state": "applied",
+  "review_status": "pending",
+  "applied": true,
+  "apply_hold": false,
+  "apply_condition": "Satisfied for this exact delta by new explicit owner authorization, owner-reported diagnostic normal rollout READY/exit0/source GO, and fresh full policy/currentDOC8v4/delta/base/source/body/ops review. No additional apply authority.",
+  "local_fullbody_path": "docs/public-progress-20261025-doc8-finish-diagnostic-full.md",
+  "utf8_bytes": 30463,
+  "local_sha256": "35de1ceee3cdab73a1100075a03bd32b4678af1233e611241cf35efed36805fa",
+  "requirements": 10,
+  "scenarios": 24,
+  "raw_fullbody_validate_spec_response": {
+    "valid": true
+  },
+  "validation_scope": "Complete resulting DOC8 raw body supplied with doc_slug, before proposal; not a clause-only/base-only validation. Server returns no digest or validation receipt ID; no machine-computed remote hash equality claimed.",
+  "ops": [
+    {
+      "kind": "modified",
+      "name": "Конечные diagnostic headers без изменения body wire"
+    }
+  ],
+  "ops_counts": {
+    "added": 0,
+    "modified": 1,
+    "removed": 0,
+    "renamed": 0
+  },
+  "new_reasons": [
+    "finish_length",
+    "finish_content_filter",
+    "finish_tool_calls",
+    "finish_error",
+    "finish_unknown"
+  ],
+  "mapping": {
+    "length": "finish_length",
+    "content_filter": "finish_content_filter",
+    "tool_calls": "finish_tool_calls",
+    "function_call": "finish_tool_calls",
+    "error": "finish_error",
+    "other_missing_null_nonstring": "finish_unknown"
+  },
+  "preserved": [
+    "17 phases unchanged",
+    "17 original reasons retained including invalid_finish",
+    "exact normalized stop-only acceptance",
+    "no raw finish_reason/native_finish_reason",
+    "no partial answer publication",
+    "body/frame schemas unchanged",
+    "request/policy/budget unchanged",
+    "receipt/accounting/unknown liabilities unchanged",
+    "no retry/fallback/refund/reset",
+    "all 10 requirement identities",
+    "nine unrelated requirements and Non-goals unchanged",
+    "prior six applied revisions and all native evidence retained"
+  ],
+  "source_read": [
+    "server/api/src/llm/provider-diagnostic.ts",
+    "server/api/src/llm/openrouter-provider.ts:136",
+    "server/api/src/llm/tests/provider-diagnostic.test.ts:61-96",
+    "tests-e2e/public-ai-translation-live.mjs:60-63,233-250",
+    "tests-e2e/public-ai-translation-live.test.mjs"
+  ],
+  "source_tests": {
+    "owner_reported_runner_tests_passed": 99,
+    "run_by_this_lane": false
+  },
+  "native_receipt_labels": {
+    "cancel": {
+      "artifact": "docs/public-final-f60d1c6c-1b6f-4f8c-a8fb-4d3254b6f7db-cancel.json",
+      "run_id": "c6cffe69-9d7c-4d97-8ea8-0bc90ab4a155",
+      "actuallyRun": true,
+      "PASS": 10,
+      "BLOCKED": 0,
+      "FAIL": 0,
+      "scope": "Per-case cancellation/progress/report/reload/history/fresh-owner-login/safety; not AI generation",
+      "owner_reported_checked_subset": "config checked 1 of 4 before cancellation"
+    },
+    "ai": {
+      "artifact": "docs/public-final-29f3a78d-9455-4131-b29a-45aca5c2c657-ai-translation.json",
+      "run_id": "75d87bff-2fe8-4854-b309-9641fd8bbaee",
+      "actuallyRun": true,
+      "PASS": 9,
+      "BLOCKED": 9,
+      "FAIL": 0,
+      "native_report": {
+        "cve": 161,
+        "debianTemp": 0,
+        "pages": 4
+      },
+      "chat": {
+        "status": "BLOCKED",
+        "httpStatus": 200,
+        "providerDiagnostic": {
+          "phase": "finish",
+          "reason": "invalid_finish"
+        },
+        "actual_normalized_upstream_finish_value": "UNKNOWN"
+      },
+      "fresh_login": {
+        "status": "BLOCKED",
+        "code": "BROWSER_READ_FAILED"
+      },
+      "translationPosts": 0,
+      "translation_acceptance": "NOT_RUN / prerequisite blocked",
+      "full_ai_working": false
+    },
+    "final_ai_324": {
+      "artifact": "docs/public-final-324479cf-07ee-4d99-983b-2be9d6c000eb-ai-translation.json",
+      "markdown": "docs/public-final-324479cf-07ee-4d99-983b-2be9d6c000eb-ai-translation.md",
+      "run_id": "ccbe6b75-d249-441e-bff7-bde2a048ef4b",
+      "actuallyRun": true,
+      "startedAt": "2026-10-26T14:07:32.545Z",
+      "finishedAt": "2026-10-26T14:10:00.794Z",
+      "PASS": 12,
+      "BLOCKED": 6,
+      "FAIL": 0,
+      "scanId": "a62c374b-066d-4caf-81e0-8b1acfa5f479",
+      "freshLoginScope": "fresh-owner-ui-login-and-report-not-anonymous401",
+      "cases": {
+        "tooling": {
+          "status": "PASS",
+          "code": "VERIFIED"
+        },
+        "owner_registration": {
+          "status": "PASS",
+          "code": "VERIFIED"
+        },
+        "native_scan": {
+          "status": "PASS",
+          "code": "VERIFIED"
+        },
+        "report": {
+          "status": "PASS",
+          "code": "VERIFIED",
+          "pages": 4,
+          "cve": 161,
+          "debianTemp": 0
+        },
+        "deployed_ui": {
+          "status": "PASS",
+          "code": "VERIFIED"
+        },
+        "readiness": {
+          "status": "PASS",
+          "code": "VERIFIED"
+        },
+        "chat_1": {
+          "status": "BLOCKED",
+          "code": "LLM_HTTP_ERROR",
+          "errorCode": "LLM_PROVIDER_RATE_LIMITED",
+          "httpStatus": 200,
+          "deliveryKind": "ndjson-error",
+          "providerDiagnostic": {
+            "phase": "headers",
+            "reason": "http_error"
+          },
+          "providerFailure": {
+            "kind": "rate_limited",
+            "status": 429
+          }
+        },
+        "chat_2": {
+          "status": "BLOCKED",
+          "code": "PREREQUISITE_UNAVAILABLE"
+        },
+        "history_reload": {
+          "status": "BLOCKED",
+          "code": "PREREQUISITE_UNAVAILABLE"
+        },
+        "fresh_login": {
+          "status": "PASS",
+          "code": "VERIFIED",
+          "freshContextCookiesEmpty": true,
+          "ownerIdentityVerified": true,
+          "loginThroughUi": true,
+          "reportUiSettled": true,
+          "preAuthScanProbe": false
+        },
+        "history_fresh_login": {
+          "status": "BLOCKED",
+          "code": "PREREQUISITE_UNAVAILABLE"
+        },
+        "foreign_registration": {
+          "status": "PASS",
+          "code": "VERIFIED"
+        },
+        "foreign_denial": {
+          "status": "PASS",
+          "code": "VERIFIED",
+          "httpStatus": 404,
+          "noAdditionalPosts": true
+        },
+        "translation_context": {
+          "status": "PASS",
+          "code": "VERIFIED",
+          "transferNoteVisible": true,
+          "contextReadOnly": true
+        },
+        "translation": {
+          "status": "BLOCKED",
+          "code": "LLM_HTTP_ERROR",
+          "errorCode": "LLM_INVALID_RESPONSE",
+          "httpStatus": 502,
+          "deliveryKind": "http-error",
+          "providerDiagnostic": {
+            "phase": "content",
+            "reason": "invalid_content"
+          }
+        },
+        "translation_toggle": {
+          "status": "BLOCKED",
+          "code": "PREREQUISITE_UNAVAILABLE"
+        },
+        "preservation": {
+          "status": "PASS",
+          "code": "VERIFIED",
+          "cve": 161,
+          "debianTemp": 0,
+          "originalUnchanged": true,
+          "countsUnchanged": true
+        },
+        "safety": {
+          "status": "PASS",
+          "code": "VERIFIED",
+          "chatPosts": 1,
+          "translationPosts": 1,
+          "scanLaunches": 1,
+          "blockedRequests": 0,
+          "pageErrors": 0,
+          "browserClosed": true,
+          "nativeScanMayRemainActive": false
+        }
+      },
+      "chat_retry_hint": "ABSENT, not zero",
+      "translation_root_predicate": "UNKNOWN",
+      "finish_star_observed": false,
+      "full_ai_working": false,
+      "semantic_accuracy": "UNVERIFIED",
+      "further_generation_attempts": "PROHIBITED by current owner instruction"
+    }
+  },
+  "runtime_operations_by_this_lane": false,
+  "task_lifecycle_or_closure_changes": false,
+  "no_spec_impact_declaration": false,
+  "pre_apply_disposition": {
+    "status": "FULL_DOC8_FINISH_ENUM_PROPOSED_APPLY_HOLD",
+    "state": "proposed",
+    "applied": false,
+    "apply_hold": true,
+    "apply_condition": "New explicit coordinator source GO and diagnostic rollout READY, followed by fresh full current document/delta/base/policy review. Previous six-delta GO does not authorize this amendment."
+  },
+  "version_no": 5,
+  "applied_at": "2026-10-26 14:05:06.375334+00",
+  "pre_apply_checks": {
+    "current_doc_version": 4,
+    "delta_base_version": 4,
+    "doc": "DIP-DOC-8",
+    "source": "DIP-TASK-42",
+    "full_current_doc_and_delta_read": true,
+    "ops_matched": true,
+    "base_local_sha256": "d8860560a007137de5b369a11db392f83069f7ab3f0d27a6a60c22f56a7e533f",
+    "result_local_sha256": "35de1ceee3cdab73a1100075a03bd32b4678af1233e611241cf35efed36805fa",
+    "both_local_hashes_recomputed_and_matched_preparation": true,
+    "server_digest_returned": false,
+    "machine_remote_hash_equality_claimed": false
+  },
+  "post_apply_validate_spec": {
+    "inputs": {
+      "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+      "doc_slug": "DIP-DOC-8"
+    },
+    "response": {
+      "valid": true
+    },
+    "scope": "Entire saved current DOC8 after successful v5 apply; validator itself does not return version/digest/receipt ID."
+  },
+  "owner_reported_deployment": {
+    "diagnostic_normal_rollout": "READY/exit0",
+    "all_four_stores_and_jwt_preserved": true,
+    "root_lint": "PASS",
+    "api_typecheck": "PASS",
+    "source_go": "final finish stop-only, fixed body/request budgets, no fallback",
+    "independently_executed_by_this_lane": false
+  },
+  "native_acceptance": "PARTIAL: final324 native12PASS/6BLOCKED/0FAIL; fresh owner UI login/foreign denial/report preservation/safety PASS. Chat provider429/no hint; translation HTTP502 LLM_INVALID_RESPONSE content/invalid_content root predicateUNKNOWN. FullAI/history/translation semantics remain unqualified; no further generation attempts. Prior29f3 and older FAIL/BLOCKED receipts retained.",
+  "historical_hold_note": "APPLY HOLD/TARGET/rework wording in the immutable applied body records preparation-time history and is superseded for this exact application by new explicit owner GO, not by retroactive native success.",
+  "final_summary_path": "docs/public-progress-20261026-final.md",
+  "final_source_validation_owner_reported": {
+    "full_api_pass_before_last_diagnostic": 1386,
+    "ui": {
+      "passed": 842,
+      "total": 844,
+      "known_paging_timeouts": 2,
+      "fixed": false
+    },
+    "targeted_diagnostic_pass": 6,
+    "runner_pass": 99,
+    "root_lint": "PASS",
+    "api_typecheck": "PASS",
+    "builds": "PASS on last reported source/UI snapshot",
+    "rerun_by_this_lane": false
+  },
+  "agent_participation_owner_reported": {
+    "real_agents": 8,
+    "formal_H6v2_H7v2_lanes": 6,
+    "separate_backend_progress_lane": 1,
+    "separate_consent_UI_lane": 1,
+    "complete_concurrency_overlap_not_claimed": true
+  },
+  "final_spec_versions": {
+    "DOC1": 7,
+    "DOC2": 9,
+    "DOC8": 5,
+    "DOC9": 3,
+    "DOC15": 4,
+    "DOC16": 4
+  },
+  "scheduler_final_scope": "Installed/loaded6h and owner-reported exact statusPASS. No successful native periodic refresh claimed; no runtime status rerun by this lane."
+}

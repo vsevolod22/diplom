@@ -1,6 +1,15 @@
 # Public image-only 8081: existing LLM backend — 2026-10-20
 
-> **CURRENT RUNTIME: READY / public8081 HTTP200, 22.10.2026.** Audit `deploy-8d83a8806715c2f0fa575efedee1b0af` completed with four-store/JWT preservation; no active operation lock. See [actual recovery result](public-recovery-ready-20261022.md) and the later AI/key rollout audit `deploy-830b7aa07d1c9a728de1a957829e43c2`, completed READY with nonempty four-store preservation. Consumed checker/continuation commands below are historical, not restart instructions. Public provider key is now supplied through an API-only readonly volume; gateway authentication returned HTTP200. A completion diagnostic returned HTTP429; successful native generation is NOT verified. See [current AI/translation status](public-ai-translation-20261022.md). The browser scan completed, but overall smoke has unresolved REQUEST_GUARD blocks; see [attempt2](public8081launch-20261022.attempt2.md).
+## Current status / historical scope — 2026-10-26
+
+This backend/source-deployment report is **historical; superseded for current status by [public-progress-20261026-final.md](public-progress-20261026-final.md)**. Public **http://127.0.0.1:8081 — HTTP200**, no maintenance in progress. Earlier key-absent, build-HOLD, pending-continuation and unexecuted-deployment statements below describe their dated lanes, not current blockers. Historical commands, consumed checkers/continuations and review tokens are not restart/retry instructions. The provider key is already provisioned; do not request, read or reprovision it.
+
+- Latest actual AI attempt `324479cf-07ee-4d99-983b-2be9d6c000eb`: **12 PASS / 6 BLOCKED / 0 FAIL**, not full AI success. Chat: HTTP200 failed NDJSON, `LLM_PROVIDER_RATE_LIMITED`, provider `rate_limited/status429`, diagnostics `headers/http_error`, no retry hint. This does not prove exhausted local quota or a specific upstream account/capacity cause.
+- Translation: application HTTP502 `LLM_INVALID_RESPONSE`, diagnostics `content/invalid_content`; exact predicate **UNKNOWN**, not proven upstream HTTP502. No `finish_*` reason was observed in this latest run. Successful Russian grounded reply, second turn, durable successful conversation and translation/toggle remain unverified/blocked; no guard relaxation or fallback is authorized.
+- Changed CVE release `sha256:e1af977c90fb06ebf3d5123afb831b89d659e7e0a3fc6231e4f9e42d85c9ec98` is active. Owner-reported activation **exit0**, original web resumed, linked CVE/LLM aggregate `preserved:true` receipts cover **AuthAccounts, ScanLedger, LlmHistoryStore and LlmQuotaStore**; later diagnostic rollout preserved all four stores and JWT. See [CVE receipt](public-progress-20261025-cve-receipt.md). Stores/DB payload hashes were not independently read or recomputed by this docs lane.
+- Scheduler `io.diplom.public-images.cve-refresh` is **installed/loaded, 21600 seconds / 6 hours**, with separate exact statusPASS reported in the final summary. **Successful periodic execution remains unproven**; installation/status/last exit0 are not a completed scheduled-run receipt.
+
+Historical recovery/key-rollout evidence remains: [22.10 recovery](public-recovery-ready-20261022.md), audit `deploy-8d83a8806715c2f0fa575efedee1b0af`, later key-rollout audit `deploy-830b7aa07d1c9a728de1a957829e43c2`, [22.10 AI status](public-ai-translation-20261022.md) and [attempt2](public8081launch-20261022.attempt2.md). Those older outcomes are not rewritten or promoted to current AI success. **No new attempts or maintenance are authorized; this documentation finalization performs no runtime checks or test reruns.**
 
 ## Scope / implementation
 
@@ -171,7 +180,7 @@ Google AI Studio's free Gemma endpoint was not selected merely because it is fre
 
 These are catalog declarations only. No authenticated generation, JSON/model-response identity compatibility, account eligibility, current free rate capacity, invoice or contractual privacy guarantee has been verified. Routing still sends exact `only:[phala]`, no fallback, deny collection, ZDR, required parameters, all-zero `max_price`, and disabled/excluded reasoning. Unexpected response model aliases, nonzero/missing cost, reasoning/content/schema/citation faults remain fail-closed. An unavailable endpoint or account constraint does **not** authorize purchasing credit, paid fallback, retries or relaxed retention.
 
-**Current exact activation blockers:** public key absent; no secret volume provisioned; approved local initializer image ID not supplied; public history/quota mounts and one-shot initialization plus isolated CONNECT egress still belong to deployment owner. No live Docker lifecycle was authorized/executed. Key entry must be performed privately by the operator with `--set-key` in a real terminal, never in agent tool arguments or browser UI.
+**Historical exact activation blockers at source handoff (superseded, not current):** public key absent; no secret volume provisioned; approved local initializer image ID not supplied; public history/quota mounts and one-shot initialization plus isolated CONNECT egress still belong to deployment owner. No live Docker lifecycle was authorized/executed. Key entry must be performed privately by the operator with `--set-key` in a real terminal, never in agent tool arguments or browser UI.
 
 ## Credential-free UI readiness fallback
 
@@ -380,7 +389,7 @@ Regressions now put the actual empty `.gitkeep` shape and a non-UTF8 binary asse
 
 That earlier pre-intent refusal required no cleanup and the read-only check confirmed preflight eligibility only. **The operator's subsequent real invocation entered a new build HOLD; the ordinary retry advice is now superseded by the current-operation procedure below.** Missing public key remains the separate generation blocker.
 
-### Current actual build HOLD: diagnosis, review boundary and continuation
+### Historical actual build HOLD: diagnosis, review boundary and consumed continuation
 
 The real retry reached `phase=build`, stopped web/API/worker cleanly (exit0), completed the original fenced backup, and failed before writing candidate image pins. Registry egress is still running, initializers retain their IDs/exit0, and no replacement application container was observed. The preserved lock contains exactly `mutation.json`, `helper-fenced.json`, `llm-candidate/`; the candidate contains only the exact CVE/LLM-env overlays. The original audit contains only `fenced/core`, with its private export manifest and restored auth/ledger snapshots. These original files were not rewritten or deleted by diagnosis.
 
@@ -440,7 +449,7 @@ Regressions cover all four files named in P1 and deeper dependencies, including 
 
 **275 existing stand/CVE bridge/preservation regression tests passed.** All Docker operations in these tests are fake; native operations are confined to temporary synthetic SQLite/source fixtures. `node --check` passed for both new scripts. Public frontend deploy TypeScript checking was run against the explicit Docker closure (including the two imported runtime contract sources). The source-only `plan` was executed and does not invoke Docker or read config/key state. Common nginx/default 8080 source was not altered. No live lifecycle/exec or real public state mutation, provider request, commit/push or MCP mutation was performed by this agent. The separately authorized actual public read-only metadata preflight is documented above; the original tests remained entirely offline.
 
-## Verification
+## Historical verification
 
 Executed against source, ephemeral ports and disposable fixture databases/keys only:
 
@@ -453,6 +462,6 @@ pnpm typecheck
 python3 -m unittest scripts/test_public_llm_config.py scripts/test_public_llm_provision.py scripts/test_set_openrouter_key.py
 ```
 
-Current rerun during the 2026-10-21 self-review: **98 TypeScript tests passed**, **32 Python tests passed**, and full API **`pnpm typecheck` passed**. This supersedes the earlier checkpoint with unrelated concurrent worker-test type errors; those files were not edited in this scope. The transport test uses only a disposable loopback TLS/CONNECT server and synthetic CA/key; legacy-origin strings in tests are headers, not calls to the old host service. Public tests cover 241 rows / 236 CVE + 5 TEMP, late critical evidence, real public module/cookie/SQLite identity, whole-count and platform conflicts, default-reader rejection, zero/unknown refusal, consent/Origin/foreign-owner denial, bounded requests, durable TEMP citation reopen/replay, failed citations with retained usage, unsafe question/parser redaction, and existing JSON/NDJSON delivery. Shared suites cover quota contention/carry/receipt/storage faults and history/session/cancellation/publication races.
+Historical rerun during the 2026-10-21 self-review: **98 TypeScript tests passed**, **32 Python tests passed**, and full API **`pnpm typecheck` passed**. This supersedes the earlier checkpoint with unrelated concurrent worker-test type errors; those files were not edited in this scope. The transport test uses only a disposable loopback TLS/CONNECT server and synthetic CA/key; legacy-origin strings in tests are headers, not calls to the old host service. Public tests cover 241 rows / 236 CVE + 5 TEMP, late critical evidence, real public module/cookie/SQLite identity, whole-count and platform conflicts, default-reader rejection, zero/unknown refusal, consent/Origin/foreign-owner denial, bounded requests, durable TEMP citation reopen/replay, failed citations with retained usage, unsafe question/parser redaction, and existing JSON/NDJSON delivery. Shared suites cover quota contention/carry/receipt/storage faults and history/session/cancellation/publication races.
 
 No private env/key/holder contents were read. Only the newly authorized non-secret public `llm.env` was created outside Git in the earlier preparation pass; public key presence was checked by metadata only and is false. No real provider key was entered/read/provisioned; no Docker lifecycle/build/exec or old-host request/inspection was performed, and no commit/push/MCP mutation was made. The actual read-only diagnostic used only authorized public-resource metadata; the own public JWT was consumed internally without output or fingerprinting. Parallel UI/CVE/deployment-owner work is not part of this patch.

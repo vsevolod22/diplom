@@ -79,7 +79,7 @@ function TranslationScope({
 }: Props & { status: ScanStatus | null }) {
   const client = useMemo(() => providedClient ?? createAdvisoryTranslationClient(), [providedClient]);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [consent, setConsent] = useState(false);
+  const disclosureId = `translation-send-${findingId}-${assessmentIndex}`;
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
   const [result, setResult] = useState<TranslationReply | null>(null);
@@ -98,7 +98,6 @@ function TranslationScope({
   function clear() {
     invalidate();
     setSnapshot(null);
-    setConsent(false);
     setResult(null);
     setPending(false);
   }
@@ -130,7 +129,13 @@ function TranslationScope({
     return { context, readiness };
   }
   async function operate(action: 'read' | 'translate') {
-    if (!available || request.current || (action === 'translate' && (!consent || !snapshot))) return;
+    if (
+      !available ||
+      request.current ||
+      (action === 'translate' &&
+        (!snapshot?.context.enabled || !snapshot.context.policyVersion || !snapshot.readiness.localReady))
+    )
+      return;
     const accepted = snapshot;
     const controller = new AbortController();
     const version = ++generation.current;
@@ -149,12 +154,13 @@ function TranslationScope({
       ),
     );
     setPending(true);
-    setConsent(false);
     setResult(null);
-    setMessage('');
+    if (action === 'translate') setMessage('');
+    let latest: Snapshot | null = null;
     const run = async () => {
       const before = await readSnapshot(controller.signal);
       if (!live()) return;
+      latest = before;
       setSnapshot(before);
       if (action === 'read') return;
       if (!accepted || translationContextFence(before.context) !== translationContextFence(accepted.context))
@@ -170,6 +176,7 @@ function TranslationScope({
       if (!matchesTranslationFields(reply, assessment)) throw new TranslationError('INVALID');
       const after = await readSnapshot(controller.signal);
       if (!live()) return;
+      latest = after;
       setSnapshot(after);
       if (
         !after.readiness.localReady ||
@@ -183,7 +190,7 @@ function TranslationScope({
       await Promise.race([run(), stopped]);
     } catch (error) {
       if (generation.current === version && client.current()) {
-        setSnapshot(null);
+        setSnapshot(latest);
         setResult(null);
         setMessage(translationErrorMessage(error));
       }
@@ -197,11 +204,12 @@ function TranslationScope({
     }
   }
   useEffect(() => {
+    // Opening this source only reads bounded context/readiness GETs; translation is a click handler.
+    void operate('read');
     const unsubscribe = subscribeScanSession(clear);
-    // Focus invalidates previous consent and display; no generation or retry is implicit.
     const focus = () => {
       clear();
-      setMessage('Условия могли измениться. Прочитайте их заново перед переводом.');
+      void operate('read');
     };
     window.addEventListener('focus', focus);
     return () => {
@@ -233,17 +241,17 @@ function TranslationScope({
         disabled={!available || pending}
         onClick={() => void operate('read')}
       >
-        Прочитать условия перевода
+        Обновить условия перевода
       </button>
       {context?.disclosure ? (
-        <div>
+        <div id={`${disclosureId}-policy`}>
           <p>
             {context.disclosure.provider} · {context.disclosure.model} ·{' '}
-            {context.disclosure.providers.join(', ')} · global: регион не ограничен.
+            {context.disclosure.providers.join(', ')} · регион не ограничен.
           </p>
           <p>
             Внешнему провайдеру передаётся разрешённый текст заголовка и описания только выбранной оценки
-            advisory. Не весь отчёт и не история чата.
+            уведомления об уязвимости. Не весь отчёт и не история чата.
           </p>
           <p>
             {context.disclosure.retention === 'no-storage'
@@ -266,20 +274,16 @@ function TranslationScope({
         </ul>
       ) : null}
       {context && !context.enabled ? <p>Перевод выключен сервером. Оригинал остаётся доступен.</p> : null}
-      <label>
-        <input
-          type="checkbox"
-          checked={consent}
-          disabled={!ready}
-          onChange={(event) => setConsent(event.target.checked)}
-        />{' '}
-        Разрешаю один запрос перевода: отправить текст выбранного advisory внешнему провайдеру по указанной
-        политике.
-      </label>
+      <p id={disclosureId}>
+        Нажимая «Перевести на русский», вы разрешаете один запрос: заголовок и описание только выбранной
+        оценки — указанным выше модели и провайдеру. Не весь отчёт и не история чата. Бесплатность и бюджет
+        указаны выше; платной замены и автоповтора нет. Условия проверяются заново перед отправкой.
+      </p>
       <button
         type="button"
         className="scan-a1__link"
-        disabled={!ready || !consent}
+        aria-describedby={`${disclosureId} ${disclosureId}-policy`}
+        disabled={!ready}
         onClick={() => void operate('translate')}
       >
         Перевести на русский

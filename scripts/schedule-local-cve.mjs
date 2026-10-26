@@ -12,10 +12,22 @@ export const INTERVAL_SECONDS = 6 * 60 * 60;
 // Shared inert scheduler mechanics; profile-specific paths/errors/loader are explicit.
 export function createCveScheduler({ label = LABEL, script = 'schedule-local-cve.mjs', paths = localPaths,
   scope = 'LOCAL', refreshFailure = publicRefreshFailure, beforeCommand = () => {}, readStatus = raw => raw.trimEnd(),
-    validateRecord = record => record, strictLoadedEnvironment = false,
+    validateRecord = record => record, strictLoadedEnvironment = false, loadedEnvironmentMetadata = Object.freeze({}),
   loadRefresh = async () => (await import('./refresh-local-cve.mjs')).refreshLocalCve } = {}) {
 const failure = () => new Error(scope + ' CVE schedule refused; inspect its public status and existing LaunchAgent. No automatic replacement or recovery.');
 function requireSafe(ok) { if (!ok) throw failure(); }
+// Opt-in, source-defined launchd metadata only; never optional user credentials
+// or overrides for HOME/PATH/LANG/TZ. Capture data descriptors without getters.
+requireSafe(loadedEnvironmentMetadata && typeof loadedEnvironmentMetadata === 'object' &&
+  [Object.prototype, null].includes(Object.getPrototypeOf(loadedEnvironmentMetadata)));
+const optionalEnvironment = new Map();
+for (const key of Reflect.ownKeys(loadedEnvironmentMetadata)) {
+  const descriptor = Object.getOwnPropertyDescriptor(loadedEnvironmentMetadata, key);
+  const expected = key === 'XPC_SERVICE_NAME' ? label : key === 'OSLogRateLimit' ? '64' : null;
+  requireSafe(strictLoadedEnvironment === true && expected !== null && descriptor &&
+    Object.hasOwn(descriptor, 'value') && descriptor.value === expected);
+  optionalEnvironment.set(key, expected);
+}
 const xml = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
 
 function agentPlist({ root = ROOT, node = process.execPath, home = homedir() } = {}) {
@@ -40,11 +52,13 @@ function agentPlist({ root = ROOT, node = process.execPath, home = homedir() } =
 
 function validateLoadedAgent(output, { root, node, path, home }) {
   requireSafe(typeof output === 'string' && Buffer.byteLength(output) <= 65536);
+  if (strictLoadedEnvironment) requireSafe(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(output));
   const fields = new Map(), blocks = new Map(), stack = [];
   for (const raw of output.split('\n')) {
     const line = raw.trim();
     if (!line) continue;
     if (line.endsWith(' = {')) {
+      if (strictLoadedEnvironment) requireSafe(!(stack.length === 2 && stack[1] === 'environment'));
       const key = line.slice(0, -4);
       if (stack.length === 1) { requireSafe(!blocks.has(key)); blocks.set(key, []); }
       stack.push(key); continue;
@@ -69,8 +83,15 @@ function validateLoadedAgent(output, { root, node, path, home }) {
     const split = line.indexOf(' => '); requireSafe(split > 0);
     const key = line.slice(0, split); requireSafe(!environment.has(key)); environment.set(key, line.slice(split + 4));
   }
-  for (const [key, value] of Object.entries({ ...childEnvironment(), HOME: home })) requireSafe(environment.get(key) === value);
-    if (strictLoadedEnvironment) requireSafe(environment.size === Object.keys(childEnvironment()).length + 1);
+  const requiredEnvironment = { ...childEnvironment(), HOME: home };
+  for (const [key, value] of Object.entries(requiredEnvironment)) requireSafe(environment.get(key) === value);
+  if (strictLoadedEnvironment) {
+    let metadataCount = 0;
+    for (const [key, value] of optionalEnvironment) if (environment.has(key)) {
+      requireSafe(environment.get(key) === value); metadataCount++;
+    }
+    requireSafe(environment.size === Object.keys(requiredEnvironment).length + metadataCount);
+  }
 }
 
 function ownedDirectory(path) {

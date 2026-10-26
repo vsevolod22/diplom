@@ -3,9 +3,10 @@ import type { LlmPolicy } from './policy.js';
 import { prepareSummary, checkedPrepared, type PreparedRequest } from './prepared-request.js';
 import { usageObservation, type QuotaPolicy, type UsageObservation } from './quota-policy.js';
 import { openRouterTransport, OpenRouterHttpFailure, MAX_PROVIDER_RETRY_SECONDS, type ProviderHttpFailure, type BodySendGuard, type GuardedTransport } from './openrouter-transport.js';
+import { abortDiagnostic, carryDiagnostic, diagnose, diagnostic, rejectedFinishReason, stoppedDiagnostic, type FailurePhase, type FailureReason } from './provider-diagnostic.js';
 import type { ReportContext } from './report-context.js';
 import { PUBLIC_OPENROUTER_KEY_FILE, readPublicProviderKey } from './public-key-file.js';
-import { object, invalidReply } from './response.js';
+import { object } from './response.js';
 
 export const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 export type UsageReceipt = { policy: QuotaPolicy; observe(observation: UsageObservation): void };
@@ -15,7 +16,11 @@ export interface LlmProvider {
   summarizePrepared?(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt: UsageReceipt): Promise<unknown>;
   generateGuarded?(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt: UsageReceipt, guard: BodySendGuard): Promise<unknown>;
 }
-const failed = () => new BadGatewayException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
+const failed = (phase: FailurePhase, reason: FailureReason) => diagnose(new BadGatewayException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }), phase, reason);
+const stoppedFailure = (signal: AbortSignal) => {
+  const error = new BadGatewayException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' });
+  stoppedDiagnostic(signal, error); return error;
+};
 export const configError = () => new ServiceUnavailableException({ errorCode: 'LLM_CONFIGURATION_UNAVAILABLE' });
 export type ProviderFailureResponse = Readonly<{
   errorCode: 'LLM_PROVIDER_RATE_LIMITED' | 'LLM_PROVIDER_AUTH_FAILED' | 'LLM_PROVIDER_UNAVAILABLE';
@@ -47,9 +52,8 @@ export function providerFailureFromException(error: unknown): ProviderFailureRes
 }
 function envelopeFailure(value: unknown, retryAfter?: string | null): OpenRouterHttpFailure | undefined {
   if (!object(value) || !Number.isInteger(value.code) || (value.code as number) < 400 || (value.code as number) > 599) return undefined;
-  return new OpenRouterHttpFailure(value.code as number, retryAfter);
+  return new OpenRouterHttpFailure(value.code as number, retryAfter, 'envelope');
 }
-
 
 export class OpenRouterProvider implements LlmProvider {
   constructor(private readonly key: string, private readonly transport: typeof fetch = openRouterTransport) {}
@@ -65,86 +69,86 @@ export class OpenRouterProvider implements LlmProvider {
     return this.send(request, policy, signal, receipt, guard);
   }
   private async send(request: PreparedRequest, policy: LlmPolicy, signal: AbortSignal, receipt?: UsageReceipt, guard?: BodySendGuard): Promise<unknown> {
-    if (signal.aborted) throw failed();
+    if (signal.aborted) throw stoppedFailure(signal);
     const body = checkedPrepared(request, policy);
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    const abort = () => {
+      if (diagnostic(signal.reason)) controller.abort(signal.reason);
+      else abortDiagnostic(controller, 'caller_abort');
+    };
     signal.addEventListener('abort', abort, { once: true });
-    const timeout = setTimeout(abort, policy.timeoutMs);
+    const timeout = setTimeout(() => abortDiagnostic(controller, 'deadline'), policy.timeoutMs);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let phase: FailurePhase = 'headers';
     try {
-      // Race as well as abort: a misbehaving injected transport cannot keep the request alive.
       const stopped = new Promise<never>((_, reject) => {
-        controller.signal.addEventListener('abort', () => reject(failed()), { once: true });
+        controller.signal.addEventListener('abort', () => reject(stoppedFailure(controller.signal)), { once: true });
       });
       const operation = async () => {
         const init: RequestInit = { method: 'POST', redirect: 'error',
           headers: { authorization: `Bearer ${this.key}`, 'content-type': 'application/json', accept: 'application/json' },
           body, signal: controller.signal };
-        const response = await (guard ? (this.transport as GuardedTransport).sendGuarded(OPENROUTER_ENDPOINT, init, guard) :
-          this.transport(OPENROUTER_ENDPOINT, init));
-        if (controller.signal.aborted) { await response.body?.cancel(); throw failed(); }
+        const response = await (guard ? (this.transport as GuardedTransport).sendGuarded(OPENROUTER_ENDPOINT, init, guard) : this.transport(OPENROUTER_ENDPOINT, init));
+        if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw stoppedFailure(controller.signal); }
         if (!response.ok || response.status >= 300) {
           const failure = new OpenRouterHttpFailure(response.status, response.headers.get('retry-after'));
-          // Cancellation must not delay or overwrite the already authenticated HTTP status.
-          void response.body?.cancel().catch(() => {});
-          throw failure;
+          void response.body?.cancel().catch(() => {}); throw failure;
         }
-        if (response.redirected ||
-            !/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
-          await response.body?.cancel(); throw failed();
+        if (response.redirected || !/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
+          void response.body?.cancel().catch(() => {}); throw failed('headers', 'invalid_type');
         }
         const length = response.headers.get('content-length');
         if (length !== null && (!/^\d+$/.test(length) || Number(length) > policy.responseBytes)) {
-          await response.body?.cancel(); throw failed();
+          void response.body?.cancel().catch(() => {}); throw failed('headers', 'limit');
         }
-        if (!response.body) throw failed();
-        reader = response.body.getReader();
+        if (!response.body) throw failed('body', 'invalid_shape');
+        phase = 'body'; reader = response.body.getReader();
         const chunks: Uint8Array[] = []; let count = 0;
         for (;;) {
           const { done, value } = await reader.read();
-          if (controller.signal.aborted) throw failed();
+          if (controller.signal.aborted) throw stoppedFailure(controller.signal);
           if (done) break;
           count += value.byteLength;
-          if (count > policy.responseBytes) throw failed();
+          if (count > policy.responseBytes) throw failed('body', 'limit');
           chunks.push(value);
         }
+        phase = 'json';
         let envelope: unknown;
         try { envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
-        catch { return invalidReply(); }
+        catch { throw failed('json', 'invalid_json'); }
         const matchingModel = object(envelope) && envelope.model === policy.model;
         const errorChoice = object(envelope) && Array.isArray(envelope.choices) && envelope.choices.length === 1 && object(envelope.choices[0]) ? envelope.choices[0] : undefined;
         const remoteFailure = envelopeFailure(object(envelope) && envelope.error !== undefined ? envelope.error : errorChoice?.error, response.headers.get('retry-after'));
-        // Bound accounting to this invocation and exact model, before any content,
-        // finish/citation or service publication validation can discard consumption.
+        // Accounting precedes content/publication checks, even on an error envelope.
         if (receipt && object(envelope) && matchingModel && (!remoteFailure || envelope.usage !== undefined)) {
+          phase = 'usage';
           const observation = usageObservation(envelope.usage, request.reserve, receipt.policy);
           try { receipt.observe(observation); }
-          catch (error) { throw remoteFailure ?? error; }
-          if (!observation.normal) { if (remoteFailure) throw remoteFailure; return invalidReply(); }
+          catch { throw remoteFailure ?? failed('accounting', 'observation_failed'); }
+          if (!observation.normal) throw remoteFailure ?? failed('usage', 'invalid_receipt');
         }
-        if (object(envelope) && envelope.error !== undefined || errorChoice?.error !== undefined) throw remoteFailure ?? failed();
-        if (!object(envelope) || !matchingModel || !Array.isArray(envelope.choices) ||
-            envelope.choices.length !== 1 || !object(envelope.choices[0])) return invalidReply();
+        if (object(envelope) && envelope.error !== undefined || errorChoice?.error !== undefined)
+          throw remoteFailure ?? failed('envelope', 'invalid_shape');
+        if (!object(envelope)) throw failed('envelope', 'invalid_shape');
+        if (!matchingModel) throw failed('model', 'mismatch');
+        if (!Array.isArray(envelope.choices) || envelope.choices.length !== 1 || !object(envelope.choices[0])) throw failed('envelope', 'invalid_shape');
         const choice = envelope.choices[0];
-
-        if (choice.finish_reason !== 'stop' || !object(choice.message) ||
-                    Object.keys(choice.message).some(k => !['role', 'content', 'refusal', 'reasoning', 'annotations'].includes(k)) ||
-                    choice.message.refusal != null || choice.message.reasoning != null ||
-                    choice.message.annotations !== undefined && (!Array.isArray(choice.message.annotations) || choice.message.annotations.length !== 0) ||
-            choice.message.role !== 'assistant' || typeof choice.message.content !== 'string' ||
-            Buffer.byteLength(choice.message.content) > policy.responseBytes || !object(envelope.usage) ||
-            !Number.isSafeInteger(envelope.usage.completion_tokens) || (envelope.usage.completion_tokens as number) < 0 ||
-            (envelope.usage.completion_tokens as number) > policy.outputTokens ||
-            policy.freeOnly && envelope.usage.cost !== 0) return invalidReply();
-        try { return JSON.parse(choice.message.content); } catch { return invalidReply(); }
+        if (choice.finish_reason !== 'stop') throw failed('finish', rejectedFinishReason(choice.finish_reason));
+        if (!object(choice.message) || Object.keys(choice.message).some(key => !['role', 'content', 'refusal', 'reasoning', 'annotations'].includes(key)) ||
+            choice.message.refusal != null || choice.message.reasoning != null ||
+            choice.message.annotations !== undefined && (!Array.isArray(choice.message.annotations) || choice.message.annotations.length !== 0) ||
+            choice.message.role !== 'assistant' || typeof choice.message.content !== 'string') throw failed('content', 'invalid_shape');
+        if (Buffer.byteLength(choice.message.content) > policy.responseBytes) throw failed('content', 'limit');
+        if (!object(envelope.usage) || !Number.isSafeInteger(envelope.usage.completion_tokens) || (envelope.usage.completion_tokens as number) < 0 ||
+            (envelope.usage.completion_tokens as number) > policy.outputTokens || policy.freeOnly && envelope.usage.cost !== 0) throw failed('usage', 'invalid_receipt');
+        try { return JSON.parse(choice.message.content); } catch { throw failed('content', 'invalid_json'); }
       };
       return await Promise.race([operation(), stopped]);
     } catch (error) {
-      if (error instanceof OpenRouterHttpFailure) throw new ProviderHttpException(error.failure);
-      throw failed();
-    }
-    finally {
+      if (error instanceof OpenRouterHttpFailure) throw carryDiagnostic(error, new ProviderHttpException(error.failure));
+      const failure = carryDiagnostic(error, new BadGatewayException({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }));
+      throw diagnose(failure, phase, 'io_error');
+    } finally {
       clearTimeout(timeout); signal.removeEventListener('abort', abort); controller.abort();
       if (reader) void reader.cancel().catch(() => {});
     }

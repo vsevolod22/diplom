@@ -2,11 +2,12 @@ import { request as httpRequest } from 'node:http';
 import { Agent, request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import { CEILINGS } from './policy.js';
+import { carryDiagnostic, diagnose, stoppedDiagnostic, type FailurePhase, type FailureReason } from './provider-diagnostic.js';
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const HOST = 'openrouter.ai';
 const PATH = '/api/v1/chat/completions';
-const unavailable = () => new Error('OpenRouter transport unavailable');
+const unavailable = (phase: FailurePhase = 'request', reason: FailureReason = 'invalid_request') => diagnose(new Error('OpenRouter transport unavailable'), phase, reason);
 export type ProviderHttpFailure = Readonly<{
   kind: 'rate_limited' | 'auth_failed' | 'unavailable';
   status: number;
@@ -27,12 +28,13 @@ export function providerRetryAfter(value: string | null | undefined, now = Date.
 }
 export class OpenRouterHttpFailure extends Error {
   readonly failure: ProviderHttpFailure;
-  constructor(status: number, retryAfter?: string | null) {
+  constructor(status: number, retryAfter?: string | null, phase: 'headers' | 'envelope' = 'headers') {
     super('OpenRouter transport unavailable');
     if (!Number.isInteger(status) || status < 300 || status > 599) throw unavailable();
     const kind = status === 429 || status === 503 ? 'rate_limited' : status === 401 ? 'auth_failed' : 'unavailable';
     const retryAfterSeconds = kind === 'rate_limited' ? providerRetryAfter(retryAfter) : undefined;
     this.failure = Object.freeze({ kind, status, ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}) });
+    diagnose(this, phase, 'http_error');
   }
 }
 export type BodySendGuard = (send: () => void) => void;
@@ -52,6 +54,7 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
     const signal = init.signal;
     return new Promise<Response>((resolve, reject) => {
       let settled = false;
+      let phase: FailurePhase = 'connect';
       const resources: Array<{ destroy(): void }> = [];
       // eslint-disable-next-line prefer-const -- A pre-aborted signal calls cleanup before the deadline is initialized.
       let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -62,32 +65,42 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
         // Settle immediately, but release sockets after that native callback unwinds.
         setImmediate(() => { for (const resource of resources) resource.destroy(); });
       };
-      const fail = (reason?: unknown) => { if (!settled) { settled = true; cleanup(); reject(reason instanceof OpenRouterHttpFailure ? reason : unavailable()); } };
-      const abort = () => fail();
-      if (signal?.aborted) { fail(); return; }
+      const fail = (error?: unknown, reason: FailureReason = 'io_error', at: FailurePhase = phase) => {
+        if (!settled) {
+          settled = true; cleanup();
+          const failure = error instanceof OpenRouterHttpFailure ? error : carryDiagnostic(error, new Error('OpenRouter transport unavailable'));
+          reject(diagnose(failure, at, reason));
+        }
+      };
+
+      const abort = () => { const error = new Error('OpenRouter transport unavailable'); stoppedDiagnostic(signal!, error); fail(error); };
+      if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
-      deadline = setTimeout(fail, CEILINGS.timeoutMs);
+      deadline = setTimeout(() => fail(undefined, 'timeout', 'deadline'), CEILINGS.timeoutMs);
       const tunnel = httpRequest({ hostname: gateway.host, port: gateway.port, method: 'CONNECT',
         path: `${HOST}:443`, headers: { host: `${HOST}:443` }, timeout: 5000 });
       resources.push(tunnel);
-      tunnel.on('response', result => { result.destroy(); fail(); });
-      tunnel.on('error', fail); tunnel.on('timeout', fail);
+      tunnel.on('response', result => { result.destroy(); fail(undefined, 'rejected', 'connect'); });
+      tunnel.on('error', fail); tunnel.on('timeout', () => fail(undefined, 'timeout', 'connect'));
       tunnel.on('connect', (response, socket, head) => {
         resources.push(socket);
         socket.on('error', fail);
         if (settled) { socket.destroy(); return; }
-        if (response.statusCode !== 200 || head.length) { fail(); return; }
+        if (response.statusCode !== 200 || head.length) { fail(undefined, 'rejected', 'connect'); return; }
+        phase = 'tls';
         const secure = tlsConnect({ socket, servername: HOST, rejectUnauthorized: true });
         resources.push(secure);
-        secure.on('error', fail); secure.setTimeout(10_000, fail);
+        secure.on('error', fail); secure.setTimeout(10_000, () => fail(undefined, 'timeout'));
         secure.once('secureConnect', () => {
           if (settled) return;
+          phase = 'dispatch_guard';
           const send = () => {
             if (signal?.aborted || settled) throw unavailable();
             const agent = new Agent({ keepAlive: false });
             resources.push(agent);
             // Reuse only this authenticated tunnel; never let the agent dial the host.
             agent.createConnection = () => secure;
+            phase = 'headers';
             const request = httpsRequest({ hostname: HOST, path: PATH, method: 'POST', agent,
               headers: { ...Object.fromEntries(headers), 'content-length': String(Buffer.byteLength(body)) }, timeout: 10_000 }, result => {
               resources.push(result);
@@ -98,15 +111,16 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
                 fail(new OpenRouterHttpFailure(result.statusCode, typeof result.headers['retry-after'] === 'string' ? result.headers['retry-after'] : undefined));
                 return;
               }
-              if (!result.statusCode || result.statusCode < 200 || result.statusCode >= 300 ||
-                  !/^application\/json(?:;|$)/i.test(result.headers['content-type'] ?? '') ||
-                  length !== undefined && (!/^\d+$/.test(length) || Number(length) > CEILINGS.responseBytes)) { fail(); return; }
+              if (!result.statusCode || result.statusCode < 200 || result.statusCode >= 300) { fail(undefined, 'invalid_shape'); return; }
+              if (!/^application\/json(?:;|$)/i.test(result.headers['content-type'] ?? '')) { fail(undefined, 'invalid_type'); return; }
+              if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > CEILINGS.responseBytes)) { fail(undefined, 'limit'); return; }
+              phase = 'body';
               const chunks: Buffer[] = []; let bytes = 0;
               result.on('error', fail); result.on('aborted', fail);
               result.on('data', (chunk: Buffer) => {
                 if (settled) return;
                 bytes += chunk.length;
-                if (bytes > CEILINGS.responseBytes) { fail(); return; }
+                if (bytes > CEILINGS.responseBytes) { fail(undefined, 'limit'); return; }
                 chunks.push(chunk);
               });
               result.on('end', () => {
@@ -121,10 +135,10 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
               });
             });
             resources.push(request);
-            request.on('error', fail); request.on('timeout', fail);
+            request.on('error', fail); request.on('timeout', () => fail(undefined, 'timeout'));
             request.end(body);
           };
-          try { if (guard) guard(send); else send(); } catch { fail(); }
+          try { if (guard) guard(send); else send(); } catch (error) { fail(error, 'rejected', 'dispatch_guard'); }
         });
       });
       tunnel.end();

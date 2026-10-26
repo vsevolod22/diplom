@@ -48,6 +48,7 @@ function CopyVector({ vector }: { vector: string }) {
   );
 }
 export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const advisory = finding.advisory;
   const debianTemp = isDebianTempId(finding.cveId);
   const references = canonicalReferences(finding.cveId);
@@ -101,7 +102,10 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
       <p className="scan-vuln-row__sources">
         Источники отдельных оценок: {finding.severitySources?.join(', ') || 'неизвестны'}
       </p>
-      <details className="scan-vuln-row__details">
+      <details
+        className="scan-vuln-row__details"
+        onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
+      >
         <summary>Подробности {finding.cveId} · описание, CVSS и ссылки</summary>
         <p>{debianTemp ? 'Advisory ID' : 'CVE ID'}: {finding.cveId}</p>
         <p>ID находки: {finding.findingId}</p>
@@ -124,12 +128,14 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
                 <p>Язык источника: {item.language ?? 'не указан'} · оригинальный текст источника</p>
                 <AdvisoryText label="Заголовок" field={item.title} />
                 <AdvisoryText label="Описание" field={item.description} />
-                <AdvisoryTranslationPanel
-                  findingId={finding.findingId}
-                  vulnerabilityId={finding.cveId}
-                  assessmentIndex={index}
-                  assessment={item}
-                />
+                {detailsOpen ? (
+                  <AdvisoryTranslationPanel
+                    findingId={finding.findingId}
+                    vulnerabilityId={finding.cveId}
+                    assessmentIndex={index}
+                    assessment={item}
+                  />
+                ) : null}
                 <p>
                   Severity источника: {item.severity ?? 'не предоставлена'} · исправление источника:{' '}
                   {item.fixedVersion ?? 'не предоставлено'}

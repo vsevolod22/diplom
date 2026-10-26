@@ -24,7 +24,7 @@ export function vuln(index: number, severity: 'LOW' | 'CRITICAL' = 'LOW') {
 }
 export function reply(report: ReportContext) {
   return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,
-    hypotheses: [{ text: 'This finding may require operator investigation.', citations: [report.findings[0].findingId] }] };
+    hypotheses: [{ text: 'Находка требует проверки оператором; эксплуатация не подтверждена.', citations: [report.findings[0].findingId] }] };
 }
 export const fixtureReport: ReportContext = {
   scanId: '00000000-0000-4000-8000-000000000000', digest, platform: 'linux/amd64', reportVersion: 'c'.repeat(64),

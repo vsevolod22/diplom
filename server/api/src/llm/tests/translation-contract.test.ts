@@ -55,7 +55,7 @@ test('translation exact selection/body, separate consent, registered prepared wi
 test('Russian prompt revision invalidates prior consent/cache policy identity without changing report binding', () => {
   const { version, ...settings } = policy;
   const previousVersion = createHash('sha256').update(JSON.stringify({ revision: fixtureEnv.LLM_POLICY_REVISION,
-    responseLanguageRevision: 'russian-prose-v1', ...settings })).digest('hex');
+    responseLanguageRevision: 'russian-prose-v2', ...settings })).digest('hex');
   assert.notEqual(version, previousVersion);
   assert.notEqual(translationPolicy(policy), translationPolicy({ ...policy, version: previousVersion }));
   assert.equal(prepareSummary(fixtureReport, policy).policyVersion, policy.version);

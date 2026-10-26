@@ -1,6 +1,17 @@
-# Public8081 — actual READY25.10; scanner PASS, AI qualification BLOCKED
+# Public8081 — исторический recovery receipt 25.10; scanner PASS, AI qualification BLOCKED
 
-## Текущий итог
+## Актуальный статус — 26.10.2026
+
+Этот recovery receipt **исторический; текущий итог — [public-progress-20261026-final.md](public-progress-20261026-final.md)**. Исходные proofs/FAIL/NOTRUN ниже сохранены и не переименованы в успех. Public **http://127.0.0.1:8081 — HTTP200**, maintenance не идёт; новых probes в этой финализации нет.
+
+- Активирован изменённый CVE release `sha256:e1af977c90fb06ebf3d5123afb831b89d659e7e0a3fc6231e4f9e42d85c9ec98`, а не прежний `5903d201…`. По передаче владельца activation **exit0**, original web resumed; связанные CVE/LLM completion receipts подтверждают aggregate four-store `preserved:true` для AuthAccounts, ScanLedger, LlmHistoryStore, LlmQuotaStore. Stores этим docs lane не открывались.
+- Scheduler `io.diplom.public-images.cve-refresh` **установлен/loaded, 21600 секунд / 6 часов**; exact statusPASS передан отдельно в финальном итоге. **Успешный periodic run не доказан**: installation/status/last exit0 не заменяют completed periodic receipt. Подробности и датированные ограничения — [CVE receipt](public-progress-20261025-cve-receipt.md).
+- Последний actual AI attempt `324479cf-07ee-4d99-983b-2be9d6c000eb`: **12 PASS / 6 BLOCKED / 0 FAIL**, не full AI PASS. Chat — HTTP200 failed NDJSON, provider `rate_limited/status429`, без retry hint. Translation — application HTTP502 `LLM_INVALID_RESPONSE`, `content/invalid_content`; exact predicate UNKNOWN, upstream HTTP502 не доказан. Успешные grounded reply, durable conversation и translation/toggle не приняты.
+- Более поздняя отдельная native cancel/progress проверка дала **10 PASS / 0 BLOCKED / 0 FAIL**; она не переписывает ранний cancel FAIL ниже и не доказывает AI generation.
+
+Старый download failure остаётся cause **UNKNOWN**. Пустая staging отдельно архивирована archive-only, `refreshSubmitted:false`; последующая activation — другая операция. **Новых attempts/maintenance/replay consumed tokens не выполнять.**
+
+## Исторический итог recovery — 25.10.2026
 
 Public **http://127.0.0.1:8081 — HTTP200**, protected8080 — **HTTP200**. Final probes выполнены после native scan/ownership/cancel-form diagnostics. Public `.operation.lock` отсутствует. Docker Desktop перезапущен **один раз**, только после явного разрешения владельца, без factory reset/deletion/prune. Старые environments/holders/ключи/DB не inspect/exec/переносились; их lifecycle вручную не управлялся. Сам разрешённый Desktop restart затронул daemon и восстановил HTTP200 на8080.
 
@@ -56,7 +67,9 @@ ONE actual attempt `f086c21c-87cb-4919-b824-e457a06036ec`, run `d17ad639-9af8-4f
 
 ONE отдельнаяform-onlydiagnostic registration воспроизвела шаги раздельно: eligibilityHTTP200READY, consent.checkPASS иsubmitenabledPASS,0scan/cancel/LLMPOST. Failure **NOT_REPRODUCED, rootcauseUNKNOWN**, не исправлен. `public-final-cancel-form-20261025.json` сохранён отдельно. Новый scan/cancel attempt не повторялся без установленной причины.
 
-## Public CVE: refresh download FAILED, scheduler pending
+## Исторический Public CVE: refresh download FAILED, scheduler тогда pending
+
+**Снимок до последующей activation и установки scheduler; не текущий статус.** Старые manifest/timestamps/counts и retained scratch ниже относятся только к той попытке, не к нынешнему состоянию. Последующая archive-only disposition и changed-release preservation сохранены в [CVE receipt](public-progress-20261025-cve-receipt.md); актуальное резюме — в начале этого документа. Старые предписания о staging/scheduler ниже не являются текущей инструкцией или разрешением на действия.
 
 После завершения browsertraffic, в отдельном maintenancewindow выполнен **один** `node scripts/refresh-public-cve.mjs`: exit1 **phase=download**, exactcauseUNKNOWN. Sourceflow не дошёл до namespace/fence/preservation/activation/signing. Оба порта остались200, operationlockabsent, currentmanifestunchanged. Это не successfulchangedrefresh и не новаяCVEfreshness.
 
@@ -66,7 +79,7 @@ Current v2manifest `sha256:5903d201b3dc68dda334b9a9397ed51bd7956d834f43ab4edae68
 
 Preflight до попытки:27.798GiBfree,2releases/3.613GB,2completedCVEbackups,3completedLLMdeployments. Эти numbers не reservation и не будущая capacityguarantee.
 
-## Provider / пользовательский путь
+## Исторический Provider / пользовательский путь — 25.10.2026
 
 Настроенная request/profile policy сохранена: **OpenRouter `xingchen-agi/xing4.0-29b-a4b:free` → `phala`**, free-only, требование ZDR, без автоматического fallback. Это требования конфигурации, не независимый аудит provider privacy. Key уже provisioned; не запрашивать его в чате и не импортировать повторно. Unauthenticated official catalog GET `2026-10-25T18:51:58.988Z`: HTTP200, Phala присутствует, prompt/completion price0; request price и ZDR flags этим endpoint не установлены. Это metadata, **не generation/privacy/billing proof**. Adapter `stream=false`; NDJSON — доставка завершённого проверенного ответа, не native token streaming.
 
@@ -74,7 +87,7 @@ Preflight до попытки:27.798GiBfree,2releases/3.613GB,2completedCVEbacku
 
 Требуемое внешнее действие дляAI: проверить доступность/лимиты точной freeпары в OpenRouter/Phala либо отдельно согласовать другуюprofilepolicy. Не обещать, что повторныйключ или повторчерезпроизвольныйинтервал исправит429; paidfallback/сменамодели безразрешениязапрещены.
 
-## Проверки и tracker
+## Исторические проверки и tracker — 25.10.2026
 
 Последние полные suites приложения на unchangedappsource: API1346/1346/UI742/742PASS, typecheck/lint/main/adminbuildsPASS; после этого менялись narrowrecoverymodule иbrowserrunner/tests, неbackend/frontendappcode. Recovery215offlinePASS и targetedcancel/ownershipchecks независимоPASS; финальныйrootlint/diffcheck отдельно. Vitechunkwarning иSSE/UIintermittency не объявленыfixed.
 

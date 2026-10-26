@@ -74,6 +74,7 @@ export function publicCveScheduler({ integration = createPublicCveBridge() } = {
     refreshFailure: publicCveFailure,
     readStatus: publicStatus,
     strictLoadedEnvironment: true,
+    loadedEnvironmentMetadata: Object.freeze({ XPC_SERVICE_NAME: LABEL, OSLogRateLimit: '64' }),
     validateRecord: (record) => JSON.parse(publicStatus(JSON.stringify(record))),
     beforeCommand: async (_command, root) => {
       requirePublicIntegration(integration);

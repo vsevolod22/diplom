@@ -4,6 +4,7 @@
 import * as fs from 'node:fs';
 import {
   createHash,
+  randomBytes,
   createPrivateKey,
   createPublicKey,
   timingSafeEqual,
@@ -14,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import {
   childEnvironment,
   runChild,
+  cveTimeout,
   directory,
   readBounded,
   writeExclusive,
@@ -23,6 +25,8 @@ import {
   prepareFrozenCandidate,
   verifierArguments,
   verifiedOutput,
+  cveCheckpoint,
+  cveRefreshDiagnostic,
   READY_PROBE,
 } from './refresh-local-cve.mjs';
 import { createPublicCveBridge } from './public-cve-bridge.mjs';
@@ -78,12 +82,13 @@ const known = [
   'cleanup',
 ];
 const failures = new WeakMap();
-function failure(phase = 'preflight', hold = false) {
+function failure(phase = 'preflight', hold = false, checkpoint = 'validation', diagnostic = null) {
   if (!known.includes(phase)) phase = 'preflight';
+  checkpoint = cveCheckpoint(phase, checkpoint);
+  const detail = diagnostic ? ` cause=${diagnostic.cause}${diagnostic.transport ? ` transport=${diagnostic.transport.boundary}/${diagnostic.transport.cause}${diagnostic.transport.status ? ` status=${diagnostic.transport.status}` : ''}` : ''};` : '';
   const details = Object.freeze({
-    phase,
-    hold,
-    message: `PUBLIC CVE refresh refused${hold ? '/HOLD' : ''}; phase=${phase}. No automatic recovery.`,
+    phase, hold, checkpoint, ...(diagnostic ? { diagnostic } : {}),
+    message: `PUBLIC CVE refresh refused${hold ? '/HOLD' : ''}; phase=${phase}; checkpoint=${checkpoint}.${detail} No automatic recovery.`,
   });
   const error = new Error(details.message);
   failures.set(error, details);
@@ -297,6 +302,86 @@ export function requirePublicIntegration(integration) {
       typeof integration.preflightPreservation === 'function',
   );
 }
+const dispositionSources = ['scripts/refresh-public-cve.mjs', 'scripts/refresh-local-cve.mjs', 'scripts/setup-local-cve.mjs', 'server/deploy/trust/fetch-db-layer.mjs'];
+const dispositionIdentity = s => ({ dev: String(s.dev), ino: String(s.ino), uid: s.uid, mode: s.mode, nlink: s.nlink, size: s.size, mtime: s.mtimeMs, ctime: s.ctimeMs });
+function emptyStagingProof(root, paths, lock) {
+  const work = join(paths.stand, '.cve-refresh-work'), parent = directoryFence(paths.stand, 0o700);
+  directory(work, 0o700); const identity = dispositionIdentity(fs.lstatSync(work));
+  const sources = dispositionSources.map(name => {
+    const path = join(root, name);
+    safe(fs.realpathSync(dirname(path)) === dirname(path));
+    const before = fs.lstatSync(path); safe(!(before.mode & 0o022));
+    const bytes = readBounded(path, 256 * 1024), after = fs.lstatSync(path);
+    safe(equal(dispositionIdentity(before), dispositionIdentity(after)));
+    return { name, path, identity: dispositionIdentity(after), sha256: sha(bytes) };
+  });
+  const verify = () => {
+    parent.verify(); lock.verify(); directory(work, 0o700);
+    safe(equal(dispositionIdentity(fs.lstatSync(work)), identity) && (fs.lstatSync(work).mode & 0o7777) === 0o700 && fs.readdirSync(work).length === 0);
+    safe(!fs.readdirSync(paths.stand).some(n => n.startsWith('.llm-pending-') || n.endsWith('.lock') && n !== '.operation.lock'));
+    for (const p of ['.profile.pending', '.compose.cve.pending', '.compose.images.pending']) safe(!present(join(paths.stand, p)));
+    for (const s of sources) {
+      safe(fs.realpathSync(dirname(s.path)) === dirname(s.path) && equal(dispositionIdentity(fs.lstatSync(s.path)), s.identity) && sha(readBounded(s.path, 256 * 1024)) === s.sha256);
+    }
+  };
+  verify();
+  const evidence = { version: 1, kind: 'empty-public-cve-staging-only', workspace: identity,
+    sources: sources.map(({ name, identity, sha256 }) => ({ name, identity, sha256 })),
+    priorFailureCause: 'UNKNOWN', priorAttemptCertified: false, refreshAuthorized: false };
+  return { work, identity, verify, evidence, review: sha(json(evidence)) };
+}
+
+// Separate explicit operation: no activation, key/JWT/DB access, network or retry.
+// A private exclusive archive parent makes rename's target unoccupied; uncertainty
+// leaves this operation's intent/lock sticky, never steals or deletes another lock.
+export async function disposeEmptyPublicCveStaging(argv, { root = ROOT, integration = createPublicCveBridge(), onLocked = () => {}, onBeforeMove = () => {} } = {}) {
+  let lock, hold = false;
+  try {
+    const checking = equal(argv, ['--check-empty-staging']);
+    safe(checking || argv.length === 3 && argv[0] === '--archive-empty-staging' && argv[1] === '--review' && HEX.test(argv[2]));
+    const paths = publicPaths(root), state = directoryFence(paths.stand, 0o700);
+    requirePublicIntegration(integration); lock = await integration.acquireLock(root);
+    safe(lock?.path === join(paths.stand, '.operation.lock') && typeof lock.verify === 'function' && typeof lock.release === 'function');
+    state.verify(); lock.verify(); await onLocked(); safe(fs.readdirSync(lock.path).length === 0);
+    const proof = emptyStagingProof(root, paths, lock);
+    if (checking) return { version: 1, outcome: 'empty-staging-review-only', review: proof.review, empty: true, archived: false, refreshAuthorized: false };
+    safe(argv[2] === proof.review); proof.verify();
+    const catalog = join(paths.stand, '.cve-refresh-archives');
+    if (present(catalog)) {
+      directory(catalog, 0o700); const entries = fs.readdirSync(catalog);
+      safe(entries.length < 16 && entries.every(n => /^empty-[a-f0-9]{32}$/.test(n)));
+      for (const n of entries) directory(join(catalog, n), 0o700);
+    }
+    hold = true;
+    const intent = join(lock.path, 'empty-staging-intent.json');
+    writeExclusive(intent, json({ ...proof.evidence, review: proof.review }), 0o600); syncDirectory(lock.path);
+    const intentFence = fileFence(intent, 16384);
+    if (!present(catalog)) { fs.mkdirSync(catalog, { mode: 0o700 }); syncDirectory(paths.stand); }
+    const catalogFence = directoryFence(catalog, 0o700), archive = join(catalog, 'empty-' + randomBytes(16).toString('hex'));
+    fs.mkdirSync(archive, { mode: 0o700 }); syncDirectory(catalog);
+    const archiveFence = directoryFence(archive, 0o700), target = join(archive, 'work');
+    await onBeforeMove(); proof.verify(); intentFence.verify(); state.verify(); catalogFence.verify(); archiveFence.verify(); safe(!present(target));
+    fs.renameSync(proof.work, target); syncDirectory(paths.stand); syncDirectory(archive);
+    directory(target, 0o700); const moved = dispositionIdentity(fs.lstatSync(target));
+    safe(moved.dev === proof.identity.dev && moved.ino === proof.identity.ino && fs.readdirSync(target).length === 0 && !present(proof.work));
+    state.verify(); lock.verify(); catalogFence.verify(); archiveFence.verify();
+    writeExclusive(join(archive, 'complete.json'), json({ version: 1, outcome: 'empty-staging-archived-only', review: proof.review,
+      originalIdentity: proof.identity, archivedIdentity: moved, priorFailureCause: 'UNKNOWN', priorAttemptCertified: false, refreshSubmitted: false }), 0o600);
+    syncDirectory(archive);
+    // Preserve the intent too; do not unlink failure evidence merely to release.
+    safe(equal(fs.readdirSync(lock.path), ['empty-staging-intent.json'])); intentFence.verify();
+    safe(!present(join(archive, 'intent.json')));
+    fs.renameSync(intent, join(archive, 'intent.json')); syncDirectory(archive); syncDirectory(lock.path);
+    hold = false;
+    return { version: 1, outcome: 'empty-staging-archived-only', review: proof.review, archived: true, priorFailureCause: 'UNKNOWN', refreshSubmitted: false };
+  } catch (error) { throw failure('staging', hold, 'workspace', cveRefreshDiagnostic(error)); }
+  finally {
+    if (lock && !hold) {
+      try { lock.verify(); lock.release(); } catch { throw failure('cleanup', true); }
+    }
+  }
+}
+
 export async function refreshPublicCve(
   argv = [],
   {
@@ -313,21 +398,20 @@ export async function refreshPublicCve(
     platform = process.platform,
   } = {},
 ) {
-  let phase = 'preflight',
+  if (argv[0] === '--check-empty-staging' || argv[0] === '--archive-empty-staging') {
+    const result = await disposeEmptyPublicCveStaging(argv, { root, integration, onLocked });
+    log(JSON.stringify(result)); return result;
+  }
+  let phase = 'preflight', checkpoint = 'validation',
     hold = false,
     lock,
     temporaryOverlay;
   const records = new Map();
-  const mark = (p) => {
-    safe(known.includes(p));
-    phase = p;
+  const mark = (p, nextCheckpoint = 'validation') => {
+    safe(known.includes(p)); phase = p; checkpoint = cveCheckpoint(p, nextCheckpoint);
   };
   const deadline = now() + 900_000;
-  const remaining = (cap) => {
-    const ms = Math.ceil(Math.min(cap, deadline - now()));
-    safe(ms > 0);
-    return ms;
-  };
+  const remaining = (cap) => cveTimeout(cap, deadline, now());
   try {
     const migrating = argv.length === 2 && argv[0] === '--migrate-v1' && /^[a-f0-9]{32}$/.test(argv[1]);
     safe(equal(argv, []) || equal(argv, ['--stage-only']) || migrating);
@@ -420,14 +504,10 @@ export async function refreshPublicCve(
       mark('verify');
       await verify(release, pins, candidateAnchor);
     } else {
-      mark('discovery');
-      const found = /^Review upstream tag :2, then download by digest: (sha256:[a-f0-9]{64})\r?\n$/.exec(
-        await child(
-          process.execPath,
-          [join(root, 'server/deploy/trust/fetch-db-layer.mjs'), 'discover'],
-          60_000,
-        ),
-      );
+      mark('discovery', 'fetch');
+      const discovered = await child(process.execPath, [join(root, 'server/deploy/trust/fetch-db-layer.mjs'), 'discover'], 60_000);
+      mark('discovery', 'receipt');
+      const found = /^Review upstream tag :2, then download by digest: (sha256:[a-f0-9]{64})\r?\n$/.exec(discovered);
       safe(found);
       manifest = found[1];
       if (manifest === current.manifestDigest) {
@@ -926,8 +1006,8 @@ export async function refreshPublicCve(
       'PUBLIC CVE activated; API/worker replaced, original web resumed after preservation; prior releases retained. Not scanner finding qualification.',
     );
     return { outcome: 'activated', manifest };
-  } catch {
-    throw failure(phase, hold);
+  } catch (error) {
+    throw failure(phase, hold, checkpoint, cveRefreshDiagnostic(error));
   } finally {
     if (lock && !hold) {
       try {

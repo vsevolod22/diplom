@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { scanChecks, type ScanCheck, type ScanProgress } from './types';
+export { scanChecks } from './types';
+export type { ScanCheck, ScanOutcome, ScanProgress } from './types';
 import { parseReportView } from './reportView';
 import type { ReportPages, SecretReportQuery, SbomReportQuery, VulnReportQuery } from './reportView';
 import { CveReportContractError, cveMetadataFields, hasCveMetadata, validateCveMetadata } from './cveDbMetadata';
@@ -12,9 +15,28 @@ const state = z.enum(['queued', 'running', 'cancelling', 'completed', 'partial',
 const coverageState = z.enum(['checked', 'unsupported', 'not_authorized', 'failed', 'skipped']);
 const coverage = z.object({ check: z.string(), status: coverageState, reason: z.string().optional(), scannerVersion: z.string().optional(), dbVersion: z.string().optional(), findingCount: z.number().int().nonnegative().nullable().optional(), checksVersion: z.string().optional(), resourcePolicyVersion: z.string().optional() });
 const finding = z.object({ findingId: z.string(), category: z.string(), ruleId: z.string(), severity: z.string(), location: z.string().optional(), evidenceRef: z.string().optional() });
-export const scanChecks = ['secret', 'sbom', 'vuln', 'config'] as const;
-export type ScanCheck = typeof scanChecks[number];
 const checkName = z.enum(scanChecks);
+const wireOutcome = z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']);
+const wireChecks = z.array(checkName).min(1).max(4).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
+const progressSchema = z.strictObject({
+  basis: z.literal('durable-outcomes-v1'), requestedChecks: wireChecks,
+  outcomes: z.partialRecord(checkName, wireOutcome.nullable()),
+  resolvedChecks: z.number().int().min(0).max(4), checkedChecks: z.number().int().min(0).max(4),
+}).refine(progress => Object.keys(progress.outcomes).every(check => progress.requestedChecks.includes(check as ScanCheck)) &&
+  progress.resolvedChecks === Object.values(progress.outcomes).filter(outcome => outcome != null).length &&
+  progress.checkedChecks === Object.values(progress.outcomes).filter(outcome => outcome === 'checked').length,
+'Несогласованный durable progress');
+
+function validateStatusProgress(progress: ScanProgress | undefined, checks: ScanCheck[] | undefined,
+  perCheck: Partial<Record<ScanCheck, { outcome: string } | null>> | undefined, state: string): void {
+  if (!progress) return;
+  if (JSON.stringify(progress.requestedChecks) !== JSON.stringify(checks)) throw new Error('Несогласованный набор progress');
+  const active = ['queued', 'running', 'cancelling'].includes(state);
+  if (state === 'queued' && progress.resolvedChecks !== 0 || active && Object.values(perCheck ?? {}).some(item => item != null))
+    throw new Error('Промежуточный progress не является отчётом');
+  if (!active && checks?.some(check => (progress.outcomes[check] ?? null) !== (perCheck?.[check]?.outcome ?? null)))
+    throw new Error('Progress не совпадает с опубликованным отчётом');
+}
 const failureCode = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE']);
 const archiveFailureReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE']);
 const archiveReason = z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN']);
@@ -28,7 +50,7 @@ const dbIdentity = z.strictObject({ envelopeVersion: z.literal(1), signer: z.lit
   updatedAt: dbTime, downloadedAt: dbTime, nextUpdate: dbTime }).refine(db => db.source === `ghcr.io/aquasecurity/trivy-db@${db.manifestDigest}`);
 const archiveEvidence = { os: subCoverage.optional(), node: subCoverage.optional(), db: dbIdentity.optional() };
 const reportImage = pinnedPublicImage;
-const status = z.object({ identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), config: imageConfigReport.optional(), scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().nullable().optional(), componentCount: z.number().int().nonnegative().optional(), reason: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN', 'CHECK_DISABLED', 'USER_NOT_RESOLVABLE', 'OCI_IDENTITY_REJECTED', 'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG']).optional(), ...archiveEvidence, resultContractVersion: cveMetadataFields.resultContractVersion.optional(), dbPolicy: cveMetadataFields.dbPolicy.optional(), usableUntil: cveMetadataFields.usableUntil.optional(), workerCheckedAt: cveMetadataFields.workerCheckedAt.optional(), checksVersion: z.string().max(80).optional(), resourcePolicyVersion: z.string().max(80).optional(), supportedRuleIds: z.array(z.string()).optional(), completedRuleIds: z.array(z.string()).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
+const status = z.object({ progress: progressSchema.optional(), identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), config: imageConfigReport.optional(), scanId: z.string(), state, stage: z.string().optional(), percent: z.number().min(0).max(100).nullable().optional(), imageReference: z.string().optional(), digest: z.string().optional(), platform: z.string().optional(), updatedAt: z.string().optional(), check: checkName.optional(), checks: z.array(checkName).optional(), perCheck: z.partialRecord(checkName, z.object({ check: checkName, coverage: z.literal('image'), outcome: z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']), errorCode: z.string().nullable().optional(), scannerVersion: z.string().nullable().optional(), findingCount: z.number().int().nonnegative().nullable().optional(), componentCount: z.number().int().nonnegative().optional(), reason: z.enum(['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN', 'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN', 'CHECK_DISABLED', 'USER_NOT_RESOLVABLE', 'OCI_IDENTITY_REJECTED', 'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG']).optional(), ...archiveEvidence, resultContractVersion: cveMetadataFields.resultContractVersion.optional(), dbPolicy: cveMetadataFields.dbPolicy.optional(), usableUntil: cveMetadataFields.usableUntil.optional(), workerCheckedAt: cveMetadataFields.workerCheckedAt.optional(), checksVersion: z.string().max(80).optional(), resourcePolicyVersion: z.string().max(80).optional(), supportedRuleIds: z.array(z.string()).optional(), completedRuleIds: z.array(z.string()).optional(), checkedAt: z.string().max(40).optional() }).nullable()).optional() });
 const results = z.object({ findings: z.array(finding), nextCursor: z.string().nullable(), coverage: z.array(coverage) });
 // Receipt URLs may refer to the internal API. Only the ID crosses into browser navigation.
 const receipt = z.object({ scanId: z.string().uuid() });
@@ -70,6 +92,9 @@ export const parseScanStatus = (value: unknown): ScanStatus => {
     if (key === 'config') wireConfigCoverage.parse(item);
     else if (item.reason !== undefined) archiveReason.parse(item.reason);
   }
+  validateStatusProgress(parsed.progress, parsed.checks, parsed.perCheck, parsed.state);
+  if (parsed.progress && (parsed.percent != null || ['queued', 'running', 'cancelling'].includes(parsed.state) && parsed.config !== undefined))
+    throw new Error('Durable progress не является процентом или промежуточным config');
   validateIdentifierCounts(parsed.profile, parsed.identifierCounts, parsed.perCheck?.vuln?.findingCount, parsed.perCheck?.vuln?.outcome === 'checked');
   return parsed;
 };
@@ -77,7 +102,6 @@ export const parseScanResults = (value: unknown): ScanResults => results.parse(v
 export const parseScanReceipt = (value: unknown): ScanReceipt => receipt.parse(value);
 
 // Browser scan endpoints currently expose this limited wire shape; new fields require review before display.
-const wireOutcome = z.enum(['checked', 'failed', 'unsupported', 'skipped', 'not_authorized']);
 // Legacy nonchecked zero is tolerated, but never becomes a confirmed count.
 const wireCoverage = z.strictObject({ findingCount: z.number().int().nonnegative().nullable().optional(), check: z.literal('secret'), coverage: z.literal('image'), outcome: wireOutcome, errorCode: z.string().nullable(), scannerVersion: z.string().nullable(), reason: archiveReason.optional(), checkedAt: z.string().datetime().optional() }).refine(item => item.outcome === 'checked' ? item.findingCount != null : item.findingCount == null || item.findingCount === 0);
 const wireSbomResult = z.discriminatedUnion('outcome', [
@@ -105,8 +129,7 @@ const wirePerCheck = z.unknown().transform((value, context) => {
   if (!parsed.success) { context.addIssue({ code: 'custom', message: 'Invalid check coverage' }); return z.NEVER; }
   return parsed.data;
 });
-const wireChecks = z.array(checkName).min(1).max(4).refine(checks => checks.every((check, index) => index === 0 || scanChecks.indexOf(checks[index - 1]) < scanChecks.indexOf(check)), 'Проверки должны быть отсортированы без повторов');
-const wireStatus = z.object({ identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), config: imageConfigReport.optional(), imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.literal('linux/amd64').optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
+const wireStatus = z.object({ progress: progressSchema.optional(), identifierCounts: identifierCounts.optional(), profile: publicProfile.optional(), config: imageConfigReport.optional(), imageReference: reportImage.optional(), scanId: z.string(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled']), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), platform: z.literal('linux/amd64').optional(), check: checkName.nullable().optional(), checks: wireChecks.optional(), perCheck: z.partialRecord(checkName, wirePerCheck.nullable()).optional(), result: wirePerCheck.nullable() });
 const sbomComponent = z.strictObject({ ecosystem: reportEcosystem, name: z.string().min(1).max(128), version: z.string().min(1).max(80) });
 const wireSbom = z.discriminatedUnion('outcome', [
   z.strictObject({ profile: publicProfile.optional(), outcome: z.literal('checked'), coverage: z.literal('image'), image: reportImage, platform: z.literal('linux/amd64'), os: z.union([reportOs, z.strictObject({ name: z.literal('alpine'), version: z.string().min(1).max(80) })]), componentCount: z.number().int().positive(), scannerVersion: z.string().min(1), checkedAt: z.string().min(1), components: z.array(sbomComponent).max(100), nextCursor: z.number().int().nonnegative().nullable() }),
@@ -132,6 +155,9 @@ export function parseCurrentStatus(value: unknown): ScanStatus {
   if (current.imageReference && (!validReportImage(current.imageReference, current.profile) || current.digest && !current.imageReference.endsWith(`@${current.digest}`) || current.profile && (!current.digest || current.platform !== 'linux/amd64'))) throw new Error('Несогласованная закреплённая цель');
   const checks = current.checks ?? (current.check || current.result ? [current.check ?? current.result!.check] : undefined);
   const perCheck = current.perCheck ?? (checks?.length === 1 ? { [checks[0]]: current.result ?? null } : undefined);
+  validateStatusProgress(current.progress, current.checks, perCheck, current.state);
+  if (current.progress && ['queued', 'running'].includes(current.state) && current.result !== null)
+    throw new Error('Промежуточный progress не является результатом');
   if (checks && perCheck && (Object.keys(perCheck).some(key => !checks.includes(key as ScanCheck) || (perCheck[key as ScanCheck] != null && perCheck[key as ScanCheck]?.check !== key)) || checks.some(key => !(key in perCheck)))) throw new Error('Недопустимый статус проверок');
   if (current.result && (hasCveMetadata(current.result) || hasCveMetadata(perCheck?.vuln))) {
     const actual = wireV2Check.parse(current.result);
@@ -153,6 +179,7 @@ export function parseCurrentStatus(value: unknown): ScanStatus {
     }
   } else if (perCheck?.config != null) throw new Error('Нет config evidence');
   return { scanId: current.scanId, state: current.state, percent: null,
+    ...(current.progress ? { progress: current.progress } : {}),
     ...(current.profile ? { profile: current.profile } : {}),
     ...(current.identifierCounts ? { identifierCounts: current.identifierCounts } : {}),
     ...(current.config ? { config: current.config } : {}),
