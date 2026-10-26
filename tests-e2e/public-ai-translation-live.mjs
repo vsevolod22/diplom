@@ -51,16 +51,18 @@ const HTTP_CODES = new Set(['LLM_CONFIGURATION_UNAVAILABLE', 'LLM_PROVIDER_UNAVA
   'LLM_QUOTA_EXCEEDED', 'LLM_BUDGET_EXCEEDED', 'LLM_CAPACITY', 'LLM_CONTEXT_LIMIT', 'LLM_NO_EVIDENCE', 'LLM_HISTORY_CAPACITY',
   'LLM_HISTORY_UNAVAILABLE', 'LLM_HISTORY_CONFLICT', 'LLM_STALE_REPORT', 'LLM_STALE_SOURCE', 'LLM_STALE_POLICY',
   'LLM_TRANSLATION_UNAVAILABLE', 'LLM_RESPONSE_LIMIT', 'LLM_REQUEST_ABORTED', 'SCAN_NOT_FOUND', 'SCAN_ACCESS_DENIED', 'UNAUTHORIZED',
-  'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_REPORT_UNAVAILABLE', 'LLM_QUOTA_UNAVAILABLE', 'SCAN_ACCESS_DISABLED',
+  'LLM_INVALID_REQUEST', 'LLM_CONSENT_REQUIRED', 'LLM_REPORT_UNAVAILABLE', 'LLM_SUMMARY_MISSING', 'LLM_QUOTA_UNAVAILABLE', 'SCAN_ACCESS_DISABLED',
   'INVALID_BROWSER_REQUEST', 'INVALID_ORIGIN', 'INVALID_CONTENT_TYPE', 'AUTH_UNAVAILABLE']);
 // Mirrors the actual factory-bound header contract; offline tests compare the
 // complete finite sets with provider-diagnostic.ts. Bodies/messages cannot add it.
 export const DIAGNOSTIC_PHASES = Object.freeze(['request', 'connect', 'tls', 'dispatch_guard', 'headers', 'body', 'json', 'model',
-  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort', 'language', 'grounding']);
+  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort', 'language', 'grounding',
+    'translation_title', 'translation_description']);
 export const DIAGNOSTIC_REASONS = Object.freeze(['invalid_request', 'rejected', 'io_error', 'timeout', 'aborted', 'http_error',
   'invalid_type', 'limit', 'invalid_json', 'mismatch', 'invalid_shape', 'invalid_finish', 'invalid_content', 'invalid_receipt',
   'observation_failed', 'not_russian', 'unknown_identifier', 'finish_length', 'finish_content_filter',
-    'finish_tool_calls', 'finish_error', 'finish_unknown']);
+    'finish_tool_calls', 'finish_error', 'finish_unknown', 'null_mismatch', 'unsafe_text', 'invalid_markup',
+      'identifier_mismatch', 'nonprose_changed', 'not_normalized', 'invalid_link']);
 function safeDiagnostic(value) {
   return exact(value, ['phase', 'reason']) && DIAGNOSTIC_PHASES.includes(value.phase) && DIAGNOSTIC_REASONS.includes(value.reason)
     ? { phase: value.phase, reason: value.reason } : undefined;
@@ -151,7 +153,7 @@ export function routeCategory(input) {
   const match = path.match(/^\/api\/v1\/browser\/scans\/([a-f0-9-]{36})(.*)$/);
   if (!match || !UUID.test(match[1])) return 'otherlocal';
   return ({ '': 'scan-status', '/events': 'scan-events', '/results': 'scan-results', '/sbom': 'scan-sbom', '/vuln': 'scan-vuln',
-    '/llm/context': 'llm-context', '/llm/usage': 'llm-usage', '/llm/readiness': 'llm-readiness', '/llm/history': 'llm-history',
+    '/llm/context': 'llm-context', '/llm/summary': 'llm-summary', '/llm/usage': 'llm-usage', '/llm/readiness': 'llm-readiness', '/llm/history': 'llm-history',
     '/llm/chat/context': 'llm-chat-context', '/llm/chat/usage': 'llm-chat-usage', '/llm/chat': 'llm-chat',
     '/llm/translation/context': 'translation-context', '/llm/translation': 'translation' })[match[2]] ?? 'otherlocal';
 }

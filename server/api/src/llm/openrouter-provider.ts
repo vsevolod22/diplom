@@ -134,7 +134,10 @@ export class OpenRouterProvider implements LlmProvider {
         if (!Array.isArray(envelope.choices) || envelope.choices.length !== 1 || !object(envelope.choices[0])) throw failed('envelope', 'invalid_shape');
         const choice = envelope.choices[0];
         if (choice.finish_reason !== 'stop') throw failed('finish', rejectedFinishReason(choice.finish_reason));
-        if (!object(choice.message) || Object.keys(choice.message).some(key => !['role', 'content', 'refusal', 'reasoning', 'annotations'].includes(key)) ||
+        // An empty documented tool_calls array declares no calls; never accept a
+        // nonempty/malformed call, execute tools, or ignore unknown message fields.
+        if (!object(choice.message) || Object.keys(choice.message).some(key => !['role', 'content', 'refusal', 'reasoning', 'annotations', 'tool_calls'].includes(key)) ||
+            choice.message.tool_calls !== undefined && (!Array.isArray(choice.message.tool_calls) || choice.message.tool_calls.length !== 0) ||
             choice.message.refusal != null || choice.message.reasoning != null ||
             choice.message.annotations !== undefined && (!Array.isArray(choice.message.annotations) || choice.message.annotations.length !== 0) ||
             choice.message.role !== 'assistant' || typeof choice.message.content !== 'string') throw failed('content', 'invalid_shape');

@@ -118,6 +118,23 @@ test('strict envelope rejects wrong model, tools, truncation, output token overf
   }
 });
 
+test('documented empty tool_calls metadata is inert; actual calls, malformed fields, reasoning and unknown keys still reject once', async () => {
+  for (const patch of [{ tool_calls: [] }, { tool_calls: [{}] }, { tool_calls: null }, { tool_calls: {} },
+    { tool_calls: 'PRIVATE' }, { tool_calls: [], reasoning: 'PRIVATE' }, { tool_calls: [], unexpected: 'PRIVATE' }]) {
+    let calls = 0;
+    const value = envelope();
+    const provider = new OpenRouterProvider(fakeKey, transport(async () => {
+      calls++;
+      return json({ ...value, choices: [{ ...value.choices[0], message: { ...value.choices[0].message, ...patch } }] });
+    }));
+    const pending = provider.summarize(fixtureReport, fixturePolicy, new AbortController().signal);
+    if (Array.isArray(patch.tool_calls) && patch.tool_calls.length === 0 && Object.keys(patch).length === 1)
+      assert.deepEqual(await pending, reply(fixtureReport));
+    else await assert.rejects(pending, errorCode('LLM_PROVIDER_UNAVAILABLE'));
+    assert.equal(calls, 1);
+  }
+});
+
 test('publication parser isolates current report citations and refuses links/markup/control/secret output', () => {
   for (const patch of [{ scanId: 'foreign' }, { digest: `sha256:${'b'.repeat(64)}` }, { platform: 'linux/arm64' }, { reportVersion: 'old' },
     { hypotheses: [{ text: 'A claim.', citations: ['foreign-id'] }] }, { extra: 'injected' }])

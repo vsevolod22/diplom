@@ -1,5 +1,7 @@
 # Selected advisory translation — public API contract
 
+Current candidate disclosure uses `automaticDispatch: 'account-preference'`: client automation is allowed only after saved account opt-in and still uses the existing consent-bound POST. Server GETs never dispatch. The historical `automaticDispatch: false` described the earlier manual-only UI and is not accepted by the current strict decoder. This undeployed correction retains the already-candidate v4 policy identity; no additional policy/source revision is introduced.
+
 Source candidate only: deploying/enabling this code, importing credentials and live provider acceptance are separate coordinator/operator actions. Synthetic tests are not live provider evidence. No host scripts, keys, existing stores or lifecycle are changed by this implementation.
 
 ## Routes and frontend integration
@@ -40,12 +42,12 @@ type TranslationContext = Binding & {
     maxPrice: { prompt: 0; completion: 0; request: 0 };
     data: string; // only eligible selected normalized title/description; no other report/history data
     targetLanguage: 'ru'; machineTranslation: true;
-    automaticDispatch: false; persistentTranslationCache: false;
+    automaticDispatch: 'account-preference'; persistentTranslationCache: false;
   };
 };
 ```
 
-The translation consent version is SHA-256 of the translation revision, underlying LLM policy version, selected-text egress declaration and target language. It is **different from summary/chat consent**. Display the disclosure and require a deliberate action before POST. A language toggle or viewing a card must not auto-dispatch.
+The translation consent version is SHA-256 of the translation revision, underlying LLM policy version, selected-text egress declaration and target language. It is **different from summary/chat consent**. Display the disclosure and require deliberate saved account opt-in before client automation; enabled metadata, a language toggle, or viewing a card alone is not authorization. After that saved opt-in, the client may schedule the existing POST with applicable per-request consent, preserving source/session/policy/readiness and revocation fences. The literal describes client behavior only: context/readiness GETs never generate, reserve quota, or construct a provider. No account preference is accepted as a new server DTO field and no POST consent gate is bypassed.
 
 ### POST `/api/v1/browser/scans/:scanId/llm/translation`
 

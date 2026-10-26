@@ -19,7 +19,7 @@ const tuple = {
   reportVersion: hash,
 };
 const disclosure = z
-  .object({
+  .strictObject({
     provider: z.literal('OpenRouter'),
     model: z.string().min(1).max(160),
     providers: z.array(z.string().min(1).max(64)).min(1).max(8),
@@ -31,7 +31,7 @@ const disclosure = z
     data: text,
     freeOnly: z.boolean().optional(),
     maxPrice: z
-      .object({
+      .strictObject({
         prompt: z.number().finite().nonnegative().max(1000),
         completion: z.number().finite().nonnegative().max(1000),
         request: z.number().finite().nonnegative().nullable(),
@@ -89,7 +89,9 @@ const replySchema = z.object({
 export type SummaryContext = z.infer<typeof contextSchema>;
 export type SummaryReply = z.infer<typeof replySchema>;
 export type SummarySource = { findingId: string; check: 'secret' | 'vuln' | 'config'; label: string };
-export type SummaryClient = ReturnType<typeof createSummaryClient>;
+export type SummaryClient = Omit<ReturnType<typeof createSummaryClient>, 'existing'> & {
+  existing?: ReturnType<typeof createSummaryClient>['existing'];
+};
 export class SummaryError extends Error {
   constructor(readonly code: string) {
     super('ИИ-сводка недоступна');
@@ -219,6 +221,18 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
       const context = contextSchema.parse(await request(scanId, 'context', signal));
       if (context.scanId !== scanId) throw new SummaryError('STALE');
       return context;
+    },
+    async existing(context: SummaryContext, signal: AbortSignal): Promise<SummaryReply | null> {
+      let value: unknown;
+      try {
+        value = await request(context.scanId, 'summary', signal);
+      } catch (error) {
+        if (error instanceof SummaryError && error.code === 'LLM_SUMMARY_MISSING') return null;
+        throw error;
+      }
+      const reply = replySchema.parse(value);
+      if (!matchesSummaryTuple(reply, context)) throw new SummaryError('STALE');
+      return reply;
     },
     async summary(context: SummaryContext, signal: AbortSignal) {
       if (!context.enabled || !context.policyVersion) throw new SummaryError('LLM_CONFIGURATION_UNAVAILABLE');

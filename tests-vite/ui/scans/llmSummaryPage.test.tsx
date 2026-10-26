@@ -1,11 +1,14 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { webcrypto } from 'node:crypto';
+import { saveReportPreferences } from '@/shared/api/preferences/reportPreferences';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LiveScanSession } from '@/features/scans/LiveScanSession';
 import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { transitionScanSession } from '@/shared/api/auth/scanSession';
-import { context as chatContext, history as chatHistory } from './llmChatFixtures';
+import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
+import { context as chatContext, history as chatHistory, usage } from './llmChatFixtures';
 
 const id = '00000000-0000-4000-8000-000000000038';
 const other = '00000000-0000-4000-8000-000000000039';
@@ -25,13 +28,15 @@ const context = {
   policyVersion: 'c'.repeat(64),
   disclosure: {
     provider: 'OpenRouter',
-    model: 'vendor/model',
-    providers: ['vendor'],
+    model: 'xingchen-agi/xing4.0-29b-a4b:free',
+    providers: ['phala'],
     region: 'global',
-    retention: 'no-training',
+    retention: 'no-storage',
     operatorApprovedRouting: true,
     providerComplianceNotProvenByDeclaration: true,
-    requestBudgetUsd: 0.1,
+    requestBudgetUsd: 0,
+    freeOnly: true,
+    maxPrice: { prompt: 0, completion: 0, request: 0 },
     data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.',
   },
 };
@@ -50,7 +55,12 @@ class Observer {
 }
 beforeEach(() => {
   requests.length = 0;
+  localStorage.clear();
+  sessionStorage.clear();
+  vi.stubGlobal('crypto', webcrypto);
   vi.stubGlobal('IntersectionObserver', Observer);
+  transitionScanSession('alice', new QueryClient(), true);
+  saveReportPreferences({ language: 'original', autoSummary: true });
   transitionScanSession(null, new QueryClient(), true);
 });
 afterEach(() => {
@@ -61,6 +71,8 @@ function mockApi(
   state = 'completed',
   summary: () => Response | Promise<Response> = () => json(reply),
   policy: unknown = context,
+  existing: () => Response | Promise<Response> = () => json({ errorCode: 'LLM_SUMMARY_MISSING' }, 404),
+  profile?: typeof PUBLIC_IMAGE_PROFILE,
 ) {
   vi.stubGlobal(
     'fetch',
@@ -68,7 +80,9 @@ function mockApi(
       requests.push({ path, init });
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path.endsWith('/llm/context')) return json(policy);
-      if (path.endsWith('/llm/summary')) return summary();
+      if (path.endsWith('/llm/summary')) return init?.method === 'GET' ? existing() : summary();
+      if (path.endsWith('/llm/usage'))
+        return json({ ...usage, ...tuple, integrationEnabled: true, quotaEnabled: true });
       if (path.includes('/results')) {
         const url = new URL(path, window.location.origin);
         if (url.searchParams.get('view') === 'report-v1')
@@ -108,6 +122,7 @@ function mockApi(
         });
       }
       return json({
+        ...(profile ? { profile, imageReference: `registry-1.docker.io/library/alpine@${digest}` } : {}),
         scanId: path.endsWith(other) ? other : id,
         digest,
         platform: tuple.platform,
@@ -140,13 +155,12 @@ function mount() {
   );
 }
 async function generate() {
-  await screen.findByText(/Бесплатный режим не подтверждён/);
-  fireEvent.click(screen.getByRole('button', { name: 'Получить сводку' }));
+  await waitFor(() => expect(requests.filter((request) => request.init?.method === 'POST')).toHaveLength(1));
 }
 it('terminal ScanDetail replaces placeholder; hidden current category and late-page source remain reachable', async () => {
   mockApi();
   mount();
-  await screen.findByText(/Бесплатный режим не подтверждён/);
+  await screen.findByText(/только бесплатный режим/);
   expect(screen.queryByRole('textbox', { name: 'Ваш вопрос' })).toBeNull();
   fireEvent.change(screen.getByLabelText('Категория'), { target: { value: 'cve' } });
   expect(screen.queryByRole('region', { name: 'Результаты Secrets' })).toBeNull();
@@ -160,6 +174,19 @@ it('terminal ScanDetail replaces placeholder; hidden current category and late-p
   expect(requests.some((request) => request.path.includes('/results?limit=50&cursor=1'))).toBe(true);
   expect(screen.getByRole('heading', { name: 'Покрытие проверок' })).toBeTruthy();
 });
+it('a previous summary is recovered on a public-profile report page with autoSummary disabled, without a provider POST', async () => {
+  transitionScanSession('alice', new QueryClient(), true);
+  saveReportPreferences({ language: 'original', autoSummary: false });
+  transitionScanSession(null, new QueryClient(), true);
+  mockApi('completed', undefined, context, () => json(reply), PUBLIC_IMAGE_PROFILE);
+  mount();
+  await screen.findByText('Late-page hypothesis');
+  expect(screen.getByText(/Сводка восстановлена из кэша процесса сервера/)).toBeTruthy();
+  expect(requests.filter((r) => r.path.endsWith('/llm/summary') && r.init?.method === 'GET')).toHaveLength(1);
+  expect(requests.some((r) => r.init?.method === 'POST')).toBe(false);
+  expect(sessionStorage.getItem('report-automation-v1:attempts')).toBeNull();
+});
+
 it('owner report navigation reaches the existing chat independently of a failed summary, without provider calls', async () => {
   mockApi('completed', undefined, { invalid: true });
   const scannerFetch = globalThis.fetch;
@@ -179,8 +206,13 @@ it('owner report navigation reaches the existing chat independently of a failed 
   const target = document.getElementById('scan-report-chat');
   expect(target?.getAttribute('tabindex')).toBe('-1');
   expect(screen.getByRole('region', { name: 'Чат по отчёту' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
+  expect(screen.queryByRole('button', { name: 'Открыть чат' })).toBeNull();
   await screen.findByLabelText('Вопрос чату');
+  await waitFor(() =>
+    expect(screen.getByRole('status', { name: 'Состояние подключения чата' }).textContent).toContain(
+      'История подключена',
+    ),
+  );
   expect(screen.getByRole('status', { name: 'Состояние подключения чата' }).textContent).toContain(
     'История подключена',
   );
@@ -206,7 +238,7 @@ it('malformed/offline summary context leaves original status, coverage and findi
   expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
   expect(requests.some((request) => request.init?.method === 'POST')).toBe(false);
 });
-it('actual route change aborts pending summary and requires new intent before another report', async () => {
+it('actual route change aborts pending summary and requires a matching authorized report before another request', async () => {
   let resolve!: (value: Response) => void;
   mockApi(
     'completed',

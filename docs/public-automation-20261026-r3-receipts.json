@@ -1,0 +1,118 @@
+{
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "package": "public-automation-20261026-r3-doc9-only",
+  "apply_hold": true,
+  "requires_before_apply": ["actual deployment", "separate coordinator authorization", "fresh base/proposal check"],
+  "policy_observed": {
+    "profile": "full",
+    "spec_mode": "strict",
+    "require_proposal_approval": false,
+    "spec_first": false,
+    "execution_order": "parallel",
+    "completion_flow": "direct"
+  },
+  "superseded": {
+    "delta_id": "3e230388-542f-439d-9eef-fb904db51789",
+    "doc_slug": "DIP-DOC-9",
+    "base_version": 3,
+    "source_slug": "DIP-TASK-42",
+    "state_confirmed": "discarded",
+    "review_status_observed": "pending",
+    "disposition": "considered-superseded under explicit DOC9-only authorization",
+    "discard_timing": "completed before compaction; get_doc_delta afterward confirmed discarded; not discarded a second time",
+    "historical_full_body_path": "docs/public-automation-20261026-r2-doc9-full.md",
+    "historical_files_overwritten": false
+  },
+  "replacement": {
+    "delta_id": "5406fc22-567a-4490-ba03-4875a4a5b994",
+    "doc_id": "1b1d03ce-3f6d-4292-bd1a-6b12c680e75f",
+    "doc_slug": "DIP-DOC-9",
+    "base_version": 3,
+    "source_node_id": "7eaa99d4-1b20-4316-b1fe-ab4165bd3c74",
+    "source_slug": "DIP-TASK-42",
+    "state": "proposed",
+    "review_status": "pending",
+    "created_at": "2026-10-26 20:19:31.440313+00",
+    "full_body_path": "docs/public-automation-20261026-r3-doc9-full.md",
+    "requirements": 10,
+    "scenarios": 19,
+    "retained_base_requirement_identities": 7,
+    "retained_r2_requirement_identities": 10,
+    "validation": {
+      "operation": "validate_spec",
+      "doc_slug": "DIP-DOC-9",
+      "entire_raw_body_supplied": true,
+      "before_proposal": true,
+      "response": {"valid": true},
+      "remote_receipt_id": null,
+      "remote_hash": null
+    },
+    "ops_from_proposal_response": [
+      {"kind": "modified", "name": "Явное раскрытие условий и согласие на один запрос"},
+      {"kind": "modified", "name": "Ограниченный ручной запрос и отмена"},
+      {"kind": "modified", "name": "Гипотезы обычным текстом и проверенные ссылки на источники"},
+      {"kind": "added", "name": "Owner-local настройки и ограниченная защита от автоповтора"},
+      {"kind": "added", "name": "Passive summary recovery до attempt marker"},
+      {"kind": "added", "name": "Bounded passive metadata scheduling"}
+    ],
+    "removed": 0,
+    "renamed": 0,
+    "local_sha256": null,
+    "local_bytes": null,
+    "byte_equality_proof": false,
+    "hash_note": "Not computed: no native/shell tools authorized. Proposal echo inspected; no machine-exact file/remote comparison claimed."
+  },
+  "other_four_unchanged_carried_from_r2_receipts": [
+    {"doc_slug": "DIP-DOC-2", "base_version": 9, "source_slug": "DIP-TASK-9", "delta_id": "cf2cf23d-f079-4bfa-b843-f07e6484f3cf", "full_body_path": "docs/public-automation-20261026-r2-doc2-full.md", "requirements": 33, "scenarios": 53, "modified": 3, "added": 1},
+    {"doc_slug": "DIP-DOC-8", "base_version": 5, "source_slug": "DIP-TASK-42", "delta_id": "21561058-ace8-4918-a3a7-14d3290f6170", "full_body_path": "docs/public-automation-20261026-r2-doc8-full.md", "requirements": 12, "scenarios": 30, "modified": 4, "added": 2},
+    {"doc_slug": "DIP-DOC-15", "base_version": 4, "source_slug": "DIP-TASK-42", "delta_id": "c7c76a73-4fe2-4fd9-9259-55f48e9d577b", "full_body_path": "docs/public-automation-20261026-r2-doc15-full.md", "requirements": 14, "scenarios": 25, "modified": 1, "added": 1},
+    {"doc_slug": "DIP-DOC-16", "base_version": 4, "source_slug": "DIP-TASK-42", "delta_id": "23d179fc-f49b-40fb-bfec-ec555b6f02c2", "full_body_path": "docs/public-automation-20261026-r2-doc16-full.md", "requirements": 16, "scenarios": 23, "modified": 6, "added": 1}
+  ],
+  "selected_package_totals_carried_and_reconciled": {"requirements": 85, "scenarios": 150, "base_requirement_identities_retained": 77, "modified": 17, "added": 8, "removed": 0, "renamed": 0},
+  "counts": {
+    "r3_authorized_discard_calls_including_precompaction": 1,
+    "r3_full_raw_validate_calls": 1,
+    "r3_valid_true_responses": 1,
+    "r3_proposal_calls": 1,
+    "r3_apply_calls": 0,
+    "r3_approve_calls": 0,
+    "r3_status_or_progress_writes": 0,
+    "r3_comments": 0,
+    "r3_native_runtime_provider_test_build_git_calls": 0,
+    "historical_r2_full_raw_validate_calls": 6,
+    "historical_r2_valid_true_responses": 6,
+    "historical_r2_proposal_calls": 5,
+    "historical_r2_authorized_discard_calls": 5,
+    "r2_plus_r3_full_raw_validate_calls": 7,
+    "r2_plus_r3_valid_true_responses": 7,
+    "historical_initial_package_separate": {"full_raw_validate_calls": 6, "proposal_calls": 7, "own_transcription_discards": 2, "apply_calls": 0}
+  },
+  "validation_history_notes": [
+    "The r2 count includes a full DOC16 validation containing an unproposed typo and a second full corrected DOC16 validation before proposal.",
+    "The r2+r3 count includes superseded DOC9 r2; it does not mean all five bodies were revalidated in r3.",
+    "All selected complete bodies have passed full raw-body validation in their respective preparation rounds."
+  ],
+  "source_reads_not_executions": [
+    "src/features/scans/ScanSummaryPanel.tsx: refresh public-only GET recovery; generate no report-profile gate and fresh authorization/exact disclosure guards",
+    "tests-vite/ui/scans/llmSummary.test.tsx:124-142: default legacy client zero recovery GET and one guarded automatic POST"
+  ],
+  "attributed_user_handoff_not_agent_verification": ["all sources frozen", "independent AI/cache GO received", "final static tests/build running"],
+  "retracted_current_claims": ["legacy report always requires manual generation", "tiny legacy-generation UI gate remains a blocker"],
+  "preserved_limits": [
+    "public-only passive GET cache recovery, not provider generation",
+    "exact fixed OpenRouter/Xing/Phala/free disclosure and fresh applicable authorization",
+    "process-lifetime cache: 64 entries, 2 MiB accounted, 64 KiB result; API restart/eviction/another replica loses cache",
+    "one local active scheduled job, at most eight waiting; bounded pending-only singleflight; no distributed lock",
+    "attempt markers do not prove dispatch; abort does not prove external cancellation; no global exactly-once",
+    "translation remains memory-only after browser reload",
+    "cache miss does not reset marker or authorize replay; passive GET no provider/quota/generation"
+  ],
+  "history": {
+    "r2_manifest": "docs/public-automation-20261026-r2-manifest.md",
+    "r2_receipts": "docs/public-automation-20261026-r2-receipts.json",
+    "r2_static_final": "docs/public-automation-20261026-r2-static-final.json",
+    "r3_manifest": "docs/public-automation-20261026-r3-manifest.md",
+    "old_approved_task9_base1_delta_untouched": "3e049e61-3462-4ff0-bd02-da80ed385fe7",
+    "inherited_cyrillic_T_in_DIP_TASK_16_preserved": true
+  }
+}

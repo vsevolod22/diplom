@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, CircleDashed, CircleOff, LockKeyhole, XCircle } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
 import {
@@ -32,19 +32,19 @@ const unavailableScope = ['live-scans', 'unavailable'] as const;
 const terminalStates = new Set<ScanStatus['state']>(['completed', 'partial', 'failed', 'cancelled']);
 
 const coverageLabels: Record<ScanCoverage['status'], string> = {
-  checked: 'Выполнено (не гарантия безопасности)',
+  checked: 'Выполнено',
   failed: 'Сбой · не проверено',
   unsupported: 'Не поддерживается',
   not_authorized: 'Нет разрешения',
   skipped: 'Пропущено',
 };
-const coverageTone: Record<ScanCoverage['status'], 'neutral' | 'info' | 'warning' | 'danger'> = {
-  checked: 'info',
-  failed: 'danger',
-  unsupported: 'warning',
-  not_authorized: 'warning',
-  skipped: 'neutral',
-};
+const coverageIcons = {
+  checked: CheckCircle2,
+  failed: XCircle,
+  unsupported: CircleOff,
+  not_authorized: LockKeyhole,
+  skipped: CircleDashed,
+} satisfies Record<ScanCoverage['status'], typeof CheckCircle2>;
 const stateTone: Record<ScanStatus['state'], 'neutral' | 'info' | 'warning' | 'danger'> = {
   queued: 'neutral',
   running: 'info',
@@ -321,29 +321,46 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 <p className="scan-a1__eyebrow">02 / ПОКРЫТИЕ</p>
                 <h3 id="scan-a1-coverage">Покрытие проверок</h3>
                 <p className="scan-a1__muted">Исход каждой проверки отдельно от статуса скана.</p>
-                {scan.data.identifierCounts ? <p>Уязвимости · весь сохранённый отчёт: {identifierCountLabel(scan.data.identifierCounts)}. Не гарантия безопасности.</p> : null}
+                <p className="scan-a1__coverage-note">
+                  «Выполнено» означает завершение проверки в указанной области, а не гарантию безопасности.
+                  Сбой, пропуск или отсутствие результата оставляют число находок неизвестным.
+                </p>
+                {scan.data.identifierCounts ? <p>Уязвимости · весь сохранённый отчёт: {identifierCountLabel(scan.data.identifierCounts)}.</p> : null}
                 {pendingChecks.length ? <ul aria-label="Проверки без подтверждённого результата">{pendingChecks.map(check => <li key={check}>
                   {check}: {active ? `ожидаем подтверждённый результат; ${scan.data.stage ? 'текущий этап указан сервером выше' : 'внутренний этап не предоставлен сервером'}` : scan.data.state === 'cancelled' ? 'завершение не подтверждено; сохранённого результата нет' : 'результат не предоставлен сервером'}
                 </li>)}</ul> : null}
                 {(liveCoverage ?? reportData?.coverage) ? (
-                  <ul className="scan-a1__coverage">
-                    {(liveCoverage ?? reportData?.coverage ?? []).map((item) => (
-                      <li key={item.check}>
-                        <strong>{item.check}</strong>
-                        <div>
-                          <Badge tone={coverageTone[item.status]}>{coverageLabels[item.status]}</Badge>
-                          {item.reason ? <p>{item.reason}</p> : null}
-                          {item.checksVersion ? <p>checks {item.checksVersion} · policy {item.resourcePolicyVersion ?? 'не предоставлена'}</p> : null}
-                          {item.scannerVersion || item.dbVersion ? (
-                            <small>
-                              {item.scannerVersion ? `scanner ${item.scannerVersion}` : ''}
-                              {item.scannerVersion && item.dbVersion ? ' · ' : ''}
-                              {item.dbVersion ? `DB ${item.dbVersion}` : ''}
-                            </small>
+                  <ul className="scan-a1__coverage" aria-label="Исходы проверок">
+                    {(liveCoverage ?? reportData?.coverage ?? []).map((item) => {
+                      const StatusIcon = coverageIcons[item.status];
+                      return (
+                        <li key={item.check} data-outcome={item.status}>
+                          <div className="scan-a1__coverage-heading">
+                            <strong>{item.check}</strong>
+                            <span className="scan-a1__coverage-status">
+                              <StatusIcon size={16} aria-hidden="true" />
+                              {coverageLabels[item.status]}
+                            </span>
+                          </div>
+                          {item.reason ? <p className="scan-a1__coverage-reason">{item.reason}</p> : null}
+                          {item.checksVersion || item.resourcePolicyVersion || item.scannerVersion || item.dbVersion ? (
+                            <details className="scan-a1__coverage-technical">
+                              <summary>Технические данные · {item.check}</summary>
+                              {item.checksVersion || item.resourcePolicyVersion ? (
+                                <p>checks {item.checksVersion ?? 'не предоставлена'} · policy {item.resourcePolicyVersion ?? 'не предоставлена'}</p>
+                              ) : null}
+                              {item.scannerVersion || item.dbVersion ? (
+                                <p>
+                                  {item.scannerVersion ? `scanner ${item.scannerVersion}` : ''}
+                                  {item.scannerVersion && item.dbVersion ? ' · ' : ''}
+                                  {item.dbVersion ? `DB ${item.dbVersion}` : ''}
+                                </p>
+                              ) : null}
+                            </details>
                           ) : null}
-                        </div>
-                      </li>
-                    ))}
+                        </li>
+                      );
+                    })}
                   </ul>
                 ) : (
                   <p>Нет подтверждённого coverage; тип проверки и результат неизвестны. «0 проблем» недопустимо.</p>
@@ -352,14 +369,17 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                   <div aria-label="Image config coverage">
                     <h4>Image config · только метаданные образа</h4>
                     <p>{coverageLabels[scan.data.config.config.outcome]}{scan.data.config.config.outcome !== 'checked' ? ` · ${scan.data.config.config.reason}` : ''}</p>
-                    <p>checks {scan.data.config.checksVersion} · policy {scan.data.config.resourcePolicyVersion}</p>
+                    <details className="scan-a1__coverage-technical">
+                      <summary>Технические данные · Image config</summary>
+                      <p>checks {scan.data.config.checksVersion} · policy {scan.data.config.resourcePolicyVersion}</p>
+                    </details>
                     <p>Правила: выполнено {scan.data.config.completedRuleIds.length} / поддерживается {scan.data.config.supportedRuleIds.length} · {scan.data.config.supportedRuleIds.join(', ')}</p>
                     <p>History: {scan.data.config.history.reason}. Dockerfile: {scan.data.config.dockerfile.reason}. IaC: {scan.data.config.iac.reason}.</p>
                     <p>OCI history не является исходным Dockerfile/IaC. Numeric UID без находки не доказывает non-root runtime.</p>
                     {scan.data.config.findings.length ? <ul>{scan.data.config.findings.map(finding => <li key={finding.findingId}>
                       <strong>{finding.ruleId} · {finding.classification} · {finding.severity}</strong>
                       <p>{finding.message}</p><p>{finding.recommendation}</p>
-                    </li>)}</ul> : scan.data.config.config.outcome === 'checked' ? <p>Root metadata finding отсутствует; это не гарантия безопасности.</p> : <p>Находки config не подтверждены.</p>}
+                    </li>)}</ul> : scan.data.config.config.outcome === 'checked' ? <p>Root metadata finding отсутствует.</p> : <p>Находки config не подтверждены.</p>}
                   </div>
                 ) : <p>Нет подтверждённого image config coverage: проверка ещё не завершена или это legacy scan без versioned evidence.</p> : null}
 

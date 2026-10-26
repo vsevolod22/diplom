@@ -49,7 +49,8 @@ const disclosure = z
     data: displayText(2000),
     targetLanguage: z.literal('ru'),
     machineTranslation: z.literal(true),
-    automaticDispatch: z.literal(false),
+    // Client-side automation after saved account opt-in, never server GET dispatch.
+    automaticDispatch: z.literal('account-preference'),
     persistentTranslationCache: z.literal(false),
   })
   .refine(

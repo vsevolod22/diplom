@@ -148,29 +148,80 @@
   padding: clamp(18px, 3vw, 35px);
   background: var(--a1-surface);
 }
-.scan-a1__coverage {
-  margin: 26px 0 0;
+.scan-a1-detail .scan-a1__coverage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  align-items: start;
+  gap: 10px;
+  margin: 14px 0 0;
   padding: 0;
   list-style: none;
 }
-.scan-a1__coverage li {
+.scan-a1-detail .scan-a1__coverage > li {
+  --coverage-color: var(--a1-muted);
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--a1-line);
+  border-radius: 10px;
+  background: var(--a1-bg);
+}
+.scan-a1-detail .scan-a1__coverage > li[data-outcome='checked'] {
+  --coverage-color: #a7e8bd;
+}
+.scan-a1-detail .scan-a1__coverage > li[data-outcome='failed'] {
+  --coverage-color: #ffb0b7;
+}
+.scan-a1-detail .scan-a1__coverage > li:is([data-outcome='unsupported'], [data-outcome='not_authorized']) {
+  --coverage-color: #f1d18c;
+}
+.scan-a1-detail .scan-a1__coverage-heading {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  gap: 15px;
-  padding: 18px 0;
-  border-top: 1px solid var(--a1-line);
+  gap: 8px 12px;
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
-.scan-a1__coverage li > div {
-  max-width: 65%;
-  text-align: right;
+.scan-a1-detail .scan-a1__coverage-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--coverage-color);
+  font-size: 0.8125rem;
+  font-weight: 600;
 }
-.scan-a1__coverage p {
+.scan-a1-detail .scan-a1__coverage-status svg {
+  flex: none;
+}
+.scan-a1-detail .scan-a1__coverage-reason {
   margin: 8px 0 0;
-}
-.scan-a1__coverage small {
-  display: block;
-  margin-top: 6px;
   color: var(--a1-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+.scan-a1-detail .scan-a1__coverage-note {
+  margin: 12px 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--a1-line);
+  color: var(--a1-muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.scan-a1-detail .scan-a1__coverage-technical {
+  margin-top: 10px;
+  border-top: 1px solid var(--a1-line);
+  color: var(--a1-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.scan-a1-detail .scan-a1__coverage-technical > summary {
+  min-height: 44px;
+  padding: 12px 0;
+  color: var(--a1-muted);
+}
+.scan-a1-detail .scan-a1__coverage-technical > p {
+  margin: 0 0 8px;
 }
 .scan-a1__coverage-guide {
   margin-top: 26px;
@@ -528,13 +579,7 @@
     border-top: 1px solid var(--a1-line);
     padding: 20px 0 0;
   }
-  .scan-a1__coverage li {
-    display: grid;
-  }
-  .scan-a1__coverage li > div {
-    max-width: none;
-    text-align: left;
-  }
+
   .scan-a1__facts > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
@@ -545,6 +590,15 @@
     display: none;
   }
 }
+.scan-a1-list .scan-a1__record-link {
+  color: inherit;
+  text-decoration: none;
+  user-select: text;
+}
+.scan-a1-list .scan-a1__record-link:focus-visible {
+  outline: 3px solid #d1ff5e;
+  outline-offset: -4px;
+}
 .scan-a1-detail .scan-a1__lead { padding: 24px 0; gap: 20px; }
 .scan-a1-detail .scan-a1__summary { min-width: 0; max-width: 320px; padding: 16px; gap: 8px; font-size: 0.875rem; }
 .scan-a1-detail .scan-a1__report-nav { margin-bottom: 24px; }
@@ -553,9 +607,7 @@
 .scan-a1-detail .scan-a1__facts { margin-top: 12px; }
 .scan-a1-detail .scan-a1__facts > div { padding: 10px 0; }
 .scan-a1-detail .scan-a1__panel { padding: clamp(14px, 2vw, 24px); }
-.scan-a1-detail .scan-a1__coverage { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; margin-top: 14px; }
-.scan-a1-detail .scan-a1__coverage li { display: block; padding: 12px; border: 1px solid var(--a1-line); }
-.scan-a1-detail .scan-a1__coverage li > div { max-width: none; text-align: left; margin-top: 8px; }
+
 .scan-a1-detail .scan-a1__coverage-guide { margin-top: 16px; padding: 12px; }
 .scan-a1-detail .scan-report-guide__trigger { min-height: 44px; padding: 8px 0; }
 .scan-a1-detail .scan-a1__desktop-filter { grid-template-columns: auto minmax(160px, 240px); align-items: center; margin: 14px 0; }

@@ -1,0 +1,461 @@
+{
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "package": "r2 supersession",
+  "policy": {
+    "profile": "full",
+    "spec_mode": "strict",
+    "require_proposal_approval": false,
+    "spec_first": false,
+    "execution_order": "parallel",
+    "completion_flow": "direct"
+  },
+  "apply": "HOLD until NEW coordinator source GO/deploy; no apply or approve called",
+  "mutations": {
+    "authorized_old_discards": 5,
+    "new_full_proposals": 5,
+    "new_proposal_discards": 0,
+    "full_raw_validate_calls": 6,
+    "full_raw_validate_valid_true": 6,
+    "apply": 0,
+    "approve": 0,
+    "task_status_content_progress_changes": 0,
+    "native_claims": 0
+  },
+  "validation_ledger": [
+    {
+      "order": 1,
+      "doc": 9,
+      "full_body": true,
+      "valid": true,
+      "intended_final": true
+    },
+    {
+      "order": 2,
+      "doc": 8,
+      "full_body": true,
+      "valid": true,
+      "intended_final": true
+    },
+    {
+      "order": 3,
+      "doc": 15,
+      "full_body": true,
+      "valid": true,
+      "intended_final": true
+    },
+    {
+      "order": 4,
+      "doc": 16,
+      "full_body": true,
+      "valid": true,
+      "intended_final": false,
+      "note": "First validate payload had transcription отбрасысывания instead of отбрасывания; no proposal created from it."
+    },
+    {
+      "order": 5,
+      "doc": 16,
+      "full_body": true,
+      "valid": true,
+      "intended_final": true,
+      "note": "Entire corrected final body validated before the only DOC16 proposal."
+    },
+    {
+      "order": 6,
+      "doc": 2,
+      "full_body": true,
+      "valid": true,
+      "intended_final": true
+    }
+  ],
+  "totals": {
+    "base_requirements_retained": 77,
+    "result_requirements": 85,
+    "result_scenarios": 150,
+    "modified": 17,
+    "added": 8,
+    "removed": 0,
+    "renamed": 0
+  },
+  "documents": [
+    {
+      "doc": 2,
+      "base_version": 9,
+      "source": "DIP-TASK-9",
+      "path": "docs/public-automation-20261026-r2-doc2-full.md",
+      "bytes": 58518,
+      "sha256": "81a38204937fadc09de98d25c6227ec183699b2d599d52e5053e09be1547be74",
+      "base_sha256": "87be1b5524f78f1f22f29a315e12c503b46ce95536437070e4f3116aa5a5686c",
+      "requirements": 33,
+      "scenarios": 53,
+      "local_expected_ops": [
+        {
+          "kind": "modified",
+          "name": "Доступный индикатор фактического прогресса"
+        },
+        {
+          "kind": "modified",
+          "name": "Подтверждённый этап и оставшиеся выбранные проверки"
+        },
+        {
+          "kind": "modified",
+          "name": "Live counters и polling независимо от SSE"
+        },
+        {
+          "kind": "added",
+          "name": "Компактное покрытие и ссылка всей карточки списка"
+        }
+      ],
+      "doc_slug": "DIP-DOC-2",
+      "doc_id": "dc029ab5-1a3a-4c6f-8604-6e08d14521e6",
+      "delta_id": "cf2cf23d-f079-4bfa-b843-f07e6484f3cf",
+      "created_at": "2026-10-26 20:10:22.528699+00",
+      "superseded_discarded_delta_id": "e103d4c2-acb0-48fb-a8bc-a631df0f1e6b",
+      "state": "proposed",
+      "review_status": "pending",
+      "raw_full_body_validation": {
+        "valid": true,
+        "before_proposal": true,
+        "calls": 1
+      },
+      "server_ops": [
+        {
+          "kind": "modified",
+          "name": "Доступный индикатор фактического прогресса"
+        },
+        {
+          "kind": "modified",
+          "name": "Подтверждённый этап и оставшиеся выбранные проверки"
+        },
+        {
+          "kind": "modified",
+          "name": "Live counters и polling независимо от SSE"
+        },
+        {
+          "kind": "added",
+          "name": "Компактное покрытие и ссылка всей карточки списка"
+        }
+      ],
+      "server_ops_checked_against_local": true,
+      "remote_machine_hash_equality_claimed": false,
+      "removed": 0,
+      "renamed": 0,
+      "source_node_id": "84f0cc26-81a2-4697-b8e5-5ed074006644"
+    },
+    {
+      "doc": 8,
+      "base_version": 5,
+      "source": "DIP-TASK-42",
+      "path": "docs/public-automation-20261026-r2-doc8-full.md",
+      "bytes": 36363,
+      "sha256": "87b03753eb0b1477686c0aea3fce8b58f8869d11f6054202b6786041eca43bc5",
+      "base_sha256": "35de1ceee3cdab73a1100075a03bd32b4678af1233e611241cf35efed36805fa",
+      "requirements": 12,
+      "scenarios": 30,
+      "local_expected_ops": [
+        {
+          "kind": "modified",
+          "name": "Авторизация и явный opt-in до egress"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченный browser summary ingress"
+        },
+        {
+          "kind": "modified",
+          "name": "Русское доказательное объяснение без неподтверждённых гипотез"
+        },
+        {
+          "kind": "modified",
+          "name": "Конечные diagnostic headers без изменения body wire"
+        },
+        {
+          "kind": "added",
+          "name": "Строгая operation-specific JSON schema public профиля"
+        },
+        {
+          "kind": "added",
+          "name": "Public passive чтение process-lifetime сводки"
+        }
+      ],
+      "doc_slug": "DIP-DOC-8",
+      "doc_id": "4262193e-8a78-4867-ad53-0928bf36262a",
+      "delta_id": "21561058-ace8-4918-a3a7-14d3290f6170",
+      "created_at": "2026-10-26 20:04:44.368013+00",
+      "superseded_discarded_delta_id": "9e36c15c-733a-4d4e-8285-5bd7e5695907",
+      "state": "proposed",
+      "review_status": "pending",
+      "raw_full_body_validation": {
+        "valid": true,
+        "before_proposal": true,
+        "calls": 1
+      },
+      "server_ops": [
+        {
+          "kind": "modified",
+          "name": "Авторизация и явный opt-in до egress"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченный browser summary ingress"
+        },
+        {
+          "kind": "modified",
+          "name": "Русское доказательное объяснение без неподтверждённых гипотез"
+        },
+        {
+          "kind": "modified",
+          "name": "Конечные diagnostic headers без изменения body wire"
+        },
+        {
+          "kind": "added",
+          "name": "Строгая operation-specific JSON schema public профиля"
+        },
+        {
+          "kind": "added",
+          "name": "Public passive чтение process-lifetime сводки"
+        }
+      ],
+      "server_ops_checked_against_local": true,
+      "remote_machine_hash_equality_claimed": false,
+      "removed": 0,
+      "renamed": 0,
+      "source_node_id": "7eaa99d4-1b20-4316-b1fe-ab4165bd3c74"
+    },
+    {
+      "doc": 9,
+      "base_version": 3,
+      "source": "DIP-TASK-42",
+      "path": "docs/public-automation-20261026-r2-doc9-full.md",
+      "bytes": 23945,
+      "sha256": "867b641cd2157b2b2f9fe197a983a5776e334708880a6f7debc88784418387e5",
+      "base_sha256": "85e8f91b43df59b35495bba618d4befce912f2480ff979bdecb265d9deff5436",
+      "requirements": 10,
+      "scenarios": 19,
+      "local_expected_ops": [
+        {
+          "kind": "modified",
+          "name": "Явное раскрытие условий и согласие на один запрос"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченный ручной запрос и отмена"
+        },
+        {
+          "kind": "modified",
+          "name": "Гипотезы обычным текстом и проверенные ссылки на источники"
+        },
+        {
+          "kind": "added",
+          "name": "Owner-local настройки и ограниченная защита от автоповтора"
+        },
+        {
+          "kind": "added",
+          "name": "Passive summary recovery до attempt marker"
+        },
+        {
+          "kind": "added",
+          "name": "Bounded passive metadata scheduling"
+        }
+      ],
+      "doc_slug": "DIP-DOC-9",
+      "doc_id": "1b1d03ce-3f6d-4292-bd1a-6b12c680e75f",
+      "delta_id": "3e230388-542f-439d-9eef-fb904db51789",
+      "created_at": "2026-10-26 20:03:26.750226+00",
+      "superseded_discarded_delta_id": "ac96de0e-88b4-4e97-ab8f-74fcdda5b0fd",
+      "state": "proposed",
+      "review_status": "pending",
+      "raw_full_body_validation": {
+        "valid": true,
+        "before_proposal": true,
+        "calls": 1
+      },
+      "server_ops": [
+        {
+          "kind": "modified",
+          "name": "Явное раскрытие условий и согласие на один запрос"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченный ручной запрос и отмена"
+        },
+        {
+          "kind": "modified",
+          "name": "Гипотезы обычным текстом и проверенные ссылки на источники"
+        },
+        {
+          "kind": "added",
+          "name": "Owner-local настройки и ограниченная защита от автоповтора"
+        },
+        {
+          "kind": "added",
+          "name": "Passive summary recovery до attempt marker"
+        },
+        {
+          "kind": "added",
+          "name": "Bounded passive metadata scheduling"
+        }
+      ],
+      "server_ops_checked_against_local": true,
+      "remote_machine_hash_equality_claimed": false,
+      "removed": 0,
+      "renamed": 0,
+      "source_node_id": "7eaa99d4-1b20-4316-b1fe-ab4165bd3c74"
+    },
+    {
+      "doc": 15,
+      "base_version": 4,
+      "source": "DIP-TASK-42",
+      "path": "docs/public-automation-20261026-r2-doc15-full.md",
+      "bytes": 28211,
+      "sha256": "21e713dd746d34ee42e9baf74eb0cf6ffa5f2d3a601f185de418e4c0c7a398fb",
+      "base_sha256": "32541b31a72fd16fc5daff4e307a8a3eddfe012d56bca524248338776e523c9d",
+      "requirements": 14,
+      "scenarios": 25,
+      "local_expected_ops": [
+        {
+          "kind": "modified",
+          "name": "Русский grounded ответ и честное отсутствие evidence"
+        },
+        {
+          "kind": "added",
+          "name": "Немедленно доступный composer при read-only подключении"
+        }
+      ],
+      "doc_slug": "DIP-DOC-15",
+      "doc_id": "ac654c74-78b9-47d0-87d7-0669acee01ab",
+      "delta_id": "c7c76a73-4fe2-4fd9-9259-55f48e9d577b",
+      "created_at": "2026-10-26 20:05:55.788895+00",
+      "superseded_discarded_delta_id": "492fe0ca-0b12-4af4-9a2b-96fc15f87295",
+      "state": "proposed",
+      "review_status": "pending",
+      "raw_full_body_validation": {
+        "valid": true,
+        "before_proposal": true,
+        "calls": 1
+      },
+      "server_ops": [
+        {
+          "kind": "modified",
+          "name": "Русский grounded ответ и честное отсутствие evidence"
+        },
+        {
+          "kind": "added",
+          "name": "Немедленно доступный composer при read-only подключении"
+        }
+      ],
+      "server_ops_checked_against_local": true,
+      "remote_machine_hash_equality_claimed": false,
+      "removed": 0,
+      "renamed": 0,
+      "source_node_id": "7eaa99d4-1b20-4316-b1fe-ab4165bd3c74"
+    },
+    {
+      "doc": 16,
+      "base_version": 4,
+      "source": "DIP-TASK-42",
+      "path": "docs/public-automation-20261026-r2-doc16-full.md",
+      "bytes": 35035,
+      "sha256": "e04100b1bfc03bd3f643995355ff81fa88c90ab484d3a24bd971a48ed83224d4",
+      "base_sha256": "769b090065cff27c6b4d9d67abc93345726c156e287d20aaca6bd47957d56eb6",
+      "requirements": 16,
+      "scenarios": 23,
+      "local_expected_ops": [
+        {
+          "kind": "modified",
+          "name": "Отдельное явное согласие на новый selected-text egress"
+        },
+        {
+          "kind": "modified",
+          "name": "Сохранный инертный UI"
+        },
+        {
+          "kind": "modified",
+          "name": "Русский human text сводки и чата с обновлением policy hash"
+        },
+        {
+          "kind": "modified",
+          "name": "Отсутствие новой durable translation state"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченная advisory Retry-After семантика"
+        },
+        {
+          "kind": "modified",
+          "name": "Translation diagnostic headers и граница русской проверки"
+        },
+        {
+          "kind": "added",
+          "name": "Ограниченная автоматизация открытого source scope"
+        }
+      ],
+      "doc_slug": "DIP-DOC-16",
+      "doc_id": "31e6c814-621d-4dfd-9752-a7cdb3868826",
+      "delta_id": "23d179fc-f49b-40fb-bfec-ec555b6f02c2",
+      "created_at": "2026-10-26 20:08:10.298578+00",
+      "superseded_discarded_delta_id": "b8fc139b-f221-4f05-bce9-e08c9270172e",
+      "state": "proposed",
+      "review_status": "pending",
+      "raw_full_body_validation": {
+        "valid": true,
+        "before_proposal": true,
+        "calls": 2
+      },
+      "server_ops": [
+        {
+          "kind": "modified",
+          "name": "Отдельное явное согласие на новый selected-text egress"
+        },
+        {
+          "kind": "modified",
+          "name": "Сохранный инертный UI"
+        },
+        {
+          "kind": "modified",
+          "name": "Русский human text сводки и чата с обновлением policy hash"
+        },
+        {
+          "kind": "modified",
+          "name": "Отсутствие новой durable translation state"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченная advisory Retry-After семантика"
+        },
+        {
+          "kind": "modified",
+          "name": "Translation diagnostic headers и граница русской проверки"
+        },
+        {
+          "kind": "added",
+          "name": "Ограниченная автоматизация открытого source scope"
+        }
+      ],
+      "server_ops_checked_against_local": true,
+      "remote_machine_hash_equality_claimed": false,
+      "removed": 0,
+      "renamed": 0,
+      "source_node_id": "7eaa99d4-1b20-4316-b1fe-ab4165bd3c74"
+    }
+  ],
+  "untouched_historical_approved_task9_base1": "3e049e61-3462-4ff0-bd02-da80ed385fe7",
+  "previous_package_counts_not_this_package": {
+    "full_raw_validations": 6,
+    "valid": 6,
+    "proposal_calls": 7,
+    "own_transcription_proposals_discarded": 2,
+    "apply": 0
+  },
+  "limitations": [
+    "Source-only; tests/build/native/browser/provider/runtime NOT_RUN in this lane.",
+    "Summary cache is per process instance; restart/replica/eviction loses it. No durable cache/history promise.",
+    "Frontend fixed summary profile allowlist remains unconditional in inspected generate(); legacy-profile UI gate still incomplete; legacy-preserving target is not claimed implemented.",
+    "report-automation-v1 is a fixed local grant format, not dynamic policy-version consent; exact disclosure and fresh snapshot/applicable flags are required.",
+    "Passive GET summary source ingress is present, deployment/browser qualification not performed.",
+    "Queue/caches/markers are bounded local safeguards, not global exactly-once or proof external work ended on abort.",
+    "No invented global selected-source selector; each mounted assessment of an open advisory has its own source slot.",
+    "Schema/script/predicate diagnostics do not prove semantic accuracy or historical provider root cause.",
+    "DOC9 inherited nonnormative DIP-ТASK-16 uses Cyrillic Т; preserved from base and prior mirror; no old history overwritten.",
+    "No DOC1 delta: native progress contract unchanged."
+  ]
+}

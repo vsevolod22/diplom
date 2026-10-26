@@ -139,6 +139,7 @@ export function allowedApiGet(input, ids, method = 'GET') {
   for (const id of ids) {
     if (!UUID.test(id)) continue;
     const base = `${SCANS}/${id}`;
+    if (path === `${base}/llm/summary`) return !url.search && !input.includes('?');
     if (['', '/events', '/llm/context', '/llm/usage', '/llm/readiness', '/llm/history', '/llm/chat/context', '/llm/chat/usage'].some(suffix => path === base + suffix)) return !url.search;
     if (path === `${base}/llm/translation/context`) return keys.length === 2 &&
       /^vuln-[a-f0-9]{64}$/.test(params.get('findingId') ?? '') && /^(?:[0-9]|1[0-5])$/.test(params.get('assessmentIndex') ?? '');
@@ -361,14 +362,34 @@ const PHASES = new Set(['progress-snapshot', 'form-navigation', 'target-fill', '
 // Completed-check counts are NOT elapsed-work percent or an ETA. The public
 // decoder currently supplies percent:null, including after SSE reconnect.
 export function progressExpectation(snapshot) {
-  assert.ok(snapshot && sameChecks(snapshot.checks) && ['queued', 'running', ...TERMINAL].includes(snapshot.state));
-  const active = ['queued', 'running'].includes(snapshot.state);
+  assert.ok(snapshot && sameChecks(snapshot.checks) && ['queued', 'running', 'cancelling', ...TERMINAL].includes(snapshot.state));
+  const active = ['queued', 'running', 'cancelling'].includes(snapshot.state);
   const progress = snapshot.progress ? durableProgress(snapshot.progress) : null;
   const resolved = progress ? progress.resolvedChecks : active ? 0 : CHECKS.filter(key => snapshot.perCheck?.[key]?.check === key).length;
   const checked = progress ? progress.checkedChecks : active ? 0 : completedChecks(snapshot).length;
   return { active, hasCheckSnapshot: !!progress || !active && snapshot.perCheck !== undefined, total: CHECKS.length, resolved, checked,
     remaining: CHECKS.length - resolved,
     percent: active && typeof snapshot.percent === 'number' && Number.isFinite(snapshot.percent) && snapshot.percent >= 0 && snapshot.percent <= 100 ? snapshot.percent : null };
+}
+// Self-contained for page.evaluate: check current JSX's bounded estimate, never turn
+// completed-check counts into elapsed percent or claim an estimated ETA.
+export function progressDomSample(element, { expected, state }) {
+  const text = element.textContent ?? '', progress = element.querySelector('progress');
+  const raw = progress?.getAttribute('value'), value = raw === null || raw === undefined || raw === '' ? null : Number(raw);
+  const bounded = Number.isFinite(value) && value >= 0 && value < 100;
+  const approximate = bounded && text.includes(`Оценка прогресса: ≈${Math.floor(value)}%${expected.active ? '' : ' на момент остановки'}.`);
+  const server = bounded && expected.percent === value && text.includes(`Прогресс: ${value}% по данным сервера.`);
+  const unknown = text.includes('Выполнение не подтверждено; оценка до остановки отсутствует.');
+  const stoppedEstimate = !expected.active && /Оценка прогресса: ≈(?:[0-9]|[1-9][0-9])% на момент остановки\./u.test(text);
+  const completed = state === 'completed' && text.includes('Прогресс: 100% — завершение подтверждено сервером.');
+  const counts = expected.hasCheckSnapshot ? `Получены итоги: ${expected.resolved} из ${expected.total}. Успешно выполнено: ${expected.checked}.` : 'Счётчики проверок не предоставлены сервером.';
+  return { stateMatches: element.getAttribute('data-state') === state,
+    barMatches: expected.active ? !!progress && progress.getAttribute('max') === '100' && bounded && (state !== 'queued' || value === 0) : !progress,
+    countsMatch: text.includes(counts),
+    remainingMatch: !expected.hasCheckSnapshot || text.includes(`${expected.active ? 'Без подтверждённого итога' : 'Без сохранённого итога'}: ${expected.remaining}.`),
+    percentMatches: expected.active ? approximate || server || unknown && value === 0 : state === 'completed' ? completed : stoppedEstimate || unknown,
+    timeHonest: text.includes(expected.active ? 'Точное оставшееся время неизвестно.' : 'Скан больше не выполняется. Отсутствующие итоги не считаются успешными проверками.'),
+    indeterminate: unknown };
 }
 export function progressSampleMatches(sample) {
   return ['stateMatches', 'barMatches', 'countsMatch', 'remainingMatch', 'percentMatches', 'timeHonest'].every(key => sample?.[key] === true);
@@ -863,23 +884,12 @@ async function runNative(mode = 'native', attemptId) {
       if (requireActive && !expected.active) return { status: 'INCONCLUSIVE', code: 'PROGRESS_NOT_OBSERVED' };
       const group = page.getByRole('group', { name: `Ход сканирования ${id}`, exact: true });
       if (await group.count() === 1) {
-        const sample = await group.evaluate((element, { expected, state }) => {
-          const text = element.textContent;
-          const progress = element.querySelector('progress');
-          const counts = expected.hasCheckSnapshot ? `Получены итоги: ${expected.resolved} из ${expected.total}. Успешно выполнено: ${expected.checked}.` : 'Счётчики проверок не предоставлены сервером.';
-          return { stateMatches: element.getAttribute('data-state') === state,
-            barMatches: expected.active ? !!progress && progress.getAttribute('max') === '100' &&
-              (expected.percent === null ? !progress.hasAttribute('value') : Number(progress.getAttribute('value')) === expected.percent) : !progress,
-            countsMatch: text.includes(counts),
-            remainingMatch: !expected.hasCheckSnapshot || text.includes(`${expected.active ? 'Без подтверждённого итога' : 'Без сохранённого итога'}: ${expected.remaining}.`),
-            percentMatches: text.includes(`Прогресс: ${expected.percent === null ? 'неизвестен' : `${expected.percent}%`}`),
-            timeHonest: text.includes(expected.active ? 'Точное оставшееся время неизвестно. Полученные итоги не показывают длительность этапов.' : 'Скан больше не выполняется. Отсутствующие итоги не считаются успешными проверками.') };
-        }, { expected, state: before.state });
+        const sample = await group.evaluate(progressDomSample, { expected, state: before.state });
         const after = await status(page, id);
         // A changed snapshot is not a UI mismatch. Observe boundedly, never freeze a worker.
         if (isDeepStrictEqual(before, after)) {
           last = sample;
-          if (progressSampleMatches(sample)) return { status: 'PASS', code: 'VERIFIED', meta: { progressObserved: true, progressIndeterminate: expected.percent === null, progressActive: expected.active } };
+          if (progressSampleMatches(sample)) return { status: 'PASS', code: 'VERIFIED', meta: { progressObserved: true, progressIndeterminate: sample.indeterminate, progressActive: expected.active } };
         }
       }
       await wait(100);
@@ -1101,7 +1111,9 @@ async function runNative(mode = 'native', attemptId) {
       const llmPath = `${SCANS}/${report.scanId}/llm`;
       const openChat = async page => {
         const panel = page.getByRole('region', { name: 'Чат по отчёту', exact: true });
-        await panel.getByRole('button', { name: 'Открыть чат', exact: true }).click();
+        await expect(panel).toBeVisible();
+        await expect(panel.getByRole('button', { name: 'Открыть чат', exact: true })).toHaveCount(0);
+        await expect(panel.getByRole('textbox', { name: 'Вопрос чату', exact: true })).toBeVisible();
         await expect(panel.getByRole('region', { name: 'Готовность генерации', exact: true })).toContainText('Генерация не проверена.');
         return panel;
       };

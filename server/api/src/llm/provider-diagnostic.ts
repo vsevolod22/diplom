@@ -1,10 +1,12 @@
 // Only factory-bound finite diagnostics may reach headers. No upstream messages, payloads or errno text.
 export const FAILURE_PHASES = ['request', 'connect', 'tls', 'dispatch_guard', 'headers', 'body', 'json', 'model',
-  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort', 'language', 'grounding'] as const;
+  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort', 'language', 'grounding',
+  'translation_title', 'translation_description'] as const;
 export const FAILURE_REASONS = ['invalid_request', 'rejected', 'io_error', 'timeout', 'aborted', 'http_error',
   'invalid_type', 'limit', 'invalid_json', 'mismatch', 'invalid_shape', 'invalid_finish', 'invalid_content', 'invalid_receipt',
   'observation_failed', 'not_russian', 'unknown_identifier', 'finish_length', 'finish_content_filter',
-  'finish_tool_calls', 'finish_error', 'finish_unknown'] as const;
+  'finish_tool_calls', 'finish_error', 'finish_unknown', 'null_mismatch', 'unsafe_text', 'invalid_markup',
+  'identifier_mismatch', 'nonprose_changed', 'not_normalized', 'invalid_link'] as const;
 export type FailurePhase = typeof FAILURE_PHASES[number];
 export type FailureReason = typeof FAILURE_REASONS[number];
 export type FailureDiagnostic = Readonly<{ phase: FailurePhase; reason: FailureReason }>;

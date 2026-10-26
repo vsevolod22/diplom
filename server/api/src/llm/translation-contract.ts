@@ -4,6 +4,7 @@ import { normalizePlain, type AdvisoryAssessment, type AdvisoryV1 } from '../wor
 import { cleanText } from './history-contract.js';
 import { disclosure, PUBLIC_FREE_MODEL, PUBLIC_FREE_PROVIDER, type LlmPolicy } from './policy.js';
 import { exact, invalidReply } from './response.js';
+import type { FailureReason } from './provider-diagnostic.js';
 import { russianHumanText, technicalIdentifiers, withoutPreservedIdentifiers, withoutRuntimeBrand } from './russian-text.js';
 
 export const TRANSLATION = Object.freeze({ revision: 'selected-advisory-ru-v1', bodyBytes: 1024, busyMs: 100,
@@ -21,7 +22,8 @@ export const translationPolicy = (policy: LlmPolicy): string => createHash('sha2
   .update(JSON.stringify([TRANSLATION.revision, policy.version, 'selected-normalized-text-only', 'ru'])).digest('hex');
 export function translationDisclosure(policy: LlmPolicy) {
   return { ...disclosure(policy), data: 'Only the selected normalized advisory title and description eligible for translation; no other report metadata, package data, history, raw evidence or credentials. Identifiers within the selected text remain unchanged.',
-    targetLanguage: 'ru' as const, machineTranslation: true, automaticDispatch: false, persistentTranslationCache: false };
+    // Client automation requires saved account opt-in; server GETs never dispatch.
+    targetLanguage: 'ru' as const, machineTranslation: true, automaticDispatch: 'account-preference' as const, persistentTranslationCache: false };
 }
 export function translationSelection(findingId: unknown, assessmentIndex: unknown): { findingId: string; assessmentIndex: number } {
   if (typeof findingId !== 'string' || !/^vuln-[a-f0-9]{64}$/.test(findingId) ||
@@ -40,13 +42,14 @@ export function translationRequest(body: unknown) {
   return { ...translationSelection(body.findingId, body.assessmentIndex), reportVersion: body.reportVersion,
     sourceVersion: body.sourceVersion, consent: body.consent };
 }
-function safeText(value: string, ceiling: number): boolean {
-  try {
-    if (cleanText(value, ceiling) !== value || normalizePlain(value, ceiling).value !== value ||
-        /https?:|mailto:|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b|\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/iu.test(withoutRuntimeBrand(value))) return false;
-    return true;
-  } catch { return false; }
+function textFailure(value: string, ceiling: number): FailureReason | undefined {
+  try { if (cleanText(value, ceiling) !== value) return 'unsafe_text'; }
+  catch { return 'unsafe_text'; }
+  if (normalizePlain(value, ceiling).value !== value) return 'not_normalized';
+  if (/https?:|mailto:|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b|\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/iu.test(withoutRuntimeBrand(value))) return 'invalid_link';
+  return undefined;
 }
+const safeText = (value: string, ceiling: number): boolean => textFailure(value, ceiling) === undefined;
 export function checkedTranslationText(value: unknown): TranslationText {
   if (!exact(value, ['title', 'description']) ||
       value.title !== null && (typeof value.title !== 'string' || !safeText(value.title, TRANSLATION.titleBytes)) ||
@@ -74,20 +77,27 @@ export function translationBinding(snapshot: TranslationSnapshot): TranslationBi
     findingId: snapshot.findingId, assessmentIndex: snapshot.assessmentIndex, sourceVersion: snapshot.sourceVersion };
 }
 const identifiers = (text: string) => [...new Set(text.match(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi) ?? [])].sort();
-function translatedField(value: unknown, original: string | null, ceiling: number): string | null {
-  if (original === null) { if (value !== null) return invalidReply(); return null; }
-  if (typeof value !== 'string' || !safeText(value, ceiling) || /[`*#~[\]{}\\]/u.test(withoutPreservedIdentifiers(value, original)) ||
-      JSON.stringify(identifiers(value)) !== JSON.stringify(identifiers(original))) return invalidReply();
+function translatedField(value: unknown, original: string | null, ceiling: number,
+  phase: 'translation_title' | 'translation_description'): string | null {
+  if (original === null) { if (value !== null) return invalidReply(phase, 'null_mismatch'); return null; }
+  if (value === null) return invalidReply(phase, 'null_mismatch');
+  if (typeof value !== 'string') return invalidReply(phase, 'invalid_type');
+  if (Buffer.byteLength(value) > ceiling) return invalidReply(phase, 'limit');
+  const failure = textFailure(value, ceiling);
+  if (failure) return invalidReply(phase, failure);
+  if (/[`*#~[\]{}\\]/u.test(withoutPreservedIdentifiers(value, original))) return invalidReply(phase, 'invalid_markup');
+  if (JSON.stringify(identifiers(value)) !== JSON.stringify(identifiers(original))) return invalidReply(phase, 'identifier_mismatch');
   const supplied = technicalIdentifiers(original), returned = technicalIdentifiers(value);
-  if (supplied.some(token => !returned.includes(token)) || returned.some(token => !supplied.includes(token))) return invalidReply();
+  if (supplied.some(token => !returned.includes(token)) || returned.some(token => !supplied.includes(token)))
+    return invalidReply(phase, 'identifier_mismatch');
   const prose = withoutPreservedIdentifiers(original, original);
   if (/\p{L}/u.test(prose)) {
-    if (!russianHumanText(value, original)) return invalidReply();
-  } else if (value !== original) return invalidReply();
+    if (!russianHumanText(value, original)) return invalidReply(phase, 'not_russian');
+  } else if (value !== original) return invalidReply(phase, 'nonprose_changed');
   return value;
 }
 export function validateTranslationReply(value: unknown, original: TranslationText): TranslationText {
-  if (!exact(value, ['title', 'description'])) return invalidReply();
-  return { title: translatedField(value.title, original.title, TRANSLATION.replyTitleBytes),
-    description: translatedField(value.description, original.description, TRANSLATION.replyDescriptionBytes) };
+  if (!exact(value, ['title', 'description'])) return invalidReply('content', 'invalid_shape');
+  return { title: translatedField(value.title, original.title, TRANSLATION.replyTitleBytes, 'translation_title'),
+    description: translatedField(value.description, original.description, TRANSLATION.replyDescriptionBytes, 'translation_description') };
 }

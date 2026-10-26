@@ -20,6 +20,7 @@ import {
   replyFor,
   translationApi,
 } from './advisoryTranslationFixtures';
+import { allowAutomationDisclosure } from '@/shared/api/scans/reportAutomation';
 import { json } from './llmChatFixtures';
 
 beforeEach(() => {
@@ -44,6 +45,10 @@ it('accepts actual backend disclosure/source versions and translation validators
     { findingId: finding.findingId, assessmentIndex: 0 },
     signal(),
   );
+  expect(context.disclosure?.automaticDispatch).toBe('account-preference');
+  expect(allowAutomationDisclosure(context.disclosure, 'translation')).toBe(true);
+  expect(api.requests).toHaveLength(1);
+  expect(api.requests[0].init.method).toBe('GET'); // Capability metadata never dispatches a translation.
   const result = await client.translate(context, consentFor(context), signal());
   expect(translationContextSchema.parse(api.context)).toEqual(context);
   expect(await translationSourceVersion(finding.cveId, finding.advisory!.assessments[0])).toBe(
@@ -78,6 +83,24 @@ it('accepts actual backend disclosure/source versions and translation validators
     /Package issue|contains a vulnerability|apiKey|question|history/,
   );
 });
+
+it.each([false, true, 'server', 'always', null, undefined])(
+  'rejects ambiguous or unsupported automaticDispatch %j in both strict context decoding and automation disclosure',
+  async (automaticDispatch) => {
+    const context = contextFor();
+    const disclosure = { ...context.disclosure, automaticDispatch };
+    const wire = { ...context, disclosure };
+    expect(translationContextSchema.safeParse(wire).success).toBe(false);
+    expect(allowAutomationDisclosure(disclosure, 'translation')).toBe(false);
+    const fetcher = vi.fn<typeof fetch>(async () => json(wire));
+    const client = createAdvisoryTranslationClient(scanSession(), fetcher);
+    await expect(
+      client.context(context.scanId, { findingId: finding.findingId, assessmentIndex: 0 }, signal()),
+    ).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('GET');
+  },
+);
 
 it('fails closed on unaccepted consent, changed policy, invalid selection and extra DTO keys, with zero POST', async () => {
   const api = translationApi();

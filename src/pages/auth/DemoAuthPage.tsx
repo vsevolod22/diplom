@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, LockKeyhole, ScanLine } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { ReportPreferencesPanel } from '@/features/auth/ReportPreferencesPanel';
 import { currentDemoUser, logoutDemoUser, submitDemoCredentials } from '@/shared/api/auth/demoAuth';
 import { transitionScanSession } from '@/shared/api/auth/scanSession';
 import { useSessionRecovery } from '@/shared/api/auth/useSessionRecovery';
@@ -99,6 +100,7 @@ export function DemoAuthPage({ mode }: { mode: Mode }) {
                   <p className="demo-auth__email">{session.data.email}</p>
                   <p>ID аккаунта для разрешения доступа к сканам: <code className="demo-auth__email">{session.data.id}</code></p>
                   <p>Реальные сканы доступны только аккаунтам с отдельным разрешением сервера. <Link to="/scans">Открыть сканы</Link>.</p>
+                  <ReportPreferencesPanel key={session.data.id} subject={session.data.id} disabled={busy} />
                   <button className="demo-auth__submit" type="button" onClick={logout} disabled={busy}>Выйти из аккаунта</button>
                 </>
               ) : (

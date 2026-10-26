@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { BrowserIdentity, type BrowserRequest } from './browser-identity.js';
 import { LlmService } from './llm.service.js';
 import type { HistoryResult } from './history.service.js';
+import type { SummaryPublication } from './summary-result-cache.js';
 import { chatRepresentation, writeDelivery } from './history-delivery.js';
 
 @Controller('api/v1/browser/scans/:scanId/llm')
@@ -23,6 +24,19 @@ export class LlmController {
   usage(@Req() req: BrowserRequest, @Param('scanId') scanId: string) {
     return this.safe(() => this.llm.usage(this.identity.resolve(req), scanId));
   }
+  @Get('summary')
+  async existingSummary(@Req() req: BrowserRequest, @Res() res: ServerResponse, @Param('scanId') scanId: string) {
+    const result = await this.safe(() => this.llm.readSummary(req, scanId));
+    await this.safe(() => this.writeSummaryResponse(res, result));
+  }
+  private writeSummaryResponse(res: ServerResponse, result: SummaryPublication) {
+    const body = JSON.stringify(result.value);
+    result.write(() => {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store',
+        'x-llm-summary-retention': 'process-lifetime' });
+      res.end(body);
+    });
+  }
   @Post('summary')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
@@ -31,7 +45,14 @@ export class LlmController {
     const controller = new AbortController();
     const abort = () => controller.abort();
     req.on('aborted', abort); res.on('close', abort);
-    try { return await this.safe(() => this.llm.summary(() => this.identity.resolve(req, true), scanId, body, controller.signal)); }
+    try {
+      if (this.llm.summaryCacheEnabled()) {
+        const result = await this.safe(() => this.llm.summaryForBrowser(req, scanId, body, controller.signal));
+        await this.safe(() => this.writeSummaryResponse(res, result));
+        return;
+      }
+      return await this.safe(() => this.llm.summary(() => this.identity.resolve(req, true), scanId, body, controller.signal));
+    }
     finally { req.off('aborted', abort); res.off('close', abort); }
   }
   @Get('history')

@@ -1,0 +1,266 @@
+{
+  "status": "FIVE_FULL_AMENDMENTS_PROPOSED_NOT_APPLIED",
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "apply_hold": true,
+  "policy": {
+    "profile": "full",
+    "spec_mode": "strict",
+    "require_proposal_approval": false,
+    "spec_first": false,
+    "execution_order": "parallel",
+    "completion_flow": "direct"
+  },
+  "validation": {
+    "full_raw_calls": 6,
+    "valid_true": 6,
+    "clause_only_calls": 0,
+    "saved_doc_calls": 0,
+    "failed_calls": 0,
+    "order": "One entire raw-body validation per document BEFORE proposal; DOC2 additionally revalidated as complete actual pending mirror after one non-normative Purpose whitespace transcription difference.",
+    "tool_response_limits": "validate_spec returns valid:true, no receipt ID/version/hash. Local hashes are NOT a machine-computed remote equality claim.",
+    "local_final_structure_retention_whitespace": "PASS; previous static-checks.json local_ops comparator was defective (greedy regex) and is superseded only for ops by this final split-based comparison. Its NOT_RUN fields are preparation metadata, not final MCP outcomes."
+  },
+  "proposal_calls": 7,
+  "active_new_proposals": 5,
+  "apply_calls": 0,
+  "approve_calls": 0,
+  "records": [
+    {
+      "doc": 2,
+      "base_version": 9,
+      "source": "DIP-TASK-9",
+      "fullbody_path": "docs/public-automation-20261026-doc2-full.md",
+      "utf8_bytes": 58911,
+      "local_sha256": "e8719bc72daefe1c39a327b804554e5fd31e0b2d23dc4a782d7393500d5a0edb",
+      "base_local_mirror": "docs/public-progress-20261025-doc2-reconciled-full.md",
+      "base_local_sha256": "87be1b5524f78f1f22f29a315e12c503b46ce95536437070e4f3116aa5a5686c",
+      "requirements": 33,
+      "scenarios": 53,
+      "all_base_requirement_identities_retained": true,
+      "delta_id": "e103d4c2-acb0-48fb-a8bc-a631df0f1e6b",
+      "state": "proposed",
+      "review_status": "pending",
+      "applied": false,
+      "ops": [
+        {
+          "kind": "modified",
+          "name": "Доступный индикатор фактического прогресса"
+        },
+        {
+          "kind": "modified",
+          "name": "Подтверждённый этап и оставшиеся выбранные проверки"
+        },
+        {
+          "kind": "modified",
+          "name": "Live counters и polling независимо от SSE"
+        },
+        {
+          "kind": "added",
+          "name": "Компактное покрытие и ссылка всей карточки списка"
+        }
+      ],
+      "removed": 0,
+      "renamed": 0,
+      "full_raw_validate_spec_responses": [
+        {
+          "valid": true
+        },
+        {
+          "valid": true
+        }
+      ]
+    },
+    {
+      "doc": 8,
+      "base_version": 5,
+      "source": "DIP-TASK-42",
+      "fullbody_path": "docs/public-automation-20261026-doc8-full.md",
+      "utf8_bytes": 32445,
+      "local_sha256": "ab75cdef538611a9af7d98b90726891c4caf837df0ef3c5a5d3bb23d68e5ce77",
+      "base_local_mirror": "docs/public-progress-20261025-doc8-finish-diagnostic-full.md",
+      "base_local_sha256": "35de1ceee3cdab73a1100075a03bd32b4678af1233e611241cf35efed36805fa",
+      "requirements": 11,
+      "scenarios": 27,
+      "all_base_requirement_identities_retained": true,
+      "delta_id": "9e36c15c-733a-4d4e-8285-5bd7e5695907",
+      "state": "proposed",
+      "review_status": "pending",
+      "applied": false,
+      "ops": [
+        {
+          "kind": "modified",
+          "name": "Авторизация и явный opt-in до egress"
+        },
+        {
+          "kind": "modified",
+          "name": "Русское доказательное объяснение без неподтверждённых гипотез"
+        },
+        {
+          "kind": "modified",
+          "name": "Конечные diagnostic headers без изменения body wire"
+        },
+        {
+          "kind": "added",
+          "name": "Строгая operation-specific JSON schema public профиля"
+        }
+      ],
+      "removed": 0,
+      "renamed": 0,
+      "full_raw_validate_spec_responses": [
+        {
+          "valid": true
+        }
+      ]
+    },
+    {
+      "doc": 9,
+      "base_version": 3,
+      "source": "DIP-TASK-42",
+      "fullbody_path": "docs/public-automation-20261026-doc9-full.md",
+      "utf8_bytes": 19054,
+      "local_sha256": "bf45c24d0d7122961a47f4d3692fe0c967bf463b8c3b211e9dd3210b1cd50e52",
+      "base_local_mirror": "docs/public-progress-20261025-doc9-proposed-full.md",
+      "base_local_sha256": "85e8f91b43df59b35495bba618d4befce912f2480ff979bdecb265d9deff5436",
+      "requirements": 8,
+      "scenarios": 15,
+      "all_base_requirement_identities_retained": true,
+      "delta_id": "ac96de0e-88b4-4e97-ab8f-74fcdda5b0fd",
+      "state": "proposed",
+      "review_status": "pending",
+      "applied": false,
+      "ops": [
+        {
+          "kind": "modified",
+          "name": "Явное раскрытие условий и согласие на один запрос"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченный ручной запрос и отмена"
+        },
+        {
+          "kind": "modified",
+          "name": "Гипотезы обычным текстом и проверенные ссылки на источники"
+        },
+        {
+          "kind": "added",
+          "name": "Owner-local настройки и ограниченная защита от автоповтора"
+        }
+      ],
+      "removed": 0,
+      "renamed": 0,
+      "full_raw_validate_spec_responses": [
+        {
+          "valid": true
+        }
+      ]
+    },
+    {
+      "doc": 15,
+      "base_version": 4,
+      "source": "DIP-TASK-42",
+      "fullbody_path": "docs/public-automation-20261026-doc15-full.md",
+      "utf8_bytes": 25733,
+      "local_sha256": "016d98b346c60cdef2fb9fe9b265d31bd4f33f24ada8d20e35c1365f5169c066",
+      "base_local_mirror": "docs/public-progress-20261025-doc15-reconciled-full.md",
+      "base_local_sha256": "32541b31a72fd16fc5daff4e307a8a3eddfe012d56bca524248338776e523c9d",
+      "requirements": 14,
+      "scenarios": 25,
+      "all_base_requirement_identities_retained": true,
+      "delta_id": "492fe0ca-0b12-4af4-9a2b-96fc15f87295",
+      "state": "proposed",
+      "review_status": "pending",
+      "applied": false,
+      "ops": [
+        {
+          "kind": "modified",
+          "name": "Русский grounded ответ и честное отсутствие evidence"
+        },
+        {
+          "kind": "added",
+          "name": "Немедленно доступный composer при read-only подключении"
+        }
+      ],
+      "removed": 0,
+      "renamed": 0,
+      "full_raw_validate_spec_responses": [
+        {
+          "valid": true
+        }
+      ]
+    },
+    {
+      "doc": 16,
+      "base_version": 4,
+      "source": "DIP-TASK-42",
+      "fullbody_path": "docs/public-automation-20261026-doc16-full.md",
+      "utf8_bytes": 31336,
+      "local_sha256": "65a17f93545c9da383711ae93f85baf05e8143ecf77a7775af3975fd9833b614",
+      "base_local_mirror": "docs/public-progress-20261025-doc16-reconciled-full.md",
+      "base_local_sha256": "769b090065cff27c6b4d9d67abc93345726c156e287d20aaca6bd47957d56eb6",
+      "requirements": 16,
+      "scenarios": 23,
+      "all_base_requirement_identities_retained": true,
+      "delta_id": "b8fc139b-f221-4f05-bce9-e08c9270172e",
+      "state": "proposed",
+      "review_status": "pending",
+      "applied": false,
+      "ops": [
+        {
+          "kind": "modified",
+          "name": "Отдельное явное согласие на новый selected-text egress"
+        },
+        {
+          "kind": "modified",
+          "name": "Сохранный инертный UI"
+        },
+        {
+          "kind": "modified",
+          "name": "Русский human text сводки и чата с обновлением policy hash"
+        },
+        {
+          "kind": "modified",
+          "name": "Отсутствие новой durable translation state"
+        },
+        {
+          "kind": "modified",
+          "name": "Ограниченная advisory Retry-After семантика"
+        },
+        {
+          "kind": "modified",
+          "name": "Translation diagnostic headers и граница русской проверки"
+        },
+        {
+          "kind": "added",
+          "name": "Ограниченная автоматизация открытого source scope"
+        }
+      ],
+      "removed": 0,
+      "renamed": 0,
+      "full_raw_validate_spec_responses": [
+        {
+          "valid": true
+        }
+      ]
+    }
+  ],
+  "discarded_new_snapshots_only": [
+    {
+      "doc": 15,
+      "delta_id": "8661cf36-4393-4581-97de-7d1dde8afddb",
+      "reason": "transcription выключным instead of validated выключенным; unintended extra modified code-fallback requirement",
+      "replacement": "492fe0ca-0b12-4af4-9a2b-96fc15f87295",
+      "history_preserved": true
+    },
+    {
+      "doc": 2,
+      "delta_id": "2432f604-37c1-466e-933c-ca6a197b5f03",
+      "reason": "transcription остаётсяcancelled instead of validated остаётся cancelled; unintended modified cancellation requirement",
+      "replacement": "e103d4c2-acb0-48fb-a8bc-a631df0f1e6b",
+      "history_preserved": true
+    }
+  ],
+  "remaining_transcription_note": "DOC2 pending Purpose contains non-normative остаётсянеизвестным (missing space). Full local mirror matches this text; separately full-raw revalidated valid:true. No normative change and no extra pending proposal for typography. DOC9 inherited DIP-ТASK-16 Cyrillic T is preserved from base, not repaired in this lane.",
+  "doc1": "No proposal: server durable-outcomes-v1/percent:null unchanged.",
+  "old_history": "Existing stale approved base1/base2 proposals and all earlier applied/discarded revisions untouched.",
+  "execution_boundary": "Only NEW docs/public-automation-20261026-* local files; no app/test/README/provider/runtime/credentials/Git writes or execution; no task lifecycle/progress/content/closure/cascade changes. Optional attributed comments only after complete TASK9/42 reads."
+}

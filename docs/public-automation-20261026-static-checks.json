@@ -1,0 +1,116 @@
+{
+  "status": "PASS",
+  "scope": "local structure/retained identities/LF/whitespace/hash; not MCP, semantic review or app tests",
+  "records": [
+    {
+      "doc": 2,
+      "base_version": 9,
+      "source": "DIP-TASK-9",
+      "base_local_mirror": "docs/public-progress-20261025-doc2-reconciled-full.md",
+      "base_local_sha256": "87be1b5524f78f1f22f29a315e12c503b46ce95536437070e4f3116aa5a5686c",
+      "fullbody_path": "docs/public-automation-20261026-doc2-full.md",
+      "bytes": 58911,
+      "sha256": "e8719bc72daefe1c39a327b804554e5fd31e0b2d23dc4a782d7393500d5a0edb",
+      "requirements": 33,
+      "scenarios": 53,
+      "all_base_requirement_identities_retained": true,
+      "full_raw_validate_spec": "NOT_RUN",
+      "proposal": "NOT_RUN",
+      "apply_hold": true,
+      "local_ops": [
+        {
+          "kind": "added",
+          "name": "Компактное покрытие и ссылка всей карточки списка"
+        }
+      ]
+    },
+    {
+      "doc": 8,
+      "base_version": 5,
+      "source": "DIP-TASK-42",
+      "base_local_mirror": "docs/public-progress-20261025-doc8-finish-diagnostic-full.md",
+      "base_local_sha256": "35de1ceee3cdab73a1100075a03bd32b4678af1233e611241cf35efed36805fa",
+      "fullbody_path": "docs/public-automation-20261026-doc8-full.md",
+      "bytes": 32445,
+      "sha256": "ab75cdef538611a9af7d98b90726891c4caf837df0ef3c5a5d3bb23d68e5ce77",
+      "requirements": 11,
+      "scenarios": 27,
+      "all_base_requirement_identities_retained": true,
+      "full_raw_validate_spec": "NOT_RUN",
+      "proposal": "NOT_RUN",
+      "apply_hold": true,
+      "local_ops": [
+        {
+          "kind": "added",
+          "name": "Строгая operation-specific JSON schema public профиля"
+        }
+      ]
+    },
+    {
+      "doc": 9,
+      "base_version": 3,
+      "source": "DIP-TASK-42",
+      "base_local_mirror": "docs/public-progress-20261025-doc9-proposed-full.md",
+      "base_local_sha256": "85e8f91b43df59b35495bba618d4befce912f2480ff979bdecb265d9deff5436",
+      "fullbody_path": "docs/public-automation-20261026-doc9-full.md",
+      "bytes": 19054,
+      "sha256": "bf45c24d0d7122961a47f4d3692fe0c967bf463b8c3b211e9dd3210b1cd50e52",
+      "requirements": 8,
+      "scenarios": 15,
+      "all_base_requirement_identities_retained": true,
+      "full_raw_validate_spec": "NOT_RUN",
+      "proposal": "NOT_RUN",
+      "apply_hold": true,
+      "local_ops": [
+        {
+          "kind": "added",
+          "name": "Owner-local настройки и ограниченная защита от автоповтора"
+        }
+      ]
+    },
+    {
+      "doc": 15,
+      "base_version": 4,
+      "source": "DIP-TASK-42",
+      "base_local_mirror": "docs/public-progress-20261025-doc15-reconciled-full.md",
+      "base_local_sha256": "32541b31a72fd16fc5daff4e307a8a3eddfe012d56bca524248338776e523c9d",
+      "fullbody_path": "docs/public-automation-20261026-doc15-full.md",
+      "bytes": 25733,
+      "sha256": "016d98b346c60cdef2fb9fe9b265d31bd4f33f24ada8d20e35c1365f5169c066",
+      "requirements": 14,
+      "scenarios": 25,
+      "all_base_requirement_identities_retained": true,
+      "full_raw_validate_spec": "NOT_RUN",
+      "proposal": "NOT_RUN",
+      "apply_hold": true,
+      "local_ops": [
+        {
+          "kind": "added",
+          "name": "Немедленно доступный composer при read-only подключении"
+        }
+      ]
+    },
+    {
+      "doc": 16,
+      "base_version": 4,
+      "source": "DIP-TASK-42",
+      "base_local_mirror": "docs/public-progress-20261025-doc16-reconciled-full.md",
+      "base_local_sha256": "769b090065cff27c6b4d9d67abc93345726c156e287d20aaca6bd47957d56eb6",
+      "fullbody_path": "docs/public-automation-20261026-doc16-full.md",
+      "bytes": 31336,
+      "sha256": "65a17f93545c9da383711ae93f85baf05e8143ecf77a7775af3975fd9833b614",
+      "requirements": 16,
+      "scenarios": 23,
+      "all_base_requirement_identities_retained": true,
+      "full_raw_validate_spec": "NOT_RUN",
+      "proposal": "NOT_RUN",
+      "apply_hold": true,
+      "local_ops": [
+        {
+          "kind": "added",
+          "name": "Ограниченная автоматизация открытого source scope"
+        }
+      ]
+    }
+  ]
+}

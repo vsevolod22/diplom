@@ -350,16 +350,20 @@ test('five new finish diagnostic reasons survive only finite response headers, n
   }
 });
 
-test('button-only AI UI contract: visible transfer notes, readonly source opening and fresh one-click server envelopes', () => {
+test('legacy manual selectors remain fail-closed on the new preference-authorized UI; chat still has one-click server envelopes', () => {
   const code = source();
   for (const old of ['Открыть чат и прочитать условия', 'Прочитать условия перевода', 'Разрешаю один запрос чата:', 'Разрешаю один запрос перевода:']) assert.equal(code.includes(old), false);
   const chatUi = readFileSync(new URL('../src/features/scans/ScanChatPanel.tsx', import.meta.url), 'utf8');
   const translationUi = readFileSync(new URL('../src/features/scans/AdvisoryTranslationPanel.tsx', import.meta.url), 'utf8');
-  assert.ok(chatUi.includes("'Открыть чат'"));
+  assert.equal(chatUi.includes("'Открыть чат'"), false);
+  assert.ok(code.includes("name: 'Открыть чат', exact: true")); // Legacy live workflow is not qualification for the new UI.
   for (const text of ['scan-chat-send-help', 'Нажимая «Отправить вопрос», вы разрешаете один запрос:']) {
     assert.ok(chatUi.includes(text)); assert.ok(code.includes(text));
   }
-  for (const text of ["void operate('read')", "onClick={() => void operate('translate')}", 'Нажимая «Перевести на русский», вы разрешаете один запрос:']) assert.ok(translationUi.includes(text));
+  assert.ok(translationUi.includes("void operate('read', null, true)"));
+  assert.ok(translationUi.includes('Сохранённое разрешение аккаунта запускает один перевод при открытии:'));
+  assert.equal(translationUi.includes('Нажимая «Перевести на русский», вы разрешаете один запрос:'), false);
+  assert.ok(code.includes('Нажимая «Перевести на русский», вы разрешаете один запрос:'));
   const translation = code.slice(code.indexOf("const contextOk = await step('translation_context'"), code.indexOf("await step('translation_toggle'"));
   assert.equal(translation.includes('checkbox'), false); assert.equal(translation.includes('consent.check'), false);
   assert.equal((translation.match(/await submit.click\(/g) ?? []).length, 1);

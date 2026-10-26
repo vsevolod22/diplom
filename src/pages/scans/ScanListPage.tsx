@@ -11,6 +11,7 @@ import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/sca
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
 import { Alert, Badge } from '@/shared/ui/scan-primitives';
+import './scan-detail-a1.css';
 
 const stateTone: Record<ScanStatus['state'], 'neutral' | 'info' | 'warning' | 'danger'> = {
   queued: 'neutral',
@@ -30,10 +31,14 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
     queryFn: ({ signal }) => transport.list(signal),
     enabled: transport.capabilities.list,
     retry: false,
+    refetchInterval: (query) => {
+      if (demo || !transport.capabilities.list || query.state.error instanceof ScanAccessError) return false;
+      return query.state.data?.some(scan => ['queued', 'running', 'cancelling'].includes(scan.state)) ? 2000 : false;
+    },
   });
   return (
     <ScanShell demo={demo}>
-      <section aria-labelledby="scan-list" className="min-w-0 space-y-8 pb-8">
+      <section aria-labelledby="scan-list" className="scan-a1-list min-w-0 space-y-8 pb-8">
         <div className="scan-a1__chapter">
           <span>ГЛАВА 01 / КАТАЛОГ</span>
           <span>{demo ? 'ЗАПИСИ ИЗ ФИКСТУР' : 'АВТОРИЗОВАННЫЙ СПИСОК'}</span>
@@ -90,10 +95,10 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
             ) : 'Не удалось загрузить список. Неизвестно, есть ли сканы.'}
           </Alert>
         ) : null}
-        {list.isSuccess && !list.data.length ? (
+        {list.isSuccess && transport.capabilities.list && !list.data.length ? (
           <p className="scan-a1__muted">Сканов нет (успешный ответ списка).</p>
         ) : null}
-        {list.isSuccess ? (
+        {list.isSuccess && transport.capabilities.list ? (
           <ol className="scan-a1__records min-w-0 list-none p-0">
             {list.data.map((scan, index) => (
               <li
@@ -101,7 +106,11 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
                 className={`scan-a1__record min-w-0 ${scan.state === 'partial' ? 'scan-a1__record--featured' : ''}`}
               >
                 <MagicCard>
-                  <div className="scan-a1__record-content">
+                  <Link
+                    className="scan-a1__record-content scan-a1__record-link"
+                    to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
+                    aria-label={`Открыть деталь: ${scan.targetLabel}`}
+                  >
                     <span className="scan-a1__index">
                       {String(index + 1).padStart(2, '0')} / {stateLabels[scan.state]}
                     </span>
@@ -114,14 +123,11 @@ export function ScanListPage({ demo = false }: { demo?: boolean }) {
                     </div>
                     <div className="flex flex-wrap items-center gap-4">
                       <Badge tone={stateTone[scan.state]}>{stateLabels[scan.state]}</Badge>
-                      <Link
-                        className="scan-a1__link"
-                        to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
-                      >
+                      <span className="scan-a1__link">
                         Открыть деталь <ArrowUpRight size={17} aria-hidden="true" />
-                      </Link>
+                      </span>
                     </div>
-                  </div>
+                  </Link>
                 </MagicCard>
               </li>
             ))}

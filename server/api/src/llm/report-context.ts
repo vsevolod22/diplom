@@ -154,6 +154,33 @@ export class ReportReader {
       throw new ServiceUnavailableException({ errorCode: 'LLM_REPORT_UNAVAILABLE' });
     } finally { db?.close(); }
   }
+  withSummaryReport<T>(identity: Identity, scanId: string, action: (report: ReportContext) => T): T {
+    if (!this.publicReports) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+    if (!identity.scope.includes('scan:read')) throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });
+    if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+    let db: Database.Database | undefined;
+    try {
+      const path = process.env.SCAN_LEDGER_PATH;
+      if (!path || path === ':memory:') return invalid();
+      // As in translation publication: fence WAL writers, then enforce SELECT-only
+      // access. No migration or data write, and never hold this across an await.
+      db = new Database(path, { fileMustExist: true, timeout: 100 });
+      const connection = db;
+      return connection.transaction(() => {
+        connection.pragma('query_only = ON');
+        if (!connection.prepare('SELECT id FROM scans WHERE id=? AND subject=?').get(scanId, identity.subject))
+          throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+        const report = this.collect(identity, scanId, connection);
+        if (!report.profile) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+        const result = action(report);
+        if (result && typeof result === 'object' && 'then' in result) return invalid();
+        return result;
+      }).immediate();
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw new ServiceUnavailableException({ errorCode: 'LLM_REPORT_UNAVAILABLE' });
+    } finally { db?.close(); }
+  }
   readTranslation(identity: Identity, scanId: string, findingId: string, assessmentIndex: number): TranslationSnapshot {
     return this.withTranslation(identity, scanId, findingId, assessmentIndex, snapshot => snapshot);
   }

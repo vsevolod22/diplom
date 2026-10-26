@@ -89,7 +89,8 @@ test('public prepared requests keep explicit reasoning-off, exact configured out
     assert.equal(body.max_tokens, policy.outputTokens);
     assert.equal(policy.outputTokens, 256, 'fixture cap is not the separate 1024-token input allowance');
     assert.deepEqual(body.reasoning, { enabled: false, exclude: true });
-    assert.deepEqual(body.response_format, { type: 'json_object' }); assert.equal(body.stream, false);
+    assert.equal(body.response_format.type, 'json_schema');
+        assert.equal(body.response_format.json_schema.strict, true); assert.equal(body.stream, false);
     assert.deepEqual(body.provider, { only: ['phala'], allow_fallbacks: false, require_parameters: true,
       data_collection: 'deny', zdr: true, max_price: { prompt: 0, completion: 0, request: 0 } });
     assert.equal(request.reserve.input, Buffer.byteLength(request.body) + 1024);

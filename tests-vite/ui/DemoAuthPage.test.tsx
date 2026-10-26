@@ -1,13 +1,21 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DemoAuthPage } from '@/pages/auth/DemoAuthPage';
+import { transitionScanSession } from '@/shared/api/auth/scanSession';
+import { readReportPreferences, REPORT_AUTOMATION_REVISION } from '@/shared/api/preferences/reportPreferences';
 
 const fetchMock = vi.fn<typeof fetch>();
 vi.stubGlobal('fetch', fetchMock);
-afterEach(() => { cleanup(); fetchMock.mockReset(); });
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  transitionScanSession(null, new QueryClient(), true);
+  localStorage.clear();
+  fetchMock.mockReset();
+});
 
 function setup(path: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -21,6 +29,70 @@ function setup(path: string) {
 const response = (status: number, body?: object) => ({ status, ok: status >= 200 && status < 300, json: async () => body }) as Response;
 
 describe('optional demo account', () => {
+  it('saves report language and automatic summary only after explicit account confirmation', async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(200, { id: 'preferences-owner', email: 'owner@example.org' }));
+    setup('/account');
+    const panel = await screen.findByRole('region', { name: 'Язык и сводка отчётов' });
+    const language = within(panel).getByRole('combobox', { name: 'Язык отчёта' });
+    const summary = within(panel).getByRole('combobox', { name: 'Краткая ИИ-сводка' });
+    expect(language).toHaveProperty('value', 'original');
+    expect(summary).toHaveProperty('value', 'off');
+    expect(within(panel).queryByRole('checkbox')).toBeNull();
+    expect(panel.textContent).toContain('для аккаунта в этом браузере');
+    for (const disclosure of ['OpenRouter', 'xingchen-agi/xing4.0-29b-a4b:free', 'Phala',
+      'бесплатном режиме', 'заголовка и', 'очищенные находки', 'машинная интерпретация',
+      'квоты пользователя и отчёта', 'новой версии согласия']) {
+      expect(panel.textContent).toContain(disclosure);
+    }
+    expect(localStorage.length).toBe(0);
+    await user.selectOptions(language, 'ru');
+    await user.selectOptions(summary, 'on');
+    expect(localStorage.length).toBe(0);
+    expect(readReportPreferences()).toMatchObject({ language: 'original', autoSummary: false, authorized: false });
+    await user.click(within(panel).getByRole('button', { name: 'Сохранить настройки отчётов' }));
+    expect(await within(panel).findByRole('status')).toHaveProperty('textContent', 'Настройки сохранены для аккаунта в этом браузере.');
+    expect(readReportPreferences()).toMatchObject({ language: 'ru', autoSummary: true, authorized: true });
+    expect(JSON.parse(localStorage.getItem('report-preferences:v1:preferences-owner')!)).toEqual({
+      version: 1, automationRevision: REPORT_AUTOMATION_REVISION, language: 'ru', autoSummary: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await user.selectOptions(language, 'original');
+    await user.selectOptions(summary, 'off');
+    expect(readReportPreferences()).toMatchObject({ language: 'ru', autoSummary: true });
+    await user.click(within(panel).getByRole('button', { name: 'Сохранить настройки отчётов' }));
+    expect(readReportPreferences()).toMatchObject({ language: 'original', autoSummary: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a storage failure without enabling automatic requests', async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(200, { id: 'storage-owner', email: 'owner@example.org' }));
+    setup('/account');
+    const language = await screen.findByRole('combobox', { name: 'Язык отчёта' });
+    await user.selectOptions(language, 'ru');
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Unavailable'); });
+    await user.click(screen.getByRole('button', { name: 'Сохранить настройки отчётов' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent',
+      'Не удалось сохранить настройки. Автоматика отключена; проверьте доступ к хранилищу браузера.');
+    expect(readReportPreferences()).toMatchObject({ language: 'original', autoSummary: false, authorized: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards unsaved choices on a new session generation and disables a stale account form', async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(200, { id: 'session-owner', email: 'owner@example.org' }));
+    const client = setup('/account');
+    const language = await screen.findByRole('combobox', { name: 'Язык отчёта' });
+    await user.selectOptions(language, 'ru');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Краткая ИИ-сводка' }), 'on');
+    act(() => transitionScanSession('session-owner', client, true));
+    expect(language).toHaveProperty('value', 'original');
+    expect(screen.getByRole('combobox', { name: 'Краткая ИИ-сводка' })).toHaveProperty('value', 'off');
+    act(() => transitionScanSession('other-owner', client, true));
+    expect(screen.getByRole('button', { name: 'Сохранить настройки отчётов' })).toHaveProperty('disabled', true);
+    expect(localStorage.length).toBe(0);
+  });
   it('registers with same-origin cookie requests, clears cached data and logs out', async () => {
     const user = userEvent.setup();
     const identity = { id: 'u1', email: 'test@example.org' };
@@ -53,6 +125,7 @@ describe('optional demo account', () => {
     await user.click(screen.getByRole('button', { name: 'Войти' }));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Неверный email или пароль.');
     expect(screen.getByRole('link', { name: /Смотреть демо без регистрации/ })).toBeTruthy();
+    expect(screen.queryByRole('combobox')).toBeNull();
   });
   it('revokes and redirects to login when account verification fails', async () => {
     fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'))

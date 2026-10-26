@@ -1,0 +1,120 @@
+{
+  "scope": "Final local file hashes, not frozen review GO or deployed-image equality; some inspected by relevant regions only. No credential/private state read.",
+  "files": [
+    {
+      "path": "src/features/auth/ReportPreferencesPanel.tsx",
+      "bytes": 6146,
+      "sha256": "ee1c2002b8549c648830c9de8108ce2615043531e009f75aa75afcfb576f2316"
+    },
+    {
+      "path": "src/shared/api/preferences/reportPreferences.ts",
+      "bytes": 5660,
+      "sha256": "062a4603af4da2099a2522af8174959491ff5958dceb534126473aa4ef35a3e2"
+    },
+    {
+      "path": "src/shared/api/scans/reportAutomation.ts",
+      "bytes": 11685,
+      "sha256": "cd0a3bcc99ea402ab8cd0f8de5b596713984fd44c5ba9a09124afc8d9016ecbb"
+    },
+    {
+      "path": "src/shared/api/scans/llmSummaryClient.ts",
+      "bytes": 14288,
+      "sha256": "9f2dcc47d21f079e093cedb2fb3985e45468bd9ba86a37ab54edf8a6750e8182"
+    },
+    {
+      "path": "src/shared/api/scans/advisoryTranslationContract.ts",
+      "bytes": 6054,
+      "sha256": "db9fc361437f8c699a4f7aa72d80e847429804e5bd9260a379e98685e0bf1e1f"
+    },
+    {
+      "path": "src/features/scans/ScanSummaryPanel.tsx",
+      "bytes": 22333,
+      "sha256": "9cb4510530254e68642d30d5b8c052aa932536cf4974e8336881e243dca09918"
+    },
+    {
+      "path": "src/features/scans/AdvisoryTranslationPanel.tsx",
+      "bytes": 19154,
+      "sha256": "1478b229f27076c3f78f3b4769fe863271c8eac0757ba13207c73d0ad8cff708"
+    },
+    {
+      "path": "src/features/scans/ScanChatPanel.tsx",
+      "bytes": 36065,
+      "sha256": "feccf6446af81934ae3be1954c39f108a687e9d290b9a1c82dd823db6e8783da"
+    },
+    {
+      "path": "src/features/scans/scanProgressEstimate.ts",
+      "bytes": 6176,
+      "sha256": "1b5f899a68f1445c59ae49b537c0b5398882dfcc4b2026fd80cacd6a1ab2b1dd"
+    },
+    {
+      "path": "src/features/scans/ScanProgressPanel.tsx",
+      "bytes": 6949,
+      "sha256": "3b5c14a88a78b7eae2942fc2c39ecdbb13d44ad8406834dfaf2df6dcfafdefd9"
+    },
+    {
+      "path": "src/pages/scans/ScanListPage.tsx",
+      "bytes": 7882,
+      "sha256": "80d31d085362d3586c84b9c5e33903bc2fa39eb4bb144ede8e840c1c548236c8"
+    },
+    {
+      "path": "server/api/src/llm/summary-result-cache.ts",
+      "bytes": 2700,
+      "sha256": "1538f43ee15b686db136bb0766cc9ffdb08b9403bc465defa247b5a39e46005b"
+    },
+    {
+      "path": "server/api/src/llm/llm.service.ts",
+      "bytes": 16928,
+      "sha256": "7b1099d337f4b191917f17e09de97757e556135705e296609dc9e86b8b23a48e"
+    },
+    {
+      "path": "server/api/src/llm/llm.controller.ts",
+      "bytes": 5580,
+      "sha256": "6a06125040599fef531aaff1cf8495356785b12dc795e025abc9e863ace204a1"
+    },
+    {
+      "path": "server/api/src/llm/response-format.ts",
+      "bytes": 1712,
+      "sha256": "9c4c2464b218be218b641e37998793a6b718348b8315fee3274fefea0456eb76"
+    },
+    {
+      "path": "server/api/src/llm/openrouter-provider.ts",
+      "bytes": 12462,
+      "sha256": "deb84bd357f097ee0ffb9533b164cabab9ee543a556f531a354c7b842c5cdf3b"
+    },
+    {
+      "path": "server/api/src/llm/translation-contract.ts",
+      "bytes": 8583,
+      "sha256": "fc9e94bb6566410181a4033d0339048bebf54b5601f047d4c7b0712f98ba705e"
+    },
+    {
+      "path": "server/api/src/llm/provider-diagnostic.ts",
+      "bytes": 3000,
+      "sha256": "f8fd893e5061c0c2611bf540761a3aafe24342d93110122b8840384b7a3dcf93"
+    },
+    {
+      "path": "server/api/src/llm/policy.ts",
+      "bytes": 4867,
+      "sha256": "911b85876e744b173414db8a8382733ca963eeaa2270889284046ad46e48e6d0"
+    },
+    {
+      "path": "server/api/src/llm/SUMMARY-RESULTS.md",
+      "bytes": 9015,
+      "sha256": "ccb257f90f568988929349132516f95c727ca4e09e8f73a1190bb3730c78641c"
+    },
+    {
+      "path": "server/api/src/llm/TRANSLATION.md",
+      "bytes": 9552,
+      "sha256": "507ee30a26045e40394fb1c213c931804f78c030a7b98150a8592040044ea1be"
+    },
+    {
+      "path": "server/deploy/public-stand.nginx.conf",
+      "bytes": 15356,
+      "sha256": "6e9a21cbcc10010a2b06e6a0d8f6538702432afdf7fdedfd7cee14cd3de16ee3"
+    },
+    {
+      "path": "tests-e2e/public-automation-live.mjs",
+      "bytes": 61243,
+      "sha256": "97685e4b73c03cf189313e4fa26ab1dfc188701cc56c252d700f9ff2c480db6f"
+    }
+  ]
+}

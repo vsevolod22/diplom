@@ -1,0 +1,24 @@
+{
+  "project_id": "520a0059-d0f2-4f86-8d93-fc15035a5715",
+  "scope": "Attributed docs-only progress comments; no task status/content/progress/closure changes",
+  "comments": [
+    {
+      "source": "DIP-TASK-9",
+      "id": "8f558da6-edf2-4393-bb6b-915f65a7b724",
+      "created_at": "2026-10-26 20:13:05.49422+00"
+    },
+    {
+      "source": "DIP-TASK-42",
+      "id": "198d52cd-18ac-422d-9904-bc1e082b0ad5",
+      "created_at": "2026-10-26 20:13:05.63058+00"
+    }
+  ],
+  "apply": "HOLD until NEW coordinator source GO/deploy",
+  "validation": {
+    "full_raw_calls": 6,
+    "valid_true": 6,
+    "five_final_full_bodies_validated_before_proposing": true,
+    "local_final_integrity_checks": "PASS; actual inert Python checks only, not application/runtime validation",
+    "application_tests_build_native_browser_provider": "NOT_RUN"
+  }
+}

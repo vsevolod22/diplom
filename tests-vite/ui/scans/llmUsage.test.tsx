@@ -292,13 +292,14 @@ it('explicit usage GET and focus revalidation never grant generation intent or e
     ),
   );
   expect(screen.queryByRole('checkbox')).toBeNull();
-  const generate = screen.getByRole('button', { name: 'Получить сводку' }) as HTMLButtonElement;
-  expect(generate.disabled).toBe(true);
-  expect(fetcher).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
+  expect(screen.getByRole('link', { name: 'настройках аккаунта' })).toBeTruthy();
+  const usageRequests = () => fetcher.mock.calls.filter(([path]) => String(path).endsWith('/llm/usage'));
+  expect(usageRequests()).toHaveLength(0);
   fireEvent.click(screen.getByRole('button', { name: 'Обновить остаток ИИ' }));
   await screen.findByText(/Предупреждение: использовано/);
   expect(contextFence(context)).toBe(fence);
-  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(usageRequests()).toHaveLength(1);
   expect(fetcher).toHaveBeenCalledWith(
     expect.stringContaining('/llm/usage'),
     expect.objectContaining({
@@ -308,18 +309,15 @@ it('explicit usage GET and focus revalidation never grant generation intent or e
       redirect: 'error',
     }),
   );
-  expect(generate.disabled).toBe(true);
-  fireEvent.click(generate);
+  expect(summaryClient.summary).not.toHaveBeenCalled();
   fireEvent.focus(window);
   fireEvent(window, new Event('online'));
   await act(async () => {});
-  expect(summaryClient.context).toHaveBeenCalledTimes(2);
+  expect(summaryClient.context).toHaveBeenCalledTimes(1);
   expect(summaryClient.summary).not.toHaveBeenCalled();
-  expect(fetcher).toHaveBeenCalledTimes(2);
-  expect(
-    fetcher.mock.calls.every(([path, init]) => String(path).endsWith('/llm/usage') && init?.method === 'GET'),
-  ).toBe(true);
-  expect(generate.disabled).toBe(true);
+  expect(usageRequests()).toHaveLength(2);
+  expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+  expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
   expect(screen.queryByRole('checkbox')).toBeNull();
   expect(screen.getByText('Исходные findings и coverage')).toBeTruthy();
 });

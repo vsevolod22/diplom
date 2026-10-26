@@ -1,13 +1,15 @@
 import { BadGatewayException } from '@nestjs/common';
 import type { ReportContext } from './report-context.js';
 import { groundedIdentifiers, russianHumanText } from './russian-text.js';
-import { diagnose } from './provider-diagnostic.js';
+import { diagnose, type FailurePhase, type FailureReason } from './provider-diagnostic.js';
 
 export const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(v));
 export const exact = (v: unknown, keys: string[]): v is Record<string, unknown> => object(v) &&
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
-export const invalidReply = (): never => { throw new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }); };
+export const invalidReply = (phase: FailurePhase = 'content', reason: FailureReason = 'invalid_content'): never => {
+  throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), phase, reason);
+};
 
 function plainText(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > 2000 ||

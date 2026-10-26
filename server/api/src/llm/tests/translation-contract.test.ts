@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { HttpException } from '@nestjs/common';
+import { diagnose, diagnostic, diagnosticHeaders } from '../provider-diagnostic.js';
 import { normalizeAdvisory, omittedAdvisory } from '../../worker/vuln-advisory.js';
 import { policyFromEnvironment } from '../policy.js';
 import { checkedPrepared, prepareHistory, prepareSummary, prepareTranslation } from '../prepared-request.js';
-import { selectedTranslation, translationPolicy, translationQuery, translationRequest, validateTranslationReply } from '../translation-contract.js';
+import { selectedTranslation, translationDisclosure, translationEnabled, translationPolicy, translationQuery, translationRequest, validateTranslationReply } from '../translation-contract.js';
 import { fixtureEnv, fixtureReport } from './fixtures.js';
 
 const policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'xingchen-agi/xing4.0-29b-a4b:free',
@@ -16,6 +18,19 @@ function selected(raw: Record<string, unknown>) {
   const index = advisory.assessments.findIndex(a => a.title.value !== null || a.description.value !== null || a.source === 'nvd');
   return selectedTranslation(advisory, index, id);
 }
+
+test('translation disclosure advertises account-preference client automation without enabling legacy/default policies', () => {
+  const value = translationDisclosure(policy);
+  assert.equal(value.automaticDispatch, 'account-preference');
+  assert.equal(value.persistentTranslationCache, false);
+  assert.equal(value.machineTranslation, true);
+  assert.equal(translationEnabled(null), false);
+  assert.equal(translationEnabled(policyFromEnvironment({})), false);
+  assert.equal(translationEnabled(policyFromEnvironment(fixtureEnv)), false);
+  assert.equal(translationEnabled(policy), true);
+  assert.equal(translationPolicy(policy), createHash('sha256')
+    .update(JSON.stringify(['selected-advisory-ru-v1', policy.version, 'selected-normalized-text-only', 'ru'])).digest('hex'));
+});
 
 test('translation exact selection/body, separate consent, registered prepared wire and Russian prose instructions', () => {
   const findingId = `vuln-${'a'.repeat(64)}`;
@@ -120,4 +135,44 @@ test('strict Russian translation output preserves field nulls/identifiers and re
     { source: 'nvd' }, { translation: reply }]) assert.throws(() => validateTranslationReply({ ...reply, ...patch }, text));
   assert.throws(() => validateTranslationReply({ title: 'Ошибка', description: 'Придуманный текст' }, { title: 'Memory flaw', description: null }));
   assert.deepEqual(validateTranslationReply({ title: id, description: null }, { title: id, description: null }), { title: id, description: null });
+});
+
+test('translation failures expose finite first rejecting predicates, never source/reply text or exception details', () => {
+  const original = { title: 'Memory flaw CVE-2026-1000', description: 'Memory flaw in Node.js' };
+  const valid = { title: 'Ошибка памяти CVE-2026-1000', description: 'Ошибка памяти в Node.js' };
+  const cases = [
+    [{ translation: valid }, 'content', 'invalid_shape'],
+    [{ ...valid, extra: 'PRIVATE' }, 'content', 'invalid_shape'],
+    [{ ...valid, title: null }, 'translation_title', 'null_mismatch'],
+    [{ ...valid, title: 123 }, 'translation_title', 'invalid_type'],
+    [{ ...valid, title: 'я'.repeat(1025) }, 'translation_title', 'limit'],
+    [{ ...valid, title: 'Ошибка https://PRIVATE.invalid CVE-2026-1000' }, 'translation_title', 'unsafe_text'],
+    [{ ...valid, title: 'Ошибка api_key="PRIVATE" CVE-2026-1000' }, 'translation_title', 'unsafe_text'],
+    [{ ...valid, title: 'Ошибка\u202e CVE-2026-1000' }, 'translation_title', 'unsafe_text'],
+    [{ ...valid, title: 'Ошибка PRIVATE.invalid CVE-2026-1000' }, 'translation_title', 'invalid_link'],
+    [{ ...valid, title: 'Ошибка памяти CVE-2026-1000 ' }, 'translation_title', 'not_normalized'],
+    [{ ...valid, title: 'Ошибка\nпамяти CVE-2026-1000' }, 'translation_title', 'not_normalized'],
+    [{ ...valid, title: '**Ошибка** CVE-2026-1000' }, 'translation_title', 'invalid_markup'],
+    [{ ...valid, title: 'Ошибка CVE-2026-9999' }, 'translation_title', 'identifier_mismatch'],
+    [{ ...valid, title: 'Memory flaw CVE-2026-1000' }, 'translation_title', 'not_russian'],
+    [{ ...valid, description: 'Ошибка памяти в OpenSSL' }, 'translation_description', 'identifier_mismatch'],
+    [{ ...valid, description: 'Ошибка памяти' }, 'translation_description', 'identifier_mismatch'],
+    [{ ...valid, description: 'Memory flaw in Node.js' }, 'translation_description', 'not_russian'],
+    [{ ...valid, description: null }, 'translation_description', 'null_mismatch'],
+  ] as const;
+  for (const [value, phase, reason] of cases) assert.throws(() => validateTranslationReply(value, original), error => {
+    assert.ok(error instanceof HttpException); assert.equal(error.getStatus(), 502);
+    assert.deepEqual(error.getResponse(), { errorCode: 'LLM_INVALID_RESPONSE' });
+    diagnose(error, 'content', 'invalid_content'); // TranslationService's fallback must not erase the first cause.
+    assert.deepEqual(diagnostic(error), { phase, reason });
+    assert.deepEqual(diagnosticHeaders(error), { 'X-LLM-Failure-Phase': phase, 'X-LLM-Failure-Reason': reason });
+    assert.doesNotMatch(JSON.stringify(error.getResponse()) + JSON.stringify(diagnosticHeaders(error)), /PRIVATE|CVE-|Node|OpenSSL|Memory/);
+    return true;
+  });
+  assert.throws(() => validateTranslationReply({ title: 'Ошибка CVE-2026-1000', description: null }, { title: 'CVE-2026-1000', description: null }), error => {
+    assert.deepEqual(diagnostic(error), { phase: 'translation_title', reason: 'nonprose_changed' }); return true;
+  });
+  assert.throws(() => validateTranslationReply({ title: 'Ошибка', description: 'Придуманные сведения' }, { title: 'Flaw', description: null }), error => {
+    assert.deepEqual(diagnostic(error), { phase: 'translation_description', reason: 'null_mismatch' }); return true;
+  });
 });

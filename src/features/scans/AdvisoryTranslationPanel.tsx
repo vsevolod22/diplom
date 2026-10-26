@@ -10,6 +10,20 @@ import {
 } from 'react';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import {
+  REPORT_AUTOMATION_REVISION,
+  subscribeReportPreferences,
+  useReportPreferences,
+} from '@/shared/api/preferences/reportPreferences';
+import {
+  allowAutomationDisclosure,
+  reportPreferencesCurrent,
+  ReportAutomationError,
+  runReportMetadata,
+  reportAutomationKey,
+  reportAutomationMessage,
+  runReportAutomation,
+} from '@/shared/api/scans/reportAutomation';
+import {
   createAdvisoryTranslationClient,
   TranslationError,
   translationErrorMessage,
@@ -58,16 +72,18 @@ const blockerMessages = {
 export function AdvisoryTranslationPanel(props: Props) {
   const status = useContext(ReportScope);
   const session = useSyncExternalStore(subscribeScanSession, sessionKey, sessionKey);
-  // Reset before rendering another owner, report, source slot or original text; never reuse consent.
+  const preferences = useReportPreferences();
+  // Reset before rendering another owner, preference, report, source slot or original text.
   const scope = JSON.stringify([
     session,
+    preferences,
     status,
     props.findingId,
     props.vulnerabilityId,
     props.assessmentIndex,
     props.assessment,
   ]);
-  return <TranslationScope key={scope} {...props} status={status} />;
+  return <TranslationScope key={scope} {...props} status={status} preferences={preferences} />;
 }
 function TranslationScope({
   status,
@@ -76,8 +92,10 @@ function TranslationScope({
   assessmentIndex,
   assessment,
   client: providedClient,
-}: Props & { status: ScanStatus | null }) {
+  preferences,
+}: Props & { status: ScanStatus | null; preferences: ReturnType<typeof useReportPreferences> }) {
   const client = useMemo(() => providedClient ?? createAdvisoryTranslationClient(), [providedClient]);
+  const current = () => client.current() && reportPreferencesCurrent(preferences, 'translation');
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const disclosureId = `translation-send-${findingId}-${assessmentIndex}`;
   const [pending, setPending] = useState(false);
@@ -87,7 +105,8 @@ function TranslationScope({
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
   const allowed = hasTranslationText(assessment);
-  const available = !!status && allowed && client.current();
+  const authorized = preferences.authorized && preferences.language === 'ru';
+  const available = !!status && status.state === 'completed' && allowed && current() && authorized;
   const selection = { findingId, assessmentIndex };
 
   function invalidate() {
@@ -101,8 +120,12 @@ function TranslationScope({
     setResult(null);
     setPending(false);
   }
-  async function readSnapshot(signal: AbortSignal): Promise<Snapshot> {
-    if (!status || !allowed) throw new TranslationError('STALE');
+  async function readSnapshot(signal: AbortSignal, passive = false): Promise<Snapshot> {
+    if (!status || !allowed || signal.aborted) throw new TranslationError('STALE');
+    if (passive) {
+      const key = JSON.stringify(['translation-metadata', status, selection, vulnerabilityId, assessment]);
+      return runReportMetadata(key, signal, (sharedSignal) => readSnapshot(sharedSignal));
+    }
     const [context, readiness, sourceVersion] = await Promise.all([
       client.context(status.scanId, selection, signal),
       client.readiness(status.scanId, signal),
@@ -128,19 +151,27 @@ function TranslationScope({
       throw new TranslationError('STALE');
     return { context, readiness };
   }
-  async function operate(action: 'read' | 'translate') {
+  async function operate(action: 'read' | 'translate', accepted = snapshot, automate = false, retry = false) {
     if (
       !available ||
       request.current ||
       (action === 'translate' &&
-        (!snapshot?.context.enabled || !snapshot.context.policyVersion || !snapshot.readiness.localReady))
+        (!accepted?.context.enabled || !accepted.context.policyVersion || !accepted.readiness.localReady))
     )
       return;
-    const accepted = snapshot;
+
+    if (
+      action === 'translate' &&
+      accepted &&
+      !allowAutomationDisclosure(accepted.context.disclosure, 'translation')
+    ) {
+      setMessage(reportAutomationMessage(new ReportAutomationError('DISCLOSURE'))!);
+      return;
+    }
     const controller = new AbortController();
     const version = ++generation.current;
     request.current = controller;
-    const live = () => generation.current === version && !controller.signal.aborted && client.current();
+    const live = () => generation.current === version && !controller.signal.aborted && current();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -154,19 +185,30 @@ function TranslationScope({
       ),
     );
     setPending(true);
-    setResult(null);
-    if (action === 'translate') setMessage('');
+    if (action === 'translate') {
+      setResult(null);
+      setMessage('');
+    }
     let latest: Snapshot | null = null;
+    let validated: TranslationReply | null = null;
     const run = async () => {
-      const before = await readSnapshot(controller.signal);
+      // Mutation tasks already own a queue slot; passive snapshots must acquire one first.
+      const before = await readSnapshot(controller.signal, action === 'read');
       if (!live()) return;
       latest = before;
       setSnapshot(before);
-      if (action === 'read') return;
+      if (action === 'read') {
+        if (accepted && translationContextFence(before.context) !== translationContextFence(accepted.context))
+          setResult(null);
+        return;
+      }
       if (!accepted || translationContextFence(before.context) !== translationContextFence(accepted.context))
         throw new TranslationError('STALE');
       if (!before.readiness.localReady || !before.context.enabled || !before.context.policyVersion)
         throw new TranslationError('LLM_CONFIGURATION_UNAVAILABLE');
+      if (!allowAutomationDisclosure(before.context.disclosure, 'translation'))
+        throw new ReportAutomationError('DISCLOSURE');
+      if (!live()) throw new TranslationError('STALE');
       const reply = await client.translate(
         before.context,
         { accepted: true, policyVersion: before.context.policyVersion },
@@ -183,16 +225,62 @@ function TranslationScope({
         translationContextFence(after.context) !== translationContextFence(before.context)
       )
         throw new TranslationError('STALE');
-      setResult(reply);
-      setShowTranslation(true);
+      validated = reply;
     };
     try {
-      await Promise.race([run(), stopped]);
+      if (action === 'read') {
+        await Promise.race([run(), stopped]);
+      } else if (accepted) {
+        const key = reportAutomationKey(
+          'translation',
+          REPORT_AUTOMATION_REVISION,
+          JSON.stringify([
+            accepted.context.scanId,
+            accepted.context.digest,
+            accepted.context.platform,
+            accepted.context.reportVersion,
+            accepted.context.policyVersion,
+            accepted.context.findingId,
+            accepted.context.assessmentIndex,
+            accepted.context.sourceVersion,
+            'ru',
+          ]),
+        );
+        // Cache only validated replies; source and policy are checked again even on a cache hit.
+        const value = await Promise.race([
+          runReportAutomation(
+            key,
+            controller.signal,
+            async () => {
+              await run();
+              if (!live() || !validated) throw new TranslationError('STALE');
+              return { reply: validated, fence: translationContextFence(accepted.context) };
+            },
+            retry,
+          ),
+          stopped,
+        ]);
+        if (!live()) return;
+        if (value.fence !== translationContextFence(accepted.context)) throw new TranslationError('STALE');
+        const after = await Promise.race([readSnapshot(controller.signal, true), stopped]);
+        if (!live()) return;
+        if (
+          !after.readiness.localReady ||
+          translationContextFence(after.context) !== translationContextFence(accepted.context)
+        )
+          throw new TranslationError('STALE');
+        if (!allowAutomationDisclosure(after.context.disclosure, 'translation'))
+          throw new ReportAutomationError('DISCLOSURE');
+        if (!live()) return;
+        setSnapshot(after);
+        setResult(value.reply);
+        setShowTranslation(true);
+      }
     } catch (error) {
-      if (generation.current === version && client.current()) {
-        setSnapshot(latest);
+      if (generation.current === version && current()) {
+        setSnapshot(latest ?? accepted);
         setResult(null);
-        setMessage(translationErrorMessage(error));
+        setMessage(reportAutomationMessage(error) ?? translationErrorMessage(error));
       }
     } finally {
       clearTimeout(timer);
@@ -202,24 +290,25 @@ function TranslationScope({
       }
       controller.abort();
     }
+    if (automate && latest && generation.current === version && authorized && current())
+      void operate('translate', latest);
   }
   useEffect(() => {
-    // Opening this source only reads bounded context/readiness GETs; translation is a click handler.
-    void operate('read');
+    // Only opened cards mount this scope. Saved Russian-language authorization permits one attempt.
+    const unsubscribePreferences = subscribeReportPreferences(() => {
+      if (!reportPreferencesCurrent(preferences, 'translation')) clear();
+    });
     const unsubscribe = subscribeScanSession(clear);
-    const focus = () => {
-      clear();
-      void operate('read');
-    };
-    window.addEventListener('focus', focus);
+    void operate('read', null, true);
+
     return () => {
       invalidate();
       unsubscribe();
-      window.removeEventListener('focus', focus);
+      unsubscribePreferences();
     };
     // The outer key includes the complete source, report and session snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client]);
+  }, [client, preferences]);
   const context = snapshot?.context;
   const ready = available && !pending && !!context?.enabled && snapshot?.readiness.localReady === true;
   return (
@@ -228,6 +317,12 @@ function TranslationScope({
       aria-busy={pending}
     >
       <p>Оригинал выше сохранён без изменений. Язык перевода: русский (ru).</p>
+      {!authorized ? (
+        <p>
+          Показан оригинал. Автоматический перевод на русский требует сохранённого разрешения в{' '}
+          <a href="/account">настройках аккаунта</a>.
+        </p>
+      ) : null}
       {!allowed ? (
         <p>
           Перевод недоступен: нет разрешённого текста источника (данные отсутствуют, скрыты или не включены).
@@ -275,19 +370,22 @@ function TranslationScope({
       ) : null}
       {context && !context.enabled ? <p>Перевод выключен сервером. Оригинал остаётся доступен.</p> : null}
       <p id={disclosureId}>
-        Нажимая «Перевести на русский», вы разрешаете один запрос: заголовок и описание только выбранной
-        оценки — указанным выше модели и провайдеру. Не весь отчёт и не история чата. Бесплатность и бюджет
-        указаны выше; платной замены и автоповтора нет. Условия проверяются заново перед отправкой.
+        Сохранённое разрешение аккаунта запускает один перевод при открытии: заголовок и описание только
+        выбранной оценки — указанным выше модели и провайдеру. Не весь отчёт и не история чата. Бесплатность и
+        бюджет указаны выше; платной замены и автоматического повтора после ошибки нет. «Повторить перевод»
+        разрешает один новый запрос с повторной проверкой источника и условий.
       </p>
-      <button
-        type="button"
-        className="scan-a1__link"
-        aria-describedby={`${disclosureId} ${disclosureId}-policy`}
-        disabled={!ready}
-        onClick={() => void operate('translate')}
-      >
-        Перевести на русский
-      </button>
+      {authorized && message && !result ? (
+        <button
+          type="button"
+          className="scan-a1__link"
+          aria-describedby={`${disclosureId} ${disclosureId}-policy`}
+          disabled={!ready}
+          onClick={() => void operate('translate', snapshot, false, true)}
+        >
+          Повторить перевод
+        </button>
+      ) : null}
       {pending ? (
         <>
           <p role="status">Проверяем условия или ожидаем полный проверенный перевод…</p>

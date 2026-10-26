@@ -21,7 +21,7 @@ import { OpenRouterProvider } from '../openrouter-provider.js';
 import type { BodySendGuard, GuardedTransport } from '../openrouter-transport.js';
 import { ReportReader } from '../report-context.js';
 import { policyFromEnvironment, type LlmPolicy } from '../policy.js';
-import { translationPolicy, type TranslationBinding, type TranslationSource } from '../translation-contract.js';
+import { translationDisclosure, translationPolicy, type TranslationBinding, type TranslationSource } from '../translation-contract.js';
 import { FixtureQuotaLedger, quotaPolicy } from './quota-fixtures.js';
 import { fixtureEnv, fakeKey } from './fixtures.js';
 
@@ -117,6 +117,18 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
     assert.doesNotMatch(JSON.stringify(initial), /Memory handling|An attacker|packageName|installedVersion/);
     assert.equal(sends, 0); assert.equal(factories, 0);
 
+    await t.test('account-preference context GET is passive: no quota/key metadata/provider construction or automatic dispatch', async () => {
+      const ledger = quotas.ledger, credential = runtime.credentialStatus;
+      quotas.ledger = () => assert.fail('passive context must not construct/read quota');
+      runtime.credentialStatus = () => assert.fail('passive context must not inspect credentials');
+      try {
+        assert.equal(translationDisclosure(policy).automaticDispatch, 'account-preference');
+        assert.deepEqual((await context()).disclosure, translationDisclosure(policy));
+        assert.deepEqual((await context()).disclosure, translationDisclosure(policy));
+        assert.equal(sends, 0); assert.equal(factories, 0);
+      } finally { quotas.ledger = ledger; runtime.credentialStatus = credential; }
+    });
+
     await t.test('ownership, exact DTO/query, consent and stale bindings refuse with zero factory/dispatch', async () => {
       assert.equal((await fetch(contextUrl())).status, 401);
       assert.equal((await get(contextUrl(), other.cookie)).status, 404);
@@ -138,7 +150,10 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
       assert.equal((await post(request(initial), cookie, path(), { origin: 'https://evil.invalid' })).status, 403);
       for (const alias of [path() + '/', path() + '?x=1', path() + '/extra']) assert.equal((await post(request(initial), cookie, alias)).status, 400);
       assert.equal((await post(request(initial), cookie, path(), { 'content-encoding': 'gzip' })).status, 400);
-      currentPolicy = null; assert.equal((await context()).enabled, false); assert.equal((await post(request(initial))).status, 503); currentPolicy = policy;
+      currentPolicy = null;
+      const disabled = await context();
+      assert.equal(disabled.enabled, false); assert.equal(disabled.disclosure, null); assert.equal(disabled.policyVersion, null);
+      assert.equal((await post(request(initial))).status, 503); currentPolicy = policy;
       assert.equal(sends, 0); assert.equal(factories, 0);
     });
 
@@ -187,7 +202,11 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
     });
 
     await t.test('invalid responses and receipts fail without retries or refunds after dispatch', async () => {
-      for (const invalid of ['english', 'url', 'identifier', 'extra', 'null', 'model', 'receipt']) {
+      for (const [invalid, phase, reason] of [
+        ['english', 'translation_title', 'not_russian'], ['url', 'translation_title', 'unsafe_text'],
+        ['identifier', 'translation_description', 'identifier_mismatch'], ['extra', 'content', 'invalid_shape'],
+        ['null', 'translation_description', 'null_mismatch'], ['model', 'model', 'mismatch'], ['receipt', 'accounting', 'observation_failed'],
+      ]) {
         bad = invalid; const before = sends;
         // Unknown/fault receipts retain liability and can lock this user's future admission.
         // Isolate those disposable quota fixtures; never erase/refund them to continue.
@@ -197,6 +216,8 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
         try {
           const response = await post(request(initial)); assert.equal(response.status, 502, invalid + ': ' + await response.clone().text());
           assert.equal(sends, before + 1); assert.doesNotMatch(await response.text(), /evil|Memory|private/);
+          assert.equal(response.headers.get('x-llm-failure-phase'), phase, invalid);
+          assert.equal(response.headers.get('x-llm-failure-reason'), reason, invalid);
           if (isolated) assert.ok(isolated.snapshot(owner.id, scan.id).scan.held.input > 0);
           else assert.equal(quota.snapshot(owner.id, scan.id).scan.held.input, 0);
         } finally { quotas.ledger = () => quota; isolated?.close(); }

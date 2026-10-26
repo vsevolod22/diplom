@@ -35,15 +35,16 @@ function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher) {
   return render(<ScanChatPanel status={status} transport={sourceTransport()} client={client} />);
 }
 async function open() {
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
-  await screen.findByLabelText('Вопрос чату');
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Обновить историю и условия чата' })).toBeEnabled(),
+  );
 }
 function prepare(question = 'Что проверить дальше?') {
   fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: question } });
 }
 const connection = () => screen.getByRole('status', { name: 'Состояние подключения чата' });
 
-it('announces manual connection, request wait and continuation; submitting twice dispatches once and requires a fresh send for the next turn', async () => {
+it('announces automatic GET connection, request wait and continuation; submitting twice dispatches once and requires a fresh send for the next turn', async () => {
   const api = chatApi();
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -69,8 +70,9 @@ it('announces manual connection, request wait and continuation; submitting twice
     return response;
   });
   mount(api, fetcher);
-  expect(connection()).toHaveTextContent('Чат не подключён');
-  expect(api.requests).toHaveLength(0);
+  expect(connection()).toHaveTextContent('Подключение: читаем');
+  expect(screen.getByLabelText('Вопрос чату')).toBeVisible();
+  expect(api.requests.every((request) => request.init.method === 'GET')).toBe(true);
   await open();
   expect(connection()).toHaveTextContent('доступность провайдера проверяется только при отправке');
   prepare();
@@ -146,7 +148,7 @@ it.each([
     expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
     expect(connection()).toHaveTextContent('Подключение не подтверждено');
     fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
-    await screen.findByLabelText('Вопрос чату');
+    await open();
     expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeEnabled();
     expect(vi.mocked(fetcher).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
@@ -163,13 +165,14 @@ it.each([401, 403])(
         : api.fetcher(path, init),
     );
     mount(api, fetcher);
-    fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(
       code === 401 ? 'Сессия изменилась или истекла' : 'Доступ к чату этого отчёта не подтверждён',
     );
     expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
-    expect(screen.queryByLabelText('Вопрос чату')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
   },
 );
@@ -203,7 +206,7 @@ it('shows duplicate-only delivery as recovery, not an answer; rereads history on
   fireEvent.focus(window);
   expect(api.requests).toHaveLength(reads);
   fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
-  await screen.findByLabelText('Вопрос чату');
+  await open();
   expect(api.requests.length).toBeGreaterThan(reads);
   expect(client.chat).toHaveBeenCalledTimes(1);
 });
@@ -453,7 +456,6 @@ it('keeps public readiness blockers visible even when the history store prevents
       client={createChatClient(scanSession(), fetcher)}
     />,
   );
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
   await screen.findByRole('alert');
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Хранилище истории недоступно',
@@ -567,9 +569,10 @@ it.each([401, 403, 404])(
         client={createChatClient(scanSession(), fetcher)}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
     await screen.findByRole('alert');
-    expect(screen.queryByLabelText('Вопрос чату')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     expect(vi.mocked(fetcher).mock.calls).toHaveLength(1);
     expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
   },
@@ -590,9 +593,8 @@ it('rejects readiness for a different report revision even when its local setup 
       client={createChatClient(scanSession(), fetcher)}
     />,
   );
-  fireEvent.click(screen.getByRole('button', { name: 'Открыть чат' }));
   await screen.findByRole('alert');
-  expect(screen.queryByLabelText('Вопрос чату')).toBeNull();
+  expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Готовность генерации неизвестна',
   );

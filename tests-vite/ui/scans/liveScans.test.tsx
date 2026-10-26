@@ -671,7 +671,7 @@ describe('cookie-session live scans', () => {
       return reads === 1 ? json({ scanId: id, state: 'running', checks: ['sbom'], perCheck: { sbom: null }, result: null }) : { ok: false, status: 401 };
     }));
     mount(`/scans/${id}`);
-    await screen.findByText('Прогресс: неизвестен');
+    await screen.findByText(/^Оценка прогресса: ≈\d+%/);
     await screen.findByText(/Не удалось получить данные скана/, {}, { timeout: 3000 });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 2100)); });
     expect(reads).toBe(2);
@@ -706,7 +706,7 @@ describe('cookie-session live scans', () => {
     mount(`/scans/${id}`);
     await waitFor(() => expect(emit).toBeTypeOf('function'));
     expect(screen.getByText('Этап: не предоставлен')).toBeTruthy();
-    expect(screen.getByText('Прогресс: неизвестен')).toBeTruthy();
+    expect(screen.getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
     const pending = screen.getByRole('list', { name: 'Проверки без подтверждённого результата' });
     expect(pending.textContent).not.toContain('Пропущено');
     expect(pending.textContent).toContain('внутренний этап не предоставлен сервером');
@@ -716,7 +716,7 @@ describe('cookie-session live scans', () => {
     await waitFor(() => expect(finish).toBeTypeOf('function'), { timeout: 2000 });
     act(() => { for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
-    expect(reads).toBe(2); expect(screen.getByText('Прогресс: неизвестен')).toBeTruthy();
+    expect(reads).toBe(2); expect(screen.getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
     act(() => emit('error'));
     expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('переподключение');
     act(() => emit('open'));

@@ -1,8 +1,9 @@
 import '@testing-library/jest-dom/vitest';
 import { readFileSync } from 'node:fs';
-import type { ReactNode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ScanProgressPanel } from '@/features/scans/ScanProgressPanel';
@@ -82,6 +83,13 @@ function durableSnapshot(
 const checked = { check: 'secret', coverage: 'image', outcome: 'checked' } as const;
 const group = (scanId = id) => screen.getByRole('group', { name: `Ход сканирования ${scanId}` });
 const bar = (scanId = id) => screen.getByRole('progressbar', { name: `Прогресс сканирования ${scanId}` });
+const percentValue = (scanId = id) => Number(bar(scanId).getAttribute('value'));
+function expectEstimate(scanId = id) {
+  expect(bar(scanId)).toHaveAttribute('value');
+  expect(percentValue(scanId)).toBeGreaterThanOrEqual(0);
+  expect(percentValue(scanId)).toBeLessThan(100);
+  expect(bar(scanId)).toHaveAttribute('aria-valuetext', expect.stringContaining('Оценка прогресса: ≈'));
+}
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -99,17 +107,16 @@ afterEach(() => {
 });
 
 it.each(['queued', 'running', 'cancelling'] as const)(
-  'shows indeterminate %s without inventing a check stage, percentage or ETA',
+  'shows approximate %s progress without inventing a check stage or ETA',
   (state) => {
     render(<ScanProgressPanel scan={snapshot({ state })} />);
-    expect(bar()).not.toHaveAttribute('value');
-    expect(bar()).not.toHaveAttribute('aria-valuenow');
-    expect(bar()).toHaveAttribute('aria-valuetext', expect.stringContaining('Процент выполнения неизвестен'));
+    expectEstimate();
+    expect(percentValue()).toBe(0);
     expect(group()).toHaveTextContent('Этап сканирования: не предоставлен сервером');
     expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
     expect(group()).toHaveTextContent('Без подтверждённого итога: 3');
     expect(group()).toHaveTextContent('Точное оставшееся время неизвестно');
-    expect(group().textContent).not.toMatch(/\d+%|секунд|минут/);
+    expect(group().textContent).not.toMatch(/секунд|минут/);
   },
 );
 
@@ -119,18 +126,20 @@ it('renders actual decoded active durable outcomes instead of the unpublished pe
   render(<ScanProgressPanel scan={scan} />);
   expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
   expect(group()).toHaveTextContent('Без подтверждённого итога: 2.');
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
+  expect(percentValue()).not.toBe(50);
   expect(group()).toHaveTextContent('Точное оставшееся время неизвестно.');
   expect(group()).toHaveTextContent('Этап сканирования: не предоставлен сервером');
 });
 
 it.each(['failed', 'unsupported', 'skipped', 'not_authorized'] as const)(
-  'durable %s counts as resolved, not checked, with no percentage conversion',
+  'durable %s counts as resolved, not checked or equal-share completion',
   (outcome) => {
     render(<ScanProgressPanel scan={durableSnapshot({ secret: outcome })} />);
     expect(group()).toHaveTextContent('Получены итоги: 1 из 4. Успешно выполнено: 0.');
     expect(group()).toHaveTextContent('Без подтверждённого итога: 3.');
-    expect(bar()).not.toHaveAttribute('value');
+    expectEstimate();
+    expect(percentValue()).toBe(0);
   },
 );
 
@@ -141,7 +150,8 @@ it('prefers progress requested checks and counters over legacy perCheck display 
   );
   expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
   expect(group()).toHaveTextContent('Без подтверждённого итога: 2.');
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
+  expect(percentValue()).not.toBe(75);
 });
 
 it.each(['partial', 'failed', 'cancelled'] as const)(
@@ -173,8 +183,8 @@ it('counts saved outcomes separately from checked and ignores unrequested checks
   expect(group()).toHaveTextContent('Этап сканирования: sbom');
   expect(group()).toHaveTextContent('Получены итоги: 2 из 3. Успешно выполнено: 1');
   expect(group()).toHaveTextContent('Без подтверждённого итога: 1');
-  expect(bar()).not.toHaveAttribute('value');
-  expect(group().textContent).not.toContain('%');
+  expectEstimate();
+  expect(percentValue()).not.toBe(66);
 });
 
 it.each(['failed', 'unsupported', 'skipped', 'not_authorized'] as const)(
@@ -187,7 +197,8 @@ it.each(['failed', 'unsupported', 'skipped', 'not_authorized'] as const)(
     );
     expect(group()).toHaveTextContent('Получены итоги: 1 из 1. Успешно выполнено: 0');
     expect(group()).toHaveTextContent('Ожидаем итоговый статус скана');
-    expect(bar()).not.toHaveAttribute('value');
+    expectEstimate();
+    expect(percentValue()).toBe(0);
   },
 );
 
@@ -201,7 +212,7 @@ it.each([
   );
   expect(group()).toHaveTextContent('Счётчики проверок не предоставлены сервером');
   expect(group().textContent).not.toMatch(/из 0|выполнено: 0|итога: 0/);
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
 });
 
 it.each([0, 12.5, 99])(
@@ -216,12 +227,12 @@ it.each([0, 12.5, 99])(
 
 it.each([NaN, Infinity, -1, 101])('does not clamp invalid percent %s into a misleading value', (percent) => {
   render(<ScanProgressPanel scan={snapshot({ percent })} />);
-  expect(bar()).not.toHaveAttribute('value');
-  expect(group()).toHaveTextContent('Прогресс: неизвестен');
+  expectEstimate();
+  expect(percentValue()).toBe(0);
 });
 
 it.each(['completed', 'partial', 'failed', 'cancelled'] as const)(
-  'terminal %s removes activity, preserves missing outcomes and never manufactures 100%%',
+  'terminal %s removes activity and preserves missing outcomes independently of completion',
   (state) => {
     render(
       <ScanProgressPanel
@@ -232,11 +243,12 @@ it.each(['completed', 'partial', 'failed', 'cancelled'] as const)(
     expect(group()).toHaveTextContent('Получены итоги: 1 из 3. Успешно выполнено: 1');
     expect(group()).toHaveTextContent('Без сохранённого итога: 2');
     expect(group()).toHaveTextContent('Скан больше не выполняется');
-    expect(group().textContent).not.toContain('100%');
+    if (state === 'completed') expect(group()).toHaveTextContent('100% — завершение подтверждено сервером');
+    else expect(group().textContent).not.toContain('100%');
   },
 );
 
-it('drops a previous explicit percent when the next snapshot says unknown, without enforcing monotonic counters', () => {
+it('resets the estimate when a new running snapshot loses checked credit', () => {
   const view = render(
     <ScanProgressPanel
       scan={snapshot({ percent: 75, perCheck: { secret: checked, sbom: null, vuln: null } })}
@@ -244,11 +256,12 @@ it('drops a previous explicit percent when the next snapshot says unknown, witho
   );
   expect(bar()).toHaveAttribute('value', '75');
   view.rerender(<ScanProgressPanel scan={snapshot()} />);
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
+  expect(percentValue()).toBe(0);
   expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
 });
 
-it('has stable accessible descriptions, no focus/timer changes and no cross-scan accumulated progress', async () => {
+it('advances without moving focus or resetting on polls, and isolates scans with timer cleanup', async () => {
   vi.useFakeTimers();
   const content = (scan: ScanStatus) => (
     <>
@@ -259,20 +272,32 @@ it('has stable accessible descriptions, no focus/timer changes and no cross-scan
   const view = render(content(snapshot({ stage: 'secret' })));
   const button = screen.getByRole('button');
   button.focus();
+  // jsdom focus schedules its own task; isolate the panel's interval below.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
   const descriptionId = bar().getAttribute('aria-describedby')!;
   expect(document.getElementById(descriptionId)).toHaveTextContent('Точное оставшееся время неизвестно');
-  const original = group().textContent;
+  const original = percentValue();
+  expect(vi.getTimerCount()).toBe(1);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120000);
   });
-  expect(group().textContent).toBe(original);
+  expect(percentValue()).toBeGreaterThan(original);
+  const advanced = percentValue();
   for (let index = 0; index < 20; index++) view.rerender(content(snapshot({ stage: 'secret' })));
+  expect(percentValue()).toBe(advanced);
+  expect(vi.getTimerCount()).toBe(1);
   expect(bar().getAttribute('aria-describedby')).toBe(descriptionId);
   expect(document.activeElement).toBe(button);
   view.rerender(content(snapshot({ scanId: otherId, checks: undefined, perCheck: undefined })));
   expect(screen.queryByRole('group', { name: `Ход сканирования ${id}` })).toBeNull();
   expect(group(otherId)).toHaveTextContent('Счётчики проверок не предоставлены сервером');
-  expect(bar(otherId)).not.toHaveAttribute('value');
+  expectEstimate(otherId);
+  expect(percentValue(otherId)).toBe(0);
+  expect(vi.getTimerCount()).toBe(1);
+  view.unmount();
+  expect(vi.getTimerCount()).toBe(0);
   expect(fetch).not.toHaveBeenCalled();
 });
 
@@ -292,7 +317,8 @@ it('keeps native parser percent null and refuses an unreviewed progress shape', 
     parseCurrentStatus({ scanId: id, state: 'running', result: null, progress: { done: 1 } }),
   ).toThrow();
   render(<ScanProgressPanel scan={parsed} />);
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
+  expect(parsed.percent).toBeNull();
   expect(group()).not.toHaveTextContent('invented-stage');
 });
 
@@ -300,9 +326,167 @@ it('isolates styles from scroll progress and disables only decoration for reduce
   const css = readFileSync('src/features/scans/ScanProgressPanel.css', 'utf8');
   expect(css).not.toContain('.scan-a1__progress');
   expect(css).toMatch(/prefers-reduced-motion:\s*reduce/);
-  expect(css).toContain('--scan-progress-animation: none');
+  expect(css).toContain('--scan-progress-transition: none');
+  expect(css).toContain('transition: var(--scan-progress-transition)');
+  expect(css).not.toContain('infinite');
   expect(css).not.toMatch(/display:\s*none/);
   expect(css).toContain('forced-colors: active');
+});
+
+it.each(['completed', 'partial', 'failed', 'cancelled', 'cancelling'] as const)(
+  'stops its timer at %s without claiming checked-safe or unconfirmed completion',
+  async (state) => {
+    vi.useFakeTimers();
+    const view = render(<ScanProgressPanel scan={snapshot()} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    const before = percentValue();
+    expect(before).toBeGreaterThan(0);
+    view.rerender(<ScanProgressPanel scan={snapshot({ state, percent: 100 })} />);
+    expect(vi.getTimerCount()).toBe(0);
+    if (state === 'cancelling') {
+      expect(percentValue()).toBe(before);
+      expect(group()).toHaveTextContent('Оценка приостановлена');
+    } else expect(screen.queryByRole('progressbar')).toBeNull();
+    if (state === 'completed') expect(group()).toHaveTextContent('100% — завершение подтверждено');
+    else expect(group().textContent).not.toContain('100%');
+    expect(group()).toHaveTextContent('Успешно выполнено: 0');
+    const stopped = group().textContent;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600_000);
+    });
+    expect(group().textContent).toBe(stopped);
+  },
+);
+
+it('starts runtime on running, not during a long queue, and cleans StrictMode timers', async () => {
+  vi.useFakeTimers();
+  const content = (state: ScanStatus['state']) => (
+    <StrictMode>
+      <ScanProgressPanel scan={snapshot({ state })} />
+    </StrictMode>
+  );
+  const view = render(content('queued'));
+  expect(vi.getTimerCount()).toBe(0);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(600_000);
+  });
+  expect(percentValue()).toBe(0);
+  view.rerender(content('running'));
+  expect(percentValue()).toBe(0);
+  expect(vi.getTimerCount()).toBe(1);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(percentValue()).toBeGreaterThan(0);
+  view.unmount();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('resets observation on session/subject changes and remount, not context object churn', async () => {
+  vi.useFakeTimers();
+  const transport = transportFor();
+  const content = (currentScope: LiveContext['scope']) => (
+    <LiveScanContext.Provider value={{ transport, scope: currentScope }}>
+      <ScanProgressPanel scan={snapshot()} />
+    </LiveScanContext.Provider>
+  );
+  const view = render(content(scope));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_000);
+  });
+  const before = percentValue();
+  expect(before).toBeGreaterThan(0);
+  view.rerender(content([...scope]));
+  expect(percentValue()).toBe(before);
+  view.rerender(content(['live-scans', 2, 'alice']));
+  expect(percentValue()).toBe(0);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  view.rerender(content(['live-scans', 2, 'bob']));
+  expect(percentValue()).toBe(0);
+  expect(vi.getTimerCount()).toBe(1);
+  view.unmount();
+  expect(vi.getTimerCount()).toBe(0);
+  render(content(scope));
+  expect(percentValue()).toBe(0);
+  expect(group()).toHaveTextContent('после ухода или перезагрузки начинается заново');
+});
+
+it('resets a running -> running durable retry without retaining old elapsed credit or claiming 100%', async () => {
+  vi.useFakeTimers();
+  const view = render(<ScanProgressPanel scan={durableSnapshot({ secret: 'checked', config: 'failed' })} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_000);
+  });
+  expect(percentValue()).toBeGreaterThan(0);
+  view.rerender(<ScanProgressPanel scan={durableSnapshot()} />);
+  expect(percentValue()).toBe(0);
+  expect(group()).toHaveTextContent('Получены итоги: 0 из 4. Успешно выполнено: 0.');
+  expect(vi.getTimerCount()).toBe(1);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(percentValue()).toBeGreaterThan(0);
+  expect(percentValue()).toBeLessThan(25);
+  expect(group().textContent).not.toContain('100%');
+  view.rerender(<ScanProgressPanel scan={durableSnapshot({}, 'cancelled')} />);
+  expect(group().textContent).not.toContain('100%');
+  expect(group()).toHaveTextContent('Без сохранённого итога: 4');
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps compact heuristic/retry uncertainty readable without interactive descendants in a card link', () => {
+  render(
+    <MemoryRouter>
+      <Link to={`/scans/${id}`}>
+        <ScanProgressPanel compact scan={snapshot()} />
+      </Link>
+    </MemoryRouter>,
+  );
+  expect(group()).toHaveClass('scan-progress-panel--compact');
+  expect(group()).toHaveTextContent('Эвристика наблюдаемого скана, не измерение текущей попытки');
+  expect(group()).toHaveTextContent('Внутренний повтор без изменения итогов не распознаётся');
+  expect(group()).toHaveTextContent('Без новых данных оценка тоже может расти');
+  expect(
+    screen
+      .getByRole('link')
+      .querySelector('a, button, input, select, textarea, details, summary, [tabindex]'),
+  ).toBeNull();
+});
+
+it('keeps the full panel disclosure collapsed and toggleable with the same explanation', async () => {
+  const user = userEvent.setup();
+  render(<ScanProgressPanel scan={snapshot()} />);
+  const summary = within(group()).getByText('Как считается оценка');
+  const explanation = summary.closest('details');
+  expect(explanation).not.toHaveAttribute('open');
+  expect(explanation).toHaveTextContent('Внутренний повтор без изменения итогов не распознаётся');
+  expect(explanation).toHaveTextContent('Без новых данных оценка тоже может расти');
+  expect(explanation).toHaveTextContent('При потере сохранённых итогов');
+  await user.click(summary);
+  expect(explanation).toHaveAttribute('open');
+  await user.click(summary);
+  expect(explanation).not.toHaveAttribute('open');
+});
+
+it('retains numerical progress under reduced motion without fake checks or ETA', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn(() => ({ matches: true })),
+  );
+  render(<ScanProgressPanel scan={snapshot({ checks: undefined, perCheck: undefined })} />);
+  expectEstimate();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(percentValue()).toBeGreaterThan(0);
+  expect(group()).toHaveTextContent('Счётчики проверок не предоставлены сервером');
+  expect(group()).toHaveTextContent('Это не доля успешных проверок и не гарантия безопасности');
+  expect(group()).toHaveTextContent('Точное оставшееся время неизвестно');
 });
 
 function transportFor(initial = snapshot()): ScanTransport {
@@ -367,7 +551,7 @@ it('uses the same presentation on list/detail and performs no N+1 detail GETs fo
   expect(transport.cancel).not.toHaveBeenCalled();
 });
 
-it('native list metadata remains indeterminate/unknown, never borrowed from detail cache', async () => {
+it('native list uses a generic local estimate, never borrowed from detail cache', async () => {
   const transport = transportFor(snapshot({ checks: undefined, perCheck: undefined }));
   const view = mount(transport, '/scans');
   act(() =>
@@ -378,7 +562,9 @@ it('native list metadata remains indeterminate/unknown, never borrowed from deta
   );
   await screen.findByRole('progressbar');
   expect(group()).toHaveTextContent('Счётчики проверок не предоставлены сервером');
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
+  expect(percentValue()).toBeLessThan(90);
+  expect(group()).toHaveTextContent('Набор проверок неизвестен; используется общая модель');
   expect(transport.get).not.toHaveBeenCalled();
 });
 
@@ -435,7 +621,7 @@ it('polls durable checkpoints with connected SSE and fences a late active GET be
   });
   expect(transport.get).toHaveBeenCalledTimes(3);
   expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
   expect(transport.subscribeEvents).toHaveBeenCalledTimes(1);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(2100);
@@ -525,7 +711,7 @@ it('cancel invalidates an overlapping connected-SSE poll and a late running resp
   expect(transport.get).toHaveBeenCalledTimes(reads);
 });
 
-it('SSE/reconnect hints leave the bar unchanged until GET resolves terminal; terminal stops activity and closes stream', async () => {
+it('SSE/reconnect hints cannot confirm completion; terminal stops activity and closes stream', async () => {
   let hint!: () => void, opened!: () => void, disconnected!: () => void;
   let finish!: (value: ScanStatus) => void;
   const close = vi.fn();
@@ -562,7 +748,7 @@ it('SSE/reconnect hints leave the bar unchanged until GET resolves terminal; ter
     opened();
     hint();
   });
-  expect(bar()).not.toHaveAttribute('value');
+  expectEstimate();
   expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
   expect(close).not.toHaveBeenCalled();
   await act(async () => {

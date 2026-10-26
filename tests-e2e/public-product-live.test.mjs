@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 
 import test from 'node:test';
 import { ORIGIN, SCANS, CHECKS, TARGETS, parseMode, fixedUrl, allowedGet, validIntent, eligibilityReady,
-  EligibilityFence, awaitEligibility, awaitStableUiEligibility, uiLaunchReady, PhaseEvidence, progressExpectation, progressSampleMatches, consumePermit, partition, cancelVerdict, preservationVerdict, keyBoundaryAllowed, checkPage, readAllPages, loadContracts, safeMeta, ResultBook, GLOBAL_MS, WORKER_MS,
+  EligibilityFence, awaitEligibility, awaitStableUiEligibility, uiLaunchReady, PhaseEvidence, progressExpectation, progressDomSample, progressSampleMatches, consumePermit, partition, cancelVerdict, preservationVerdict, keyBoundaryAllowed, checkPage, readAllPages, loadContracts, safeMeta, ResultBook, GLOBAL_MS, WORKER_MS,
     BROWSER_ARGS, BROWSER_READ_STAGES, BROWSER_READ_CAUSES, BrowserReadError, browserReadFailureMeta, classifyBrowserReadFailure, trackBrowserReadPage, readBrowserJson, settleReportNavigation, settleAuthNavigation, safeMutationRequest, allowedApiGet, safeReadRequest, runtimeProbeRead, assertRuntimeOffReply, assertDeniedReply, assertChatUsage, renderedRowParts, paginationVerdict, evidenceDocuments, writeEvidence,
     SMOKE_MS, CANCEL_MS, nativePlan, scanLaunchAllowed, smokeMutationAllowed, cancelMutationAllowed, completedChecks, durableProgress, checkpointChecks, cancelObservation, assertCancelOutcomePreservation, resultExitCode, assertAuthUser, failureMeta } from './public-product-live.mjs';
 
@@ -224,6 +224,21 @@ test('GET allowlist contains actual report/LLM routes and known scan IDs only', 
   assert.ok(allowedGet('/api/v1/auth/me', [])); assert.ok(allowedGet(SCANS, []));
   for (const path of [`${SCANS}/${id}/llm/chat`, `${SCANS}/${id}/cancel`, `${SCANS}/${id}/runtime`, `${SCANS}/images`, '/api/v1/admin', `${SCANS}/${id}/llm/history/decision`]) assert.equal(allowedGet(path, [id]), false);
   assert.equal(allowedGet(`${SCANS}/${id}`, []), false);
+});
+
+test('passive GET summary is one exact known-scan read, not broad LLM/method/query permission', () => {
+  const url = `${ORIGIN}${SCANS}/${id}/llm/summary`;
+  assert.equal(allowedApiGet(url, [id]), true);
+  assert.equal(allowedGet(`${SCANS}/${id}/llm/summary`, [id]), true);
+  assert.equal(allowedApiGet(url, []), false);
+  for (const method of ['HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) assert.equal(allowedApiGet(url, [id], method), false);
+  for (const suffix of ['?', '?policyVersion=private', '?cached=true', '?x=1&x=2', '/', '/context', '/private', '-extra'])
+    assert.equal(allowedApiGet(url + suffix, [id]), false);
+  for (const other of [url.replace(':8081', ':8080'), url.replace('127.0.0.1', 'localhost'), url.replace(id, '00000000-0000-4000-8000-000000000000'),
+    url.replace('/summary', '/translation'), url.replace('/summary', '/chat'), `${ORIGIN}${SCANS}/${id}/llm/anything`]) assert.equal(allowedApiGet(other, [id]), false);
+  // An owner cache miss is NOT a foreign-owner/nonexistent denial.
+  assert.throws(() => assertDeniedReply({ status: 404, value: { errorCode: 'LLM_SUMMARY_MISSING' } }, 404));
+  assert.doesNotThrow(() => assertDeniedReply({ status: 404, value: { errorCode: 'SCAN_NOT_FOUND' } }, 404));
 });
 
 test('two fixed image targets; exact image-only canonical four-check intent', () => {
@@ -506,12 +521,14 @@ test('progress acceptance requires all actual DOM facts; unknown or partial samp
   assert.deepEqual(safeMeta({ progressObserved: true, progressIndeterminate: true, progressActive: true, percent: 'PRIVATE_MARKER', eta: 'PRIVATE_MARKER' }), { progressObserved: true, progressIndeterminate: true, progressActive: true });
 });
 
-test('product chat opening matches final readonly UI copy while readiness metadata remains independently strict', () => {
+test('product chat composer is auto-open in current JSX while readiness metadata remains independently strict', () => {
   const source = readFileSync(new URL('./public-product-live.mjs', import.meta.url), 'utf8');
   const ui = readFileSync(new URL('../src/features/scans/ScanChatPanel.tsx', import.meta.url), 'utf8');
   const openChat = source.slice(source.indexOf('      const openChat = async'), source.indexOf('      const readChat = async'));
-  assert.ok(ui.includes("'Открыть чат'")); assert.ok(ui.includes('Генерация не проверена.'));
-  assert.ok(openChat.includes("name: 'Открыть чат', exact: true"));
+  assert.equal(ui.includes("'Открыть чат'"), false); assert.ok(ui.includes('Генерация не проверена.'));
+  assert.ok(openChat.includes("getByRole('textbox', { name: 'Вопрос чату', exact: true })"));
+  assert.ok(openChat.includes("getByRole('button', { name: 'Открыть чат', exact: true })).toHaveCount(0)"));
+  assert.equal(openChat.includes('.click()'), false);
   assert.ok(openChat.includes("toContainText('Генерация не проверена.')"));
   assert.equal(openChat.includes("toContainText('generationVerified: false')"), false);
   for (const forbidden of ['permit(', 'http(', 'checkbox', 'consent.check', 'force:']) assert.equal(openChat.includes(forbidden), false);
@@ -647,11 +664,11 @@ test('browser read metadata is closed; accepted scan UUID survives a later block
   assert.equal(JSON.stringify(book.evidence()).includes('PRIVATE'), false);
 });
 
-test('actual progress renderer uses durable running outcomes with unpublished perCheck; percent/ETA remain unknown', () => {
+test('actual progress JSX uses durable outcomes plus a bounded local estimate, never a fabricated server percent/ETA', () => {
   const require = createRequire(new URL('../server/api/package.json', import.meta.url));
   const ts = require('typescript');
-  // Execute the real TSX and label module in memory. Only the stylesheet import
-  // is inert in server rendering; no browser, network, app mutation or saved state.
+  // Execute real TSX, estimate and labels in memory. Only CSS and the external
+  // live-session hook boundary are inert; no browser/network/storage is initialized.
   const compile = (relative, imports = {}) => {
     const text = readFileSync(new URL(relative, import.meta.url), 'utf8');
     const js = ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -660,7 +677,9 @@ test('actual progress renderer uses durable running outcomes with unpublished pe
     return module.exports;
   };
   const labels = compile('../src/features/scans/scanStateLabels.ts');
-  const { ScanProgressPanel } = compile('../src/features/scans/ScanProgressPanel.tsx', { './ScanProgressPanel.css': {}, './scanStateLabels': labels });
+  const estimate = compile('../src/features/scans/scanProgressEstimate.ts');
+  const { ScanProgressPanel } = compile('../src/features/scans/ScanProgressPanel.tsx', { './ScanProgressPanel.css': {}, './scanStateLabels': labels,
+    './scanProgressEstimate': estimate, './liveScanContext': { useLiveScanSession: () => null } });
   const { createElement } = require('react'); const { renderToStaticMarkup } = require('react-dom/server');
   const scan = { scanId: id, checks: [...CHECKS], state: 'running', percent: null,
     perCheck: Object.fromEntries(CHECKS.map(check => [check, null])), progress: progressOf({ secret: 'checked', sbom: 'failed' }) };
@@ -668,7 +687,16 @@ test('actual progress renderer uses durable running outcomes with unpublished pe
   assert.ok(html.includes('Получены итоги: 2 из 4. Успешно выполнено: 1.'), 'ACTIVE_DURABLE_COUNTS_UI_CONTRACT');
   assert.ok(html.includes('Без подтверждённого итога: 2.'), 'ACTIVE_DURABLE_REMAINING_UI_CONTRACT');
   assert.ok(html.includes('Точное оставшееся время неизвестно.'), 'UNKNOWN_ETA_UI_CONTRACT');
-  assert.ok(html.includes('<progress') && !/<progress[^>]*\svalue=/.test(html), 'UNKNOWN_PERCENT_UI_CONTRACT');
+  const percent = Math.floor(estimate.estimateScanProgress(scan, 0).percent);
+  assert.ok(percent >= 0 && percent < 100);
+  assert.match(html, new RegExp(`<progress[^>]*value="${percent}"`));
+  assert.ok(html.includes(`Оценка прогресса: ≈${percent}%`), 'EXPLICIT_LOCAL_ESTIMATE_UI_CONTRACT');
+  assert.ok(html.includes('Эвристика наблюдаемого скана, не измерение текущей попытки.'));
+  const attribute = (tag, name) => tag.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? null;
+  const tag = html.match(/<progress[^>]*>/)?.[0];
+  const element = { textContent: html.replace(/<[^>]*>/g, ''), getAttribute: name => name === 'data-state' ? scan.state : null,
+    querySelector: () => tag ? { getAttribute: name => attribute(tag, name) } : null };
+  assert.equal(progressSampleMatches(progressDomSample(element, { expected: progressExpectation(scan), state: scan.state })), true);
   const page = readFileSync(new URL('../src/pages/scans/ScanDetailPage.tsx', import.meta.url), 'utf8');
   assert.equal(/connectedStream\s*!==\s*streamKey\s*\?\s*2000/.test(page), false, 'DURABLE_PROGRESS_POLLING_MUST_NOT_DEPEND_ON_SSE');
 });
@@ -678,12 +706,29 @@ test('progress native plan observes active, cancelled, reload and fresh-login UI
   const observe = source.slice(source.indexOf('  const observeProgress ='), source.indexOf('  const statusMeta ='));
   for (const forbidden of ['http(page, SCANS,', 'submit.click', 'cancel', 'llm', 'screenshot', 'storageState']) assert.equal(observe.includes(forbidden), false, forbidden);
   assert.ok(observe.includes('isDeepStrictEqual(before, after)'));
-  assert.ok(observe.includes("!progress.hasAttribute('value')"));
+  assert.ok(observe.includes('group.evaluate(progressDomSample,'));
+  assert.equal(observe.includes("!progress.hasAttribute('value')"), false);
   assert.ok(source.includes('await observeProgress(own.page, id, true)'));
   assert.ok(source.includes('await observeProgress(own.page, after.scanId)'));
   assert.ok((source.match(/await observeProgress\(own.page, cancelled.after.scanId\)/g) ?? []).length >= 2);
   const component = readFileSync(new URL('../src/features/scans/ScanProgressPanel.tsx', import.meta.url), 'utf8');
-  for (const contract of ['Ход сканирования ${scan.scanId}', 'data-state={scan.state}', 'Процент выполнения неизвестен.', 'Получены итоги:', 'Счётчики проверок не предоставлены сервером.', 'Точное оставшееся время неизвестно.', 'Отсутствующие итоги не считаются успешными проверками.']) assert.ok(component.includes(contract), contract);
+  for (const contract of ['Ход сканирования ${scan.scanId}', 'data-state={scan.state}', 'Оценка прогресса: ≈${percent}%', 'Получены итоги:', 'Счётчики проверок не предоставлены сервером.', 'Точное оставшееся время неизвестно.', 'Отсутствующие итоги не считаются успешными проверками.']) assert.ok(component.includes(contract), contract);
+});
+
+test('progress DOM observation rejects false completion, missing estimate labels/counters and dishonest ETA copy', () => {
+  const expected = progressExpectation({ scanId: id, checks: CHECKS, state: 'running', progress: progressOf({ secret: 'checked' }) });
+  const text = 'Оценка прогресса: ≈12%. Получены итоги: 1 из 4. Успешно выполнено: 1. Без подтверждённого итога: 3. Точное оставшееся время неизвестно.';
+  const element = (value = '12', body = text, state = 'running') => ({ textContent: body, getAttribute: () => state,
+    querySelector: () => ({ getAttribute: key => key === 'max' ? '100' : value }) });
+  assert.equal(progressSampleMatches(progressDomSample(element(), { expected, state: 'running' })), true);
+  for (const bad of [element('100'), element('-1'), element(null), element('NaN'), element('12', text.replace('≈12%', '12%')),
+    element('12', text.replace('Успешно выполнено: 1', 'Успешно выполнено: 4')), element('12', text.replace('Без подтверждённого итога: 3', 'Без подтверждённого итога: 0')),
+    element('12', text.replace('Точное оставшееся время неизвестно.', 'Осталось 10 секунд.')), element('12', text, 'completed')])
+    assert.equal(progressSampleMatches(progressDomSample(bad, { expected, state: 'running' })), false);
+  assert.equal(progressSampleMatches(progressDomSample(element('12'), { expected: { ...expected, active: false }, state: 'completed' })), false);
+  const done = { textContent: 'Прогресс: 100% — завершение подтверждено сервером. Получены итоги: 4 из 4. Успешно выполнено: 4. Без сохранённого итога: 0. Скан больше не выполняется. Отсутствующие итоги не считаются успешными проверками.',
+    getAttribute: () => 'completed', querySelector: () => null };
+  assert.equal(progressSampleMatches(progressDomSample(done, { expected: { active: false, hasCheckSnapshot: true, resolved: 4, total: 4, checked: 4, remaining: 0 }, state: 'completed' })), true);
 });
 
 test('mutation permits are one-shot, exact-path, exact-body and POST-only', () => {

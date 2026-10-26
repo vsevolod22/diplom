@@ -1,6 +1,5 @@
 .scan-progress-panel {
-  --scan-progress-animation: scan-progress-activity 1.2s linear infinite;
-  --scan-progress-pattern: repeating-linear-gradient(110deg, #211f34 0 12px, #788c46 12px 24px);
+  --scan-progress-transition: width 1s linear;
   min-width: 0;
   max-width: 100%;
   display: grid;
@@ -34,27 +33,11 @@
 }
 .scan-progress-panel__bar::-webkit-progress-value {
   background: var(--a1-accent, #d1ff5e);
+  transition: var(--scan-progress-transition);
 }
 .scan-progress-panel__bar::-moz-progress-bar {
   background: var(--a1-accent, #d1ff5e);
-}
-.scan-progress-panel__bar:indeterminate {
-  background: var(--scan-progress-pattern);
-  background-size: 48px 100%;
-  animation: var(--scan-progress-animation);
-}
-.scan-progress-panel__bar:indeterminate::-webkit-progress-bar {
-  background: var(--scan-progress-pattern);
-  background-size: 48px 100%;
-  animation: var(--scan-progress-animation);
-}
-.scan-progress-panel__bar:indeterminate::-moz-progress-bar {
-  background: var(--scan-progress-pattern);
-  background-size: 48px 100%;
-  animation: var(--scan-progress-animation);
-}
-.scan-progress-panel__bar:indeterminate::-webkit-progress-value {
-  background: transparent;
+  transition: var(--scan-progress-transition);
 }
 .scan-progress-panel__description {
   display: grid;
@@ -65,14 +48,10 @@
   margin-top: 8px;
   gap: 6px;
 }
-@keyframes scan-progress-activity {
-  to {
-    background-position: 48px 0;
-  }
-}
+
 @media (prefers-reduced-motion: reduce) {
   .scan-progress-panel {
-    --scan-progress-animation: none;
+    --scan-progress-transition: none;
   }
 }
 @media (forced-colors: active) {

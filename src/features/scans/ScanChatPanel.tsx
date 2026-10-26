@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
+import { subscribeReportPreferences, useReportPreferences } from '@/shared/api/preferences/reportPreferences';
+import { reportPreferencesCurrent } from '@/shared/api/scans/reportAutomation';
 import {
   ChatError,
   chatErrorMessage,
@@ -117,8 +119,15 @@ const policyFence = (v: ChatContext) =>
   });
 export function ScanChatPanel(props: Props) {
   const session = useSyncExternalStore(subscribeScanSession, sessionKey, sessionKey);
-  // A→B→A and same-owner reauthentication create new local state, not reusable old requests/consent.
-  return <ChatScope key={`${session}:${JSON.stringify(props.status)}`} {...props} />;
+  const preferences = useReportPreferences();
+  // Session, report and preference changes fence drafts and pending explicit submissions.
+  return (
+    <ChatScope
+      key={JSON.stringify([session, props.status, preferences])}
+      {...props}
+      preferences={preferences}
+    />
+  );
 }
 function SourceList({
   sources,
@@ -166,9 +175,15 @@ function SourceList({
     </>
   );
 }
-function ChatScope({ status, transport, client: providedClient }: Props) {
+function ChatScope({
+  status,
+  transport,
+  client: providedClient,
+  preferences,
+}: Props & { preferences: ReturnType<typeof useReportPreferences> }) {
   const client = useMemo(() => providedClient ?? createChatClient(scanSession()), [providedClient]);
-  const [opened, setOpened] = useState(false);
+  const current = () => client.current() && reportPreferencesCurrent(preferences);
+
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [readiness, setReadiness] = useState<ChatReadiness | null>(null);
   const publicReport = status.profile === PUBLIC_IMAGE_PROFILE;
@@ -281,7 +296,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   async function operate(
     action: (signal: AbortSignal, publish: (action: () => void) => void) => Promise<void>,
   ) {
-    if (request.current || !client.current()) return;
+    if (request.current || !current()) return;
     const controller = new AbortController();
     request.current = controller;
     const version = ++generation.current;
@@ -292,7 +307,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       timedOut = true;
       controller.abort();
     }, 45_000);
-    const live = () => generation.current === version && !controller.signal.aborted && client.current();
+    const live = () => generation.current === version && !controller.signal.aborted && current();
     const stopped = new Promise<never>((_, reject) =>
       controller.signal.addEventListener(
         'abort',
@@ -307,7 +322,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     try {
       await Promise.race([action(controller.signal, publish), stopped]);
     } catch (error) {
-      if (generation.current === version && client.current()) {
+      if (generation.current === version && current()) {
         setSnapshot(null);
         setSelectedIds([]);
         setMessage(chatErrorMessage(error));
@@ -323,10 +338,10 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
   }
 
   function refresh() {
-    if (request.current || !client.current()) return;
+    if (request.current || !current()) return;
     setOperation('read');
     setReadiness(null);
-    setOpened(true);
+
     setSnapshot(null);
     setSelectedIds([]);
     void operate(async (signal, publish) => {
@@ -341,6 +356,18 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     });
   }
   useEffect(() => {
+    const preferencesChanged = () => {
+      if (reportPreferencesCurrent(preferences)) return;
+      invalidate();
+      setSnapshot(null);
+      setReadiness(null);
+      setReceipt(null);
+      setSelectedIds([]);
+      setQuestion('');
+      setDecision('');
+      setPending(false);
+    };
+    const unsubscribePreferences = subscribeReportPreferences(preferencesChanged);
     const unsubscribe = subscribeScanSession(() => {
       invalidate();
       setSnapshot(null);
@@ -349,12 +376,15 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       setSelectedIds([]);
       setPending(false);
     });
+    refresh();
     return () => {
       invalidate();
       unsubscribe();
+      unsubscribePreferences();
     };
-    // Scope is keyed by the complete status and session; no generation POST is ever an effect.
-  }, [client]);
+    // Automatic connection reads only GETs; questions and decisions remain explicit actions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, preferences]);
 
   function mutate(kind: 'chat' | 'decision') {
     const accepted = snapshot;
@@ -362,7 +392,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       !accepted ||
       pending ||
       accepted.context.pending ||
-      !client.current() ||
+      !current() ||
       (kind === 'chat' && (!accepted.context.enabled || (publicReport && !readiness?.localReady)))
     )
       return;
@@ -385,17 +415,13 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       }
       const before = await client.context(status.scanId, signal);
       checkStatus(before);
-      if (
-        chatContextFence(before) !== chatContextFence(accepted.context) ||
-        signal.aborted ||
-        !client.current()
-      )
+      if (chatContextFence(before) !== chatContextFence(accepted.context) || signal.aborted || !current())
         throw new ChatError('STALE');
       const result =
         kind === 'chat'
           ? await client.chat(before, value, mutationId, signal)
           : await client.decision(before, value, ids, mutationId, signal);
-      if (signal.aborted || !client.current()) throw new ChatError('STALE');
+      if (signal.aborted || !current()) throw new ChatError('STALE');
       if ('reply' in result && !verifiedChatSources(result.reply, accepted.sources))
         throw new ChatError('INVALID');
       // No optimistic assistant or decision. Status-only duplicate, ambiguous cancellation and disconnect recover through GET.
@@ -437,7 +463,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
     });
   }
   const context = snapshot?.context;
-  const available = !!snapshot && !pending && !context?.pending && client.current();
+  const available = !!snapshot && !pending && !context?.pending && current();
   const generationAllowed = !!context?.enabled && (!publicReport || readiness?.localReady === true);
   const connection = pending
     ? operation === 'read'
@@ -453,9 +479,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
           : context?.enabled
             ? 'История подключена. Чат разрешён сервером; доступность провайдера проверяется только при отправке.'
             : 'История подключена. Генерация выключена сервером; историю и решения можно читать без модели.'
-      : opened
-        ? 'Подключение не подтверждено. Повторите чтение истории перед новым запросом.'
-        : 'Чат не подключён. Открытие читает условия и историю, но не вызывает провайдера.';
+      : 'Подключение не подтверждено. Повторите чтение истории перед новым запросом.';
   return (
     <section
       id="scan-report-chat"
@@ -465,7 +489,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
       aria-busy={pending}
       style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}
     >
-      <h3>Чат по отчёту · только вручную</h3>
+      <h3>Чат по отчёту</h3>
       <p role="status" aria-label="Состояние подключения чата" aria-live="polite">
         {connection}
       </p>
@@ -478,8 +502,8 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
         передачи, проверки учёта расхода, ссылок на находки и совпадения с сохранённой историей. Промежуточный
         текст не показываем.
       </p>
-      <Button type="button" variant="secondary" disabled={pending || !client.current()} onClick={refresh}>
-        {opened ? 'Обновить историю и условия чата' : 'Открыть чат'}
+      <Button type="button" variant="secondary" disabled={pending || !current()} onClick={refresh}>
+        Обновить историю и условия чата
       </Button>
       {pending ? (
         <>
@@ -492,7 +516,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
           </Button>
         </>
       ) : null}
-      {publicReport && opened ? (
+      {publicReport ? (
         <section aria-label="Готовность генерации">
           <h4>Готовность генерации</h4>
           {readiness ? (
@@ -525,6 +549,43 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
           {message}
         </Alert>
       ) : null}
+      <form
+        className="scan-a1__compose"
+        aria-label="Отправка вопроса по отчёту"
+        onSubmit={(event) => {
+          event.preventDefault();
+          mutate('chat');
+        }}
+      >
+        <label>
+          Вопрос чату
+          <textarea
+            ref={questionInput}
+            aria-describedby="scan-chat-input-help"
+            aria-invalid={question.length > 0 && !validChatText(question)}
+            value={question}
+            disabled={pending && operation !== 'read'}
+            rows={3}
+            onChange={(event) => setQuestion(event.target.value)}
+            style={{ width: '100%' }}
+          />
+        </label>
+        <small id="scan-chat-input-help">
+          {utf8Bytes(question)} / 2048 UTF-8 байт. Без ссылок, секретов и исходных свидетельств.
+        </small>
+        <p id="scan-chat-send-help">
+          Нажимая «Отправить вопрос», вы разрешаете один запрос: очищенный вопрос, историю, решения, выбранные
+          находки и покрытие — указанным ниже модели и провайдеру OpenRouter. Только бесплатный профиль, без
+          платной замены и автоповтора. Условия проверяются заново перед отправкой.
+        </p>
+        <Button
+          type="submit"
+          aria-describedby="scan-chat-send-help"
+          disabled={!available || !generationAllowed || !validChatText(question)}
+        >
+          Отправить вопрос
+        </Button>
+      </form>
       {snapshot && context ? (
         <>
           {status.profile === PUBLIC_IMAGE_PROFILE ? (
@@ -641,43 +702,7 @@ function ChatScope({ status, transport, client: providedClient }: Props) {
               «Отправить вопрос».
             </p>
           ) : null}
-          <form
-            className="scan-a1__compose"
-            aria-label="Отправка вопроса по отчёту"
-            onSubmit={(event) => {
-              event.preventDefault();
-              mutate('chat');
-            }}
-          >
-            <label>
-              Вопрос чату
-              <textarea
-                ref={questionInput}
-                aria-describedby="scan-chat-input-help"
-                aria-invalid={question.length > 0 && !validChatText(question)}
-                value={question}
-                disabled={pending}
-                rows={3}
-                onChange={(e) => setQuestion(e.target.value)}
-                style={{ width: '100%' }}
-              />
-            </label>
-            <small id="scan-chat-input-help">
-              {utf8Bytes(question)} / 2048 UTF-8 байт. Без ссылок, секретов и исходных свидетельств.
-            </small>
-            <p id="scan-chat-send-help">
-              Нажимая «Отправить вопрос», вы разрешаете один запрос: очищенный вопрос, историю, решения,
-              выбранные находки и покрытие — указанным выше модели и провайдеру OpenRouter. Только бесплатный
-              профиль, без платной замены и автоповтора. Условия проверяются заново перед отправкой.
-            </p>
-            <Button
-              type="submit"
-              aria-describedby="scan-chat-send-help"
-              disabled={!available || !generationAllowed || !validChatText(question)}
-            >
-              Отправить вопрос
-            </Button>
-          </form>
+
           <h4>Подтверждённая история</h4>
           {!snapshot.history.turns.length && !snapshot.history.decisions.length ? (
             <p>История пока пуста. Это не означает, что отчёт безопасен.</p>

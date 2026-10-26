@@ -1,0 +1,73 @@
+{
+  "scope": "Read-only local source observed after proposal preparation; not freeze/review/deploy/remote image equality",
+  "records": [
+    {
+      "path": "src/features/auth/ReportPreferencesPanel.tsx",
+      "sha256": "ee1c2002b8549c648830c9de8108ce2615043531e009f75aa75afcfb576f2316"
+    },
+    {
+      "path": "src/shared/api/preferences/reportPreferences.ts",
+      "sha256": "062a4603af4da2099a2522af8174959491ff5958dceb534126473aa4ef35a3e2"
+    },
+    {
+      "path": "src/shared/api/scans/reportAutomation.ts",
+      "sha256": "dec759071778f226d74f95e19be5081ece78195a40125ff215cb5648d9efbeba"
+    },
+    {
+      "path": "src/features/scans/ScanSummaryPanel.tsx",
+      "sha256": "c844a599eac74ed33a87e4595f33079dfbd33b2234e648b9eaaf1537e70a36e4"
+    },
+    {
+      "path": "src/features/scans/AdvisoryTranslationPanel.tsx",
+      "sha256": "3e48034f6d1975516df3af4282cea711802d5bdaf99983b4f4b68d7cdec036b5"
+    },
+    {
+      "path": "src/features/scans/ScanChatPanel.tsx",
+      "sha256": "75fe8a6d7397d6562b523ee7e6e0f7636d83d74297098d1e8ffb71ea7256a7b6"
+    },
+    {
+      "path": "src/features/scans/ScanProgressPanel.tsx",
+      "sha256": "28ce82c280aad3542581230c0edf19368dddf7f996bed12ab364942459279e43"
+    },
+    {
+      "path": "src/features/scans/scanProgressEstimate.ts",
+      "sha256": "1948da400b07e8b4781a200ec2642356c9de91f8af0a40ca659a7347b010b80e"
+    },
+    {
+      "path": "src/pages/scans/ScanListPage.tsx",
+      "sha256": "d6d66b310476ca30400136e9a37db7eea559e4c7fa5b5330c5142ed750b9f706"
+    },
+    {
+      "path": "src/pages/scans/VulnAdvisoryCard.tsx",
+      "sha256": "5cdd0f4fd64900062fccb16a9d51aca9f11961bc6232c7a06fa4279b13af9af0"
+    },
+    {
+      "path": "server/api/src/llm/policy.ts",
+      "sha256": "911b85876e744b173414db8a8382733ca963eeaa2270889284046ad46e48e6d0"
+    },
+    {
+      "path": "server/api/src/llm/response-format.ts",
+      "sha256": "9c4c2464b218be218b641e37998793a6b718348b8315fee3274fefea0456eb76"
+    },
+    {
+      "path": "server/api/src/llm/openrouter-provider.ts",
+      "sha256": "deb84bd357f097ee0ffb9533b164cabab9ee543a556f531a354c7b842c5cdf3b"
+    },
+    {
+      "path": "server/api/src/llm/provider-diagnostic.ts",
+      "sha256": "f8fd893e5061c0c2611bf540761a3aafe24342d93110122b8840384b7a3dcf93"
+    },
+    {
+      "path": "server/api/src/llm/translation-contract.ts",
+      "sha256": "d1af156e7461d10836cc1f75cb0dec4252be38c28ff38224586c57a7800660cf"
+    },
+    {
+      "path": "server/api/src/llm/PUBLIC-QUALIFICATION-20261026.md",
+      "sha256": "52fd3ebaf02c4c8869302a48e310fbcbc761d79dd7537ccb738747b553796e92"
+    },
+    {
+      "path": "server/api/src/scans/scans.service.ts",
+      "sha256": "c717fe02968373258bbcb9d91be4635ff8177e430b3ec88e128dfdf256cca937"
+    }
+  ]
+}

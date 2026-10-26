@@ -1,0 +1,167 @@
+[
+  {
+    "doc": 2,
+    "base_version": 9,
+    "source": "DIP-TASK-9",
+    "path": "docs/public-automation-20261026-r2-doc2-full.md",
+    "bytes": 58518,
+    "sha256": "81a38204937fadc09de98d25c6227ec183699b2d599d52e5053e09be1547be74",
+    "base_sha256": "87be1b5524f78f1f22f29a315e12c503b46ce95536437070e4f3116aa5a5686c",
+    "requirements": 33,
+    "scenarios": 53,
+    "local_expected_ops": [
+      {
+        "kind": "modified",
+        "name": "Доступный индикатор фактического прогресса"
+      },
+      {
+        "kind": "modified",
+        "name": "Подтверждённый этап и оставшиеся выбранные проверки"
+      },
+      {
+        "kind": "modified",
+        "name": "Live counters и polling независимо от SSE"
+      },
+      {
+        "kind": "added",
+        "name": "Компактное покрытие и ссылка всей карточки списка"
+      }
+    ]
+  },
+  {
+    "doc": 8,
+    "base_version": 5,
+    "source": "DIP-TASK-42",
+    "path": "docs/public-automation-20261026-r2-doc8-full.md",
+    "bytes": 36363,
+    "sha256": "87b03753eb0b1477686c0aea3fce8b58f8869d11f6054202b6786041eca43bc5",
+    "base_sha256": "35de1ceee3cdab73a1100075a03bd32b4678af1233e611241cf35efed36805fa",
+    "requirements": 12,
+    "scenarios": 30,
+    "local_expected_ops": [
+      {
+        "kind": "modified",
+        "name": "Авторизация и явный opt-in до egress"
+      },
+      {
+        "kind": "modified",
+        "name": "Ограниченный browser summary ingress"
+      },
+      {
+        "kind": "modified",
+        "name": "Русское доказательное объяснение без неподтверждённых гипотез"
+      },
+      {
+        "kind": "modified",
+        "name": "Конечные diagnostic headers без изменения body wire"
+      },
+      {
+        "kind": "added",
+        "name": "Строгая operation-specific JSON schema public профиля"
+      },
+      {
+        "kind": "added",
+        "name": "Public passive чтение process-lifetime сводки"
+      }
+    ]
+  },
+  {
+    "doc": 9,
+    "base_version": 3,
+    "source": "DIP-TASK-42",
+    "path": "docs/public-automation-20261026-r2-doc9-full.md",
+    "bytes": 23945,
+    "sha256": "867b641cd2157b2b2f9fe197a983a5776e334708880a6f7debc88784418387e5",
+    "base_sha256": "85e8f91b43df59b35495bba618d4befce912f2480ff979bdecb265d9deff5436",
+    "requirements": 10,
+    "scenarios": 19,
+    "local_expected_ops": [
+      {
+        "kind": "modified",
+        "name": "Явное раскрытие условий и согласие на один запрос"
+      },
+      {
+        "kind": "modified",
+        "name": "Ограниченный ручной запрос и отмена"
+      },
+      {
+        "kind": "modified",
+        "name": "Гипотезы обычным текстом и проверенные ссылки на источники"
+      },
+      {
+        "kind": "added",
+        "name": "Owner-local настройки и ограниченная защита от автоповтора"
+      },
+      {
+        "kind": "added",
+        "name": "Passive summary recovery до attempt marker"
+      },
+      {
+        "kind": "added",
+        "name": "Bounded passive metadata scheduling"
+      }
+    ]
+  },
+  {
+    "doc": 15,
+    "base_version": 4,
+    "source": "DIP-TASK-42",
+    "path": "docs/public-automation-20261026-r2-doc15-full.md",
+    "bytes": 28211,
+    "sha256": "21e713dd746d34ee42e9baf74eb0cf6ffa5f2d3a601f185de418e4c0c7a398fb",
+    "base_sha256": "32541b31a72fd16fc5daff4e307a8a3eddfe012d56bca524248338776e523c9d",
+    "requirements": 14,
+    "scenarios": 25,
+    "local_expected_ops": [
+      {
+        "kind": "modified",
+        "name": "Русский grounded ответ и честное отсутствие evidence"
+      },
+      {
+        "kind": "added",
+        "name": "Немедленно доступный composer при read-only подключении"
+      }
+    ]
+  },
+  {
+    "doc": 16,
+    "base_version": 4,
+    "source": "DIP-TASK-42",
+    "path": "docs/public-automation-20261026-r2-doc16-full.md",
+    "bytes": 35035,
+    "sha256": "e04100b1bfc03bd3f643995355ff81fa88c90ab484d3a24bd971a48ed83224d4",
+    "base_sha256": "769b090065cff27c6b4d9d67abc93345726c156e287d20aaca6bd47957d56eb6",
+    "requirements": 16,
+    "scenarios": 23,
+    "local_expected_ops": [
+      {
+        "kind": "modified",
+        "name": "Отдельное явное согласие на новый selected-text egress"
+      },
+      {
+        "kind": "modified",
+        "name": "Сохранный инертный UI"
+      },
+      {
+        "kind": "modified",
+        "name": "Русский human text сводки и чата с обновлением policy hash"
+      },
+      {
+        "kind": "modified",
+        "name": "Отсутствие новой durable translation state"
+      },
+      {
+        "kind": "modified",
+        "name": "Ограниченная advisory Retry-After семантика"
+      },
+      {
+        "kind": "modified",
+        "name": "Translation diagnostic headers и граница русской проверки"
+      },
+      {
+        "kind": "added",
+        "name": "Ограниченная автоматизация открытого source scope"
+      }
+    ]
+  }
+]

@@ -1,0 +1,8 @@
+{
+  "comments": {
+    "DIP-TASK-9": "61eacf1b-8498-4a49-a768-57ab30827016",
+    "DIP-TASK-42": "17aa02c4-0bbf-4979-bc28-de2c60291d5f"
+  },
+  "scope": "attributed progress only, after full task reads; no lifecycle/content/progress changes",
+  "final_local_checks": "PASS: five final bodies match recorded local bytes/hash/counts, prefix JSON parses, Markdown has no trailing whitespace; not remote hash comparison or application tests"
+}

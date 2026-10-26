@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, Optional, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { AuthStore } from '../auth/auth.store.js';
+import { AuthStore, type SessionSnapshot } from '../auth/auth.store.js';
+import { tokenFrom } from '../auth/auth.controller.js';
 import { HistoryService } from './history.service.js';
 import { TranslationService } from './translation.service.js';
 import { historyUnavailable } from './history-contract.js';
@@ -11,7 +12,8 @@ import { exact, validateReply } from './response.js';
 import { LlmQuotaRuntime } from './quota-runtime.js';
 import { quotaUnavailable, type Vector } from './quota-policy.js';
 import { prepareSummary } from './prepared-request.js';
-import { BROWSER_SCAN_LOCAL_ORIGIN, type BrowserScanLocalOrigin } from './browser-identity.js';
+import { BROWSER_SCAN_LOCAL_ORIGIN, browserIdentity, type BrowserRequest, type BrowserScanLocalOrigin } from './browser-identity.js';
+import { SUMMARY_CACHE, SummaryResultCache, type SummaryPublication } from './summary-result-cache.js';
 import { selectSummaryReport } from './summary-context.js';
 import type { QuotaLedger } from './quota-ledger.js';
 import { publicCredentialStatus, publicReadiness } from './public-readiness.js';
@@ -32,9 +34,12 @@ export class LlmRuntime {
   }
   credentialStatus() { return publicCredentialStatus(); }
 }
+type SummaryAccess = { request: BrowserRequest; identity: Identity; session: SessionSnapshot };
+
 @Injectable()
 export class LlmService {
   private readonly active = new Set<string>();
+  private readonly summaryResults = new SummaryResultCache();
   private historyService?: HistoryService;
   private translationService?: TranslationService;
   constructor(@Inject(ReportReader) private readonly reports: ReportReader, @Inject(LlmRuntime) private readonly runtime: LlmRuntime,
@@ -48,7 +53,55 @@ export class LlmService {
     if (!this.auth || this.localOrigin !== 'http://127.0.0.1:8081') throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
     return this.translationService ??= new TranslationService(this.auth, this.reports, this.runtime, this.quotas, owner => this.acquire(owner), this.localOrigin);
   }
-  onModuleDestroy() { this.historyService?.close(); }
+  onModuleDestroy() { this.summaryResults.clear(); this.historyService?.close(); }
+  summaryCacheEnabled() { return this.localOrigin === 'http://127.0.0.1:8081' && !!this.auth; }
+  private summaryAccess(request: BrowserRequest): SummaryAccess {
+    if (!this.summaryCacheEnabled()) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+    const identity = browserIdentity(this.auth!, request, false, this.localOrigin);
+    const session = this.auth!.sessionForToken(tokenFrom(request) ?? '');
+    if (!session || session.subject !== identity.subject) throw new ServiceUnavailableException({ errorCode: 'AUTH_UNAVAILABLE' });
+    return { request, session, identity: { ...identity, scope: [...identity.scope, 'scan:read'] } };
+  }
+  private summaryIdentity(access: SummaryAccess, mutation = false): Identity {
+    const identity = browserIdentity(this.auth!, access.request, mutation, this.localOrigin);
+    if (identity.subject !== access.identity.subject) throw new ForbiddenException({ errorCode: 'SCAN_ACCESS_DENIED' });
+    return { ...identity, scope: [...identity.scope, 'scan:read'] };
+  }
+  private withSummary<T>(access: SummaryAccess, scanId: string, action: (report: ReportContext, policy: LlmPolicy | null) => T): T {
+    return this.auth!.guardSession(access.session, () => {
+      const identity = this.summaryIdentity(access);
+      // Owner lookup and full current report precede policy disclosure or cache access.
+      return this.reports.withSummaryReport(identity, scanId, report => action(report, this.runtime.policy()));
+    }, SUMMARY_CACHE.busyMs);
+  }
+  private summaryPublication(access: SummaryAccess, report: ReportContext, policy: LlmPolicy, value: SummaryPublication['value'],
+    signal?: AbortSignal, store = false): SummaryPublication {
+    const body = JSON.stringify(value);
+    return { value: JSON.parse(body) as SummaryPublication['value'], write: action => this.withSummary(access, report.scanId, (fresh, current) => {
+      if (signal?.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
+      if (fresh.reportVersion !== report.reportVersion || fresh.digest !== report.digest || fresh.platform !== report.platform)
+        throw new ConflictException({ errorCode: 'LLM_STALE_REPORT' });
+      if (current?.version !== policy.version) throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
+      action();
+      // Retain only a validated result whose synchronous final publication guard
+      // succeeded. No auth decision is cached; later reads repeat every fence.
+      if (store) this.summaryResults.put(access.identity.subject, report, policy.version, body);
+    }) };
+  }
+  readSummary(request: BrowserRequest, scanId: string): SummaryPublication {
+    const access = this.summaryAccess(request);
+    return this.withSummary(access, scanId, (report, policy) => {
+      const value = this.summaryResults.get(access.identity.subject, report, policy?.version ?? null);
+      if (!value || !policy) throw new NotFoundException({ errorCode: 'LLM_SUMMARY_MISSING' });
+      return this.summaryPublication(access, report, policy, value);
+    });
+  }
+  async summaryForBrowser(request: BrowserRequest, scanId: string, body: unknown, signal: AbortSignal): Promise<SummaryPublication> {
+    const access = this.summaryAccess(request);
+    const generated = await this.generateSummary(() => this.auth!.guardSession(access.session,
+      () => this.summaryIdentity(access, true), SUMMARY_CACHE.busyMs), scanId, body, signal);
+    return this.summaryPublication(access, generated.report, generated.policy, generated.value, signal, true);
+  }
   private acquire(owner: string): () => void {
     if (this.active.size >= 8 || this.active.has(owner)) throw new HttpException({ errorCode: 'LLM_CAPACITY' }, 429);
     this.active.add(owner); return () => { this.active.delete(owner); };
@@ -93,6 +146,9 @@ export class LlmService {
     } catch { return { ...binding, ...flags, available: false, reason: flags.quotaEnabled ? 'unavailable' : 'disabled' }; }
   }
   async summary(authorize: () => Identity, scanId: string, body: unknown, signal: AbortSignal) {
+    return (await this.generateSummary(authorize, scanId, body, signal)).value;
+  }
+  private async generateSummary(authorize: () => Identity, scanId: string, body: unknown, signal: AbortSignal) {
     // Owner and explicit opt-in precede even provider/key configuration inspection.
     const identity = authorize();
     const report = this.reports.read(identity, scanId);
@@ -162,7 +218,7 @@ export class LlmService {
               findingCounts: report.findingCounts, coverage: report.coverage, contextSelection: selection } : result;
       if (Buffer.byteLength(JSON.stringify(response)) > policy.responseBytes)
         throw new ServiceUnavailableException({ errorCode: 'LLM_RESPONSE_LIMIT' });
-      return response;
+      return { value: response, report, policy };
     } catch (error) {
       if (error instanceof HttpException) throw error;
       // Do not log/echo provider bodies, raw SQLite diagnostics, cookies or the key.

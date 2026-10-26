@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 1,
+  "scope": "native-public8081-report-automation",
+  "attemptId": "60aa9db1-4784-4866-a8ec-9131a5cb2035",
+  "runId": "1fa31ead-7a60-47f8-986d-2e26e25606df",
+  "origin": "http://127.0.0.1:8081",
+  "actuallyRun": true,
+  "startedAt": "2026-10-26T20:44:16.870Z",
+  "finishedAt": "2026-10-26T20:45:53.047Z",
+  "scanReceipt": {
+    "scanId": "22e240ac-5ed2-402a-be8d-a5212722fed3",
+    "launchHttpStatus": 202,
+    "receiptAccepted": true
+  },
+  "guard": {
+    "blockedRequests": 0,
+    "benignAborts": 0,
+    "overflow": 0,
+    "events": []
+  },
+  "maxAccounts": 1,
+  "maxScans": 1,
+  "maxGenerationPosts": 4,
+  "requiredChecks": [
+    "secret",
+    "sbom",
+    "vuln",
+    "config"
+  ],
+  "generationAdmissions": {
+    "total": 1,
+    "summaryPosts": 1,
+    "chatPosts": 0,
+    "translationPosts": 0,
+    "halted": true
+  },
+  "requiredCases": [
+    "tooling",
+    "owner_registration",
+    "preferences_original",
+    "native_scan",
+    "estimate",
+    "coverage_click",
+    "report",
+    "always_open_chat",
+    "summary_initial_missing",
+    "summary",
+    "chat_1",
+    "chat_2",
+    "history_reload",
+    "summary_reload_no_post",
+    "summary_reload_restore",
+    "preferences_ru",
+    "translation",
+    "translation_toggle",
+    "preferences_fresh_context",
+    "fresh_login",
+    "history_fresh_login",
+    "summary_fresh_login_restore",
+    "anonymous_denial",
+    "settings_owner_isolation",
+    "preservation",
+    "safety"
+  ],
+  "passiveSummaryReads": 2,
+  "summaryRetention": "process-lifetime-not-durable",
+  "admittedSummaryObservation": {
+    "admitted": true,
+    "consumption": "UNKNOWN",
+    "capture": "ERROR_CAPTURED",
+    "code": "LLM_HTTP_ERROR",
+    "httpStatus": 503,
+    "errorCode": "LLM_REQUEST_ABORTED",
+    "providerDiagnostic": {
+      "phase": "deadline",
+      "reason": "timeout"
+    },
+    "deliveryKind": "http-error",
+    "runnerLine": 316
+  },
+  "policy": {
+    "model": "xingchen-agi/xing4.0-29b-a4b:free",
+    "endpoint": "phala",
+    "freeOnly": true,
+    "noFallback": true
+  },
+  "serverEgressIndependentlyObserved": false,
+  "billingIndependentlyVerified": false,
+  "semanticAccuracy": "unverified-requires-memory-only-human-review",
+  "ownershipScope": "fresh-owner-login-and-anonymous-denial-not-foreign-owner",
+  "preferenceScope": "same-owner-browser-local-and-empty-context-not-foreign-owner",
+  "payloadArtifacts": false,
+  "credentialsPersisted": false,
+  "screenshots": false,
+  "har": false,
+  "storageState": false,
+  "createdRuntimeDataAutomaticallyDeleted": false,
+  "cases": {
+    "tooling": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "owner_registration": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "preferences_original": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "explicitConsent": true,
+      "noAdditionalPosts": true
+    },
+    "native_scan": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "scanId": "22e240ac-5ed2-402a-be8d-a5212722fed3",
+      "digest": "sha256:01393fe5a51489b63da0ab51aa8e0a7ff9990132917cf20cfc3d46f5e36c0e48",
+      "platform": "linux/amd64",
+      "state": "completed"
+    },
+    "estimate": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "coverage_click": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "noAdditionalPosts": true
+    },
+    "report": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "pages": 4,
+      "vulnerabilities": 161
+    },
+    "always_open_chat": {
+      "status": "PASS",
+      "code": "VERIFIED"
+    },
+    "summary_initial_missing": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "httpStatus": 404,
+      "errorCode": "LLM_SUMMARY_MISSING"
+    },
+    "summary": {
+      "status": "BLOCKED",
+      "code": "LLM_HTTP_ERROR",
+      "httpStatus": 503,
+      "errorCode": "LLM_REQUEST_ABORTED",
+      "providerDiagnostic": {
+        "phase": "deadline",
+        "reason": "timeout"
+      },
+      "deliveryKind": "http-error",
+      "runnerLine": 316
+    },
+    "chat_1": {
+      "status": "BLOCKED",
+      "code": "PROVIDER_STOP_NO_RETRY",
+      "runnerLine": 705
+    },
+    "chat_2": {
+      "status": "BLOCKED",
+      "code": "PROVIDER_STOP_NO_RETRY",
+      "runnerLine": 705
+    },
+    "history_reload": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 741
+    },
+    "summary_reload_no_post": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 727
+    },
+    "summary_reload_restore": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 735
+    },
+    "preferences_ru": {
+      "status": "BLOCKED",
+      "code": "PROVIDER_STOP_NO_RETRY",
+      "runnerLine": 746
+    },
+    "translation": {
+      "status": "BLOCKED",
+      "code": "PROVIDER_STOP_NO_RETRY",
+      "runnerLine": 752
+    },
+    "translation_toggle": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 779
+    },
+    "preferences_fresh_context": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 800
+    },
+    "fresh_login": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 795
+    },
+    "history_fresh_login": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 808
+    },
+    "summary_fresh_login_restore": {
+      "status": "BLOCKED",
+      "code": "PREREQUISITE_UNAVAILABLE",
+      "runnerLine": 815
+    },
+    "anonymous_denial": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "httpStatus": 401,
+      "noAdditionalPosts": true
+    },
+    "settings_owner_isolation": {
+      "status": "BLOCKED",
+      "code": "SECOND_OWNER_NOT_AUTHORIZED"
+    },
+    "preservation": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "costMicros": 0,
+      "countsUnchanged": true,
+      "originalUnchanged": true
+    },
+    "safety": {
+      "status": "PASS",
+      "code": "VERIFIED",
+      "accountsCreated": 1,
+      "scanLaunches": 1,
+      "chatPosts": 0,
+      "translationPosts": 0,
+      "blockedRequests": 0,
+      "pageErrors": 0,
+      "browserClosed": true,
+      "nativeScanMayRemainActive": false
+    }
+  }
+}
