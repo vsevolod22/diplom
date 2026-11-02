@@ -24,6 +24,60 @@
   outline: 3px solid var(--home-acid);
   outline-offset: 5px;
 }
+.home__onboarding {
+  padding-block: 48px;
+  scroll-margin-top: 24px;
+}
+.home__onboarding h2 {
+  font-size: clamp(28px, 5vw, 48px);
+  line-height: 1.2;
+  margin-block: 16px 24px;
+}
+.home__onboarding ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  padding: 0;
+  list-style: none;
+}
+.home__onboarding li {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #50515e;
+  border-radius: 12px;
+}
+.home__onboarding strong {
+  color: var(--home-acid);
+  font-size: 18px;
+}
+.home__onboarding p {
+  line-height: 1.65;
+  margin-top: 12px;
+}
+.home__onboarding-scope {
+  max-width: 85ch;
+  padding-block: 12px;
+}
+.home__onboarding details {
+  max-width: 85ch;
+}
+.home__onboarding summary {
+  cursor: pointer;
+  padding-block: 12px;
+}
+.home__onboarding summary:focus-visible {
+  outline: 3px solid var(--home-acid);
+  outline-offset: 4px;
+}
+.home__back-top {
+  margin-top: 48px;
+}
+@media (max-width: 700px) {
+  .home__onboarding ol {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
 .home__container {
   width: min(100% - 96px, 1344px);
   margin-inline: auto;

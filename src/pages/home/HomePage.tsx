@@ -5,7 +5,6 @@ import {
   Box,
   Fingerprint,
   Layers3,
-  LockKeyhole,
   ScanLine,
   ShieldAlert,
   Sparkles,
@@ -23,19 +22,19 @@ const exploreTabs = [
     value: 'image',
     label: 'Образ',
     number: '01',
-    title: 'Начни с устройства.',
+    title: 'Выберите образ и версию.',
     description:
-      'Представь образ как набор слоёв: каждый добавляет файлы и меняет то, что попадёт в контейнер.',
+      'Найдите публичный репозиторий Docker Hub, выберите тег или введите адрес вручную. Перед запуском сервис проверит доступность выбранной цели.',
     illustration: ['BASE', 'RUNTIME', 'APP'],
     caption: 'Схема слоёв · вымышленный пример',
   },
   {
     value: 'secrets',
-    label: 'Secrets',
+    label: 'Секреты',
     number: '02',
     title: 'Секретам не место в образе.',
     description:
-      'Концепция проверки на случайно оставленные секреты. Внутренний Secrets-only сценарий разрабатывается и ожидает приёмки; из браузера он недоступен.',
+      'Проверка ищет возможные ключи и пароли в файлах образа. Находку нужно подтвердить: совпадение не доказывает, что ключ действителен. Если секрет настоящий, отзовите его и удалите из сборки.',
     illustration: ['CONFIG', 'TOKEN?', 'REVIEW'],
     caption: 'Схема проверки · не результат анализа',
   },
@@ -45,7 +44,7 @@ const exploreTabs = [
     number: '03',
     title: 'Знай границы видимости.',
     description:
-      'Даже полный список пакетов не равен доказательству безопасности. Отмечай, что исследовано, а что осталось вне проверки.',
+      'Отчёт отдельно показывает выполненные проверки, находки и пробелы. Неполный анализ или отсутствие находок не означает, что образ безопасен. Список пакетов сам по себе не является проверкой уязвимостей.',
     illustration: ['LAYERS', 'PACKAGES', 'GAPS'],
     caption: 'Карта видимости · не SBOM и не скан',
   },
@@ -76,10 +75,10 @@ export function HomePage() {
           </Link>
           <nav className="home__nav" aria-label="Основная навигация">
             <a href="#approach" className="home__nav-about">
-              Подход
+              Как начать
             </a>
             <Link to="/scans">
-              Сканы <ArrowUpRight size={16} aria-hidden="true" />
+              Мои проверки <ArrowUpRight size={16} aria-hidden="true" />
             </Link>
             <Link to="/account">Аккаунт</Link>
           </nav>
@@ -125,20 +124,21 @@ export function HomePage() {
               transition={{ duration: 0.7, delay: 0.2 }}
             >
               <p className="home__lead">
-                Загляни под слои контейнера. Исследуй состав OCI-образа и разберись с рисками до того, как он
-                попадёт в среду.
+                Проверьте публичный образ Docker Hub: известные уязвимости, возможные секреты, состав пакетов
+                и настройки. Получите находки и понятные следующие шаги.
               </p>
               <div className="home__actions">
-                <Link className="home__button home__button--primary" to="/demo/scans">
-                  Смотреть демо <ArrowUpRight size={19} aria-hidden="true" />
+                <Link className="home__button home__button--primary" to="/scans/new">
+                  Проверить образ <ArrowUpRight size={19} aria-hidden="true" />
                 </Link>
-                <Link className="home__button home__button--outline" to="/scans">
-                  Раздел сканов <ArrowRight size={19} aria-hidden="true" />
+                <Link className="home__button home__button--outline" to="/demo/scans/partial-demo">
+                  Пример отчёта <ArrowRight size={19} aria-hidden="true" />
                 </Link>
               </div>
               <p className="home__hero-disclaimer">
-                <span aria-hidden="true">✳</span> Демо — вымышленные данные. Настоящий запуск скана из
-                браузера сейчас недоступен. <Link to="/register">Регистрация необязательна.</Link>
+                <span aria-hidden="true">✳</span> Для реальной проверки нужны <Link to="/login">вход</Link> и
+                разрешение сервера. <Link to="/register">Создать аккаунт</Link>. Демо доступно без входа и
+                содержит вымышленные данные.
               </p>
             </motion.div>
           </div>
@@ -245,7 +245,47 @@ export function HomePage() {
         </div>
       </div>
 
-      <section className="home__section home__container" id="approach" aria-labelledby="approach-title">
+      <section className="home__onboarding home__container" id="approach" aria-labelledby="onboarding-title">
+        <p className="home__section-kicker">ОТ ОБРАЗА К СЛЕДУЮЩЕМУ ШАГУ</p>
+        <h2 id="onboarding-title">Как начать проверку</h2>
+        <ol>
+          <li>
+            <strong>1. Выберите образ</strong>
+            <p>
+              Найдите репозиторий и тег в Docker Hub или укажите адрес, например <code>nginx:1.24</code>.
+            </p>
+          </li>
+          <li>
+            <strong>2. Подтвердите проверки</strong>
+            <p>Выберите нужные категории и подтвердите цель. Один выбор версии ещё ничего не запускает.</p>
+          </li>
+          <li>
+            <strong>3. Разберите отчёт</strong>
+            <p>
+              Посмотрите, что найдено, почему это важно и что исправить. Обратите внимание на непроверенные
+              части.
+            </p>
+          </li>
+        </ol>
+        <p className="home__onboarding-scope">
+          Поддерживаются публичные образы Docker Hub для Linux (amd64), в пределах ограничений размера и
+          формата. Приватные образы и другие реестры не поддерживаются. Не вводите пароли и токены.
+        </p>
+        <details>
+          <summary>Что важно знать до запуска</summary>
+          <p>
+            Сканирование исследует образ, а не работающий контейнер или сервер. Наличие версии в каталоге не
+            гарантирует, что сервис сможет её обработать.
+          </p>
+          <p>
+            ИИ-объяснение — отдельное необязательное действие. Оно передаёт подготовленные данные внешнему
+            провайдеру и может быть платным; условия и согласие показываются до запроса. Для чтения обычного
+            отчёта ИИ не нужен.
+          </p>
+        </details>
+      </section>
+
+      <section className="home__section home__container" aria-labelledby="approach-title">
         <div className="home__section-heading">
           <div>
             <p className="home__section-kicker">/ 01 — ПОДХОД</p>
@@ -260,7 +300,7 @@ export function HomePage() {
         <div className="home__features">
           <article className="home__feature home__feature--lime">
             <div className="home__feature-top">
-              <span>01 / СТРУКТУРА</span>
+              <span>01 / УЯЗВИМОСТИ</span>
               <Layers3 size={25} aria-hidden="true" />
             </div>
             <div className="home__feature-art home__feature-art--layers" aria-hidden="true">
@@ -270,11 +310,14 @@ export function HomePage() {
             </div>
             <div>
               <h3>
-                Слои без
+                Что требует
                 <br />
-                иллюзий.
+                обновления.
               </h3>
-              <p>Смотри на устройство образа, а не только на его название.</p>
+              <p>
+                Известные проблемы пакетов и исправленные версии, когда они указаны в источниках. Покрытие
+                зависит от доступной базы.
+              </p>
             </div>
           </article>
           <article className="home__feature home__feature--violet">
@@ -294,7 +337,7 @@ export function HomePage() {
                 <br />
                 значение.
               </h3>
-              <p>Исследуй пакеты и зависимости как часть картины риска.</p>
+              <p>Пакеты и установленные версии помогают понять состав сборки и спланировать обновление.</p>
             </div>
           </article>
           <article className="home__feature home__feature--dark">
@@ -314,7 +357,10 @@ export function HomePage() {
                 <br />
                 догадка.
               </h3>
-              <p>Разбирай находки в контексте образа. Никаких обещаний «всё безопасно».</p>
+              <p>
+                У каждой находки есть контекст. Возможный секрет требует проверки, а неполный результат —
+                внимания, не оценки «всё безопасно».
+              </p>
             </div>
           </article>
         </div>
@@ -324,7 +370,10 @@ export function HomePage() {
         <div className="home__explore-intro">
           <p className="home__section-kicker">/ 02 — ИССЛЕДУЙ ГЛУБЖЕ</p>
           <h2 id="explore-title">ПОД ПОВЕРХНОСТЬЮ.</h2>
-          <p>Три ракурса на один образ. Это интерактивная концепция, а не данные работающего API.</p>
+          <p>
+            Короткая памятка: как выбрать цель, разобраться с секретами и не пропустить ограничения отчёта.
+            Иллюстрации ниже — не результаты сканирования.
+          </p>
         </div>
         <Tabs.Root className="home__explore-tabs" defaultValue="image" activationMode="automatic">
           <Tabs.List className="home__explore-list" aria-label="Ракурсы исследования образа">
@@ -338,10 +387,10 @@ export function HomePage() {
           {exploreTabs.map((tab) => (
             <Tabs.Content className="home__explore-panel" key={tab.value} value={tab.value}>
               <div className="home__explore-copy">
-                <p className="home__explore-overline">КОНЦЕПТ / {tab.number}</p>
+                <p className="home__explore-overline">ПАМЯТКА / {tab.number}</p>
                 <h3>{tab.title}</h3>
                 <p>{tab.description}</p>
-                <span className="home__explore-note">Демо · вымышленные примеры · не live-скан</span>
+                <span className="home__explore-note">Схематичная иллюстрация · не результат проверки</span>
               </div>
               <div className={`home__explore-art home__explore-art--${tab.value}`}>
                 <div className="home__explore-art-top" aria-hidden="true">
@@ -386,24 +435,20 @@ export function HomePage() {
             <em>ГЛУБЖЕ.</em>
           </h2>
           <p className="home__outro-copy">
-            Открой демонстрационный сценарий или перейди к разделу сканов. Демо использует только вымышленные
-            фикстуры; реальный запуск Alpine/secret доступен только разрешённому аккаунту в локальном стенде.
+            Выберите публичный образ и нужные проверки. Для реального запуска войдите в аккаунт; доступность
+            подтвердит сервер. Хотите сначала понять результат? Откройте демонстрационный отчёт без входа.
           </p>
           <div className="home__actions home__actions--outro">
-            <Link className="home__button home__button--primary" to="/demo/scans">
-              Открыть демо <ArrowUpRight size={19} aria-hidden="true" />
+            <Link className="home__button home__button--primary" to="/scans/new">
+              Проверить образ <ArrowUpRight size={19} aria-hidden="true" />
             </Link>
-            <Link className="home__button home__button--outline" to="/scans">
-              К сканам <ArrowRight size={19} aria-hidden="true" />
+            <Link className="home__button home__button--outline" to="/demo/scans/partial-demo">
+              Пример отчёта <ArrowRight size={19} aria-hidden="true" />
             </Link>
           </div>
-          <div className="home__footer">
-            <span>OCI / VISION</span>
-            <span>
-              <LockKeyhole size={14} aria-hidden="true" /> Дипломный проект · Демо отдельно от защищённого сканирования
-            </span>
+          <p className="home__back-top">
             <a href="#home-title">Наверх ↑</a>
-          </div>
+          </p>
         </div>
       </section>
     </main>
