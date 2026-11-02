@@ -10,6 +10,7 @@ import {
   chatHistorySchema,
   chatReadinessSchema,
   chatResultSchema,
+  chatReceiptMatchesProvider,
   duplicateSchema,
   sameChatBinding,
   validChatText,
@@ -108,10 +109,13 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
     const unsubscribe = subscribeScanSession(abort);
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
-    const timer = setTimeout(() => {
-      timedOut = true;
-      abort();
-    }, 40_000);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        abort();
+      },
+      body && endpoint === 'chat' ? 105_000 : 40_000,
+    );
     const stopped = new Promise<never>((_, reject) => {
       const stop = () => {
         void reader?.cancel().catch(() => {});
@@ -305,6 +309,7 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
         ),
       );
       if ('duplicate' in value) throw new ChatError('DUPLICATE');
+      if (!chatReceiptMatchesProvider(value.usage, context)) throw new ChatError('INVALID');
       if (value.epoch !== context.epoch || value.revision !== context.revision + 2)
         throw new ChatError('STALE');
       return bound(value, context);

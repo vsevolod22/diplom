@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { cveMetadataFields } from './cveDbMetadata';
 import { imageConfigReport } from './imageConfigReport';
-import { identifierCounts } from './publicVulnerabilityIdentifiers';
+import { identifierCounts, identifierCountsTotal } from './publicVulnerabilityIdentifiers';
 
 const count = z.number().int().min(0).max(1000);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -122,7 +122,7 @@ export function validPublicChatMetadata(value: PublicMetadata): boolean {
   }
   return value.coverage.vuln.outcome === 'checked'
     ? !!value.identifierCounts &&
-        value.identifierCounts.cve + value.identifierCounts.debianTemp === value.findingCounts.byCheck.vuln
+        identifierCountsTotal(value.identifierCounts) === value.findingCounts.byCheck.vuln
     : value.identifierCounts === undefined;
 }
 export const chatContextSelectionSchema = z.strictObject({
@@ -136,14 +136,89 @@ export const chatContextSelectionSchema = z.strictObject({
 
 export const freeProfileSchema = z.union([
   z.strictObject({
-    model: z.literal('apodex/apodex-1.1-mini:free'),
-    providers: z.tuple([z.literal('novita/bf16')]),
-  }),
-  z.strictObject({
     model: z.literal('xingchen-agi/xing4.0-29b-a4b:free'),
     providers: z.tuple([z.literal('phala')]),
+    retention: z.literal('no-storage'),
+  }),
+  z.strictObject({
+    model: z.literal('apodex/apodex-1.1-mini:free'),
+    providers: z.tuple([z.literal('novita/bf16')]),
+    retention: z.literal('no-storage'),
+  }),
+  z.strictObject({
+    model: z.literal('dots-studio/dots-3-note-preview:free'),
+    providers: z.tuple([z.literal('atlas-cloud/fp8')]),
+    retention: z.literal('no-training'),
   }),
 ]);
+export const LEGACY_SCANNER_DISCLOSURE =
+  'Sanitized scanner findings and coverage; no raw evidence or credentials.';
+export const REMEDIATION_SCANNER_DISCLOSURE =
+  'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.';
+export const scannerDisclosureData = z.enum([LEGACY_SCANNER_DISCLOSURE, REMEDIATION_SCANNER_DISCLOSURE]);
+/** New egress is supported only by the exact public remediation profile; legacy DTOs stay readable. */
+export function validScannerDisclosure(value: {
+  data: string;
+  model: string;
+  providers: string[];
+  retention: string;
+  freeOnly?: boolean;
+  requestBudgetUsd: number;
+  maxPrice?: { prompt: number; completion: number; request: number | null };
+}): boolean {
+  return (
+    value.data === LEGACY_SCANNER_DISCLOSURE ||
+    (value.data === REMEDIATION_SCANNER_DISCLOSURE &&
+      value.model === 'dots-studio/dots-3-note-preview:free' &&
+      freeProfileSchema.safeParse({
+        model: value.model,
+        providers: value.providers,
+        retention: value.retention,
+      }).success &&
+      value.freeOnly === true &&
+      value.requestBudgetUsd === 0 &&
+      value.maxPrice?.prompt === 0 &&
+      value.maxPrice.completion === 0 &&
+      value.maxPrice.request === 0)
+  );
+}
+export const OPENAI_MODEL = 'gpt-5.4-mini-2026-03-17';
+export const OPENAI_COST_BASIS = 'server-estimated-configured-rates-not-invoice';
+const positiveInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const positiveBudget = z.number().finite().positive();
+const openAiDisclosureShape = {
+  provider: z.literal('OpenAI'),
+  model: z.literal(OPENAI_MODEL),
+  retention: z.literal('no-training'),
+  operatorApprovedRouting: z.literal(true),
+  providerComplianceNotProvenByDeclaration: z.literal(true),
+  zeroDataRetentionVerified: z.literal(false),
+  costBasis: z.literal(OPENAI_COST_BASIS),
+  estimatedPrice: z.strictObject({
+    unit: z.literal('microUSD-per-million-tokens'),
+    input: positiveInteger,
+    output: positiveInteger,
+  }),
+  data: scannerDisclosureData,
+};
+export const openAiDisclosureSchema = z.discriminatedUnion('monetaryLimit', [
+  z.strictObject({
+    ...openAiDisclosureShape,
+    monetaryLimit: z.literal('capped'),
+    requestBudgetMicros: positiveBudget,
+    userBudgetMicros: positiveBudget,
+    scanBudgetMicros: positiveBudget,
+  }),
+  z.strictObject({
+    ...openAiDisclosureShape,
+    monetaryLimit: z.literal('uncapped'),
+    requestBudgetMicros: z.null(),
+    userBudgetMicros: z.null(),
+    scanBudgetMicros: z.null(),
+  }),
+]);
+export type OpenAiDisclosure = z.infer<typeof openAiDisclosureSchema>;
+
 const catalogBase = { checkedOn: z.literal('2026-10-21'), liveVerified: z.literal(false) };
 const catalog = z.union([
   z.strictObject({
@@ -152,6 +227,15 @@ const catalog = z.union([
     model: z.literal('xingchen-agi/xing4.0-29b-a4b:free'),
     endpoint: z.literal('phala'),
     zdrListed: z.literal(true),
+  }),
+  z.strictObject({
+    checkedOn: z.literal('2026-10-29'),
+    liveVerified: z.literal(false),
+    status: z.literal('catalog-listed-unprobed'),
+    model: z.literal('dots-studio/dots-3-note-preview:free'),
+    endpoint: z.literal('atlas-cloud/fp8'),
+    zdrListed: z.literal(false),
+    retention: z.literal('no-training'),
   }),
   z.strictObject({
     ...catalogBase,
@@ -201,6 +285,52 @@ export function validPublicReadiness(value: z.infer<z.ZodObject<typeof publicRea
   );
 }
 export type ReadinessBlocker = z.infer<typeof readinessBlockerSchema>;
+
+export const openAiReadinessShape = {
+  status: z.enum(['setup-required', 'locally-configured']),
+  localReady: z.boolean(),
+  blockers: z
+    .array(
+      z.enum([
+        'configuration-required',
+        'environment-key-required',
+        'accounting-configuration-required',
+        'quota-store-unavailable',
+        'history-store-unavailable',
+      ]),
+    )
+    .max(5)
+    .refine((v) => new Set(v).size === v.length),
+  credential: z.enum(['unavailable', 'environment-valid']),
+  quota: z.enum(['available', 'unavailable']),
+  history: z.enum(['available', 'unavailable']),
+  accounting: z.enum(['unavailable', 'configured']),
+  provider: z.strictObject({
+    name: z.literal('OpenAI'),
+    model: z.literal(OPENAI_MODEL).nullable(),
+    status: z.enum(['configured-unprobed', 'configuration-unavailable']),
+    liveVerified: z.literal(false),
+  }),
+  generationVerified: z.literal(false),
+  requiresConsent: z.literal(true),
+  acceptsCredentials: z.literal(false),
+  setupAction: z.literal('operator-server-environment-configuration'),
+};
+export function validOpenAiReadiness(value: z.infer<z.ZodObject<typeof openAiReadinessShape>>) {
+  const configured = value.provider.status === 'configured-unprobed';
+  if (configured !== (value.provider.model === OPENAI_MODEL)) return false;
+  const expected: typeof value.blockers = [];
+  if (!configured) expected.push('configuration-required');
+  if (value.credential !== 'environment-valid') expected.push('environment-key-required');
+  if (value.accounting !== 'configured') expected.push('accounting-configuration-required');
+  if (value.quota !== 'available') expected.push('quota-store-unavailable');
+  if (value.history !== 'available') expected.push('history-store-unavailable');
+  return (
+    JSON.stringify(expected) === JSON.stringify(value.blockers) &&
+    value.localReady === !expected.length &&
+    value.status === (expected.length ? 'setup-required' : 'locally-configured')
+  );
+}
 
 export const providerFailureSchema = z
   .strictObject({

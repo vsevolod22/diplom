@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { hashKey, isCancelledError, QueryClientContext } from '@tanstack/react-query';
+import type { QueryKey } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
 import { ReportCursorResetError, ReportQueryError, ReportViewContractError } from '@/shared/api/scans/reportView';
@@ -29,6 +31,7 @@ type Snapshot<T> = { data: T; description: PageDescription; index: number; start
 type Attempt = { cursor: string | undefined; index: number; start: number };
 type Props<T> = {
   reportKey: string;
+  queryKey?: QueryKey;
   label: string;
   enabled: boolean;
   waiting: string;
@@ -40,10 +43,14 @@ type Props<T> = {
 
 export function CursorReportPager<T>(props: Props<T>) {
   // A new scope/status identity destroys confirmed data, cursor history and pending work.
-  return <PagerSession key={props.reportKey} {...props} />;
+  return <PagerSession key={JSON.stringify([props.reportKey, hashKey(props.queryKey ?? [props.reportKey])])} {...props} />;
 }
 
-function PagerSession<T>({ label, enabled, waiting, load, describe, controls, children }: Props<T>) {
+function PagerSession<T>({ reportKey, queryKey, label, enabled, waiting, load, describe, controls, children }: Props<T>) {
+  // Standalone renderers may omit the provider; application reports use its existing client.
+  const queryClient = useContext(QueryClientContext);
+  // The keyed session remounts whenever this query identity changes.
+  const baseQueryKey = useRef(queryKey ?? [reportKey]).current;
   const [snapshot, setSnapshot] = useState<Snapshot<T> | null>(null);
   const confirmed = useRef<Snapshot<T> | null>(null);
   const displayed = useRef<Snapshot<T> | null>(null);
@@ -52,18 +59,38 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
   const [error, setError] = useState('');
   const [denied, setDenied] = useState(false);
   const [attempt, setAttempt] = useState<Attempt>({ cursor: undefined, index: 0, start: 0 });
-  const request = useRef<AbortController | null>(null);
+  const request = useRef<{ controller: AbortController; queryKey: QueryKey } | null>(null);
 
   const fetchPage = useCallback(
     async (target: Attempt) => {
       if (request.current || !enabled) return;
       const controller = new AbortController();
-      request.current = controller;
+      const pageQueryKey = [...baseQueryKey, target.cursor ?? null];
+      const active = { controller, queryKey: pageQueryKey };
+      request.current = active;
+      let querySignal: AbortSignal | undefined;
+      const abort = () => controller.abort();
       setPending(true);
       setError('');
       setAttempt(target);
       try {
-        const data = await load(target.cursor, controller.signal);
+        const data = queryClient ? await queryClient.fetchQuery({
+          queryKey: pageQueryKey,
+          queryFn: async ({ signal }) => {
+            querySignal = signal;
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted) abort();
+            const page = await load(target.cursor, controller.signal);
+            controller.signal.throwIfAborted();
+            return page;
+          },
+          // Revisits must reach the backend to detect changed content under the same identity.
+          staleTime: 0,
+          gcTime: 0,
+          retry: false,
+          networkMode: 'always',
+          structuralSharing: false,
+        }) : await load(target.cursor, controller.signal);
         if (controller.signal.aborted) return;
         const description = describe(data);
         const previous = confirmed.current;
@@ -122,7 +149,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
         setHistoryInvalid(false);
         setDenied(false);
       } catch (failure) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || isCancelledError(failure)) return;
         const accessLost =
           failure instanceof ScanAccessError ||
           (failure instanceof Error &&
@@ -136,7 +163,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
           setHistoryInvalid(true);
           setAttempt({ cursor: undefined, index: 0, start: 0 });
           setError(
-            'Содержимое посещённой страницы изменилось при прежней идентичности отчёта. История cursors сброшена. Показана последняя подтверждённая страница, а не несовместимый ответ; повтор начинается с первой страницы.',
+            'Содержимое отчёта изменилось. Показана предыдущая подтверждённая страница, её актуальность неизвестна. Повторная загрузка начнётся с первой страницы.',
           );
         } else if (accessLost || failure instanceof ReportIdentityError || failure instanceof CveReportContractError || failure instanceof ReportViewContractError || failure instanceof ReportCursorResetError) {
           confirmed.current = null;
@@ -149,8 +176,8 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
             accessLost
               ? 'Доступ к отчёту утрачен. Подтвердите сессию заново.'
               : failure instanceof ReportQueryError
-                ? 'Исправьте фильтры отчёта. Прежние данные и cursors сброшены; повтор начинается с первой страницы.'
-                : 'Идентичность или версия отчёта изменилась. Прежние данные и cursors сброшены.',
+                ? 'Исправьте фильтры отчёта. Прежние данные скрыты; повторная загрузка начнётся с первой страницы.'
+                : 'Не удалось подтвердить, что ответ относится к текущему отчёту. Прежние данные скрыты; повторите загрузку с первой страницы.',
           );
         } else {
           setError(
@@ -158,26 +185,34 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
               displayed.current
                 ? 'Показана предыдущая подтверждённая страница, а не результат неудавшегося перехода.'
                 : 'Данные и число строк неизвестны.'
-            }${displayed.current && !confirmed.current ? ' История cursors сброшена; повтор начинается с первой страницы.' : ''}`,
+            }${displayed.current && !confirmed.current ? ' Повторная загрузка начнётся с первой страницы.' : ''}`,
           );
         }
       } finally {
-        if (!controller.signal.aborted) {
+        querySignal?.removeEventListener('abort', abort);
+        if (request.current === active) {
+          // Only the imperative, validated snapshot survives; no private rows persist in QueryCache.
+          queryClient?.removeQueries({ queryKey: pageQueryKey, exact: true });
           request.current = null;
           setPending(false);
         }
       }
     },
-    [enabled, load, describe, label],
+    [enabled, load, describe, label, queryClient, baseQueryKey],
   );
 
   useEffect(() => {
     void fetchPage({ cursor: undefined, index: 0, start: 0 });
     return () => {
-      request.current?.abort();
+      const active = request.current;
       request.current = null;
+      if (active) {
+        active.controller.abort();
+        void queryClient?.cancelQueries({ queryKey: active.queryKey, exact: true });
+        queryClient?.removeQueries({ queryKey: active.queryKey, exact: true });
+      }
     };
-  }, [fetchPage]);
+  }, [fetchPage, queryClient]);
 
   const page = snapshot?.description.checked ? snapshot : null;
   const previous = page && !historyInvalid && page.index > 0 ? page.entries[page.index - 1] : null;
@@ -217,7 +252,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
                     ? `${page.description.wholeTotal !== undefined ? 'Совпадений во всём отчёте' : 'Подтверждённый итог'} ${label}: ${page.description.total}`
                     : `Итог ${label} неизвестен`}
                 </span>
-                {page.description.wholeTotal !== undefined ? <span>{page.description.wholeTotal === null ? `Полный итог ${label} неизвестен` : `Полный итог ${label}: ${page.description.wholeTotal}`}</span> : null}
+                {page.description.wholeTotal !== undefined && page.description.wholeTotal !== page.description.total ? <span>{page.description.wholeTotal === null ? `Полный итог ${label} неизвестен` : `Полный итог ${label}: ${page.description.wholeTotal}`}</span> : null}
               </>
             ) : (
               <span>Число {label} неизвестно до подтверждения выполненной проверки.</span>
@@ -227,7 +262,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
                 Сохранён прежний подтверждённый снимок; актуальность повторного ответа не подтверждена.
               </span>
             ) : null}
-            {pending ? <span>Загружаем {label}… Номер и диапазон ещё не изменены.</span> : null}
+            {pending ? <span>Загружаем {label}… {page ? 'Пока показана предыдущая страница.' : ''}</span> : null}
           </div>
           {error ? (
             <Alert tone="danger" role="alert">
@@ -247,9 +282,7 @@ function PagerSession<T>({ label, enabled, waiting, load, describe, controls, ch
           {navigation('top')}
           {snapshot && !denied ? children(snapshot.data) : null}
           {navigation('bottom')}
-          {navigable ? <p className="scan-a1__muted scan-report-pages__note">
-            Только последовательные страницы API. Общего числа страниц и перехода к произвольной странице нет.
-          </p> : null}
+
         </>
       )}
     </div>

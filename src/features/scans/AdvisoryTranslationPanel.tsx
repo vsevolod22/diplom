@@ -59,7 +59,7 @@ type Props = {
   assessment: AdvisoryAssessment;
   client?: AdvisoryTranslationClient;
 };
-type Snapshot = { context: TranslationContext; readiness: ChatReadiness };
+type Snapshot = { context: TranslationContext; readiness: Extract<ChatReadiness, { setupAction: 'operator-public-file-configuration' }> };
 const sessionKey = () => JSON.stringify(scanSession());
 const blockerMessages = {
   'configuration-required': 'Оператор должен настроить политику ИИ.',
@@ -131,6 +131,7 @@ function TranslationScope({
       client.readiness(status.scanId, signal),
       translationSourceVersion(vulnerabilityId, assessment),
     ]);
+    if (readiness.setupAction !== 'operator-public-file-configuration') throw new TranslationError('INVALID');
     if (
       context.scanId !== status.scanId ||
       context.findingId !== findingId ||

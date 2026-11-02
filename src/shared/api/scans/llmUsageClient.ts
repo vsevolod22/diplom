@@ -4,20 +4,25 @@ import { BROWSER_SCANS_PATH } from './scanTransport';
 
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const vector = z.strictObject({ input: count, output: count, costMicros: count });
+const limitVector = vector.extend({ costMicros: count.nullable() });
 const scope = z
   .strictObject({
-    limits: vector,
+    limits: limitVector,
     used: vector,
     held: vector,
     carried: vector,
-    remaining: vector,
+    remaining: limitVector,
     warning: z.boolean(),
     exhausted: z.boolean(),
   })
   .refine((value) =>
     (['input', 'output', 'costMicros'] as const).every((d) => {
       const total = value.used[d] + value.held[d] + value.carried[d];
-      return Number.isSafeInteger(total) && value.remaining[d] === Math.max(0, value.limits[d] - total);
+      const limit = value.limits[d];
+      return (
+        Number.isSafeInteger(total) &&
+        (limit === null ? value.remaining[d] === null : value.remaining[d] === Math.max(0, limit - total))
+      );
     }),
   );
 const binding = {
@@ -34,8 +39,8 @@ const admission = z.union([
     status: z.enum(['fits', 'insufficient', 'policy_fault']),
     reserve: z.strictObject({
       input: count.min(1025).max(65536),
-      output: count.min(1).max(2048),
-      costMicros: z.literal(0),
+      output: count.min(1).max(4096),
+      costMicros: count,
     }),
     signals: z
       .array(
@@ -65,6 +70,7 @@ export const usageSchema = z.discriminatedUnion('available', [
     .strictObject({
       ...binding,
       available: z.literal(true),
+      monetaryLimit: z.enum(['capped', 'uncapped']).optional(),
       admission,
       reason: z.enum(['ready', 'warning', 'exhausted', 'policy_fault']),
       window: z
@@ -84,10 +90,22 @@ export const usageSchema = z.discriminatedUnion('available', [
     })
     .refine((value) => {
       const next = value.admission;
+      for (const name of ['user', 'scan'] as const) {
+        const cost = value[name].limits.costMicros;
+        if (value.monetaryLimit === 'uncapped' ? cost !== null : cost === null) return false;
+        if (value.monetaryLimit === 'capped' && (cost === null || cost <= 0)) return false;
+      }
+      if (value.monetaryLimit === 'uncapped' && value.signals.some((s) => s.dimension === 'costMicros'))
+        return false;
       if (next.status === 'unavailable') return true;
+      if (value.monetaryLimit === undefined ? next.reserve.costMicros !== 0 : next.reserve.costMicros <= 0)
+        return false;
       const expected = (['user', 'scan'] as const).flatMap((name) =>
         (['input', 'output', 'costMicros'] as const)
-          .filter((d) => next.reserve[d] > value[name].remaining[d])
+          .filter((d) => {
+            const remaining = value[name].remaining[d];
+            return remaining !== null && next.reserve[d] > remaining;
+          })
           .map((d) => `${name}:${d}`),
       );
       const shortages = next.signals.filter((s) => s.reason === 'insufficient');
@@ -108,6 +126,19 @@ export const usageSchema = z.discriminatedUnion('available', [
     }),
 ]);
 export type LlmUsage = z.infer<typeof usageSchema>;
+/** A free/old accounting snapshot cannot admit a paid request (or vice versa). */
+export function usageMatchesDisclosure(
+  usage: LlmUsage,
+  disclosure:
+    | { provider: 'OpenAI'; monetaryLimit: 'capped' | 'uncapped' }
+    | { provider: 'OpenRouter' }
+    | null,
+) {
+  if (!usage.available || !disclosure) return false;
+  return disclosure.provider === 'OpenAI'
+    ? usage.monetaryLimit === disclosure.monetaryLimit
+    : usage.monetaryLimit === undefined;
+}
 export type UsageBinding = Pick<LlmUsage, 'scanId' | 'digest' | 'platform' | 'reportVersion'>;
 export class UsageError extends Error {
   constructor() {

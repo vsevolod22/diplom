@@ -9,7 +9,7 @@ import { logoutDemoUser } from '@/shared/api/auth/demoAuth';
 import { transitionScanSession } from '@/shared/api/auth/scanSession';
 import { Alert, Badge } from '@/shared/ui/scan-primitives';
 
-export function ScanShell({ demo, children }: { demo: boolean; children: ReactNode }) {
+export function ScanShell({ demo, children, compact = false }: { demo: boolean; children: ReactNode; compact?: boolean }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -36,12 +36,12 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
   const newScanPath = demo ? '/demo/scans/new' : '/scans/new';
   const screenTitle =
     pathname === newScanPath
-      ? 'Новый скан'
+      ? 'Новая проверка'
       : pathname === '/scans' || pathname === '/demo/scans'
-        ? 'Список сканов'
-        : 'Деталь скана';
+        ? 'Мои проверки'
+        : 'Отчёт по образу';
   return (
-    <main className="scan-shell scan-a1 min-w-0 text-slate-950">
+    <main className={`scan-shell scan-a1 min-w-0 text-slate-950${compact ? ' scan-shell--compact' : ''}`}>
       <motion.div
         className="scan-a1__progress"
         aria-hidden="true"
@@ -68,18 +68,21 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
               </Link>
             </div>
           </header>
-          <div className="scan-shell__body">
+          <div className={compact ? 'sr-only' : 'scan-shell__body'}>
             <p className="scan-shell__eyebrow">IMAGE / EXPLORER</p>
             <h1 className="sr-only">{screenTitle}</h1>
             <Badge tone={demo ? 'warning' : 'neutral'}>
-              {demo ? 'Режим · демо' : 'Режим · авторизованный API'}
+              {demo ? 'Демонстрация' : 'Личный кабинет'}
             </Badge>
           </div>
-          <NavListCard
+          {compact ? <nav className="scan-shell__compact-nav" aria-label="Разделы сканирования">
+            <Link to={demo ? '/demo/scans' : '/scans'}>Мои проверки</Link>
+            <Link to={newScanPath}>Новая проверка</Link>
+          </nav> : <NavListCard
             items={[
               {
-                label: 'Реальные сканы',
-                description: 'По защищённой сессии',
+                label: 'Мои проверки',
+                description: 'Результаты и история',
                 to: '/scans',
                 icon: <ArrowUpRight size={18} />,
                 current: pathname === '/scans',
@@ -92,14 +95,14 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
                 current: pathname === '/demo/scans',
               },
               {
-                label: 'Новый скан',
-                description: demo ? 'Форма без запуска' : 'Запуск с разрешения сервера',
+                label: 'Новая проверка',
+                description: demo ? 'Форма без запуска' : 'Выбрать и проверить образ',
                 to: newScanPath,
                 icon: <ArrowUpRight size={18} />,
                 current: pathname === newScanPath,
               },
             ]}
-          />
+          />}
         </div>
       </div>
       <div className="scan-shell__stage">
@@ -111,15 +114,7 @@ export function ScanShell({ demo, children }: { demo: boolean; children: ReactNo
                 Не результат реального сканирования и не подтверждение безопасности образа.
               </span>
             </Alert>
-          ) : (
-            <Alert role="note" tone="neutral" className="border-slate-300 bg-slate-50 text-slate-800">
-              <strong className="block">Авторизованный режим</strong>
-              <span className="mt-1 block text-sm leading-relaxed">
-                Снимки доступны через защищённую cookie-сессию и разрешение сервера.
-                Статус обновляется по серверным событиям или опросу; доступные действия определяет сервер. Демонстрация доступна отдельно.
-              </span>
-            </Alert>
-          )}
+          ) : null}
           {logoutError ? <Alert role="alert" tone="danger">Не удалось завершить сессию на сервере. Повторите выход.</Alert> : null}
           {children}
         </div>

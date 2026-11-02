@@ -1,5 +1,14 @@
 import { z } from 'zod';
-import { isCveId, isDebianTempId } from './publicVulnerabilityIdentifiers';
+import { isCveId, isDebianTempId, isDebianDlaId, identifierLabel } from './publicVulnerabilityIdentifiers';
+import {
+  freeProfileSchema,
+  openAiDisclosureSchema,
+  publicChatMetadataShape,
+  scannerDisclosureData,
+  validPublicChatMetadata,
+  validScannerDisclosure,
+} from './llmPublicContract';
+import { publicSafeFinding, type LlmFinding } from './llmFindingContract';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { BROWSER_SCANS_PATH, type ScanStatus, type ScanTransport } from './scanTransport';
 
@@ -28,7 +37,7 @@ const disclosure = z
     operatorApprovedRouting: z.literal(true),
     providerComplianceNotProvenByDeclaration: z.literal(true),
     requestBudgetUsd: z.number().finite().nonnegative().max(1),
-    data: text,
+    data: scannerDisclosureData,
     freeOnly: z.boolean().optional(),
     maxPrice: z
       .strictObject({
@@ -44,51 +53,118 @@ const disclosure = z
       (policy.requestBudgetUsd === 0 &&
         policy.maxPrice?.prompt === 0 &&
         policy.maxPrice.completion === 0 &&
-        policy.maxPrice.request === 0),
-  );
-const contextSchema = z
-  .object({
+        policy.maxPrice.request === 0 &&
+        freeProfileSchema.safeParse({
+          model: policy.model,
+          providers: policy.providers,
+          retention: policy.retention,
+        }).success),
+  )
+  .refine(validScannerDisclosure);
+export const summaryContextSchema = z
+  .strictObject({
     ...tuple,
     enabled: z.boolean(),
+    unavailableReason: z.literal('LLM_SUMMARY_UNSUPPORTED_REPORT').optional(),
+    summaryResultRead: z.boolean().optional(),
     policyVersion: hash.nullable(),
-    disclosure: disclosure.nullable(),
+    disclosure: z.discriminatedUnion('provider', [disclosure, openAiDisclosureSchema]).nullable(),
+    ...publicChatMetadataShape,
   })
+  .refine(validPublicChatMetadata)
   .refine((value) =>
     value.enabled
       ? value.policyVersion !== null && value.disclosure !== null
       : value.policyVersion === null && value.disclosure === null,
+  )
+  .refine(
+    (value) =>
+      value.unavailableReason === undefined ||
+      (!value.enabled &&
+        value.policyVersion === null &&
+        value.disclosure === null &&
+        value.summaryResultRead !== true),
   );
 const findingId = z.string().regex(/^(?:secret-\d{1,6}-\d{1,6}|vuln-[a-f0-9]{64}|sha256:[a-f0-9]{64})$/);
-const replySchema = z.object({
-  ...tuple,
-  hypotheses: z
-    .array(
-      z.strictObject({
-        kind: z.literal('hypothesis'),
-        text,
-        citations: z
-          .array(findingId)
-          .min(1)
-          .max(20)
-          .refine((ids) => new Set(ids).size === ids.length),
-      }),
+const summaryContextSelectionSchema = z
+  .strictObject({
+    totalFindings: z.number().int().min(1).max(1000),
+    selectedFindings: z.number().int().min(1).max(1000),
+    omittedFindings: z.number().int().min(0).max(1000),
+    strategy: z.literal('all-critical-and-unknown-then-severity'),
+    selectedFindingIds: z
+      .array(findingId)
+      .min(1)
+      .max(1000)
+      .refine((ids) => new Set(ids).size === ids.length),
+  })
+  .refine(
+    (selection) =>
+      selection.selectedFindings === selection.selectedFindingIds.length &&
+      selection.selectedFindings + selection.omittedFindings === selection.totalFindings,
+  );
+export const summaryReplySchema = z
+  .strictObject({
+    ...tuple,
+    hypotheses: z
+      .array(
+        z.strictObject({
+          kind: z.literal('hypothesis'),
+          text,
+          citations: z
+            .array(findingId)
+            .min(1)
+            .max(20)
+            .refine((ids) => new Set(ids).size === ids.length),
+        }),
+      )
+      .min(1)
+      .max(12),
+    // Exact technical details come from server facts, never from generated prose.
+    scannerFacts: z
+      .array(
+        z.union([
+          // Earlier summary DTOs carried only these three fields.
+          z.strictObject({
+            findingId,
+            check: z.enum(['secret', 'vuln', 'config']),
+            severity: z.string().max(20),
+          }),
+          publicSafeFinding,
+        ]),
+      )
+      .max(1000),
+    ...publicChatMetadataShape,
+    contextSelection: summaryContextSelectionSchema.optional(),
+  })
+  .refine(validPublicChatMetadata)
+  .refine((reply) => {
+    // Legacy replies have no public metadata. A native public reply carries the whole group,
+    // while scannerFacts contains only cited rows from the selected subset, not all findings.
+    if (reply.findingCount === undefined) return reply.contextSelection === undefined;
+    const selection = reply.contextSelection;
+    if (!selection || selection.totalFindings !== reply.findingCount) return false;
+    const selected = new Set(selection.selectedFindingIds);
+    const cited = new Set(reply.hypotheses.flatMap((paragraph) => paragraph.citations));
+    const facts = new Set(reply.scannerFacts.map((fact) => fact.findingId));
+    if (
+      facts.size !== reply.scannerFacts.length ||
+      facts.size !== cited.size ||
+      [...cited].some((id) => !selected.has(id) || !facts.has(id))
     )
-    .min(1)
-    .max(12),
-  // Only these source fields are displayed. Other server facts never become generated HTML or links.
-  scannerFacts: z
-    .array(
-      z.object({
-        findingId: z.string().min(1).max(200),
-        check: z.enum(['secret', 'vuln', 'config']),
-        severity: z.string().max(20),
-      }),
-    )
-    .max(1000),
-});
-export type SummaryContext = z.infer<typeof contextSchema>;
-export type SummaryReply = z.infer<typeof replySchema>;
-export type SummarySource = { findingId: string; check: 'secret' | 'vuln' | 'config'; label: string };
+      return false;
+    return reply.scannerFacts.every(
+      (fact) => cited.has(fact.findingId) && publicSafeFinding.safeParse(fact).success,
+    );
+  });
+export type SummaryContext = z.infer<typeof summaryContextSchema>;
+export type SummaryReply = z.infer<typeof summaryReplySchema>;
+export type SummarySource = {
+  findingId: string;
+  check: 'secret' | 'vuln' | 'config';
+  label: string;
+  finding?: LlmFinding;
+};
 export type SummaryClient = Omit<ReturnType<typeof createSummaryClient>, 'existing'> & {
   existing?: ReturnType<typeof createSummaryClient>['existing'];
 };
@@ -97,20 +173,30 @@ export class SummaryError extends Error {
     super('ИИ-сводка недоступна');
   }
 }
+export function isUnsupportedSummaryReport(error: unknown): boolean {
+  return error instanceof SummaryError && error.code === 'LLM_SUMMARY_UNSUPPORTED_REPORT';
+}
 export function summaryErrorMessage(error: unknown): string {
+  if (isUnsupportedSummaryReport(error))
+    return 'ИИ-разбор недоступен для этого формата отчёта. Исходные результаты сканирования доступны ниже.';
   const code = error instanceof SummaryError ? error.code : '';
   if (code === 'LLM_NO_EVIDENCE')
-    return 'Нет подтверждённых находок для сводки. Это не означает, что непроверенные области безопасны.';
+    return 'Для разбора недостаточно находок. Это не означает, что образ безопасен.';
   if (['LLM_STALE_REPORT', 'LLM_STALE_POLICY', 'STALE'].includes(code))
-    return 'Отчёт или политика изменились. Обновите условия и подтвердите согласие заново.';
-  if (['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED', 'LLM_QUOTA_EXCEEDED'].includes(code))
-    return 'Достигнут лимит запросов или бюджета. Попробуйте позднее; отчёт сканеров сохранён.';
+    return 'Отчёт или условия разбора изменились. Повторите разбор вручную.';
+  if (
+    ['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED', 'LLM_QUOTA_EXCEEDED', 'LLM_PROVIDER_RATE_LIMITED'].includes(code)
+  )
+    return 'ИИ-разбор временно недоступен. Попробуйте позднее; отчёт сканеров доступен.';
   if (['TIMEOUT', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
-    return 'Сводка не получена вовремя. Можно повторить вручную после нового согласия.';
+    return 'Не дождались ответа ИИ. Можно повторить разбор вручную.';
+  if (code === 'LLM_INVALID_RESPONSE' || code === 'INVALID')
+    return 'Ответ ИИ не прошёл проверку достоверности или формата и не показан. Исходные находки сохранены; можно повторить разбор вручную.';
+  if (code === 'ABORTED') return 'Разбор остановлен. Исходные находки доступны.';
   if (code === 'LLM_CONFIGURATION_UNAVAILABLE')
-    return 'ИИ не настроен или выключен. Доступность модели и ключа не подтверждена.';
-  if (code === 'SESSION') return 'Сессия изменилась. Сводка и согласие сброшены.';
-  return 'Не удалось безопасно получить сводку. Исходный отчёт остаётся доступен; обновите условия или попробуйте позднее.';
+    return 'ИИ-разбор сейчас недоступен. Отчёт сканеров доступен.';
+  if (code === 'SESSION') return 'Сессия изменилась. Откройте отчёт заново.';
+  return 'Не удалось получить разбор ИИ. Отчёт сканеров доступен; можно повторить вручную.';
 }
 export const contextFence = (value: SummaryContext) => JSON.stringify(value);
 export function matchesSummaryTuple(
@@ -145,10 +231,13 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
     const unsubscribe = subscribeScanSession(abort);
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      abort();
-    }, 35_000);
+    const deadline = setTimeout(
+      () => {
+        timedOut = true;
+        abort();
+      },
+      body ? 105_000 : 35_000,
+    );
     const stopped = new Promise<never>((_, reject) => {
       const rejectAbort = () =>
         reject(new SummaryError(!current() ? 'SESSION' : timedOut ? 'TIMEOUT' : 'ABORTED'));
@@ -218,7 +307,7 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
   return {
     current,
     async context(scanId: string, signal: AbortSignal) {
-      const context = contextSchema.parse(await request(scanId, 'context', signal));
+      const context = summaryContextSchema.parse(await request(scanId, 'context', signal));
       if (context.scanId !== scanId) throw new SummaryError('STALE');
       return context;
     },
@@ -230,13 +319,15 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
         if (error instanceof SummaryError && error.code === 'LLM_SUMMARY_MISSING') return null;
         throw error;
       }
-      const reply = replySchema.parse(value);
+      const reply = summaryReplySchema.parse(value);
       if (!matchesSummaryTuple(reply, context)) throw new SummaryError('STALE');
       return reply;
     },
     async summary(context: SummaryContext, signal: AbortSignal) {
+      if (context.unavailableReason === 'LLM_SUMMARY_UNSUPPORTED_REPORT')
+        throw new SummaryError(context.unavailableReason);
       if (!context.enabled || !context.policyVersion) throw new SummaryError('LLM_CONFIGURATION_UNAVAILABLE');
-      const reply = replySchema.parse(
+      const reply = summaryReplySchema.parse(
         await request(context.scanId, 'summary', signal, {
           reportVersion: context.reportVersion,
           consent: { accepted: true, policyVersion: context.policyVersion },
@@ -271,6 +362,7 @@ export async function collectSummarySources(
     let expected: number | null | undefined;
     let cve = 0;
     let debianTemp = 0;
+    let debianDla = 0;
     for (let index = 0; index < 21; index++) {
       const page =
         check === 'secret'
@@ -292,7 +384,8 @@ export async function collectSummarySources(
         page.outcome === 'checked' &&
         (page.profile !== status.profile ||
           page.identifierCounts?.cve !== status.identifierCounts?.cve ||
-          page.identifierCounts?.debianTemp !== status.identifierCounts?.debianTemp)
+          page.identifierCounts?.debianTemp !== status.identifierCounts?.debianTemp ||
+          (page.identifierCounts?.debianDla ?? 0) !== (status.identifierCounts?.debianDla ?? 0))
       )
         throw new SummaryError('STALE');
       if ('image' in page && (!page.image.endsWith(`@${status.digest}`) || page.platform !== status.platform))
@@ -301,13 +394,14 @@ export async function collectSummarySources(
         if ('cveId' in finding) {
           if (isCveId(finding.cveId)) cve++;
           else if (isDebianTempId(finding.cveId)) debianTemp++;
+          else if (isDebianDlaId(finding.cveId)) debianDla++;
         }
         add({
           findingId: finding.findingId,
           check,
           label:
             'cveId' in finding
-              ? `${finding.cveId}${isDebianTempId(finding.cveId) ? ' · Debian advisory (не CVE)' : ''} · ${finding.severity}`
+              ? `${finding.cveId}${isCveId(finding.cveId) ? '' : ` · ${identifierLabel(finding.cveId)}`} · ${finding.severity}`
               : `${finding.ruleId} · Secrets`,
         });
       }
@@ -318,7 +412,8 @@ export async function collectSummarySources(
           status.perCheck?.[check]?.findingCount !== expected ||
           (check === 'vuln' &&
             status.identifierCounts &&
-            (cve !== status.identifierCounts.cve || debianTemp !== status.identifierCounts.debianTemp))
+            (cve !== status.identifierCounts.cve || debianTemp !== status.identifierCounts.debianTemp ||
+                          debianDla !== (status.identifierCounts.debianDla ?? 0)))
         )
           throw new SummaryError('INVALID');
         break;
@@ -339,5 +434,9 @@ export function verifiedSummarySources(reply: SummaryReply, sources: SummarySour
     const source = byId.get(id);
     if (!source || facts.get(id)?.check !== source.check) throw new SummaryError('INVALID');
   }
-  return sources.filter((source) => cited.has(source.findingId));
+  return sources.filter((source) => cited.has(source.findingId)).map((source) => {
+    // Keep legacy three-field facts usable; retain full validated server facts for citation cards.
+    const finding = publicSafeFinding.safeParse(facts.get(source.findingId));
+    return finding.success ? { ...source, finding: finding.data } : source;
+  });
 }

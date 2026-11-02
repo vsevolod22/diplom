@@ -1,13 +1,36 @@
 import { useSyncExternalStore } from 'react';
+import { z } from 'zod';
+import { openAiDisclosureSchema } from '@/shared/api/scans/llmPublicContract';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 
 export const REPORT_AUTOMATION_REVISION = 'report-automation-v1';
 const STORAGE_PREFIX = 'report-preferences:v1:';
 
+export const openAiSummaryConsentSchema = z
+  .strictObject({
+    version: z.literal(1),
+    policyVersion: z.string().regex(/^[a-f0-9]{64}$/),
+    disclosure: openAiDisclosureSchema,
+  })
+  // Freeze every object in this closed schema, not just the preferences snapshot.
+  // Copy each level so neither parsing nor saving retains or freezes caller-owned references.
+  .transform((grant) =>
+    Object.freeze({
+      ...grant,
+      disclosure: Object.freeze({
+        ...grant.disclosure,
+        estimatedPrice: Object.freeze({ ...grant.disclosure.estimatedPrice }),
+      }),
+    }),
+  );
+export type OpenAiSummaryConsent = z.infer<typeof openAiSummaryConsentSchema>;
+
 type Session = ReturnType<typeof scanSession>;
 export type ReportPreferencesInput = Readonly<{
   language: 'original' | 'ru';
   autoSummary: boolean;
+  /** Only an explicit action after the exact paid disclosure may populate this grant. */
+  openAiSummaryConsent?: OpenAiSummaryConsent;
 }>;
 export type ReportPreferences = ReportPreferencesInput &
   Readonly<{
@@ -33,20 +56,29 @@ function storageKey(subject: string) {
 }
 
 function decode(raw: string | null): ReportPreferences {
-  if (!raw || raw.length > 256) return defaults;
+  if (!raw || raw.length > 4096) return defaults;
   try {
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return defaults;
     const record = value as Record<string, unknown>;
     if (
-      Object.keys(record).sort().join(',') !== 'autoSummary,automationRevision,language,version' ||
+      Object.keys(record).sort().join(',') !==
+        (Object.hasOwn(record, 'openAiSummaryConsent')
+          ? 'autoSummary,automationRevision,language,openAiSummaryConsent,version'
+          : 'autoSummary,automationRevision,language,version') ||
       record.version !== 1 ||
       record.automationRevision !== REPORT_AUTOMATION_REVISION ||
       (record.language !== 'original' && record.language !== 'ru') ||
       typeof record.autoSummary !== 'boolean'
     )
       return defaults;
+    const consent =
+      record.openAiSummaryConsent === undefined
+        ? undefined
+        : openAiSummaryConsentSchema.parse(record.openAiSummaryConsent);
+    if (consent && !record.autoSummary) return defaults;
     return {
+      ...(consent ? { openAiSummaryConsent: consent } : {}),
       language: record.language,
       autoSummary: record.autoSummary,
       authorized: true,
@@ -131,6 +163,11 @@ export function saveReportPreferences(
     typeof preferences.autoSummary !== 'boolean'
   )
     return false;
+  const parsedConsent =
+    preferences.openAiSummaryConsent === undefined
+      ? null
+      : openAiSummaryConsentSchema.safeParse(preferences.openAiSummaryConsent);
+  if (parsedConsent && (!parsedConsent.success || !preferences.autoSummary)) return false;
   readReportPreferences();
   try {
     const key = storageKey(session.subject);
@@ -139,6 +176,7 @@ export function saveReportPreferences(
       automationRevision: REPORT_AUTOMATION_REVISION,
       language: preferences.language,
       autoSummary: preferences.autoSummary,
+      ...(parsedConsent?.success ? { openAiSummaryConsent: parsedConsent.data } : {}),
     });
     window.localStorage.setItem(key, raw);
     if (window.localStorage.getItem(key) !== raw) throw new Error('Preferences not persisted');

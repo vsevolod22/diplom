@@ -2,14 +2,10 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { subscribeReportPreferences, useReportPreferences } from '@/shared/api/preferences/reportPreferences';
 import { reportPreferencesCurrent } from '@/shared/api/scans/reportAutomation';
-import {
-  ChatError,
-  chatErrorMessage,
-  createChatClient,
-  type ChatClient,
-} from '@/shared/api/scans/llmChatClient';
+import { ChatError, createChatClient, type ChatClient } from '@/shared/api/scans/llmChatClient';
 import {
   chatContextFence,
+  chatReceiptMatchesProvider,
   sameChatBinding,
   validChatText,
   verifiedChatSources,
@@ -21,12 +17,15 @@ import {
 } from '@/shared/api/scans/llmChatContract';
 import { collectSummarySources, type SummarySource } from '@/shared/api/scans/llmSummaryClient';
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
-import type { LlmUsage } from '@/shared/api/scans/llmUsageClient';
+import { usageMatchesDisclosure, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
+import { OpenAiDisclosure } from './OpenAiDisclosure';
+import { LlmFindingDetails } from './LlmFindingDetails';
 import { utf8Bytes } from '@/shared/api/scans/vulnAdvisory';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
-import { isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
+import { identifierLabel, identifierCountsTotal } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
+import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient };
 type Snapshot = {
@@ -36,22 +35,52 @@ type Snapshot = {
   sources: SummarySource[];
 };
 const readinessMessages = {
-  'configuration-required': 'Требуется настройка политики генерации оператором.',
-  'public-key-required':
-    'Серверный ключ не настроен или отсутствует. Настройка — только оператором; не вводите ключ в чат.',
-  'public-key-unsafe': 'Метаданные серверного ключа не прошли проверку безопасности. Обратитесь к оператору.',
-  'quota-store-unavailable': 'Хранилище квоты недоступно. Это не нулевой расход и не разрешение на отправку.',
-  'history-store-unavailable': 'Хранилище истории недоступно; генерация заблокирована.',
-  'provider-profile-unavailable':
-    'Профиль провайдера недоступен в проверенном каталоге. Автоматической замены модели нет.',
+  'configuration-required': 'Чат не настроен. Обратитесь к оператору.',
+  'environment-key-required': 'Требуется серверная настройка OpenAI. Не вводите ключ в интерфейс.',
+  'accounting-configuration-required': 'Учёт стоимости OpenAI не настроен. Обратитесь к оператору.',
+  'public-key-required': 'Чат не настроен. Обратитесь к оператору; не вводите ключи в чат.',
+  'public-key-unsafe': 'Настройки чата не прошли проверку безопасности. Обратитесь к оператору.',
+  'quota-store-unavailable': 'Не удалось проверить лимиты. Попробуйте обновить историю позже.',
+  'history-store-unavailable': 'История временно недоступна. Попробуйте позже.',
+  'provider-profile-unavailable': 'Сервис ответов недоступен. Обратитесь к оператору.',
 };
+function chatErrorMessage(error: unknown) {
+  const code = error instanceof ChatError ? error.code : '';
+  if (code === 'SESSION') return 'Сессия изменилась или истекла. Войдите заново.';
+  if (code === 'ACCESS') return 'Доступ к чату этого отчёта не подтверждён. Проверьте аккаунт.';
+  if (['STALE', 'LLM_STALE_REPORT', 'LLM_STALE_POLICY', 'LLM_HISTORY_CONFLICT'].includes(code))
+    return 'Данные отчёта или условия чата изменились. Обновите историю перед отправкой.';
+  if (['TIMEOUT', 'ABORTED', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
+    return 'Ожидание остановлено. Ответ ещё может сохраниться — обновите историю перед повтором.';
+  if (['LLM_QUOTA_EXCEEDED', 'LLM_BUDGET_EXCEEDED', 'LLM_CAPACITY'].includes(code))
+    return 'Достигнут лимит запросов. Попробуйте позже.';
+  if (['LLM_CONTEXT_LIMIT', 'LLM_HISTORY_CAPACITY'].includes(code))
+    return 'В чате слишком много данных для нового ответа. История сохранена.';
+  if (code === 'LLM_CONFIGURATION_UNAVAILABLE') return 'Чат не настроен. Обратитесь к оператору.';
+  if (code === 'LLM_PROVIDER_RATE_LIMITED') return 'Сервис ответов занят. Обновите историю перед повтором.';
+  if (code === 'LLM_PROVIDER_AUTH_FAILED') return 'Чат временно недоступен. Обратитесь к оператору.';
+  if (['LLM_PROVIDER_UNAVAILABLE', 'LLM_UNAVAILABLE'].includes(code))
+    return 'Сервис ответов недоступен. Обновите историю перед повтором.';
+  if (code === 'LLM_HISTORY_UNAVAILABLE') return 'История временно недоступна. Попробуйте позже.';
+  if (['LLM_REPORT_UNAVAILABLE', 'REPORT_UNAVAILABLE'].includes(code))
+    return 'Отчёт недоступен для чата. Проверьте доступ к отчёту.';
+  if (code === 'LLM_NO_EVIDENCE') return 'Нет подтверждённых источников для ответа.';
+  if (code === 'DUPLICATE') return 'Запрос уже зарегистрирован. Обновите историю, чтобы увидеть ответ.';
+  if (code === 'INPUT') return 'Введите короткий вопрос без ссылок и секретов.';
+  return 'Не удалось проверить ответ. Обновите историю перед повтором.';
+}
 function readinessMatchesContext(ready: ChatReadiness, context: ChatContext) {
   if (!sameChatBinding(ready, context)) return false;
+  if (ready.setupAction === 'operator-server-environment-configuration') {
+    if (!context.enabled) return true; // Disabled contexts deliberately disclose no provider policy.
+    return context.disclosure?.provider === 'OpenAI' && ready.provider.model === context.disclosure.model;
+  }
   if (!context.enabled) return ready.provider.status === 'unverified-profile';
   return (
+    context.disclosure?.provider === 'OpenRouter' &&
     'model' in ready.provider &&
-    ready.provider.model === context.disclosure?.model &&
-    ready.provider.endpoint === context.disclosure?.providers[0]
+    ready.provider.model === context.disclosure.model &&
+    ready.provider.endpoint === context.disclosure.providers[0]
   );
 }
 const checkLabels = { secret: 'Секреты', vuln: 'Уязвимости', config: 'Конфигурация' };
@@ -98,7 +127,9 @@ function sourceLabel(label: string) {
           ? 'Секреты'
           : part === 'Debian advisory (не CVE)'
             ? 'Уведомление Debian (не CVE)'
-            : part),
+            : part === 'Debian DLA advisory (не CVE)'
+              ? 'Бюллетень Debian DLA (не CVE)'
+              : part),
     )
     .join(' · ');
 }
@@ -139,40 +170,29 @@ function SourceList({
   prefix: string;
 }) {
   return (
-    <>
-      <p>
-        Основания ответа/решения:{' '}
-        {sources.map((source) => (
-          <a key={source.finding.findingId} href={`#${prefix}-${source.finding.findingId}`}>
-            Находка {source.finding.findingId}{' '}
-          </a>
-        ))}
-      </p>
+    <details>
+      <summary>Источники ({sources.length})</summary>
       <ul>
         {sources.map((source) => (
           <li key={source.finding.findingId} id={`${prefix}-${source.finding.findingId}`} tabIndex={-1}>
             <strong>
               {checkLabels[source.finding.check]} · {severityLabels[source.finding.severity] ?? 'Неизвестна'}
-            </strong>{' '}
-            · {source.finding.findingId}
+            </strong>
             {source.finding.check === 'vuln' ? (
-              <p>
-                {source.finding.cveId} ·{' '}
-                {isDebianTempId(source.finding.cveId) ? 'Уведомление Debian (не CVE)' : 'CVE'}
+              <p style={{ overflowWrap: 'anywhere' }}>
+                {source.finding.cveId} · {sourceLabel(identifierLabel(source.finding.cveId))}
               </p>
             ) : null}
+            <LlmFindingDetails finding={source.finding} />
             <p>
               {sameChatBinding(source, current)
                 ? 'Источник текущего отчёта, проверен по результатам сканирования.'
                 : 'Исторический источник — не разрешён как находка текущего отчёта.'}
             </p>
-            <small>
-              Отчёт {source.reportVersion} · {source.digest} · {source.platform}
-            </small>
           </li>
         ))}
       </ul>
-    </>
+    </details>
   );
 }
 function ChatScope({
@@ -223,7 +243,8 @@ function ChatScope({
       publicReport &&
       (context.findingCount === undefined ||
         context.identifierCounts?.cve !== status.identifierCounts?.cve ||
-        context.identifierCounts?.debianTemp !== status.identifierCounts?.debianTemp)
+        context.identifierCounts?.debianTemp !== status.identifierCounts?.debianTemp ||
+        (context.identifierCounts?.debianDla ?? 0) !== (status.identifierCounts?.debianDla ?? 0))
     )
       throw new ChatError('STALE');
   }
@@ -294,6 +315,7 @@ function ChatScope({
     return { context, history, usage, sources };
   }
   async function operate(
+    timeoutMs: number,
     action: (signal: AbortSignal, publish: (action: () => void) => void) => Promise<void>,
   ) {
     if (request.current || !current()) return;
@@ -306,7 +328,7 @@ function ChatScope({
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, 45_000);
+    }, timeoutMs);
     const live = () => generation.current === version && !controller.signal.aborted && current();
     const stopped = new Promise<never>((_, reject) =>
       controller.signal.addEventListener(
@@ -344,10 +366,15 @@ function ChatScope({
 
     setSnapshot(null);
     setSelectedIds([]);
-    void operate(async (signal, publish) => {
-      const ready = publicReport ? await readReadiness(signal) : null;
+    void operate(45_000, async (signal, publish) => {
+      // Keep setup diagnostics available even if the history-backed context cannot be read.
+      let ready = publicReport ? await readReadiness(signal) : null;
       publish(() => setReadiness(ready));
       const next = await readSnapshot(signal);
+      if (!publicReport && next.context.disclosure?.provider === 'OpenAI') {
+        ready = await readReadiness(signal);
+        publish(() => setReadiness(ready));
+      }
       if (ready && !readinessMatchesContext(ready, next.context)) {
         publish(() => setReadiness(null));
         throw new ChatError('STALE');
@@ -393,12 +420,14 @@ function ChatScope({
       pending ||
       accepted.context.pending ||
       !current() ||
-      (kind === 'chat' && (!accepted.context.enabled || (publicReport && !readiness?.localReady)))
+      (kind === 'chat' &&
+        (!accepted.context.enabled ||
+          ((publicReport || accepted.context.disclosure?.provider === 'OpenAI') && !readiness?.localReady)))
     )
       return;
     const value = kind === 'chat' ? question : decision;
     if (!validChatText(value)) {
-      setMessage(chatErrorMessage(new ChatError('INPUT')));
+      setMessage(scanChatInputFeedback(value) ?? chatErrorMessage(new ChatError('INPUT')));
       return;
     }
     if (request.current) return;
@@ -406,8 +435,8 @@ function ChatScope({
     setMessage('');
     const mutationId = crypto.randomUUID();
     const ids = [...selectedIds];
-    void operate(async (signal, publish) => {
-      if (kind === 'chat' && publicReport) {
+    void operate(kind === 'chat' ? 120_000 : 45_000, async (signal, publish) => {
+      if (kind === 'chat' && (publicReport || accepted.context.disclosure?.provider === 'OpenAI')) {
         const ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
         if (!ready?.localReady) throw new ChatError('LLM_CONFIGURATION_UNAVAILABLE');
@@ -422,7 +451,11 @@ function ChatScope({
           ? await client.chat(before, value, mutationId, signal)
           : await client.decision(before, value, ids, mutationId, signal);
       if (signal.aborted || !current()) throw new ChatError('STALE');
-      if ('reply' in result && !verifiedChatSources(result.reply, accepted.sources))
+      if (
+        'reply' in result &&
+        (!verifiedChatSources(result.reply, accepted.sources) ||
+          !chatReceiptMatchesProvider(result.usage, before))
+      )
         throw new ChatError('INVALID');
       // No optimistic assistant or decision. Status-only duplicate, ambiguous cancellation and disconnect recover through GET.
       const next = await readSnapshot(signal);
@@ -455,31 +488,35 @@ function ChatScope({
         if (kind === 'chat') setQuestion('');
         else setDecision('');
         if ('reply' in result) setReceipt(result.usage);
-        if ('duplicate' in result)
-          setMessage(
-            'Повтор уже зарегистрирован. Прочитана долговечная история; новая генерация не запущена.',
-          );
+        if ('duplicate' in result) setMessage('Запрос уже зарегистрирован. История обновлена.');
       });
     });
   }
   const context = snapshot?.context;
+  const questionFeedback = scanChatInputFeedback(question);
+  const decisionFeedback = scanChatInputFeedback(decision);
+  const questionInvalid = question.length > 0 && !validChatText(question);
+  const decisionInvalid = decision.length > 0 && !validChatText(decision);
   const available = !!snapshot && !pending && !context?.pending && current();
-  const generationAllowed = !!context?.enabled && (!publicReport || readiness?.localReady === true);
+  const needsReadiness = publicReport || context?.disclosure?.provider === 'OpenAI';
+  const generationAllowed = !!context?.enabled && (!needsReadiness || readiness?.localReady === true);
   const connection = pending
     ? operation === 'read'
-      ? 'Подключение: читаем условия, источники и историю отчёта…'
+      ? 'Загружаем историю…'
       : operation === 'chat'
-        ? 'Ожидаем проверенный полный ответ. Частичный текст не показывается.'
-        : 'Сохраняем решение без вызова провайдера…'
+        ? 'Ожидаем ответ…'
+        : 'Сохраняем решение…'
     : snapshot
       ? context?.pending
-        ? 'На сервере уже выполняется запрос. Новая отправка заблокирована; обновите историю вручную позже.'
-        : publicReport && !readiness?.localReady
-          ? 'История подключена. Готовность генерации не подтверждена; проверьте настройку ниже.'
+        ? 'Запрос ещё выполняется. Обновите историю позже.'
+        : needsReadiness && !readiness?.localReady
+          ? readiness?.blockers.length
+            ? readinessMessages[readiness.blockers[0]]
+            : 'Не удалось проверить готовность чата. Обновите историю позже.'
           : context?.enabled
-            ? 'История подключена. Чат разрешён сервером; доступность провайдера проверяется только при отправке.'
-            : 'История подключена. Генерация выключена сервером; историю и решения можно читать без модели.'
-      : 'Подключение не подтверждено. Повторите чтение истории перед новым запросом.';
+            ? ''
+            : 'Новые ответы отключены. История доступна.'
+      : 'Не удалось подключить чат. Обновите историю.';
   return (
     <section
       id="scan-report-chat"
@@ -489,223 +526,39 @@ function ChatScope({
       aria-busy={pending}
       style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}
     >
-      <h3>Чат по отчёту</h3>
-      <p role="status" aria-label="Состояние подключения чата" aria-live="polite">
+      <h3>Задать вопрос по отчёту</h3>
+            <p>Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.</p>
+      {['partial', 'failed', 'cancelled'].includes(status.state) ? (
+        <p>
+          Проверка {status.state === 'partial' ? 'завершилась частично' : status.state === 'failed' ? 'завершилась с ошибкой' : 'отменена'}.
+          {' '}Авторазбор и отдельный перевод описаний доступны только для полностью завершённой проверки.
+          Чат, если разрешён сервером, использует сохранённые результаты; непроверенное не означает отсутствие проблем.
+        </p>
+      ) : null}
+      <p id="scan-chat-connection" role="status" aria-label="Состояние подключения чата" aria-live="polite">
         {connection}
       </p>
-      <p>
-        Находки и покрытие — результаты сканирования в основном отчёте. Ответ ИИ — отдельная интерпретация:
-        предположения и рекомендации требуют проверки по источникам. Ошибка ИИ не меняет отчёт.
-      </p>
-      <p>
-        Провайдер возвращает полный ответ, а не поток токенов. Показываем его только после завершения
-        передачи, проверки учёта расхода, ссылок на находки и совпадения с сохранённой историей. Промежуточный
-        текст не показываем.
-      </p>
+
       <Button type="button" variant="secondary" disabled={pending || !current()} onClick={refresh}>
-        Обновить историю и условия чата
+        Обновить историю
       </Button>
       {pending ? (
         <>
-          <p>
-            Отмена останавливает только ожидание в браузере, не гарантирует отмену на сервере или возврат
-            квоты.
-          </p>
+          <p>Отмена остановит ожидание, но запрос ещё может завершиться.</p>
           <Button type="button" variant="secondary" onClick={cancel}>
             Отменить ожидание чата
           </Button>
         </>
-      ) : null}
-      {publicReport ? (
-        <section aria-label="Готовность генерации">
-          <h4>Готовность генерации</h4>
-          {readiness ? (
-            <>
-              <p>
-                {readiness.localReady
-                  ? 'Локальная настройка подтверждена, не доступность провайдера.'
-                  : 'Для генерации требуется настройка оператора.'}
-              </p>
-              <ul>
-                {readiness.blockers.map((blocker) => (
-                  <li key={blocker}>{readinessMessages[blocker]}</li>
-                ))}
-              </ul>
-              <p>
-                Генерация не проверена. Каталог не подтверждает успешный вызов. Новый запрос отправляется
-                только кнопкой «Отправить вопрос»; ключи в интерфейсе не принимаются.
-              </p>
-            </>
-          ) : (
-            <p>
-              Готовность генерации неизвестна. Историю можно читать независимо; новая отправка запрещена до
-              подтверждения настроек.
-            </p>
-          )}
-        </section>
       ) : null}
       {message ? (
         <Alert role="alert" tone="warning">
           {message}
         </Alert>
       ) : null}
-      <form
-        className="scan-a1__compose"
-        aria-label="Отправка вопроса по отчёту"
-        onSubmit={(event) => {
-          event.preventDefault();
-          mutate('chat');
-        }}
-      >
-        <label>
-          Вопрос чату
-          <textarea
-            ref={questionInput}
-            aria-describedby="scan-chat-input-help"
-            aria-invalid={question.length > 0 && !validChatText(question)}
-            value={question}
-            disabled={pending && operation !== 'read'}
-            rows={3}
-            onChange={(event) => setQuestion(event.target.value)}
-            style={{ width: '100%' }}
-          />
-        </label>
-        <small id="scan-chat-input-help">
-          {utf8Bytes(question)} / 2048 UTF-8 байт. Без ссылок, секретов и исходных свидетельств.
-        </small>
-        <p id="scan-chat-send-help">
-          Нажимая «Отправить вопрос», вы разрешаете один запрос: очищенный вопрос, историю, решения, выбранные
-          находки и покрытие — указанным ниже модели и провайдеру OpenRouter. Только бесплатный профиль, без
-          платной замены и автоповтора. Условия проверяются заново перед отправкой.
-        </p>
-        <Button
-          type="submit"
-          aria-describedby="scan-chat-send-help"
-          disabled={!available || !generationAllowed || !validChatText(question)}
-        >
-          Отправить вопрос
-        </Button>
-      </form>
       {snapshot && context ? (
         <>
-          {status.profile === PUBLIC_IMAGE_PROFILE ? (
-            <div aria-label="Границы отчёта публичного образа в чате">
-              <p>
-                Весь сохранённый отчёт:{' '}
-                {status.identifierCounts
-                  ? `CVE: ${status.identifierCounts.cve}; уведомления Debian: ${status.identifierCounts.debianTemp}`
-                  : 'число CVE и уведомлений Debian неизвестно'}
-                . Debian TEMP — не CVE.
-              </p>
-              <p>
-                Покрытие уязвимостей: {coverageLabel(status.perCheck?.vuln?.outcome)}; ОС:{' '}
-                {coverageLabel(status.perCheck?.vuln?.os?.outcome)}; Node.js:{' '}
-                {coverageLabel(status.perCheck?.vuln?.node?.outcome)}
-                {status.perCheck?.vuln?.node?.outcome === 'unsupported'
-                  ? ` · ${coverageReason(status.perCheck.vuln.node.reason)}`
-                  : ''}
-                . Непроверенное не означает ноль; выполненная проверка не гарантирует безопасность.
-              </p>
-            </div>
-          ) : null}
-          <dl className="scan-a1__facts">
-            <div>
-              <dt>Привязка</dt>
-              <dd>
-                {context.scanId} · {context.digest} · {context.platform} · отчёт {context.reportVersion}
-              </dd>
-            </div>
-            <div>
-              <dt>История</dt>
-              <dd>
-                Владелец + скан · поколение {context.epoch} · ревизия {context.revision}
-              </dd>
-            </div>
-          </dl>
-          <p>
-            История хранится на сервере до отдельно разрешённой операции оператора, без автоматического срока
-            удаления. Кэш содержит контекст, не ответы; экономия вызовов провайдера не заявлена.
-          </p>
-          {context.disclosure ? (
-            <>
-              <p>
-                OpenRouter · {context.disclosure.model} · {context.disclosure.providers.join(', ')} · регион
-                не ограничен.
-              </p>
-              <p>
-                Только бесплатный профиль, все ценовые пределы равны нулю, без платной замены и автоматических
-                повторов. Текущий предел ответа — 2048 токенов; это не фактический счёт.
-              </p>
-              <p>
-                Провайдер декларирует отсутствие хранения и обучения; декларация и одобрение оператора не
-                доказывают соблюдение. Передаются очищенный вопрос, все пользовательские сообщения и решения,
-                выбранные находки и полное покрытие, без исходных свидетельств.
-              </p>
-              <small>Политика чата {context.policyVersion}</small>
-            </>
-          ) : (
-            <p>Генерация чата выключена; подтверждённая история и ручные решения не требуют вызова модели.</p>
-          )}
-          {context.pending ? (
-            <p role="status">
-              Сервер уже обрабатывает запрос этого владельца и scan. Обновите историю вручную позже; отмена
-              ожидания не удаляет серверную историю.
-            </p>
-          ) : null}
-          <section aria-label="Квоты чата">
-            <h4>Использование</h4>
-            {snapshot.usage?.available ? (
-              <>
-                <p>
-                  Окно {new Date(snapshot.usage.window.start).toISOString()} —{' '}
-                  {new Date(snapshot.usage.window.end).toISOString()}
-                </p>
-                {(['user', 'scan'] as const).map((scope) =>
-                  snapshot.usage?.available ? (
-                    <p key={scope}>
-                      {scope === 'user' ? 'Владелец' : 'Скан'}: остаток входных токенов{' '}
-                      {snapshot.usage[scope].remaining.input}, выходных токенов{' '}
-                      {snapshot.usage[scope].remaining.output}; использовано{' '}
-                      {snapshot.usage[scope].used.input}/{snapshot.usage[scope].used.output}, удержано{' '}
-                      {snapshot.usage[scope].held.input}/{snapshot.usage[scope].held.output}, перенесено{' '}
-                      {snapshot.usage[scope].carried.input}/{snapshot.usage[scope].carried.output}; учтённая
-                      стоимость в миллионных долях доллара: {snapshot.usage[scope].used.costMicros}.
-                      {snapshot.usage[scope].exhausted
-                        ? ' Квота исчерпана.'
-                        : snapshot.usage[scope].warning
-                          ? ' Приближается лимит.'
-                          : ''}
-                    </p>
-                  ) : null,
-                )}
-                <p>
-                  Допуск запроса неизвестен до точного вопроса и полного запроса. Остаток не гарантирует
-                  допуск.
-                </p>
-              </>
-            ) : (
-              <p>
-                Учёт недоступен, не ноль и не разрешение на генерацию. Сервер проверит квоты при отправке.
-              </p>
-            )}
-            {receipt ? (
-              <p>
-                Последний ответ: входных токенов {receipt.input}, выходных токенов {receipt.output}, учтённая
-                стоимость в миллионных долях доллара: {receipt.costMicros}. Проверенное сервером сообщение
-                провайдера, не счёт.
-              </p>
-            ) : null}
-          </section>
-          {snapshot.history.turns.length ? (
-            <p>
-              Продолжите чат новым вопросом. История входит в следующий запрос только при новом нажатии
-              «Отправить вопрос».
-            </p>
-          ) : null}
-
-          <h4>Подтверждённая история</h4>
           {!snapshot.history.turns.length && !snapshot.history.decisions.length ? (
-            <p>История пока пуста. Это не означает, что отчёт безопасен.</p>
+            <p>Например: «С каких находок начать?» Не добавляйте пароли, ключи или другие чувствительные данные.</p>
           ) : null}
           {snapshot.history.turns.map((turn) => (
             <article key={turn.id}>
@@ -724,13 +577,13 @@ function ChatScope({
               <p style={{ whiteSpace: 'pre-wrap' }}>{turn.question}</p>
               {turn.state === 'completed' ? (
                 <>
-                  <h5>Ответ ИИ · требует проверки</h5>
+                  <h5>Ответ · проверьте по источникам</h5>
                   <SafeMarkdown text={turn.reply.text} />
                   <SourceList sources={turn.reply.sources} current={context} prefix={`chat-${turn.id}`} />
                 </>
               ) : (
                 <>
-                  <p>Полного подтверждённого ответа нет. Автоматический повтор не выполняется.</p>
+                  <p>Ответ пока не получен.</p>
                   {turn.state !== 'pending' ? (
                     <Button
                       type="button"
@@ -748,62 +601,277 @@ function ChatScope({
               )}
             </article>
           ))}
-          {snapshot.history.decisions.map((entry) => (
-            <article key={entry.id}>
-              <h5>Решение пользователя · не вывод сканера</h5>
-              <p style={{ whiteSpace: 'pre-wrap' }}>{entry.text}</p>
-              <SourceList sources={entry.sources} current={context} prefix={`decision-${entry.id}`} />
-            </article>
-          ))}
-          <fieldset
-            className="scan-a1__compose"
-            disabled={!available}
-            style={{ minWidth: 0, maxWidth: '100%' }}
-          >
-            <legend>Сохранить решение без вызова модели</legend>
-            <label>
-              Текст решения
-              <textarea
-                value={decision}
-                rows={3}
-                onChange={(e) => setDecision(e.target.value)}
-                style={{ width: '100%' }}
-              />
-            </label>
-            <small>
-              {utf8Bytes(decision)} / 2048 UTF-8 байт. Выберите до 32 источников текущего отчёта (можно без
-              источников).
-            </small>
-            <details>
-              <summary>Основания решения</summary>
-              {snapshot.sources.map((source) => (
-                <label key={source.findingId} style={{ display: 'block' }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.includes(source.findingId)}
-                    disabled={!selectedIds.includes(source.findingId) && selectedIds.length >= 32}
-                    onChange={(e) => {
-                      setSelectedIds((ids) =>
-                        e.target.checked
-                          ? [...ids, source.findingId]
-                          : ids.filter((id) => id !== source.findingId),
-                      );
-                    }}
-                  />
-                  {sourceLabel(source.label)} · {source.findingId}
-                </label>
-              ))}
-            </details>
-            <Button
-              type="button"
-              disabled={!available || !validChatText(decision)}
-              onClick={() => mutate('decision')}
-            >
-              Сохранить решение
-            </Button>
-          </fieldset>
         </>
       ) : null}
+      <form
+        className="scan-a1__compose"
+        aria-label="Отправка вопроса по отчёту"
+        onSubmit={(event) => {
+          event.preventDefault();
+          mutate('chat');
+        }}
+      >
+        <label>
+          Вопрос чату
+          <textarea
+            ref={questionInput}
+            aria-describedby={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`}
+            aria-invalid={questionInvalid}
+            value={question}
+            disabled={pending && operation !== 'read'}
+            rows={3}
+            onChange={(event) => setQuestion(event.target.value)}
+            style={{ width: '100%' }}
+          />
+        </label>
+        <small id="scan-chat-input-help">
+          Короткий вопрос без ссылок, разметки, секретов и служебных символов. Лимит — 2048 байт UTF-8, не символов:
+          русская буква обычно занимает 2 байта. Например: «С каких находок начать?»
+        </small>
+        <p id="scan-chat-input-count">
+          {utf8Bytes(question)} / {SCAN_CHAT_INPUT_BYTE_LIMIT} байт UTF-8
+        </p>
+        <p id="scan-chat-input-error" role="status" aria-live="polite" aria-atomic="true">
+          {questionInvalid ? questionFeedback : null}
+        </p>
+        {context?.disclosure?.provider === 'OpenAI' ? (
+          <OpenAiDisclosure disclosure={context.disclosure} chat />
+        ) : null}
+        <p id="scan-chat-send-help">
+          Нажимая «Отправить вопрос», вы разрешаете{' '}
+          {context?.disclosure?.provider === 'OpenAI'
+            ? 'платный запрос OpenAI на показанных условиях текущей политики и передачу вопроса, находок и истории. Это отдельное согласие, не прежний бесплатный opt-in.'
+            : 'передать внешнему ИИ вопрос и контекст отчёта, включая историю чата. Запрет обучения не гарантирует отсутствие хранения.'}
+        </p>
+        <Button
+          type="submit"
+          aria-describedby={`scan-chat-send-help scan-chat-input-help scan-chat-input-count scan-chat-connection${questionInvalid ? ' scan-chat-input-error' : ''}`}
+          disabled={!available || !generationAllowed || !validChatText(question)}
+        >
+          Отправить вопрос
+        </Button>
+      </form>
+      <details>
+        <summary>Подробности · история решений, условия и использование</summary>
+        {needsReadiness ? (
+          <section aria-label="Готовность генерации">
+            <h4>Готовность генерации</h4>
+            {readiness ? (
+              <>
+                <p>
+                  {readiness.localReady
+                    ? 'Локальная настройка подтверждена, не доступность провайдера.'
+                    : 'Для генерации требуется настройка оператора.'}
+                </p>
+                <ul>
+                  {readiness.blockers.map((blocker) => (
+                    <li key={blocker}>{readinessMessages[blocker]}</li>
+                  ))}
+                </ul>
+                <p>
+                  Генерация не проверена. Локальная настройка не подтверждает успешный вызов. Новый запрос
+                  отправляется только кнопкой «Отправить вопрос»; ключи в интерфейсе не принимаются.
+                </p>
+              </>
+            ) : (
+              <p>
+                Готовность генерации неизвестна. Историю можно читать независимо; новая отправка запрещена до
+                подтверждения настроек.
+              </p>
+            )}
+          </section>
+        ) : null}
+        {snapshot && context ? (
+          <>
+            {status.profile === PUBLIC_IMAGE_PROFILE ? (
+              <div aria-label="Границы отчёта публичного образа в чате">
+                <p>
+                  Весь сохранённый отчёт:{' '}
+                  {status.identifierCounts
+                    ? `находок всего: ${identifierCountsTotal(status.identifierCounts)}; CVE: ${status.identifierCounts.cve}; Debian TEMP: ${status.identifierCounts.debianTemp}; Debian DLA: ${status.identifierCounts.debianDla ?? 0}`
+                    : 'число находок и их распределение по типам идентификаторов неизвестно'}
+                  . Debian TEMP и бюллетени Debian DLA — не CVE.
+                </p>
+                <p>
+                  Покрытие уязвимостей: {coverageLabel(status.perCheck?.vuln?.outcome)}; ОС:{' '}
+                  {coverageLabel(status.perCheck?.vuln?.os?.outcome)}; Node.js:{' '}
+                  {coverageLabel(status.perCheck?.vuln?.node?.outcome)}
+                  {status.perCheck?.vuln?.node?.outcome === 'unsupported'
+                    ? ` · ${coverageReason(status.perCheck.vuln.node.reason)}`
+                    : ''}
+                  . Непроверенное не означает ноль; выполненная проверка не гарантирует безопасность.
+                </p>
+              </div>
+            ) : null}
+            <dl className="scan-a1__facts">
+              <div>
+                <dt>Привязка</dt>
+                <dd>
+                  {context.scanId} · {context.digest} · {context.platform} · отчёт {context.reportVersion}
+                </dd>
+              </div>
+              <div>
+                <dt>История</dt>
+                <dd>
+                  Владелец + скан · поколение {context.epoch} · ревизия {context.revision}
+                </dd>
+              </div>
+            </dl>
+            <p>
+              История хранится на сервере до отдельно разрешённой операции оператора, без автоматического
+              срока удаления. Кэш содержит контекст, не ответы; экономия вызовов провайдера не заявлена.
+            </p>
+            {context.disclosure ? (
+              <>
+                {context.disclosure.provider === 'OpenRouter' ? (
+                  <>
+                    <p>
+                      OpenRouter · {context.disclosure.model} · {context.disclosure.providers.join(', ')} ·
+                      регион не ограничен.
+                    </p>
+                    <p>
+                      Только бесплатный профиль, все ценовые пределы равны нулю, без платной замены и
+                      автоматических повторов. Текущий предел ответа — 2048 токенов; это не фактический счёт.
+                    </p>
+                  </>
+                ) : (
+                  <p>OpenAI · {context.disclosure.model}. Платный ответ, оценка сервера — не счёт.</p>
+                )}
+                <p>
+                  {context.disclosure.retention === 'no-storage'
+                    ? 'Провайдер декларирует отсутствие хранения и обучения'
+                    : 'Провайдер декларирует отсутствие обучения (no-training); отсутствие хранения не заявлено, это не ZDR; запросы могут сохраняться'}
+                  ; декларация и одобрение оператора не доказывают соблюдение. Передаются очищенный вопрос,
+                  все пользовательские сообщения и решения, выбранные находки и полное покрытие, без исходных
+                  свидетельств.
+                </p>
+                <small>Политика чата {context.policyVersion}</small>
+              </>
+            ) : (
+              <p>
+                Генерация чата выключена; подтверждённая история и ручные решения не требуют вызова модели.
+              </p>
+            )}
+
+            <section aria-label="Квоты чата">
+              <h4>Использование</h4>
+              {snapshot.usage?.available && usageMatchesDisclosure(snapshot.usage, context.disclosure) ? (
+                <>
+                  <p>
+                    Окно {new Date(snapshot.usage.window.start).toISOString()} —{' '}
+                    {new Date(snapshot.usage.window.end).toISOString()}
+                  </p>
+                  {(['user', 'scan'] as const).map((scope) =>
+                    snapshot.usage?.available ? (
+                      <p key={scope}>
+                        {scope === 'user' ? 'Владелец' : 'Скан'}: остаток входных токенов{' '}
+                        {snapshot.usage[scope].remaining.input}, выходных токенов{' '}
+                        {snapshot.usage[scope].remaining.output}; использовано{' '}
+                        {snapshot.usage[scope].used.input}/{snapshot.usage[scope].used.output}, удержано{' '}
+                        {snapshot.usage[scope].held.input}/{snapshot.usage[scope].held.output}, перенесено{' '}
+                        {snapshot.usage[scope].carried.input}/{snapshot.usage[scope].carried.output}; учтённая
+                        стоимость в миллионных долях доллара: {snapshot.usage[scope].used.costMicros}.{' '}
+                        Денежный остаток:{' '}
+                        {snapshot.usage[scope].remaining.costMicros === null
+                          ? 'без локального денежного лимита; платно, оценка не счёт'
+                          : `${snapshot.usage[scope].remaining.costMicros} микро-USD`}
+                        . Резерв стоимости: {snapshot.usage[scope].held.costMicros}; перенос:{' '}
+                        {snapshot.usage[scope].carried.costMicros}.
+                        {snapshot.usage[scope].exhausted
+                          ? ' Квота исчерпана.'
+                          : snapshot.usage[scope].warning
+                            ? ' Приближается лимит.'
+                            : ''}
+                      </p>
+                    ) : null,
+                  )}
+                  <p>
+                    Допуск запроса неизвестен до точного вопроса и полного запроса. Остаток не гарантирует
+                    допуск.
+                  </p>
+                </>
+              ) : (
+                <p>
+                  Учёт недоступен, не ноль и не разрешение на генерацию. Сервер проверит квоты при отправке.
+                </p>
+              )}
+              {receipt ? (
+                <p>
+                  Последний ответ: входных токенов {receipt.input}, выходных токенов {receipt.output},
+                  учтённая стоимость в миллионных долях доллара: {receipt.costMicros}.{' '}
+                  {receipt.source === 'server-estimated-configured-rates-not-invoice'
+                    ? 'Оценка сервера по настроенным ставкам, не счёт провайдера.'
+                    : 'Проверенное сервером сообщение провайдера, не счёт.'}
+                </p>
+              ) : null}
+            </section>
+
+            {snapshot.history.decisions.map((entry) => (
+              <article key={entry.id}>
+                <h5>Решение пользователя · не вывод сканера</h5>
+                <p style={{ whiteSpace: 'pre-wrap' }}>{entry.text}</p>
+                <SourceList sources={entry.sources} current={context} prefix={`decision-${entry.id}`} />
+              </article>
+            ))}
+            <fieldset
+              className="scan-a1__compose"
+              disabled={!available}
+              style={{ minWidth: 0, maxWidth: '100%' }}
+            >
+              <legend>Сохранить решение без вызова модели</legend>
+              <label>
+                Текст решения
+                <textarea
+                  value={decision}
+                  aria-describedby={`scan-chat-decision-help scan-chat-decision-count${decisionInvalid ? ' scan-chat-decision-error' : ''}`}
+                  aria-invalid={decisionInvalid}
+                  rows={3}
+                  onChange={(e) => setDecision(e.target.value)}
+                  style={{ width: '100%' }}
+                />
+              </label>
+              <small id="scan-chat-decision-help">
+                Обычный текст без ссылок, разметки, секретов и служебных символов; до 2048 байт UTF-8.
+                Выберите до 32 источников текущего отчёта (можно без источников).
+              </small>
+              <p id="scan-chat-decision-count">
+                {utf8Bytes(decision)} / {SCAN_CHAT_INPUT_BYTE_LIMIT} байт UTF-8
+              </p>
+              <p id="scan-chat-decision-error" role="status" aria-live="polite" aria-atomic="true">
+                {decisionInvalid ? decisionFeedback : null}
+              </p>
+              <details>
+                <summary>Основания решения</summary>
+                {snapshot.sources.map((source) => (
+                  <label key={source.findingId} style={{ display: 'block', overflowWrap: 'anywhere', minWidth: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(source.findingId)}
+                      disabled={!selectedIds.includes(source.findingId) && selectedIds.length >= 32}
+                      onChange={(e) => {
+                        setSelectedIds((ids) =>
+                          e.target.checked
+                            ? [...ids, source.findingId]
+                            : ids.filter((id) => id !== source.findingId),
+                        );
+                      }}
+                    />
+                    {sourceLabel(source.label)} · {source.findingId}
+                  </label>
+                ))}
+              </details>
+              <Button
+                type="button"
+                disabled={!available || !validChatText(decision)}
+                aria-describedby={`scan-chat-decision-help scan-chat-decision-count${decisionInvalid ? ' scan-chat-decision-error' : ''}`}
+                onClick={() => mutate('decision')}
+              >
+                Сохранить решение
+              </Button>
+            </fieldset>
+          </>
+        ) : null}
+      </details>
     </section>
   );
 }

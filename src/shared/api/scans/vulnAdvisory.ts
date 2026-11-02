@@ -218,8 +218,8 @@ export const advisoryV1 = z
   );
 export type AdvisoryV1 = z.infer<typeof advisoryV1>;
 export function validAdvisoryReferences(advisory: AdvisoryV1, cveId: string): boolean {
-  // No mapped external references exist for Debian TEMP in this increment.
-  if (/^TEMP-[0-9]{7}-[A-F0-9]{6}$/.test(cveId)) return advisory.references.length === 0;
+  // Only CVE identifiers authorize generated links; Debian TEMP/DLA have no inferred mappings.
+  if (!/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(cveId)) return advisory.references.length === 0;
   const allowed = canonicalReferences(cveId);
   const canCalculate =
     allowed.length > 0 &&

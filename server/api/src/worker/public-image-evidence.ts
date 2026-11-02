@@ -40,9 +40,19 @@ export function publicDebianVersion(version: unknown, epoch?: unknown, release?:
   const canonical = `${typeof epoch === 'number' && epoch > 0 ? `${epoch}:` : ''}${version}${release ? `-${release}` : ''}`;
   return publicPackageVersion(canonical) ? canonical : undefined;
 }
+export type PublicVulnerabilityKind = 'cve' | 'debian-temp' | 'debian-dla';
+export const isDebianDlaId = (value: unknown): value is string =>
+  typeof value === 'string' && /^DLA-[1-9][0-9]{0,6}-[1-9][0-9]{0,2}$/.test(value);
+export function publicVulnerabilityKind(value: unknown, ecosystem: PackageEcosystem): PublicVulnerabilityKind | undefined {
+  if (typeof value !== 'string') return undefined;
+  if (/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(value)) return 'cve';
+  if (ecosystem !== 'deb') return undefined;
+  if (/^TEMP-[0-9]{7}-[A-F0-9]{6}$/.test(value)) return 'debian-temp';
+  if (isDebianDlaId(value)) return 'debian-dla';
+  return undefined;
+}
 export const publicVulnerabilityId = (value: unknown, ecosystem: PackageEcosystem): value is string =>
-  typeof value === 'string' && (/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(value) ||
-    ecosystem === 'deb' && /^TEMP-[0-9]{7}-[A-F0-9]{6}$/.test(value));
+  publicVulnerabilityKind(value, ecosystem) !== undefined;
 
 export function publicOs(value: unknown): { name: string; version: string; eol: boolean } | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;

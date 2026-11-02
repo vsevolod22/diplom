@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import {
   chatContextSelectionSchema,
+  scannerDisclosureData,
+  validScannerDisclosure,
   freeProfileSchema,
+  openAiDisclosureSchema,
+  openAiReadinessShape,
+  validOpenAiReadiness,
+  OPENAI_COST_BASIS,
   publicChatMetadataShape,
   publicReadinessShape,
   providerFailureSchema,
@@ -11,9 +17,9 @@ import {
   validPublicChatMetadata,
   validPublicReadiness,
 } from './llmPublicContract';
-import { reportEcosystem, reportSeveritySource } from './publicImageProfile';
-import { isCveId, isDebianTempId } from './publicVulnerabilityIdentifiers';
-import { advisorySeverity, advisorySource, serializedBytes, utf8Bytes } from './vulnAdvisory';
+import { publicSafeFinding } from './llmFindingContract';
+import { vulnerabilityIdentifierKind } from './publicVulnerabilityIdentifiers';
+import { serializedBytes, utf8Bytes } from './vulnAdvisory';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const uuid = z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
@@ -43,99 +49,14 @@ export function validChatText(value: string, limit = 2048) {
   );
 }
 const text = (limit: number) => z.string().refine((v) => validChatText(v, limit));
-const fieldState = z.enum([
-  'available',
-  'missing',
-  'invalid',
-  'redacted',
-  'truncated',
-  'unsupported',
-  'omitted',
-]);
-const cvss = z
-  .strictObject({
-    family: z.enum(['v2', 'v3']),
-    version: z.enum(['2.0', '3.0', '3.1']).nullable(),
-    versionState: fieldState,
-    reportedScore: z.number().finite().min(0).max(10).nullable(),
-    scoreState: z.enum(['available', 'missing', 'invalid']),
-    vectorState: fieldState,
-  })
-  .refine((v) => (v.scoreState === 'available' ? v.reportedScore !== null : v.reportedScore === null));
-const vulnBase = {
-  check: z.literal('vuln'),
-  findingId: z.string().regex(/^vuln-[a-f0-9]{64}$/),
-  severity: advisorySeverity,
-  cveId: z.string().refine((id) => isCveId(id) || isDebianTempId(id)),
-  identifierKind: z.enum(['cve', 'debian-temp']).optional(),
-  ecosystem: reportEcosystem,
-  severitySources: z
-    .array(reportSeveritySource)
-    .min(1)
-    .max(32)
-    .refine((v) => new Set(v).size === v.length),
-  provenanceRef: z.string().regex(/^target-[a-f0-9]{64}$/),
-  fixedVersionReported: z.boolean(),
-};
-const finding = z.union([
-  z.strictObject({
-    check: z.literal('secret'),
-    findingId: z.string().regex(/^secret-\d{1,6}-\d{1,6}$/),
-    severity: z.literal('UNKNOWN'),
-    ruleId: z.string().regex(/^rule-[a-f0-9]{16}$/),
-    line: count.max(10000000).nullable(),
-    evidenceRef: z.string().regex(/^result-\d{1,6}-secret-\d{1,6}$/),
-  }),
-  z.strictObject({
-    check: z.literal('config'),
-    findingId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-    severity: z.literal('MEDIUM'),
-    ruleId: z.literal('IMGCFG_USER_ROOT'),
-    classification: z.enum(['DEFAULT_ROOT', 'NUMERIC_ROOT']),
-    configDigest: chatBindingSchema.shape.digest,
-    manifestDigest: chatBindingSchema.shape.digest,
-    location: z.literal('/config/User'),
-  }),
-  z.strictObject({ ...vulnBase, advisoryState: z.literal('unknown') }),
-  z.strictObject({
-    ...vulnBase,
-    advisoryState: z.enum(['available', 'omitted']),
-    conflictState: z.enum(['none', 'present', 'unknown']),
-    conflicts: z.array(z.enum(['title', 'description', 'severity', 'fixedVersion', 'cvss'])).max(5),
-    limitations: z
-      .array(
-        z.enum([
-          'invalid_metadata',
-          'redaction',
-          'field_limit',
-          'assessment_limit',
-          'reference_limit',
-          'finding_budget',
-          'scan_budget',
-          'report_budget',
-        ]),
-      )
-      .max(8),
-    assessments: z
-      .array(
-        z.strictObject({
-          source: advisorySource,
-          severity: advisorySeverity.nullable(),
-          fixedVersionReported: z.boolean(),
-          cvss: cvss.nullable(),
-        }),
-      )
-      .max(16),
-  }),
-]);
 export const chatSourceSchema = z
-  .strictObject({ ...chatBindingSchema.shape, finding })
+  .strictObject({ ...chatBindingSchema.shape, finding: publicSafeFinding })
   .refine(
     ({ finding: f }) =>
       f.check !== 'vuln' ||
-      (isDebianTempId(f.cveId)
-        ? f.identifierKind === 'debian-temp' && f.ecosystem === 'deb'
-        : f.identifierKind === undefined || f.identifierKind === 'cve'),
+      (vulnerabilityIdentifierKind(f.cveId) === 'cve'
+        ? f.identifierKind === undefined || f.identifierKind === 'cve'
+        : f.identifierKind === vulnerabilityIdentifierKind(f.cveId) && f.ecosystem === 'deb'),
   )
   .refine((v) => serializedBytes(v) <= 2048);
 const sources = z
@@ -204,19 +125,31 @@ export const chatHistorySchema = z
       ) <= 4096
     );
   });
+const chatDisclosureFields = {
+  sentData: z.literal(
+    'Cleaned question, all user history/accepted decisions and selected findings with complete coverage.',
+  ),
+  localRetention: z.literal(
+    'Durable owner+scan history until separately authorized operator lifecycle; capacity can refuse; context cache only, not output cache.',
+  ),
+};
+const openAiChatDisclosure = z.discriminatedUnion('monetaryLimit', [
+  openAiDisclosureSchema.options[0].extend(chatDisclosureFields),
+  openAiDisclosureSchema.options[1].extend(chatDisclosureFields),
+]);
 const disclosure = z
   .strictObject({
     provider: z.literal('OpenRouter'),
-    model: z.enum(['apodex/apodex-1.1-mini:free', 'xingchen-agi/xing4.0-29b-a4b:free']),
-    providers: z.tuple([z.enum(['novita/bf16', 'phala'])]),
+    model: z.enum(['apodex/apodex-1.1-mini:free', 'dots-studio/dots-3-note-preview:free']),
+    providers: z.tuple([z.enum(['novita/bf16', 'atlas-cloud/fp8'])]),
     region: z.literal('global'),
-    retention: z.literal('no-storage'),
+    retention: z.enum(['no-storage', 'no-training']),
     operatorApprovedRouting: z.literal(true),
     providerComplianceNotProvenByDeclaration: z.literal(true),
     requestBudgetUsd: z.literal(0),
     freeOnly: z.literal(true),
     maxPrice: z.strictObject({ prompt: z.literal(0), completion: z.literal(0), request: z.literal(0) }),
-    data: z.literal('Sanitized scanner findings and coverage; no raw evidence or credentials.'),
+    data: scannerDisclosureData,
     sentData: z.literal(
       'Cleaned question, all user history/accepted decisions and selected findings with complete coverage.',
     ),
@@ -224,7 +157,11 @@ const disclosure = z
       'Durable owner+scan history until separately authorized operator lifecycle; capacity can refuse; context cache only, not output cache.',
     ),
   })
-  .refine((v) => freeProfileSchema.safeParse({ model: v.model, providers: v.providers }).success);
+  .refine(
+    (v) =>
+      freeProfileSchema.safeParse({ model: v.model, providers: v.providers, retention: v.retention })
+        .success && validScannerDisclosure(v),
+  );
 export const chatContextSchema = z
   .strictObject({
     ...chatBindingSchema.shape,
@@ -232,7 +169,7 @@ export const chatContextSchema = z
     revision: count,
     enabled: z.boolean(),
     policyVersion: hash.nullable(),
-    disclosure: disclosure.nullable(),
+    disclosure: z.discriminatedUnion('provider', [disclosure, openAiChatDisclosure]).nullable(),
     limits: z.strictObject({ questionBytes: z.literal(2048), bodyBytes: z.literal(8192) }),
     deliveryMode: z.literal('completed-response'),
     pending: z.boolean(),
@@ -249,12 +186,29 @@ export const duplicateSchema = z.strictObject({
   epoch: uuid,
   revision: count,
 });
-export const chatReceiptSchema = z.strictObject({
-  input: count,
-  output: count.max(2048),
-  costMicros: z.literal(0),
-  source: z.literal('server-validated-provider-reported-not-invoice'),
-});
+export const chatReceiptSchema = z.discriminatedUnion('source', [
+  z.strictObject({
+    input: count,
+    output: count.max(4096),
+    costMicros: z.literal(0),
+    source: z.literal('server-validated-provider-reported-not-invoice'),
+  }),
+  z.strictObject({
+    input: count.positive(),
+    output: count.max(4096),
+    costMicros: count.positive(),
+    source: z.literal(OPENAI_COST_BASIS),
+  }),
+]);
+export function chatReceiptMatchesProvider(usage: z.infer<typeof chatReceiptSchema>, context: ChatContext) {
+  return (
+    !!context.disclosure &&
+    usage.source ===
+      (context.disclosure.provider === 'OpenAI'
+        ? OPENAI_COST_BASIS
+        : 'server-validated-provider-reported-not-invoice')
+  );
+}
 export const chatResultSchema = z.union([
   duplicateSchema,
   z
@@ -289,9 +243,10 @@ export const chatResultSchema = z.union([
     )
     .refine((v) => sameChatBinding(v.reply, v)),
 ]);
-export const chatReadinessSchema = z
-  .strictObject({ ...chatBindingSchema.shape, ...publicReadinessShape })
-  .refine(validPublicReadiness);
+export const chatReadinessSchema = z.discriminatedUnion('setupAction', [
+  z.strictObject({ ...chatBindingSchema.shape, ...publicReadinessShape }).refine(validPublicReadiness),
+  z.strictObject({ ...chatBindingSchema.shape, ...openAiReadinessShape }).refine(validOpenAiReadiness),
+]);
 export type ChatReadiness = z.infer<typeof chatReadinessSchema>;
 export type ChatContext = z.infer<typeof chatContextSchema>;
 export type ChatHistory = z.infer<typeof chatHistorySchema>;
@@ -407,7 +362,12 @@ export function createChatFrameParser(context: ChatContext, mutationId: string) 
           ...(frame.providerFailure ? { providerFailure: frame.providerFailure } : {}),
         };
       } else if (frame.type === 'usage') {
-        if (frame.seq !== 0 || frame.revision !== context.revision + 2) invalid();
+        if (
+          frame.seq !== 0 ||
+          frame.revision !== context.revision + 2 ||
+          !chatReceiptMatchesProvider(frame.usage, context)
+        )
+          invalid();
         usage = frame.usage;
       } else if (frame.type === 'citation') {
         if (

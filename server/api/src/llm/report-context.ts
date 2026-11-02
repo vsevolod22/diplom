@@ -1,3 +1,4 @@
+import type { PublicIdentifierCounts } from '../scans/public-vulnerability-identifiers.js';
 import { ConflictException, ForbiddenException, HttpException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -9,7 +10,7 @@ import { CEILINGS } from './policy.js';
 import { exact, object } from './response.js';
 import { validateDbEvidence, CURRENT_DB_POLICY } from '../worker/cve-db-evidence.js';
 import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
-import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, type PackageEcosystem } from '../worker/public-image-evidence.js';
+import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, publicVulnerabilityKind, type PackageEcosystem } from '../worker/public-image-evidence.js';
 
 import { selectedTranslation, translationSelection, TRANSLATION, type TranslationSnapshot } from './translation-contract.js';
 
@@ -24,7 +25,7 @@ const reasons = ['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE', 'DB_UNAVAILA
 export type SafeFinding = { findingId: string; check: Check; severity: string; [key: string]: unknown };
 export type ReportContext = { scanId: string; digest: string; platform: string; reportVersion: string;
   state: string; attempt: number; requestedChecks: Check[]; coverage: Record<Check, unknown>; findings: SafeFinding[];
-  findingCount: number; findingCounts?: { byCheck: Record<string, number | null>; bySeverity: Record<string, number> }; profile?: typeof PUBLIC_IMAGE_PROFILE; identifierCounts?: { cve: number; debianTemp: number };
+  findingCount: number; findingCounts?: { byCheck: Record<string, number | null>; bySeverity: Record<string, number> }; profile?: typeof PUBLIC_IMAGE_PROFILE; identifierCounts?: PublicIdentifierCounts;
     contextSelection?: { totalFindings: number; selectedFindings: number; omittedFindings: number; strategy: string; selectedFindingIds: string[] };
     checkedIsNotSafe: true; omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' |
           'All free text, URLs, credentials, env and raw output excluded; package identities and versions are sanitized scanner facts' };
@@ -110,7 +111,7 @@ function finding(v: unknown, check: 'secret' | 'vuln', publicProfile = false): S
   if (publicProfile ? !publicVulnerabilityId(f.cveId, f.ecosystem as PackageEcosystem) :
       typeof f.cveId !== 'string' || !/^CVE-\d{4}-\d{4,12}$/.test(f.cveId)) return invalid();
     const safe: SafeFinding = { check, findingId: match(f.findingId, /^vuln-[a-f0-9]{64}$/), severity,
-    cveId: f.cveId, ...(publicProfile ? { identifierKind: String(f.cveId).startsWith('TEMP-') ? 'debian-temp' : 'cve' } : {}), ecosystem: f.ecosystem, severitySources: [...f.severitySources],
+    cveId: f.cveId, ...(publicProfile ? { identifierKind: publicVulnerabilityKind(f.cveId, f.ecosystem as PackageEcosystem) } : {}), ecosystem: f.ecosystem, severitySources: [...f.severitySources],
     provenanceRef: match(f.provenanceRef, /^target-[a-f0-9]{64}$/), fixedVersionReported: f.fixedVersion !== null };
   if (f.advisory != null) {
     validateAdvisory(f.advisory, safe.cveId as string);
@@ -311,11 +312,19 @@ export class ReportReader {
     }
     findings.sort((a, b) => a.findingId < b.findingId ? -1 : a.findingId > b.findingId ? 1 : 0);
     const reportVersion = hash({ subject: identity.subject, scanId, digest, platform, raw });
-    const identifierCounts = { cve: 0, debianTemp: 0 };
+    const identifierCounts: PublicIdentifierCounts = { cve: 0, debianTemp: 0 };
     if (publicProfile && record(allCoverage.vuln).outcome === 'checked') {
-      for (const f of findings.filter(f => f.check === 'vuln')) identifierCounts[f.identifierKind === 'debian-temp' ? 'debianTemp' : 'cve']++;
-      if (!exact(status.identifierCounts, ['cve', 'debianTemp']) ||
-        status.identifierCounts.cve !== identifierCounts.cve || status.identifierCounts.debianTemp !== identifierCounts.debianTemp) return invalid();
+      for (const f of findings.filter(f => f.check === 'vuln')) {
+        if (f.identifierKind === 'cve') identifierCounts.cve++;
+        else if (f.identifierKind === 'debian-temp') identifierCounts.debianTemp++;
+        else if (f.identifierKind === 'debian-dla') identifierCounts.debianDla = (identifierCounts.debianDla ?? 0) + 1;
+        else return invalid();
+      }
+      const savedCounts = record(status.identifierCounts);
+      const hasDla = Object.hasOwn(savedCounts, 'debianDla');
+      if (!exact(savedCounts, ['cve', 'debianTemp', ...(hasDla ? ['debianDla'] : [])]) ||
+        savedCounts.cve !== identifierCounts.cve || savedCounts.debianTemp !== identifierCounts.debianTemp ||
+        (hasDla ? savedCounts.debianDla : 0) !== (identifierCounts.debianDla ?? 0)) return invalid();
     }
     const report: ReportContext = { scanId, digest, platform, reportVersion, state: status.state as string,
       ...(publicProfile ? { profile: PUBLIC_IMAGE_PROFILE,

@@ -1,14 +1,19 @@
 import { useMemo, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { currentDemoUser } from '@/shared/api/auth/demoAuth';
+import { safeAuthReturnTo } from '@/shared/api/auth/authReturnTo';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
+import { useScanSession } from '@/shared/api/auth/useScanSession';
 import { useSessionRecovery } from '@/shared/api/auth/useSessionRecovery';
 import { createAuthorizedScanTransport } from '@/shared/api/scans/httpScanTransport';
+import { RouteLoading } from '@/shared/ui/RouteLoading';
 import { LiveScanContext } from './liveScanContext';
 
 export function LiveScanSession({ children }: { children: ReactNode }) {
   const client = useQueryClient();
+  const location = useLocation();
+  const authState = { returnTo: safeAuthReturnTo(location.pathname) };
   const session = useQuery({
     queryKey: ['demo-auth', 'me'],
     queryFn: async ({ signal }) => {
@@ -18,7 +23,7 @@ export function LiveScanSession({ children }: { children: ReactNode }) {
         transitionScanSession(user?.id ?? null, client);
         return user;
       } catch (error) {
-        if (!signal.aborted) transitionScanSession(null, client);
+        if (!signal.aborted) transitionScanSession(null, client, false, 'unverified');
         throw error;
       }
     },
@@ -29,7 +34,7 @@ export function LiveScanSession({ children }: { children: ReactNode }) {
     refetchInterval: 30_000,
   });
   useSessionRecovery(session.isError);
-  const identity = scanSession();
+  const identity = useScanSession();
   const userId = session.data?.id;
   const scope = userId && identity.subject === userId ? (`${identity.generation}:${userId}`) : null;
   const value = useMemo(() => scope && userId ? {
@@ -40,8 +45,27 @@ export function LiveScanSession({ children }: { children: ReactNode }) {
     } }),
   } : null, [scope, userId, identity.generation]);
 
-  if (session.isPending) return <p role="status">Проверяем сессию…</p>;
-  if (session.isError) return <p role="status">Проверка сессии не удалась. Закрываем доступ…</p>;
-  if (!value) return <p role="status">Для доступа к сканам <Link to="/login">войдите</Link>. <Link to="/demo/scans">Демо без входа</Link>.</p>;
-  return <LiveScanContext.Provider value={value}>{children}</LiveScanContext.Provider>;
+  if (session.isPending) return (
+    <RouteLoading
+      label="Проверка сессии"
+      title="Проверяем сессию…"
+      description="Данные скрыты до успешной проверки."
+    />
+  );
+  if (session.isError) return <div>
+    <p role="alert">Не удалось проверить сессию. Данные скрыты до успешной проверки; выход из аккаунта не выполнялся.</p>
+    <button type="button" disabled={session.isFetching} onClick={() => void session.refetch({ cancelRefetch: false })}>
+      {session.isFetching ? 'Проверяем сессию…' : 'Повторить проверку сессии'}
+    </button>
+    {' '}<Link to="/login" state={authState}>Перейти ко входу</Link>
+  </div>;
+  if (userId && identity.subject !== userId) return (
+    <RouteLoading
+      label="Подтверждение сессии"
+      title="Подтверждаем сессию…"
+      description="Данные скрыты до успешной проверки."
+    />
+  );
+  if (!value) return <p role="status">Вход не выполнен или сессия истекла. Для доступа к сканам <Link to="/login" state={authState}>войдите</Link>. <Link to="/demo/scans">Демо без входа</Link>.</p>;
+  return <LiveScanContext.Provider key={scope} value={value}>{children}</LiveScanContext.Provider>;
 }

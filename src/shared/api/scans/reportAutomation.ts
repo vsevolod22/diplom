@@ -3,6 +3,7 @@ import {
   REPORT_AUTOMATION_REVISION,
   readReportPreferences,
   type ReportPreferences,
+  openAiSummaryConsentSchema,
 } from '@/shared/api/preferences/reportPreferences';
 
 /** A consent-version string is not a change token. Every save/revocation replaces the snapshot. */
@@ -21,7 +22,35 @@ const SUMMARY_DATA = 'Sanitized scanner findings and coverage; no raw evidence o
 const TRANSLATION_DATA =
   'Only the selected normalized advisory title and description eligible for translation; no other report metadata, package data, history, raw evidence or credentials. Identifiers within the selected text remain unchanged.';
 
-/** Exact account disclosure for report-automation-v1; a new server policy is not new user consent. */
+/** Paid automation is authorized only by a fresh, exact provider/policy/disclosure grant.
+ * The old boolean and language preference alone can only authorize the legacy free profile.
+ */
+export function allowSummaryAutomation(
+  preferences: ReportPreferences,
+  context: { enabled: boolean; policyVersion: string | null; disclosure: unknown },
+): boolean {
+  if (
+    !preferences.authorized ||
+    !preferences.autoSummary ||
+    preferences.revision !== REPORT_AUTOMATION_REVISION ||
+    !context.enabled ||
+    !context.policyVersion
+  )
+    return false;
+  const paid = openAiSummaryConsentSchema.safeParse({
+    version: 1,
+    policyVersion: context.policyVersion,
+    disclosure: context.disclosure,
+  });
+  if (paid.success) {
+    const saved = openAiSummaryConsentSchema.safeParse(preferences.openAiSummaryConsent);
+    return saved.success && JSON.stringify(saved.data) === JSON.stringify(paid.data);
+  }
+  // A paid opt-in is not permission to silently switch back to a different provider.
+  return !preferences.openAiSummaryConsent && allowAutomationDisclosure(context.disclosure, 'summary');
+}
+
+/** Exact account disclosure; a new server policy is not new user consent. */
 export function allowAutomationDisclosure(value: unknown, kind: 'summary' | 'translation'): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;

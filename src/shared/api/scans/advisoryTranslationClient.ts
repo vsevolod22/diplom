@@ -169,9 +169,12 @@ export function createAdvisoryTranslationClient(session = scanSession(), fetcher
     current,
     async readiness(scanId: string, signal: AbortSignal) {
       try {
-        return await chat.readiness(scanId, signal);
+        const value = await chat.readiness(scanId, signal);
+        // Retain the base OpenRouter readiness contract; paid readiness is not translation authority.
+        if (value.setupAction !== 'operator-public-file-configuration') throw new TranslationError('INVALID');
+        return value;
       } catch (error) {
-        throw error instanceof ChatError
+        throw error instanceof TranslationError ? error : error instanceof ChatError
           ? new TranslationError(error.code, error.providerFailure)
           : new TranslationError('INVALID');
       }

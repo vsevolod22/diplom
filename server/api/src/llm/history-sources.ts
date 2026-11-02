@@ -1,6 +1,7 @@
-import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, type PackageEcosystem } from '../worker/public-image-evidence.js';
+import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, publicVulnerabilityKind, type PackageEcosystem } from '../worker/public-image-evidence.js';
 import { ADVISORY_SOURCES } from '../worker/vuln-advisory.js';
 import { exact, object } from './response.js';
+import { safeRemediationFields } from './remediation-identifiers.js';
 
 const matches = (v: unknown, pattern: RegExp) => typeof v === 'string' && pattern.test(v);
 const member = (v: unknown, values: readonly unknown[]) => values.includes(v);
@@ -26,11 +27,16 @@ export function safeHistoryFinding(value: unknown): boolean {
   const base = ['check', 'findingId', 'severity', 'cveId', 'ecosystem', 'severitySources', 'provenanceRef', 'fixedVersionReported', 'advisoryState'];
   const advisory = ['assessments', 'conflictState', 'conflicts', 'limitations'];
   const publicFinding = Object.hasOwn(f, 'identifierKind');
-  const keys = publicFinding ? [...base, 'identifierKind'] : base;
+  // Old public citations remain readable; new citations carry all three fields,
+  // never a partial package identity. Legacy findings cannot add these fields.
+  const remediation = ['packageName', 'installedVersion', 'fixedVersion'];
+  const hasRemediation = publicFinding && remediation.some(key => Object.hasOwn(f, key));
+  if (hasRemediation && (!safeRemediationFields(f) || f.fixedVersionReported !== (f.fixedVersion !== null))) return false;
+  const keys = publicFinding ? [...base, 'identifierKind', ...(hasRemediation ? remediation : [])] : base;
   if (!exact(f, f.advisoryState === 'unknown' ? keys : [...keys, ...advisory]) ||
     !matches(f.findingId, /^vuln-[a-f0-9]{64}$/) ||
     (publicFinding ? !member(f.ecosystem, PUBLIC_ECOSYSTEMS) || !publicVulnerabilityId(f.cveId, f.ecosystem as PackageEcosystem) ||
-      f.identifierKind !== (String(f.cveId).startsWith('TEMP-') ? 'debian-temp' : 'cve') :
+      f.identifierKind !== publicVulnerabilityKind(f.cveId, f.ecosystem as PackageEcosystem) :
       !matches(f.cveId, /^CVE-\d{4}-\d{4,12}$/) || !member(f.ecosystem, ['apk', 'npm'])) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
     !list(f.severitySources, ADVISORY_SOURCES, ADVISORY_SOURCES.length) ||
     !matches(f.provenanceRef, /^target-[a-f0-9]{64}$/) || typeof f.fixedVersionReported !== 'boolean') return false;

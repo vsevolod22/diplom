@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeAuthEmail, PASSWORD_HINT, validAuthPassword } from './accountSecurity';
 
 const user = z.object({ id: z.string(), email: z.string().email() });
 export type DemoUser = z.infer<typeof user>;
@@ -25,9 +26,12 @@ export async function submitDemoCredentials(
   email: string,
   password: string,
 ): Promise<DemoUser> {
+  const normalizedEmail = normalizeAuthEmail(email);
+  if (!normalizedEmail) throw new Error('Введите корректный email длиной не более 254 байт UTF-8.');
+  if (!validAuthPassword(password)) throw new Error(PASSWORD_HINT);
   const response = await authRequest(action, {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email: normalizedEmail, password }),
   });
   if (!response.ok) {
     if (response.status === 409) throw new Error('Этот адрес уже зарегистрирован. Войдите в аккаунт.');

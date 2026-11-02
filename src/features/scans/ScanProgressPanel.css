@@ -1,5 +1,4 @@
 .scan-progress-panel {
-  --scan-progress-transition: width 1s linear;
   min-width: 0;
   max-width: 100%;
   display: grid;
@@ -33,11 +32,13 @@
 }
 .scan-progress-panel__bar::-webkit-progress-value {
   background: var(--a1-accent, #d1ff5e);
-  transition: var(--scan-progress-transition);
 }
 .scan-progress-panel__bar::-moz-progress-bar {
   background: var(--a1-accent, #d1ff5e);
-  transition: var(--scan-progress-transition);
+}
+.scan-progress-panel__bar:indeterminate,
+.scan-progress-panel__bar:indeterminate::-webkit-progress-bar {
+  background: repeating-linear-gradient(135deg, transparent 0 8px, currentColor 8px 10px);
 }
 .scan-progress-panel__description {
   display: grid;
@@ -49,10 +50,30 @@
   gap: 6px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .scan-progress-panel {
-    --scan-progress-transition: none;
-  }
+.scan-progress-panel__checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 8px;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+.scan-progress-panel__check {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-inline-start: 3px solid currentColor;
+  background: rgb(255 255 255 / 4%);
+}
+.scan-progress-panel__check[data-outcome='checked'] {
+  border-inline-start-color: var(--a1-accent, #d1ff5e);
+}
+.scan-progress-panel__check[data-outcome='unknown'] {
+  border-inline-start-style: dashed;
+}
+.scan-progress-panel__bar:indeterminate::-moz-progress-bar {
+  background: transparent;
 }
 @media (forced-colors: active) {
   .scan-progress-panel__bar {

@@ -1,25 +1,31 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   REPORT_AUTOMATION_REVISION,
+  readReportPreferences,
+  saveReportPreferences,
+  openAiSummaryConsentSchema,
   subscribeReportPreferences,
   useReportPreferences,
 } from '@/shared/api/preferences/reportPreferences';
-import { createUsageClient } from '@/shared/api/scans/llmUsageClient';
+import { OpenAiDisclosure } from './OpenAiDisclosure';
+import { LlmFindingDetails } from './LlmFindingDetails';
+import { createUsageClient, usageMatchesDisclosure } from '@/shared/api/scans/llmUsageClient';
 import {
   allowAutomationDisclosure,
+  allowSummaryAutomation,
   reportPreferencesCurrent,
   ReportAutomationError,
   reportAutomationKey,
-  reportAutomationMessage,
   runReportAutomation,
   runReportMetadata,
 } from '@/shared/api/scans/reportAutomation';
-import { Sparkles } from 'lucide-react';
+import { CheckCircle2, LoaderCircle, Sparkles } from 'lucide-react';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import {
   collectSummarySources,
   contextFence,
   createSummaryClient,
+  isUnsupportedSummaryReport,
   matchesSummaryTuple,
   SummaryError,
   summaryErrorMessage,
@@ -32,8 +38,6 @@ import {
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
-import { LlmUsagePanel } from './LlmUsagePanel';
-import { ScanChatPanel } from './ScanChatPanel';
 
 const sourceLabels: Record<string, string> = {
   Secrets: 'Секреты',
@@ -44,17 +48,83 @@ const sourceLabels: Record<string, string> = {
   INFO: 'Информационная',
   UNKNOWN: 'Неизвестна',
   'Debian advisory (не CVE)': 'Уведомление Debian (не CVE)',
+  'Debian DLA advisory (не CVE)': 'Бюллетень Debian DLA (не CVE)',
 };
+const summaryPhases = {
+  context: 'Проверяем доступность разбора',
+  recovery: 'Ищем сохранённый разбор',
+  waiting: 'Ожидаем начала разбора',
+  generation: 'Модель готовит рекомендации',
+  verification: 'Проверяем источники и готовим результат',
+} as const;
+type SummaryPhase = keyof typeof summaryPhases;
+
+function SummaryProgress({ phase }: { phase: SummaryPhase }) {
+  const [startedAt] = useState(() => Date.now());
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000))),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  return (
+    <div className="scan-summary-progress" data-phase={phase}>
+      <p role="status" aria-atomic="true">
+        <LoaderCircle className="scan-summary-progress__spinner" size={20} aria-hidden="true" />
+        <span>
+          <span className="sr-only">Готовим разбор… </span>
+          {summaryPhases[phase]}
+        </span>
+      </p>
+      <progress aria-label="Подготовка ИИ-отчёта" />
+      <small>Точный процент пока неизвестен. Исходные находки доступны в разделе «Находки и исправления».</small>
+      {seconds >= 10 ? <small className="scan-summary-progress__elapsed">Ожидание: {seconds} с</small> : null}
+    </div>
+  );
+}
+
 type Props = { status: ScanStatus; transport: ScanTransport; client?: SummaryClient };
 const sessionKey = () => JSON.stringify(scanSession());
 export function ScanSummaryPanel(props: Props) {
   const session = useSyncExternalStore(subscribeScanSession, sessionKey, sessionKey);
   const preferences = useReportPreferences();
+  const owner = scanSession();
+  const scope = JSON.stringify([session, props.status]);
+  // A failed persistent save revokes consent and remounts SummaryScope; keep its feedback owner-scoped.
+  const [saveFailure, setSaveFailure] = useState<{
+    scope: string;
+    preferences: ReturnType<typeof useReportPreferences>;
+  } | null>(null);
+  function enableAutomation(context: SummaryContext) {
+    if (!reportPreferencesCurrent(preferences) || !context.enabled || !context.policyVersion) return;
+    const paid =
+      context.disclosure?.provider === 'OpenAI'
+        ? openAiSummaryConsentSchema.safeParse({
+            version: 1,
+            policyVersion: context.policyVersion,
+            disclosure: context.disclosure,
+          })
+        : null;
+    if (paid ? !paid.success : !allowAutomationDisclosure(context.disclosure, 'summary')) return;
+    const saved = saveReportPreferences(
+      {
+        language: preferences.language,
+        autoSummary: true,
+        ...(paid?.success ? { openAiSummaryConsent: paid.data } : {}),
+      },
+      owner,
+    );
+    setSaveFailure(saved ? null : { scope, preferences: readReportPreferences() });
+  }
   return (
     <SummaryScope
       key={JSON.stringify([session, props.status, preferences])}
       {...props}
       preferences={preferences}
+      onEnableAutomation={enableAutomation}
+      optInFailed={saveFailure?.scope === scope && saveFailure.preferences === preferences}
     />
   );
 }
@@ -63,28 +133,38 @@ function SummaryScope({
   transport,
   client: providedClient,
   preferences,
-}: Props & { preferences: ReturnType<typeof useReportPreferences> }) {
+  onEnableAutomation,
+  optInFailed,
+}: Props & {
+  preferences: ReturnType<typeof useReportPreferences>;
+  onEnableAutomation: (context: SummaryContext) => void;
+  optInFailed: boolean;
+}) {
   const client = useMemo<SummaryClient>(
     () => providedClient ?? createSummaryClient(scanSession()),
     [providedClient],
   );
   const current = () => client.current() && reportPreferencesCurrent(preferences);
-  const automationCurrent = () => client.current() && reportPreferencesCurrent(preferences, 'summary');
+  const automationCurrent = (accepted = contextRef.current) =>
+    client.current() &&
+    reportPreferencesCurrent(preferences, 'summary') &&
+    !!accepted &&
+    allowSummaryAutomation(preferences, accepted);
   const [context, setContext] = useState<SummaryContext | null>(null);
 
   const [pending, setPending] = useState(false);
+  const [phase, setPhase] = useState<SummaryPhase>('context');
   const [message, setMessage] = useState('');
-  const [usageRefreshVersion, setUsageRefreshVersion] = useState(0);
+  const [unsupportedReport, setUnsupportedReport] = useState(false);
   const [result, setResult] = useState<{
     reply: SummaryReply;
     sources: SummarySource[];
-    recovered?: true;
   } | null>(null);
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
   const contextRef = useRef<SummaryContext | null>(null);
 
-  const authorized = preferences.authorized && preferences.autoSummary;
+  const authorized = !!context && allowSummaryAutomation(preferences, context);
 
   function invalidateRequest() {
     generation.current++;
@@ -99,6 +179,8 @@ function SummaryScope({
   function checkContext(next: SummaryContext) {
     if (next.scanId !== status.scanId || next.digest !== status.digest || next.platform !== status.platform)
       throw new SummaryError('STALE');
+    if (next.unavailableReason === 'LLM_SUMMARY_UNSUPPORTED_REPORT')
+      throw new SummaryError(next.unavailableReason);
   }
   async function refresh(automate = false, retry = false) {
     if (request.current || !current()) return;
@@ -106,6 +188,9 @@ function SummaryScope({
     request.current = controller;
     const version = ++generation.current;
     setPending(true);
+    setPhase('context');
+    setMessage('');
+    setUnsupportedReport(false);
     let timedOut = false;
     const deadline = setTimeout(() => {
       timedOut = true;
@@ -135,9 +220,11 @@ function SummaryScope({
       setContext(next);
       accepted = next;
       const existing = client.existing;
-      if (existing && status.state === 'completed' && status.profile === PUBLIC_IMAGE_PROFILE) {
-        // Recovery is a public-profile endpoint; the legacy proxy supports POST only.
+      const canReadSummary = next.summaryResultRead ?? status.profile === PUBLIC_IMAGE_PROFILE;
+      if (existing && status.state === 'completed' && canReadSummary) {
+        // Explicit route capability includes compatible legacy reports; older contexts use the profile fallback.
         // Reading an owner's previous result needs no autoSummary opt-in or attempt marker.
+        setPhase('recovery');
         const value = await Promise.race([
           runReportMetadata(
             JSON.stringify(['summary-recovery', status, contextFence(next)]),
@@ -147,6 +234,7 @@ function SummaryScope({
               if (signal.aborted || !client.current()) throw new SummaryError('STALE');
               if (reply === null) return null;
               if (!reply || !matchesSummaryTuple(reply, next)) throw new SummaryError('STALE');
+              if (live()) setPhase('verification');
               const sources = await collectSummarySources(transport, status, signal);
               const verified = verifiedSummarySources(reply, sources);
               if (signal.aborted || !client.current()) throw new SummaryError('STALE');
@@ -161,14 +249,15 @@ function SummaryScope({
         ]);
         if (!live()) return;
         if (value) {
-          setResult({ ...value, recovered: true });
+          setResult(value);
           setMessage('');
           recovered = true;
         }
       }
     } catch (error) {
       accepted = null;
-      if (generation.current !== version) return;
+      if (generation.current !== version || !current()) return;
+      setUnsupportedReport(isUnsupportedSummaryReport(error));
       contextRef.current = null;
       setContext(null);
       setResult(null);
@@ -182,11 +271,25 @@ function SummaryScope({
       }
     }
     if (
+      accepted?.enabled &&
+      !recovered &&
+      generation.current === version &&
+      preferences.authorized &&
+      preferences.autoSummary &&
+      !allowSummaryAutomation(preferences, accepted)
+    ) {
+      setMessage(
+        accepted.disclosure?.provider === 'OpenAI'
+          ? 'Для платного OpenAI требуется новое согласие на показанные условия. Прежний opt-in не применяется.'
+          : 'Условия ИИ-разбора изменились. Проверьте настройки аккаунта.',
+      );
+    }
+    if (
       automate &&
       !recovered &&
       accepted &&
       generation.current === version &&
-      authorized &&
+      allowSummaryAutomation(preferences, accepted) &&
       status.state === 'completed'
     )
       void generate(accepted, retry);
@@ -197,13 +300,15 @@ function SummaryScope({
       stop();
       contextRef.current = null;
       setContext(null);
-      setMessage('Настройки изменились. Ожидание сводки остановлено; прежнее разрешение не используется.');
+      setUnsupportedReport(false);
+      setMessage('Настройки изменились. Разбор остановлен.');
     });
     const unsubscribe = subscribeScanSession(() => {
       stop();
       contextRef.current = null;
       setContext(null);
-      setMessage('Сессия изменилась. Сводка скрыта; войдите и откройте отчёт заново.');
+      setUnsupportedReport(false);
+      setMessage('Сессия изменилась. Откройте отчёт заново.');
     });
     void refresh(true);
     // Focus and reconnect never create generation intent or discard a verified cached reply.
@@ -218,17 +323,17 @@ function SummaryScope({
 
   async function generate(accepted = contextRef.current, retry = false) {
     if (
-      !authorized ||
+      unsupportedReport ||
       status.state !== 'completed' ||
       !accepted?.enabled ||
       !accepted.policyVersion ||
       !accepted.disclosure ||
       request.current ||
-      !automationCurrent()
+      !automationCurrent(accepted)
     )
       return;
-    if (!allowAutomationDisclosure(accepted.disclosure, 'summary')) {
-      setMessage(reportAutomationMessage(new ReportAutomationError('DISCLOSURE'))!);
+    if (!allowSummaryAutomation(preferences, accepted)) {
+      setMessage('Условия ИИ-разбора изменились. Проверьте настройки аккаунта.');
       return;
     }
     const controller = new AbortController();
@@ -236,13 +341,14 @@ function SummaryScope({
     request.current = controller;
 
     setPending(true);
+    setPhase('waiting');
     setResult(null);
     setMessage('');
     let timedOut = false;
     const deadline = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, 45_000);
+    }, 120_000);
     const stopped = new Promise<never>((_, reject) =>
       controller.signal.addEventListener(
         'abort',
@@ -250,7 +356,11 @@ function SummaryScope({
         { once: true },
       ),
     );
+    const updatePhase = (next: SummaryPhase) => {
+      if (generation.current === version && !controller.signal.aborted && current()) setPhase(next);
+    };
     const operation = async () => {
+      updatePhase('context');
       const before = await client.context(status.scanId, controller.signal);
       checkContext(before);
       if (contextFence(before) !== contextFence(accepted)) {
@@ -267,6 +377,7 @@ function SummaryScope({
         throw new SummaryError('STALE');
       if (
         !usage.available ||
+        !usageMatchesDisclosure(usage, before.disclosure) ||
         !usage.integrationEnabled ||
         !usage.quotaEnabled ||
         usage.user.exhausted ||
@@ -276,13 +387,14 @@ function SummaryScope({
         usage.admission.status === 'policy_fault'
       )
         throw new SummaryError('LLM_QUOTA_EXCEEDED');
-      if (!allowAutomationDisclosure(before.disclosure, 'summary'))
-        throw new ReportAutomationError('DISCLOSURE');
+      if (!allowSummaryAutomation(preferences, before)) throw new ReportAutomationError('DISCLOSURE');
       if (controller.signal.aborted || !automationCurrent() || generation.current !== version)
         throw new SummaryError('STALE');
+      updatePhase('generation');
       const reply = await client.summary(before, controller.signal);
       if (controller.signal.aborted || !current() || generation.current !== version)
         throw new SummaryError('STALE');
+      updatePhase('verification');
       const sources = await collectSummarySources(transport, status, controller.signal);
       const verified = verifiedSummarySources(reply, sources);
       if (controller.signal.aborted || !current() || generation.current !== version)
@@ -319,6 +431,7 @@ function SummaryScope({
       // A cached reply still needs the exact disclosure and current authorization before publication.
       if (generation.current !== version || controller.signal.aborted || !current()) return;
       if (value.fence !== contextFence(accepted)) throw new SummaryError('STALE');
+      updatePhase('verification');
       const after = await Promise.race([
         runReportMetadata(JSON.stringify(['summary-context', status]), controller.signal, (signal) =>
           client.context(status.scanId, signal),
@@ -327,203 +440,184 @@ function SummaryScope({
       ]);
       checkContext(after);
       if (contextFence(after) !== contextFence(accepted)) throw new SummaryError('STALE');
-      if (!allowAutomationDisclosure(after.disclosure, 'summary'))
-        throw new ReportAutomationError('DISCLOSURE');
+      if (!allowSummaryAutomation(preferences, after)) throw new ReportAutomationError('DISCLOSURE');
       if (generation.current === version && !controller.signal.aborted && automationCurrent())
         setResult(value);
     } catch (error) {
-      if (generation.current === version)
-        setMessage(reportAutomationMessage(error) ?? summaryErrorMessage(error));
+      if (generation.current === version && current()) {
+        setUnsupportedReport(isUnsupportedSummaryReport(error));
+        setMessage(
+          error instanceof ReportAutomationError
+            ? error.code === 'DISCLOSURE'
+              ? 'Условия ИИ-разбора изменились. Проверьте настройки аккаунта.'
+              : 'Не удалось подготовить разбор. Отчёт сканеров доступен; можно повторить вручную.'
+            : summaryErrorMessage(error),
+        );
+      }
     } finally {
       clearTimeout(deadline);
       controller.abort();
       if (generation.current === version) {
         request.current = null;
         setPending(false);
-        setUsageRefreshVersion((value) => value + 1);
       }
     }
   }
-  const policy = context?.disclosure;
+  function enableAutomation() {
+    const accepted = contextRef.current;
+    if (
+      pending ||
+      unsupportedReport ||
+      !current() ||
+      !accepted?.enabled ||
+      !(
+        accepted.disclosure?.provider === 'OpenAI' ||
+        allowAutomationDisclosure(accepted.disclosure, 'summary')
+      )
+    )
+      return;
+    checkContext(accepted);
+    onEnableAutomation(accepted);
+  }
+
+  const failure = unsupportedReport
+    ? 'ИИ-разбор недоступен для этого формата отчёта. Исходные результаты доступны в разделе «Находки и исправления».'
+    : optInFailed
+      ? 'Не удалось сохранить настройку. Авторазбор не включён.'
+      : message ||
+        (status.state !== 'completed'
+          ? 'ИИ-разбор доступен только для полностью завершённой проверки. Сохранённые находки доступны в отчёте.'
+          : context && !context.enabled
+            ? 'ИИ-разбор сейчас недоступен. Отчёт сканеров доступен.'
+            : '');
+
   return (
     <section className="scan-a1__ai" aria-labelledby="scan-a1-ai" aria-busy={pending}>
-      <div>
-        <p className="scan-a1__eyebrow">04 / ИИ-СВОДКА · НАСТРОЙКИ АККАУНТА</p>
-        <h3 id="scan-a1-ai">
-          <Sparkles size={24} aria-hidden="true" /> Сводка отчёта
-        </h3>
-        <p>
-          Находки и покрытие — результаты сканирования в основном отчёте. Сводка ИИ — отдельная интерпретация:
-          предположения и рекомендации требуют проверки по исходным находкам.
-        </p>
-        {policy ? (
-          <dl className="scan-a1__facts">
-            <div>
-              <dt>Модель</dt>
-              <dd>
-                {policy.provider} · {policy.model}
-              </dd>
-            </div>
-            <div>
-              <dt>Маршрутизация</dt>
-              <dd>{policy.providers.join(', ')} · регион не ограничен</dd>
-            </div>
-            <div>
-              <dt>Стоимость</dt>
-              <dd>
-                {policy.freeOnly === true
-                  ? 'Серверная политика: только бесплатный режим'
-                  : policy.freeOnly === false
-                    ? 'Бесплатный режим выключен'
-                    : 'Бесплатный режим не подтверждён сервером'}{' '}
-                · бюджет допуска {policy.requestBudgetUsd} USD/запрос; не фактический счёт и не
-                пользовательская квота
-              </dd>
-            </div>
-            <div>
-              <dt>Данные</dt>
-              <dd>Очищенные находки и покрытие проверок; без исходных свидетельств и учётных данных.</dd>
-            </div>
-            <div>
-              <dt>Обработка</dt>
-              <dd>
-                {policy.retention === 'no-storage'
-                  ? 'Без хранения и обучения (декларация провайдера)'
-                  : 'Без обучения (декларация провайдера); отсутствие хранения не заявлено'}
-                . Одобрение оператора и декларация не доказывают соблюдение провайдером.
-              </dd>
-            </div>
-            <div>
-              <dt>Привязка запроса</dt>
-              <dd>
-                Отчёт {context?.reportVersion} · политика {context?.policyVersion}
-              </dd>
-            </div>
-          </dl>
-        ) : (
-          <p>
-            {context && !context.enabled
-              ? 'ИИ выключен или политика не настроена.'
-              : 'Условия передачи пока не подтверждены.'}
+      <h3 id="scan-a1-ai">
+        <Sparkles size={24} aria-hidden="true" /> Объяснение ИИ
+      </h3>
+      <p>Дополнительное объяснение, не заключение о безопасности. Проверяйте рекомендации по находкам сканера и источникам под каждым абзацем.</p>
+      {context?.disclosure?.provider === 'OpenAI' ? (
+        <OpenAiDisclosure disclosure={context.disclosure} />
+      ) : null}
+      {!authorized && !result && !unsupportedReport ? (
+        <div>
+          <p id="scan-summary-send-help">
+            {context?.disclosure?.provider === 'OpenAI'
+              ? 'Включение разрешает платный авторазбор только для показанных OpenAI, политики и денежного режима. Старое бесплатное согласие не применяется.'
+              : 'Находки отчёта, имена пакетов и версии передаются внешней модели, которая может сохранять данные.'}{' '}
+            Авторазбор следующих сканирований можно выключить в <a href="/account">настройках аккаунта</a>.
           </p>
-        )}
-      </div>
-      <div className="scan-a1__compose">
-        <p id="scan-summary-send-help">
-          При сохранённом разрешении аккаунта сводка запрашивается автоматически один раз для отчёта и
-          политики: очищенные находки и покрытие — указанным выше модели и провайдеру OpenRouter.{' '}
-          {policy?.freeOnly === true
-            ? 'Только бесплатный профиль.'
-            : policy?.freeOnly === false
-              ? 'Бесплатность выключена.'
-              : 'Бесплатность не подтверждена.'}{' '}
-          Бюджет указан выше. Без автоматического повтора или замены модели; условия проверяются заново перед
-          отправкой.
-        </p>
-        {!authorized ? (
-          <p>
-            Автоматическая сводка выключена. Сохраните разрешение в <a href="/account">настройках аккаунта</a>
-            . История и чат доступны независимо.
-          </p>
-        ) : null}
-        {authorized && message && !result ? (
           <Button
             type="button"
             aria-describedby="scan-summary-send-help"
-            disabled={pending || !context?.enabled || !policy || !current()}
-            onClick={() => void refresh(true, true)}
+            disabled={
+              pending ||
+              !current() ||
+              status.state !== 'completed' ||
+              !context?.enabled ||
+              !(
+                context.disclosure?.provider === 'OpenAI' ||
+                allowAutomationDisclosure(context.disclosure, 'summary')
+              )
+            }
+            onClick={enableAutomation}
           >
-            Повторить сводку
+            {context?.disclosure?.provider === 'OpenAI'
+              ? 'Включить платный авторазбор OpenAI'
+              : 'Включить авторазбор'}
           </Button>
-        ) : null}
-        {pending ? (
-          <>
-            <p role="status">Проверяем условия или получаем сводку…</p>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => {
-                stop();
-                setMessage(
-                  'Запрос отменён; результат не будет показан. Передача провайдеру уже могла начаться.',
-                );
-              }}
-            >
-              Отменить запрос сводки
-            </Button>
-          </>
-        ) : (
-          <Button type="button" variant="secondary" onClick={() => void refresh()}>
-            Обновить условия
-          </Button>
-        )}
-        <small>
-          После ошибки или отмены автоматического повтора нет. «Повторить сводку» разрешает один новый запрос
-          с повторной проверкой условий и квот. Сводка может восстанавливаться из ограниченного кэша процесса
-          сервера. Это не долговечное хранение: после перезапуска процесса или вытеснения запись может
-          исчезнуть. Ответы не сохраняются в браузерном хранилище.
-        </small>
-        {message ? (
-          <Alert role="alert" tone="warning">
-            {message}
-          </Alert>
-        ) : null}
-      </div>
-      <LlmUsagePanel
-        binding={
-          context && current()
-            ? {
-                scanId: context.scanId,
-                digest: context.digest,
-                platform: context.platform,
-                reportVersion: context.reportVersion,
-              }
-            : null
-        }
-        refreshVersion={usageRefreshVersion}
-      />
-      {result ? (
-        <div aria-label="Сводка ИИ · требует проверки">
-          {result.recovered ? (
-            <p>Сводка восстановлена из кэша процесса сервера; это не долговечная история.</p>
-          ) : null}
-          {result.reply.hypotheses.map((hypothesis, index) => (
-            <article key={index}>
-              <h4>Пункт {index + 1} · интерпретация ИИ</h4>
-              <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{hypothesis.text}</p>
-              <ul>
-                {hypothesis.citations.map((id) => (
-                  <li key={id}>
-                    <a href={`#ai-source-${encodeURIComponent(id)}`}>Находка {id}</a>
-                  </li>
-                ))}
-              </ul>
-            </article>
-          ))}
-          <h4>Основания ответа</h4>
-          <p>
-            Источники найдены в авторизованных результатах сканирования, включая другие категории и страницы.
-            Наличие источника не доказывает вывод ИИ; выполненная проверка не гарантирует безопасность.
-          </p>
-          <ul>
-            {result.sources.map((source) => (
-              <li id={`ai-source-${source.findingId}`} tabIndex={-1} key={source.findingId}>
-                <strong>
-                  {source.label
-                    .split(' · ')
-                    .map((part) => sourceLabels[part] ?? part)
-                    .join(' · ')}
-                </strong>
-                <p>
-                  {{ secret: 'Секреты', vuln: 'Уязвимости', config: 'Конфигурация' }[source.check]} · ID:{' '}
-                  {source.findingId}
-                </p>
-              </li>
-            ))}
-          </ul>
         </div>
       ) : null}
-      <ScanChatPanel status={status} transport={transport} />
+      {pending ? (
+        <div>
+          <SummaryProgress phase={phase} />
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              stop();
+              setMessage('Разбор отменён. Передача данных уже могла начаться.');
+            }}
+          >
+            Отменить разбор
+          </Button>
+        </div>
+      ) : null}
+      {failure && !pending && !result ? (
+        <div>
+          <Alert role="alert" tone="warning">
+            {failure}
+          </Alert>
+          {!unsupportedReport ? (
+            <Button type="button" disabled={!current()} onClick={() => void refresh(true, true)}>
+              Повторить разбор
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {result ? (
+        <div aria-label="ИИ-разбор отчёта">
+          <div className="scan-summary-ready" role="status">
+            <CheckCircle2 size={18} aria-hidden="true" /> ИИ-разбор готов
+          </div>
+          <div aria-label="Объём контекста модели">
+            {result.reply.contextSelection ? (
+              <>
+                <p>
+                  Модель получила {result.reply.contextSelection.selectedFindings} из{' '}
+                  {result.reply.contextSelection.totalFindings} находок;{' '}
+                  {result.reply.contextSelection.omittedFindings} не включены в контекст.
+                </p>
+                <p>
+                  Включаются все критические находки (в том числе с критической оценкой отдельного источника)
+                  и находки с неизвестной опасностью; остальные отбираются по уровню опасности в пределах
+                  объёма контекста. Это отбор для объяснения, а не удаление находок из отчёта.
+                </p>
+                <p>
+                  {result.reply.contextSelection.omittedFindings > 0
+                    ? 'Объяснение охватывает только отобранные находки. Не включённые находки тоже требуют проверки.'
+                    : 'В контекст включены все находки сохранённого отчёта. Это не означает, что все проверки поддерживаются или образ безопасен.'}
+                </p>
+              </>
+            ) : (
+              <p>
+                Объём контекста модели неизвестен: в этом сохранённом разборе нет данных об отборе находок.
+                Полнота охвата не подтверждена; число цитат не равно числу переданных модели находок.
+              </p>
+            )}
+            <p>
+              <a href="#scan-a1-findings">Полный отчёт сканеров · находки и исправления</a>
+              {' '}— проверьте все категории и страницы. Объём контекста не зависит от текущего фильтра или страницы.
+            </p>
+          </div>
+          <details className="scan-summary-explanation">
+            <summary>Прочитать объяснение и проверить его источники</summary>
+          {result.reply.hypotheses.map((paragraph, index) => (
+            <div key={index}>
+              <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{paragraph.text}</p>
+              <details>
+                <summary>На чём основан абзац {index + 1} · находок: {paragraph.citations.length}</summary>
+                <ul>
+                  {result.sources.filter((source) => paragraph.citations.includes(source.findingId)).map((source) => (
+                    <li key={source.findingId}>
+                      <strong style={{ overflowWrap: 'anywhere' }}>
+                        {source.label
+                          .split(' · ')
+                          .map((part) => sourceLabels[part] ?? part)
+                          .join(' · ')}
+                      </strong>
+                      {source.finding ? <LlmFindingDetails finding={source.finding} /> : null}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </div>
+          ))}
+          </details>
+        </div>
+      ) : null}
     </section>
   );
 }

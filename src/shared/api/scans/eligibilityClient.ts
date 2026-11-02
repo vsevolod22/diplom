@@ -24,11 +24,24 @@ export class EligibilityClient {
   activate(): void { this.retired = false; }
   retire(): void { this.retired = true; this.flight?.controller.abort(); }
 
-  async request(imageReference: string, checks: readonly string[], fresh = false, consumerCurrent: () => boolean = () => true): Promise<unknown> {
+  request(imageReference: string, checks: readonly string[], fresh = false, consumerCurrent: () => boolean = () => true): Promise<unknown> {
+    return this.read(imageReference, checks, fresh, consumerCurrent);
+  }
+
+  async retryAuthorization<T>(imageReference: string, checks: readonly string[], validate: (value: unknown) => T, consumerCurrent: () => boolean = () => true): Promise<T> {
+    // Only this explicit manual path may recheck a 403. Keep the denial latched
+    // through network/contract failures and while the fresh response is pending.
+    const result = validate(await this.read(imageReference, checks, true, consumerCurrent, true));
+    if (this.retired || !this.current() || !consumerCurrent()) throw new Error('Сессия или цель изменилась');
+    if (this.accessError?.status === 403) this.accessError = null;
+    return result;
+  }
+
+  private async read(imageReference: string, checks: readonly string[], fresh: boolean, consumerCurrent: () => boolean, retryForbidden = false): Promise<unknown> {
     // Cleanup invalidates queued consumers, not the shared active server read.
     if (!consumerCurrent()) throw new DOMException('Проверка больше не нужна', 'AbortError');
     if (this.retired || !this.current()) throw new Error('Сессия изменилась');
-    if (this.accessError) throw this.accessError;
+    if (this.accessError && !(retryForbidden && this.accessError.status === 403)) throw this.accessError;
     if (this.wait && this.wait.until > Date.now()) {
       this.onWait(this.wait);
       throw new ScanHttpError(429, 'IMAGE_SEARCH_RATE_LIMITED', Math.max(1, Math.ceil((this.wait.until - Date.now()) / 1000)), this.wait.reason === 'admission' ? null : this.wait.reason);
@@ -38,7 +51,7 @@ export class EligibilityClient {
       if (!fresh && this.flight.key === key) return this.flight.promise;
       // Changed targets serialize too; aborted browser reads may still occupy server work.
       await this.flight.promise.catch(() => undefined);
-      return this.request(imageReference, checks, fresh, consumerCurrent);
+      return this.read(imageReference, checks, fresh, consumerCurrent, retryForbidden);
     }
     const controller = new AbortController();
     const promise = this.fetchEligibility(imageReference, checks, controller);

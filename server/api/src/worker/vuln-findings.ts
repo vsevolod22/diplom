@@ -112,7 +112,7 @@ export function parseVulnFindings(value: unknown, image: string, platform: strin
       if (++count > MAX_VULN_FINDINGS) throw new Error('Too many vulnerabilities');
       if (!object(raw) || typeof raw.VulnerabilityID !== 'string' ||
           (publicImage ? !publicVulnerabilityId(raw.VulnerabilityID, ecosystem) ||
-                      raw.VulnerabilityID.startsWith('TEMP-') && value.Metadata.OS.Family !== 'debian' :
+                      (raw.VulnerabilityID.startsWith('TEMP-') || raw.VulnerabilityID.startsWith('DLA-')) && value.Metadata.OS.Family !== 'debian' :
                       !/^CVE-[0-9]{4}-[0-9]{4,12}$/.test(raw.VulnerabilityID)) ||
           !validName(raw.PkgName) || !version(raw.InstalledVersion) ||
           typeof raw.Severity !== 'string' || !severities.includes(raw.Severity as typeof severities[number]) ||

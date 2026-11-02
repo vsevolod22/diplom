@@ -2,9 +2,13 @@ import { useState } from 'react';
 import { AdvisoryTranslationPanel } from '@/features/scans/AdvisoryTranslationPanel';
 import type { VulnFinding } from '@/shared/api/scans/scanTransport';
 import { canonicalReferences, FIRST_CALCULATOR, validCvssVector } from '@/shared/api/scans/vulnAdvisory';
-import { isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
+import { identifierLabel, vulnerabilityIdentifierKind } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import type { AdvisoryV1 } from '@/shared/api/scans/vulnAdvisory';
 
+const severityLabels = {
+  CRITICAL: 'Критическая оценка', HIGH: 'Высокая оценка', MEDIUM: 'Средняя оценка',
+  LOW: 'Низкая оценка', UNKNOWN: 'Опасность неизвестна',
+};
 type PlainField = AdvisoryV1['assessments'][number]['title'];
 const fieldLabels = {
   available: '',
@@ -50,8 +54,10 @@ function CopyVector({ vector }: { vector: string }) {
 export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const advisory = finding.advisory;
-  const debianTemp = isDebianTempId(finding.cveId);
-  const references = canonicalReferences(finding.cveId);
+  const identifierKind = vulnerabilityIdentifierKind(finding.cveId);
+  const identifierName = identifierKind === 'debian-dla' ? 'Бюллетень Debian DLA (не CVE)'
+    : identifierKind === 'debian-temp' ? 'Уведомление Debian (не CVE)' : identifierLabel(finding.cveId);
+  const references = identifierKind === 'cve' ? canonicalReferences(finding.cveId) : [];
   const incompleteAssessments =
     !advisory || advisory.state === 'omitted' || advisory.conflictState === 'unknown';
   const representativeSeverity = incompleteAssessments || advisory.conflicts.includes('severity');
@@ -65,49 +71,58 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
   return (
     <li className="scan-vuln-row" data-severity={finding.severity}>
       <div className="scan-vuln-row__headline">
-        <strong className="scan-vuln-row__id">{finding.cveId}</strong>
-        {debianTemp ? <span>Debian advisory (не CVE)</span> : null}
-        <span className="scan-vuln-row__severity">{finding.severity}</span>
+        <strong className="scan-vuln-row__id">{finding.packageName}</strong>
+        <span style={{ overflowWrap: 'anywhere', minWidth: 0 }}>
+          {finding.cveId}{identifierKind !== 'cve' ? ` · ${identifierName}` : ''}
+        </span>
+        <span className="scan-vuln-row__severity">{severityLabels[finding.severity]}</span>
       </div>
       <dl className="scan-vuln-row__facts">
-        <div>
-          <dt>Пакет / {finding.ecosystem}</dt>
-          <dd>{finding.packageName}</dd>
-        </div>
+
         <div>
           <dt>Установлено</dt>
           <dd>{finding.installedVersion}</dd>
         </div>
         <div>
-          <dt>Исправление</dt>
-          <dd>{finding.fixedVersion ?? 'не указано'}</dd>
+          <dt>{representativeFix ? 'Версия исправления · требует сверки' : 'Исправленная версия по отчёту'}</dt>
+          <dd>{finding.fixedVersion ?? 'источник не указал'}</dd>
         </div>
       </dl>
+      <div className="scan-vuln-row__action">
+        <p><strong>Следующий шаг.</strong> {representativeFix
+          ? 'Сверьте исправление с поставщиком: данные источников неполны или расходятся.'
+          : finding.fixedVersion
+            ? 'Проверьте совместимость и обновите пакет или базовый образ до подходящей исправленной версии. Затем пересоберите образ и повторите проверку.'
+            : 'Уточните исправление у поставщика. Неуказанная версия не доказывает, что исправления нет; при его отсутствии оцените замену или ограничение использования пакета.'}</p>
+      </div>
       {advisory?.assessments.some((item) => item.severity === 'CRITICAL') &&
       finding.severity !== 'CRITICAL' ? (
         <p className="scan-vuln-row__warning">
-          Отдельный источник сообщает CRITICAL; оценки расходятся.
+          Один из источников считает уязвимость критической; оценки расходятся.
         </p>
       ) : null}
-      {representativeSeverity ? (
-        <p>
-          Совместимое значение severity, не авторитетная оценка источника.
+      {representativeSeverity || representativeFix || (advisory?.conflicts.length ?? 0) > 0 || (advisory?.limitations.length ?? 0) > 0 ? (
+        <p className="scan-vuln-row__warning">
+          {representativeSeverity ? 'Опасность требует уточнения. ' : ''}
+          {representativeFix ? 'Версия исправления не подтверждена всеми источниками. ' : ''}
+          {advisory?.conflicts.length ? 'Есть расхождения источников. ' : ''}
+          {advisory?.limitations.length ? 'Часть данных ограничена. ' : ''}
+          {advisory?.conflictState === 'unknown' ? 'Согласованность источников неизвестна. ' : ''}
+          Сверьте сведения в подробностях.
         </p>
       ) : null}
-      {representativeFix ? (
-        <p>
-          Совместимое значение исправления, не авторитетная оценка источника.
-        </p>
-      ) : null}
-      <p className="scan-vuln-row__sources">
-        Источники отдельных оценок: {finding.severitySources?.join(', ') || 'неизвестны'}
-      </p>
+
       <details
         className="scan-vuln-row__details"
         onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
       >
-        <summary>Подробности {finding.cveId} · описание, CVSS и ссылки</summary>
-        <p>{debianTemp ? 'Advisory ID' : 'CVE ID'}: {finding.cveId}</p>
+        <summary>Подробности · описание уязвимости и источники</summary>
+        <p><strong>Почему важно.</strong> Установленный пакет совпал с записью об уязвимости. Это не доказательство эксплуатации: применимость к вашему приложению нужно проверить отдельно.</p>
+        <p>Тип пакета: {finding.ecosystem}</p>
+        <p>{identifierName}: {finding.cveId}</p>
+        <p>Оценка сканера: {finding.severity}. Источники: {finding.severitySources?.join(', ') || 'неизвестны'}.</p>
+        {advisory?.conflicts.length ? <p>Поля с расхождениями: {advisory.conflicts.join(', ')}</p> : null}
+        {advisory?.limitations.length ? <p>Ограничения источника: {advisory.limitations.join(', ')}</p> : null}
         <p>ID находки: {finding.findingId}</p>
         <p>Provenance: {finding.provenanceRef ?? 'не предоставлен'}</p>
         {!advisory ? (
@@ -126,6 +141,7 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
                   <strong>Источник: {item.source}</strong> · {item.provenanceRef}
                 </p>
                 <p>Язык источника: {item.language ?? 'не указан'} · оригинальный текст источника</p>
+                <p>Оценка источника №{index + 1}. Отдельный перевод описания — не ИИ-разбор и не ответ чата.</p>
                 <AdvisoryText label="Заголовок" field={item.title} />
                 <AdvisoryText label="Описание" field={item.description} />
                 {detailsOpen ? (
@@ -188,22 +204,12 @@ export function VulnAdvisoryCard({ finding }: { finding: VulnFinding }) {
             · базовый инструмент без автозаполнения; вставьте проверенный вектор вручную.
           </p>
         ) : null}
-        {debianTemp ? <p>Временный Debian advisory ID, не CVE. Сопоставленные внешние ссылки не предоставлены.</p>
-          : <p>Проверенный русский источник для этой CVE недоступен. Ссылка БДУ не подтверждена.</p>}
+        {identifierKind === 'debian-temp' ? <p>Временный Debian advisory ID, не CVE. Сопоставленные внешние ссылки не предоставлены.</p>
+          : identifierKind === 'debian-dla' ? <p>Бюллетень Debian DLA — не идентификатор CVE. Сопоставление с CVE/NVD не выполнялось; сведения источника приведены отдельно.</p>
+            : identifierKind === 'cve' ? <p>Проверенный русский источник для этой CVE недоступен. Ссылка БДУ не подтверждена.</p>
+              : <p>Тип идентификатора не определён; внешние ссылки не сопоставлялись.</p>}
       </details>
-      {advisory && advisory.conflicts.length > 0 ? (
-        <p className="scan-vuln-row__warning">
-          Источники расходятся: {advisory.conflicts.join(', ')}. Сохранены отдельные оценки источников.
-        </p>
-      ) : null}
-      {advisory?.conflictState === 'unknown' ? (
-        <p className="scan-vuln-row__warning">
-          Согласованность источников неизвестна: часть наблюдений недоступна.
-        </p>
-      ) : null}
-      {advisory && advisory.limitations.length > 0 ? (
-        <p>Ограничения данных: {advisory.limitations.join(', ')}</p>
-      ) : null}
+
     </li>
   );
 }

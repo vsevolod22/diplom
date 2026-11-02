@@ -76,7 +76,7 @@ export function translationBinding(snapshot: TranslationSnapshot): TranslationBi
   return { scanId: snapshot.scanId, digest: snapshot.digest, platform: snapshot.platform, reportVersion: snapshot.reportVersion,
     findingId: snapshot.findingId, assessmentIndex: snapshot.assessmentIndex, sourceVersion: snapshot.sourceVersion };
 }
-const identifiers = (text: string) => [...new Set(text.match(/\b(?:CVE|TEMP)-[A-Za-z0-9-]+/gi) ?? [])].sort();
+const identifiers = (text: string) => [...new Set(text.match(/\b(?:CVE|TEMP|DLA)-[A-Za-z0-9-]+/gi) ?? [])].sort();
 function translatedField(value: unknown, original: string | null, ceiling: number,
   phase: 'translation_title' | 'translation_description'): string | null {
   if (original === null) { if (value !== null) return invalidReply(phase, 'null_mismatch'); return null; }

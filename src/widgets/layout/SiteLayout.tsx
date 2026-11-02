@@ -7,6 +7,8 @@ function pageTitle(path: string): string {
   const titles: Record<string, string> = {
     '/': 'Проверка контейнерных образов',
     '/login': 'Вход',
+    '/forgot-password': 'Восстановление доступа',
+    '/reset-password': 'Новый пароль',
     '/register': 'Регистрация',
     '/account': 'Аккаунт',
     '/scans': 'Мои проверки',

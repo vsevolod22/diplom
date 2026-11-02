@@ -1,5 +1,7 @@
 import { useCallback, useState } from 'react';
-import { ReportViewContractError, reportViewIdentity } from '@/shared/api/scans/reportView';
+import { scanReasonLabel } from '@/features/scans/scanProgressPresentation';
+import { ScanCheckFailure } from '@/features/scans/ScanCheckFailure';
+import { normalizeReportQuery, ReportViewContractError, reportViewIdentity } from '@/shared/api/scans/reportView';
 import type { SbomReportQuery, SecretReportQuery, VulnReportQuery } from '@/shared/api/scans/reportView';
 import { SbomReportControls, SecretReportControls, UnsupportedReportControls, VulnReportControls } from './ReportViewControls';
 import { cveMetadataIdentity, hasCveMetadata, savedDbAge } from '@/shared/api/scans/cveDbMetadata';
@@ -14,8 +16,8 @@ import { CursorReportPager, ReportIdentityError } from './CursorReportPager';
 import { fingerprintReportRows } from './reportRowFingerprint';
 import type { PageDescription } from './CursorReportPager';
 import { VulnAdvisoryCard } from './VulnAdvisoryCard';
-import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
-import { identifierCountLabel, isDebianTempId } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
+import { ReportCount } from './ScanReportOverview';
+import { countVulnerabilityIdentifiers, identifierCountLabel } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 
 type Props = {
   status: ScanStatus;
@@ -74,26 +76,25 @@ export function ScanReportSections(props: Props) {
     status.checks,
     status.perCheck,
   ]);
+  const secretsFirst = status.perCheck?.secret?.outcome === 'checked' && (status.perCheck.secret.findingCount ?? 0) > 0;
+  const secrets = demo || checks.includes('secret') ? (
+    <div key="secrets" hidden={!demo && filter === 'cve'}>
+      <SecretReport {...props} reportKey={`${identity}:secret`} />
+    </div>
+  ) : null;
   return (
     <div key={identity} className="scan-report-sections">
-      <p className="scan-a1__muted">
-        {status.profile ? 'Уязвимости' : 'CVE'}, Secrets и SBOM — независимые наборы данных и итоги. Категория только переключает видимость; не
-        сортирует и не фильтрует весь отчёт.
-      </p>
+      {secretsFirst ? secrets : null}
       {checks.includes('vuln') ? (
-        <div hidden={filter === 'secret'}>
+        <div key="vulnerabilities" hidden={filter === 'secret'}>
           <VulnReport {...props} reportKey={`${identity}:vuln`} />
         </div>
       ) : null}
-      {demo || checks.includes('secret') ? (
-        <div hidden={!demo && filter === 'cve'}>
-          <SecretReport {...props} reportKey={`${identity}:secret`} />
-        </div>
-      ) : null}
+      {!secretsFirst ? secrets : null}
       {checks.includes('sbom') ? <SbomReport {...props} reportKey={`${identity}:sbom`} /> : null}
-      {filter === 'cve' && !checks.includes('vuln') ? <p>CVE не запрашивались для этого скана.</p> : null}
+      {filter === 'cve' && !checks.includes('vuln') ? <p>Проверка уязвимостей не запрашивалась для этого образа.</p> : null}
       {filter === 'secret' && !demo && !checks.includes('secret') ? (
-        <p>Secrets не запрашивались для этого скана.</p>
+        <p>Поиск возможных секретов не запрашивался для этого образа.</p>
       ) : null}
       {!demo && checks.length === 0 ? (
         <p>
@@ -115,9 +116,9 @@ function viewRowFingerprint(rows: Parameters<typeof fingerprintReportRows>[0], r
   try { return fingerprintReportRows(rows); }
   catch (error) { if (reportView) throw new ReportViewContractError(); throw error; }
 }
-function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
-  const publicReport = status.profile === PUBLIC_IMAGE_PROFILE;
-  const label = publicReport ? 'Уязвимости' : 'CVE';
+function VulnReport({ status, transport, reportKey, demo, scope }: SectionProps) {
+
+  const label = 'Уязвимости';
   const [query, setQuery, revision] = useReportSelection<VulnReportQuery>({ view: 'report-v1', limit: 25, sort: 'severity:desc', severity: null });
   const supported = !demo && transport.kind === 'live';
   const load = useCallback(
@@ -169,13 +170,14 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
     [status, supported],
   );
   return (
-    <section aria-label={`Результаты ${label}`} className="scan-report-section">
-      <h4>
-        {label} <span className="scan-report-section__scope">registry IMAGE</span>
-      </h4>
+    <section id="scan-report-vulnerabilities" tabIndex={-1} aria-label={`Результаты ${label}`} className="scan-report-section">
+      <h4>{label}</h4>
+      <p className="scan-report-section__intro">Сравните установленную и исправленную версии. Оценка опасности относится к находке, а не ко всему образу.</p>
+      {/* Controls survive query changes; the keyed pager alone cancels and resets replaced reads. */}
+      {supported ? <VulnReportControls query={query} onChange={setQuery} disabled={false} label={label} /> : <UnsupportedReportControls />}
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
-        controls={pending => supported ? <VulnReportControls query={query} onChange={setQuery} disabled={pending} label={label} /> : <UnsupportedReportControls />}
+        queryKey={[...scope, 'report-page', status.scanId, 'vuln', supported ? { view: query.view, ...normalizeReportQuery('vuln', query) } : null, reportKey]}
         label={label}
         load={load}
         describe={describe}
@@ -184,45 +186,54 @@ function VulnReport({ status, transport, reportKey, demo }: SectionProps) {
       >
         {(page) =>
           page.outcome === 'failed' ? (
-            <p>{label} не проверены: {page.reason ?? page.errorCode}. Число уязвимостей неизвестно.</p>
+            <div className="scan-report-unavailable">
+              <strong>Не удалось проверить уязвимости</strong>
+              <p>Число уязвимостей неизвестно, а не равно нулю. Не используйте этот результат как подтверждение безопасности.</p>
+              <ScanCheckFailure detail={page.failureDetail} reason={page.reason ?? page.errorCode} />
+            </div>
           ) : page.outcome === 'unsupported' ? (
-            <>
-              <p>{label} не поддерживаются: {page.reason}. Это не нулевое число находок.</p>
+            <div className="scan-report-unavailable">
+              <strong>Проверка уязвимостей не поддерживается</strong>
+              <p>{scanReasonLabel(page.reason)}. Число уязвимостей неизвестно, а не равно нулю.</p>
+              <p>Проверьте эту область другим подходящим инструментом; повторный запуск сам по себе не устраняет ограничение.</p>
               <CveDbFacts page={page} />
-            </>
+            </div>
           ) : (
             <>
               <p className="scan-a1__muted">
-                Находок в проверенной области: {page.findingCount}. Это не гарантия безопасности; другие
-                области не проверялись.
+                Всего находок в проверенной области: <strong>{page.findingCount}</strong>. Фильтр меняет список, но не этот итог.
               </p>
-              {page.identifierCounts ? <p>Весь сохранённый отчёт (до фильтров): {identifierCountLabel(page.identifierCounts)}.
-                {' '}На этой странице: {identifierCountLabel({ cve: page.findings.filter(row => !isDebianTempId(row.cveId)).length, debianTemp: page.findings.filter(row => isDebianTempId(row.cveId)).length })}.
-              </p> : null}
+
               <div className="scan-report-section__coverage">
                 {page.os ? (
                   <p>
-                    OS {label}: {outcomes[page.os.outcome]}
-                    {page.os.outcome === 'unsupported' ? ` · ${page.os.reason}` : ''}
+                    Системные пакеты: {page.os.outcome === 'checked' ? 'проверены' : outcomes[page.os.outcome]}
+                    {page.os.outcome === 'unsupported' ? ` · ${scanReasonLabel(page.os.reason)}` : ''}
                   </p>
                 ) : null}
                 {page.node ? (
                   <p>
-                    Node/npm {label}: {outcomes[page.node.outcome]}
-                    {page.node.outcome === 'unsupported' ? ` · ${page.node.reason}` : ''}
+                    Пакеты приложения (Node/npm): {page.node.outcome === 'checked' ? 'проверены' : outcomes[page.node.outcome]}
+                    {page.node.outcome === 'unsupported' ? ` · ${scanReasonLabel(page.node.reason)}` : ''}
                                         {page.node.outcome === 'unsupported' && page.node.reason === 'NODE_INVENTORY_UNKNOWN' ? ' · Инвентарь не установлен; отсутствие Node-пакетов не доказано.' : ''}
                   </p>
                 ) : null}
-                {!page.os || !page.node ? <p>Часть сведений о покрытии OS/Node не предоставлена.</p> : null}
+                {!page.os || !page.node ? <p>Неизвестно, насколько полно проверены системные пакеты и пакеты приложения.</p> : null}
               </div>
               <CveDbFacts page={page} />
-              <p className="scan-a1__muted">scanner {page.scannerVersion} · проверено {page.checkedAt}
-                {status.perCheck?.vuln?.checksVersion ? ` · checks ${status.perCheck.vuln.checksVersion}` : ''}
-              </p>
+              <details className="scan-report-section__metadata">
+                <summary>Подробности · данные проверки уязвимостей</summary>
+                                {page.identifierCounts ? <p>Весь сохранённый отчёт (до фильтров): {identifierCountLabel(page.identifierCounts)}.
+                                  {' '}На этой странице: {identifierCountLabel(countVulnerabilityIdentifiers(page.findings))}.
+                                </p> : null}
+                <p>scanner {page.scannerVersion} · проверено {page.checkedAt}
+                  {status.perCheck?.vuln?.checksVersion ? ` · checks ${status.perCheck.vuln.checksVersion}` : ''}
+                </p>
+              </details>
               {page.findingCount === 0 ? (
-                <p>{publicReport ? '0 уязвимостей' : '0 CVE'} в выполненной проверенной области; это не гарантия безопасности.</p>
+                <p>0 находок в выполненной проверенной области; это не гарантия безопасности.</p>
               ) : null}
-              {page.page?.matchedCount === 0 && page.findingCount > 0 ? <p>Нет совпадений глобального фильтра {label}. Полный отчёт содержит {page.findingCount} находок.</p> : null}
+              {page.page?.matchedCount === 0 && page.findingCount > 0 ? <p>По выбранному фильтру находок нет. Во всём отчёте: {page.findingCount}. Измените фильтр, чтобы увидеть остальные.</p> : null}
               <ul className="scan-vuln-list" aria-label={`Находки ${label}`}>
                 {page.findings.map((finding) => (
                   <VulnAdvisoryCard key={finding.findingId} finding={finding} />
@@ -244,14 +255,16 @@ function CveDbFacts({ page }: { page: Exclude<ScanVuln, { outcome: 'failed' }> }
   const v2 = isV2CvePage(page) ? page : null;
   return <div className="scan-report-db">
     {v2 ? <div className="scan-report-db__policy">
-      <p><strong>Политика CVE DB: UpdatedAt + 14 дней включительно</strong> · {v2.dbPolicy.status === 'stale-but-usable' ? 'допустима с предупреждениями' : 'допустима'} на сохранённый момент проверки, не сейчас.</p>
-      <p>Возраст базы на сохранённый момент: {savedDbAge(v2.db, v2.dbPolicy.evaluatedAt)} · оценено {new Date(v2.dbPolicy.evaluatedAt).toISOString()}.</p>
-      {v2.dbPolicy.warnings.includes('DB_DATA_OLDER_THAN_24H') ? <p className="scan-vuln-row__warning">DB_DATA_OLDER_THAN_24H: данные базы старше 24 часов на момент оценки.</p> : null}
-      {v2.dbPolicy.warnings.includes('DB_PUBLICATION_OVERDUE') ? <p className="scan-vuln-row__warning">DB_PUBLICATION_OVERDUE: ожидаемая публикация NextUpdate просрочена на момент оценки.</p> : null}
-      <p>Исторический результат не подтверждает текущую готовность базы или безопасность образа.</p>
-    </div> : <p className="scan-a1__muted">Legacy CVE: versioned policy evidence не предоставлено; правило 14 дней и актуальная допустимость не подтверждены.</p>}
+      <p>Возраст базы на момент проверки: {savedDbAge(v2.db, v2.dbPolicy.evaluatedAt)}.</p>
+      {v2.dbPolicy.warnings.includes('DB_DATA_OLDER_THAN_24H') ? <p className="scan-vuln-row__warning">Данные базы старше 24 часов на момент проверки.</p> : null}
+      {v2.dbPolicy.warnings.includes('DB_PUBLICATION_OVERDUE') ? <p className="scan-vuln-row__warning">Ожидаемое обновление базы не вышло к моменту проверки.</p> : null}
+    </div> : <p className="scan-a1__muted">Актуальность базы на момент проверки не подтверждена.</p>}
     <details className="scan-report-section__metadata">
-      <summary>Версии scanner и базы CVE</summary>
+      <summary>Сведения о базе уязвимостей</summary>
+      {v2 ? <>
+        <p><strong>Политика CVE DB: UpdatedAt + 14 дней включительно</strong> · {v2.dbPolicy.status === 'stale-but-usable' ? 'допустима с предупреждениями' : 'допустима'} на сохранённый момент проверки, не сейчас.</p>
+        <p>Оценено {new Date(v2.dbPolicy.evaluatedAt).toISOString()}. Исторический результат не подтверждает текущую готовность базы или безопасность образа.</p>
+      </> : null}
       {page.db ? <>
         <p>DB {page.db.manifestDigest} · {page.db.signer} (локальная аттестация, не подпись издателя; браузер не проверяет подпись).</p>
         <p>UpdatedAt · обновлена {page.db.updatedAt}</p>
@@ -267,7 +280,7 @@ function CveDbFacts({ page }: { page: Exclude<ScanVuln, { outcome: 'failed' }> }
   </div>;
 }
 
-function SbomReport({ status, transport, reportKey, demo }: SectionProps) {
+function SbomReport({ status, transport, reportKey, demo, scope }: SectionProps) {
   const [query, setQuery, revision] = useReportSelection<SbomReportQuery>({ view: 'report-v1', limit: 25, sort: 'name:asc', ecosystem: null, name: null });
   const supported = !demo && transport.kind === 'live';
   const load = useCallback(
@@ -301,33 +314,39 @@ function SbomReport({ status, transport, reportKey, demo }: SectionProps) {
     [status, supported],
   );
   return (
-    <section aria-label="Пакеты SBOM" className="scan-report-section">
-      <h4>Пакеты SBOM</h4>
+    <details aria-label="Пакеты SBOM" className="scan-report-section">
+      <summary>Состав образа · найти пакет и его версию{status.perCheck?.sbom?.outcome === 'checked' && status.perCheck.sbom.componentCount != null ? <> · <ReportCount value={status.perCheck.sbom.componentCount} unit="package" /></> : null}</summary>
+      <p>Инвентарь пакетов (SBOM) — для проверки зависимостей. Это не список уязвимостей.</p>
+      {supported ? <SbomReportControls query={query} onChange={setQuery} disabled={false} /> : <UnsupportedReportControls />}
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
-        controls={pending => supported ? <SbomReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
-        label="SBOM"
+        queryKey={[...scope, 'report-page', status.scanId, 'sbom', supported ? { view: query.view, ...normalizeReportQuery('sbom', query) } : null, reportKey]}
+
+        label="Пакеты"
         load={load}
         describe={describe}
         enabled={terminal.includes(status.state) && !!status.perCheck?.sbom}
-        waiting={status.state === 'cancelled' ? 'SBOM: завершённый результат не сохранён. Число пакетов неизвестно.' : 'SBOM не подтверждён; число пакетов неизвестно.'}
+        waiting={status.state === 'cancelled' ? 'Состав пакетов не сохранён до отмены. Число пакетов неизвестно.' : 'Состав образа ещё не подтверждён; число пакетов неизвестно.'}
       >
         {(page) =>
           page.outcome === 'failed' ? (
-            <p>SBOM не проверен: {page.reason ?? page.errorCode}. Число пакетов неизвестно.</p>
+            <>
+              <p>Состав образа не проверен. Число пакетов неизвестно.</p>
+              <ScanCheckFailure detail={page.failureDetail} reason={page.reason ?? page.errorCode} />
+            </>
           ) : (
             <>
               <p>
-                Подтверждённый инвентарь: {page.componentCount} пакетов · ОС {page.os.name} {page.os.version}{' '}
+                Подтверждённый инвентарь: <ReportCount value={page.componentCount} unit="package" /> · ОС {page.os.name} {page.os.version}{' '}
                 · {page.platform}
               </p>
-              <p className="scan-a1__muted">
-                Образ: {page.image}. SBOM не содержит оценку CVE и не подтверждает безопасность.
-              </p>
-              <p className="scan-a1__muted">
-                scanner {page.scannerVersion} · проверено {page.checkedAt}
-              </p>
-              {page.page?.matchedCount === 0 ? <p>Нет совпадений глобального фильтра SBOM; полный инвентарь: {page.componentCount} пакетов.</p> : null}
+              <p className="scan-a1__muted">Список пакетов сам по себе не подтверждает безопасность образа.</p>
+              <details className="scan-report-section__metadata">
+                <summary>Сведения о составе пакетов</summary>
+                <p>Образ: {page.image}. SBOM не содержит оценку CVE.</p>
+                <p>scanner {page.scannerVersion} · проверено {page.checkedAt}</p>
+              </details>
+              {page.page?.matchedCount === 0 ? <p>Пакетов с такими параметрами нет. Измените фильтр; во всём инвентаре: <ReportCount value={page.componentCount} unit="package" />.</p> : null}
               <ul className="scan-report-inventory">
                 {page.components.map((component) => (
                   <li key={JSON.stringify(component)}>
@@ -342,11 +361,11 @@ function SbomReport({ status, transport, reportKey, demo }: SectionProps) {
           )
         }
       </CursorReportPager>
-    </section>
+    </details>
   );
 }
 
-function SecretReport({ status, transport, reportKey, demo, filter, onResetFilter }: SectionProps) {
+function SecretReport({ status, transport, reportKey, demo, scope, filter, onResetFilter }: SectionProps) {
   const [query, setQuery, revision] = useReportSelection<SecretReportQuery>({ view: 'report-v1', limit: 25, sort: 'ruleId:asc', ruleId: null, linePresence: null });
   const supported = !demo && transport.kind === 'live';
   const load = useCallback(
@@ -382,16 +401,19 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
     [status, demo, supported],
   );
   return (
-    <section aria-label="Результаты Secrets" className="scan-report-section">
-      <h4>Secrets</h4>
+    <section id="scan-report-secrets" tabIndex={-1} aria-label="Возможные секреты" className="scan-report-section">
+      <h4>Возможные ключи и пароли</h4>
+      <p>Совпадение с правилом ещё не означает утечку. Проверьте, являются ли найденные данные действующими; сами значения здесь не отображаются.</p>
+      {supported ? <SecretReportControls query={query} onChange={setQuery} disabled={false} /> : <UnsupportedReportControls />}
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
-        controls={pending => supported ? <SecretReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
-        label="Secrets"
+        queryKey={[...scope, 'report-page', status.scanId, 'secret', supported ? { view: query.view, ...normalizeReportQuery('secret', query) } : null, reportKey]}
+
+        label="Возможные секреты"
         load={load}
         describe={describe}
         enabled={demo || !!status.perCheck?.secret}
-        waiting={status.state === 'cancelled' ? 'Secrets: завершённый результат не сохранён. Число находок неизвестно.' : 'Результат Secrets не подтверждён; число находок неизвестно.'}
+        waiting={status.state === 'cancelled' ? 'Результат поиска секретов не сохранён до отмены. Число находок неизвестно.' : 'Результат поиска секретов не подтверждён; число находок неизвестно.'}
       >
         {(page) => {
           const coverage = page.coverage.find((item) => item.check === 'Secrets');
@@ -403,29 +425,36 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
             <>
               {coverage ? (
                 <p>
-                  Secrets:{' '}
+                  Поиск секретов:{' '}
                   {coverage.status === 'checked'
                     ? 'проверка выполнена; не гарантия безопасности'
                     : outcomes[coverage.status]}
-                  {coverage.reason ? ` · ${coverage.reason}` : ''}
+                  {coverage.status !== 'failed' && coverage.reason ? ` · ${scanReasonLabel(coverage.reason) === coverage.reason ? 'причина не описана' : scanReasonLabel(coverage.reason)}` : ''}
                 </p>
               ) : (
-                <p>Coverage Secrets неизвестно.</p>
+                <p>Неизвестно, выполнен ли поиск секретов.</p>
               )}
+              {coverage?.status === 'failed' ? (
+                <ScanCheckFailure detail={coverage.failureDetail} reason={coverage.reason} />
+              ) : coverage?.reason ? <details><summary>Подробности · причина результата</summary><p>{coverage.reason}</p></details> : null}
               {findings.length ? (
                 <ul className="scan-report-inventory">
-                  {findings.map((finding) => (
+                  {findings.map((finding, index) => (
                     <li key={finding.findingId}>
-                      <strong>{finding.ruleId}</strong>
-                      <span>
-                        {finding.category} · {finding.line == null ? 'Номер строки неизвестен' : `Строка ${finding.line}`}
-                      </span>
-                      <span>ID: {finding.findingId}</span>
+                      <strong>{finding.category === 'secret' ? 'Возможный секрет' : 'Демонстрационная находка'} · на странице {index + 1}</strong>
+                      <span>{finding.line == null ? 'Номер строки неизвестен' : `Строка ${finding.line}`}</span>
+                      {finding.category === 'secret' ? <p>Если это действующий ключ или пароль, замените его, уберите из сборки и пересоберите образ. Удаление из нового образа само по себе не отзывает ключ.</p> : null}
+                      <details><summary>Подробности · правило и место находки</summary>
+                        <p>Правило: {finding.ruleId} · категория: {finding.category}</p>
+                        {finding.location ? <p>Место: {finding.location}</p> : null}
+                        {finding.evidenceRef ? <p>Ссылка на свидетельство: {finding.evidenceRef}</p> : null}
+                        <p>ID: {finding.findingId}</p>
+                      </details>
                     </li>
                   ))}
                 </ul>
               ) : page.page?.matchedCount === 0 && coverage?.findingCount !== 0 ? (
-                <p>Нет совпадений глобального фильтра Secrets; полный отчёт: {coverage?.findingCount ?? 'неизвестен'}.</p>
+                <p>По выбранному фильтру находок нет. Во всём отчёте: {coverage?.findingCount ?? 'количество неизвестно'}.</p>
               ) : demo && filter !== 'all' ? (
                 <p>
                   Нет совпадений фильтра на загруженной странице.{' '}
@@ -434,15 +463,16 @@ function SecretReport({ status, transport, reportKey, demo, filter, onResetFilte
                   </button>
                 </p>
               ) : coverage?.status === 'checked' && coverage.findingCount === 0 ? (
-                <p>0 находок в выполненной проверенной области Secrets; другие области не исключены.</p>
+                <p>В выполненной проверке секретов находок нет. Это не исключает их наличие в непроверенных областях.</p>
               ) : coverage?.status === 'checked' ? (
-                <p>На текущей странице находок Secrets нет; это не подтверждает нулевой итог.</p>
+                <p>На текущей странице находок нет; это не значит, что их нет во всём отчёте.</p>
               ) : (
                 <p>Нет подтверждённых находок: область не проверена полностью.</p>
               )}
-              <p className="scan-a1__muted">
-                Значения секретов не отображаются. Номер строки и правило не являются оценкой severity.
-              </p>
+              <details className="scan-report-section__metadata">
+                <summary>Как проверить совпадение</summary>
+                <p>Значения секретов не отображаются. Правило и номер строки помогают найти совпадение, но не определяют его опасность. Проверяйте действительность ключа в своей системе, не публикуя его значение.</p>
+              </details>
             </>
           );
         }}

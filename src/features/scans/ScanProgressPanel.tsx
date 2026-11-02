@@ -1,77 +1,38 @@
-import { useEffect, useId, useState } from 'react';
-import type { ScanStatus } from '@/shared/api/scans/scanTransport';
-import { useLiveScanSession } from './liveScanContext';
-import { estimateScanProgress } from './scanProgressEstimate';
+import { useId } from 'react';
+import type { ScanOutcome, ScanStatus } from '@/shared/api/scans/scanTransport';
+import { scanCheckLabels, scanCheckSnapshot, scanExecutionLabel, scanProgressPresentation } from './scanProgressPresentation';
 import { stateLabels } from './scanStateLabels';
+import { ScanCheckFailure } from './ScanCheckFailure';
 import './ScanProgressPanel.css';
 
-type Props = { scan: ScanStatus; compact?: boolean };
+type Props = { scan: ScanStatus; compact?: boolean; list?: boolean };
 
-export function ScanProgressPanel(props: Props) {
-  const session = useLiveScanSession();
-  // No cross-scan, owner or login-session memory, even when a parent reuses us.
-  return <ObservedScanProgress key={JSON.stringify([session?.scope, props.scan.scanId])} {...props} />;
-}
+const outcomeLabels: Record<ScanOutcome, string> = {
+  checked: 'Выполнено',
+  failed: 'Ошибка проверки',
+  unsupported: 'Не поддерживается',
+  skipped: 'Пропущено',
+  not_authorized: 'Нет разрешения',
+};
 
-function ObservedScanProgress({ scan, compact = false }: Props) {
+export function ScanProgressPanel({ scan, compact = false, list = false }: Props) {
   const descriptionId = useId();
-  const [sample, setSample] = useState(() => ({
-    scan,
-    estimate: estimateScanProgress(scan, performance.now()),
-  }));
-  let current = sample;
-  if (sample.scan !== scan) {
-    current = { scan, estimate: estimateScanProgress(scan, performance.now(), sample.estimate) };
-    setSample(current);
-  }
-  const running = scan.state === 'running';
-  useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(() => {
-      setSample((previous) => ({
-        scan: previous.scan,
-        estimate: estimateScanProgress(previous.scan, performance.now(), previous.estimate),
-      }));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [running]);
-
   const active = ['queued', 'running', 'cancelling'].includes(scan.state);
-  const progress = scan.progress;
-  const requested = [
-    ...new Set(progress?.requestedChecks ?? scan.checks ?? (scan.check ? [scan.check] : [])),
-  ];
-  const hasCheckSnapshot = !!progress || (requested.length > 0 && scan.perCheck !== undefined);
-  const resolved = requested.filter((check) => scan.perCheck?.[check]?.check === check);
-  const resolvedCount = progress?.resolvedChecks ?? resolved.length;
-  const checkedCount =
-    progress?.checkedChecks ??
-    resolved.filter((check) => scan.perCheck?.[check]?.outcome === 'checked').length;
-  const remaining = requested.length - resolvedCount;
-  const serverPercent =
-    running &&
-    !progress &&
-    typeof scan.percent === 'number' &&
-    current.estimate.percent === scan.percent &&
-    scan.percent < 100;
-  const percent =
-    current.estimate.percent === null
-      ? null
-      : serverPercent
-        ? current.estimate.percent
-        : Math.floor(current.estimate.percent);
-  const percentText =
-    scan.state === 'completed'
-      ? 'Прогресс: 100% — завершение подтверждено сервером.'
-      : percent === null
-        ? 'Выполнение не подтверждено; оценка до остановки отсутствует.'
-        : serverPercent
-          ? `Прогресс: ${percent}% по данным сервера.`
-          : `Оценка прогресса: ≈${percent}%${active ? '' : ' на момент остановки'}.`;
-  const counts = hasCheckSnapshot
-    ? `Получены итоги: ${resolvedCount} из ${requested.length}. Успешно выполнено: ${checkedCount}.`
-    : 'Счётчики проверок не предоставлены сервером.';
-  const stage = scan.stage?.trim() || 'не предоставлен сервером';
+  const snapshot = scanCheckSnapshot(scan);
+  const { percent, source, awaitingCompletion } = scanProgressPresentation(scan);
+  const percentText = source === 'completed'
+    ? '100% — проверка завершена.'
+    : awaitingCompletion
+      ? 'Ожидаем завершения проверки.'
+      : source === 'server'
+        ? `Выполнено: ${percent}%.`
+        : active
+          ? 'Процент выполнения пока неизвестен.'
+          : '';
+  const terminalList = list && !active;
+  const counts = terminalList ? 'Подробности в отчёте.' : snapshot.known
+    ? `Получены результаты: ${snapshot.resolved} из ${snapshot.requested.length}. Выполнено проверок: ${snapshot.checked}.`
+    : 'Результаты проверок пока недоступны.';
 
   return (
     <div
@@ -79,65 +40,40 @@ function ObservedScanProgress({ scan, compact = false }: Props) {
       role="group"
       aria-label={`Ход сканирования ${scan.scanId}`}
       data-state={scan.state}
+      data-progress-source={source}
     >
-      <p className="scan-progress-panel__stage">Этап сканирования: {stage}</p>
+      <p className="scan-progress-panel__stage">{scanExecutionLabel(scan)}</p>
       {active ? (
         <progress
           className="scan-progress-panel__bar"
           max={100}
-          value={percent ?? 0}
+          value={percent ?? undefined}
           aria-label={`Прогресс сканирования ${scan.scanId}`}
           aria-describedby={descriptionId}
-          aria-valuetext={`${percentText} ${counts} Точное оставшееся время неизвестно.`}
+          aria-valuetext={`${percentText} ${counts}`}
         />
       ) : (
         <p className="scan-progress-panel__outcome">Итог скана: {stateLabels[scan.state]}</p>
       )}
-      <span className="scan-progress-panel__percent">{percentText}</span>
+      {percentText ? <span className="scan-progress-panel__percent">{percentText}</span> : null}
       <div id={descriptionId} className="scan-progress-panel__description">
-        <p>{counts}</p>
-        {hasCheckSnapshot ? (
-          <p>
-            {active ? 'Без подтверждённого итога' : 'Без сохранённого итога'}: {remaining}.
-            {active && remaining === 0 ? ' Ожидаем итоговый статус скана.' : ''}
-          </p>
+        <p role="status" aria-live="polite">{counts}</p>
+        {!terminalList && snapshot.entries.length > 0 ? (
+          <ul className="scan-progress-panel__checks" aria-label="Результаты проверок">
+            {snapshot.entries.map(({ check, outcome, result }) => (
+              <li key={check} className="scan-progress-panel__check" data-outcome={outcome ?? 'unknown'}>
+                <span>{scanCheckLabels[check]}</span>
+                <strong>{outcome !== null ? outcomeLabels[outcome]
+                  : !snapshot.known ? 'Нет данных'
+                    : active ? 'Ожидаем результат' : 'Нет результата'}</strong>
+                {outcome === 'failed' ? (
+                  <ScanCheckFailure detail={result?.failureDetail} reason={result?.reason ?? result?.errorCode} />
+                ) : null}
+              </li>
+            ))}
+          </ul>
         ) : null}
-        {active ? (
-          <>
-            <p>
-              Эвристика наблюдаемого скана, не измерение текущей попытки. Точное оставшееся время неизвестно.
-              {scan.state === 'queued' ? ' Время очереди не считается выполнением.' : ''}
-              {scan.state === 'cancelling' ? ' Оценка приостановлена: ожидаем подтверждение отмены.' : ''}
-            </p>
-            {compact ? (
-              <p>
-                Внутренний повтор без изменения итогов не распознаётся. Без новых данных оценка тоже может
-                расти.
-                {requested.length === 0 ? ' Набор проверок неизвестен; используется общая модель.' : ''}
-              </p>
-            ) : (
-              <details>
-                <summary>Как считается оценка</summary>
-                <p>
-                  Время наблюдения и сохранённые итоги учитываются с разными весами: загрузка образа и анализ
-                  уязвимостей весят больше проверки конфигурации. Это не доля успешных проверок и не гарантия
-                  безопасности.
-                </p>
-                <p>
-                  Внутренний повтор без изменения итогов не распознаётся: сервер не сообщает номер попытки.
-                  Без новых данных оценка тоже может расти; это не подтверждение выполнения. При потере
-                  сохранённых итогов или снижении числа выполненных проверок наблюдение сбрасывается.
-                </p>
-                <p>
-                  Наблюдение только в этой панели и сессии; после ухода или перезагрузки начинается заново.
-                  {requested.length === 0 ? ' Набор проверок неизвестен; используется общая модель.' : ''}
-                </p>
-              </details>
-            )}
-          </>
-        ) : (
-          <p>Скан больше не выполняется. Отсутствующие итоги не считаются успешными проверками.</p>
-        )}
+        {!terminalList ? <p>{active ? 'Оставшееся время пока неизвестно.' : 'Смотрите результаты отдельных проверок.'}</p> : null}
       </div>
     </div>
   );

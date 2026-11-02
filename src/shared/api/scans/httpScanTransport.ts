@@ -1,5 +1,6 @@
 import { ReportCursorResetError, ReportQueryError, ReportViewContractError, reportViewSearch } from './reportView';
-import { BROWSER_SCANS_PATH, parseCurrentList, parseCurrentResults, parseCurrentSbom, parseCurrentVuln, parseCurrentStatus, parseScanReceipt, parseScanEventHint, sameOriginScanUrl, type ScanTransport } from './scanTransport';
+import { parseImageFailureDetail, type ImageFailureDetail } from './imageFailure';
+import { BROWSER_SCANS_PATH, parseCurrentList, parseCurrentResults, parseCurrentSbom, parseCurrentVuln, parseCurrentStatus, parseScanReceipt, parseScanEventHint, sameOriginScanUrl, parseScanListCursor, ScanListIdentityError, type ScanTransport } from './scanTransport';
 
 export class ScanAccessError extends Error {
   constructor(readonly status: 401 | 403) {
@@ -9,7 +10,8 @@ export class ScanAccessError extends Error {
 
 export class ScanHttpError extends Error {
   constructor(readonly status: number, readonly code: string | null,
-    readonly retryAfterSeconds: number | null = null, readonly limitReason: 'rate' | 'concurrency' | 'capacity' | null = null) {
+    readonly retryAfterSeconds: number | null = null, readonly limitReason: 'rate' | 'concurrency' | 'capacity' | null = null,
+    readonly failureDetail?: ImageFailureDetail) {
     super(status === 409 ? 'Отмена невозможна в текущем состоянии' : 'Запрос скана не выполнен');
   }
 }
@@ -19,7 +21,12 @@ export async function scanResponseError(response: Response): Promise<Error> {
   const payload: unknown = await response.json().catch(() => null);
   const body = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
   const code = typeof body.errorCode === 'string' && body.errorCode.length <= 64 ? body.errorCode : null;
-  if (response.status !== 429) return new ScanHttpError(response.status, code);
+  let failureDetail: ImageFailureDetail | undefined;
+  if (Object.hasOwn(body, 'failureDetail')) {
+    try { failureDetail = parseImageFailureDetail(body.failureDetail); }
+    catch { /* Reject malformed optional evidence without losing HTTP authorization/rate-limit gates. */ }
+  }
+  if (response.status !== 429) return new ScanHttpError(response.status, code, null, null, failureDetail);
   const header = response.headers?.get('Retry-After');
   const seconds = body.retryAfterSeconds;
   const valid = typeof seconds === 'number' && Number.isInteger(seconds) && seconds >= 1 && seconds <= 60 &&
@@ -28,7 +35,7 @@ export async function scanResponseError(response: Response): Promise<Error> {
     code === 'IMAGE_SEARCH_CAPACITY' && body.limitReason === 'capacity')
     ? body.limitReason as 'rate' | 'concurrency' | 'capacity' : null;
   // Unknown/malformed timing must never become an immediate retry.
-  return new ScanHttpError(429, code, valid && (code === 'SCAN_CAPACITY' || limitReason) ? seconds : 60, limitReason);
+  return new ScanHttpError(429, code, valid && (code === 'SCAN_CAPACITY' || limitReason) ? seconds : 60, limitReason, failureDetail);
 }
 
 /** Session-bound, same-origin cookie transport. The server enforces authorization for every request. */
@@ -81,7 +88,7 @@ export function createAuthorizedScanTransport(session: { subject: string; curren
     async list(signal) {
       const scans = [];
       let cursor: string | null = null;
-      // The existing list UI expects a complete array, not just the first page.
+      // Compatibility for complete-array consumers. The history UI uses listPage instead.
       // Fail closed rather than label a truncated list as complete.
       for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
         const path = `${BROWSER_SCANS_PATH}?limit=100${cursor === null ? '' : `&cursor=${cursor}`}`;
@@ -94,6 +101,17 @@ export function createAuthorizedScanTransport(session: { subject: string; curren
         cursor = page.nextCursor;
       }
       throw new Error('Список слишком велик для текущего интерфейса');
+    },
+    async listPage(cursor, signal) {
+      const previous = cursor === undefined ? undefined : parseScanListCursor(cursor);
+      const path = `${BROWSER_SCANS_PATH}?limit=50${cursor === undefined ? '' : `&cursor=${encodeURIComponent(cursor)}`}`;
+      const page = parseCurrentList(await request(path, signal));
+      if (page.scans.length > 50) throw new ScanListIdentityError();
+      if (page.nextCursor !== null) {
+        const next = parseScanListCursor(page.nextCursor);
+        if (previous && (next.bound !== previous.bound || next.last >= previous.last)) throw new ScanListIdentityError();
+      }
+      return page;
     },
     async get(id, signal) { return parseCurrentStatus(await request(sameOriginScanUrl(`${BROWSER_SCANS_PATH}/${encodeURIComponent(id)}`, id), signal)); },
     async results(id, cursor, signal, query) {
