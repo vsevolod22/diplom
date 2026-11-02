@@ -180,6 +180,22 @@ export function qualifyAdapterAuthCopy(root, options) {
   const result = Object.freeze(qualifyPublicAuthSnapshot(root, options)); authQualifications.add(result); return result;
 }
 
+// Stdout is informational after a settled exit-zero dispatch and authoritative
+// inspect. Allow silence or the exact known warning, never arbitrary extra text.
+function stopAcknowledgement(output, before) {
+  if(typeof output!=='string')return 'non-text';
+  let text=output.trim();
+  const warning='Flag --time has been deprecated, use --timeout instead';
+  const deprecated=text===warning||text.startsWith(warning+'\n')||text.startsWith(warning+'\r\n');
+  if(deprecated)text=text.slice(warning.length).trim();
+  if(text==='')return deprecated?'deprecated-warning':'empty';
+  if(id(before?.Id)&&text===before.Id)return deprecated?'deprecated-warning':'id';
+  const name=before?.Name;
+  if(typeof name==='string'&&/^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)&&
+    (text===name||text===name.slice(1)))return deprecated?'deprecated-warning':'name';
+  return 'unexpected';
+}
+
 // Classification only: no stop/start and no authority to retry an uncertain action.
 // Submission time must be sampled from the SAME daemon, not the host wall clock.
 export function classifyStatelessGatewayStop({ before, after, stopOutput, events, daemonSubmittedMs, writers, drain }) {
@@ -192,7 +208,7 @@ export function classifyStatelessGatewayStop({ before, after, stopOutput, events
   const stopped = c => c.State?.Running===false && c.State.Status==='exited' && c.State.Pid===0 && c.RestartCount===0 &&
     !c.State.OOMKilled && !c.State.Dead && !c.State.Paused && !c.State.Restarting && !c.State.Error;
   need(healthy(before) && stopped(after) && before.State.StartedAt===after.State.StartedAt &&
-    typeof stopOutput==='string' && stopOutput.trim()===before.Id, 'GATEWAY_STOP_NOT_PROVEN');
+    ['id','name'].includes(stopAcknowledgement(stopOutput,before)), 'GATEWAY_STOP_NOT_PROVEN');
   need(Array.isArray(writers) && equal(writers.map(role).sort(),['api','web','worker']) && writers.every(c=>stopped(c)&&
     (role(c)==='web'?[0,143]:[0]).includes(c.State.ExitCode)) && equal(drain,{jobs:0,leases:0,outbox:0}), 'WRITERS_NOT_QUIESCENT');
   if([0,143].includes(after.State.ExitCode))return Object.freeze({warning:false,exitCode:after.State.ExitCode});
@@ -540,11 +556,24 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     let submitted;
     if(gateway){const text=await request(['info','--format','{{json .SystemTime}}'],p.connection.options,'DAEMON_CLOCK_FAILED');submitted=Date.parse(JSON.parse(text));need(Number.isSafeInteger(submitted),'DAEMON_CLOCK_INVALID');}
     save(p,'stop-'+name+'-submission.json',{role:name,id:before.Id,image:before.Image,...(gateway?{daemonSubmittedMs:submitted}:{})});
-    const output=await request(['container','stop','--time','30',before.Id],p.connection.options,'STOP_DISPATCH_FAILED',45000);
-    need(output.trim()===before.Id,'STOP_OUTPUT_INVALID');
+    // --time is deprecated and can add CLI warning output; use the canonical flag.
+    const output=await request(['container','stop','--timeout','30',before.Id],p.connection.options,'STOP_DISPATCH_FAILED',45000);
+    const acknowledgement=stopAcknowledgement(output,before);
+    // Inspect even when stdout is unexpected: text alone cannot prove a stop failed.
     // Use the PREVIOUS authority when stopping a retained service, never candidate defaults.
-    const rows=JSON.parse(await request(['container','inspect',before.Id],p.connection.options,'STOP_INSPECT_FAILED'));need(rows.length===1,'STOP_CARDINALITY');const after=rows[0];
-    need(equal(control(before),control(after))&&before.State.StartedAt===after.State.StartedAt,'STOP_CONTROL_CHANGED');assertCommand(after);
+    const rows=JSON.parse(await request(['container','inspect',before.Id],p.connection.options,'STOP_INSPECT_FAILED'));need(Array.isArray(rows)&&rows.length===1,'STOP_CARDINALITY');const after=rows[0];
+    const sameControl=equal(control(before),control(after)),sameStart=before.State.StartedAt===after.State.StartedAt;
+    save(p,'stop-'+name+'-observation.json',{role:name,dispatch:'exit-zero',acknowledgement,
+      stdoutBytes:typeof output==='string'?Buffer.byteLength(output):null,
+      deprecatedTimeWarning:typeof output==='string'&&output.includes('Flag --time has been deprecated, use --timeout instead'),
+      sameControl,sameStart,exited:after.State.Status==='exited',running:after.State.Running===true,zeroPid:after.State.Pid===0,
+      cleanWriterStop:!gateway&&cleanStopped(after),
+      exitCode:Number.isInteger(after.State.ExitCode)&&after.State.ExitCode>=0&&after.State.ExitCode<=255?after.State.ExitCode:null});
+    need(after.Id===before.Id&&after.Image===before.Image&&sameControl&&sameStart,'STOP_CONTROL_CHANGED');assertCommand(after);
+    need(after.State.Running===false&&after.State.Status==='exited'&&after.State.Pid===0&&after.RestartCount===0&&
+      !after.State.OOMKilled&&!after.State.Paused&&!after.State.Dead&&!after.State.Restarting&&!after.State.Error,'STOP_NOT_PROVEN');
+    if(!gateway)need(cleanStopped(after),'WRITER_NOT_CLEANLY_STOPPED');
+    need(['empty','id','name','deprecated-warning'].includes(acknowledgement),'STOP_OUTPUT_INVALID');
     if(gateway){let events=[];
       if(after.State.ExitCode===137){
         // Relative CLI deadline is finite; --until is in the daemon's already-past clock, not FinishedAt+future.
@@ -556,9 +585,11 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         need(Buffer.byteLength(text)<=65536,'EVENT_LIMIT');const rows=text.trim().split('\n').filter(Boolean).map(s=>JSON.parse(s));
         need(rows.length<=32,'EVENT_COUNT');events=rows.filter(e=>['kill','die'].includes(e.Action)).map(e=>({action:e.Action,id:e.Actor?.ID,signal:e.Actor?.Attributes?.signal??null,exit:e.Actor?.Attributes?.exitCode??null,time:e.time}));
       }
-      const result=classifyStatelessGatewayStop({before,after,stopOutput:output,events,daemonSubmittedMs:submitted,writers:['web','api','worker'].map(n=>p.peers.get(n)),drain:p.drain});
+      // Normalize only after exit-zero dispatch, same stopped-instance proof and
+      // allowed informational stdout. The classifier still requires 137 event proof.
+      const result=classifyStatelessGatewayStop({before,after,stopOutput:before.Id,events,daemonSubmittedMs:submitted,writers:['web','api','worker'].map(n=>p.peers.get(n)),drain:p.drain});
       save(p,'stop-'+name+'-proof.json',{role:name,id:after.Id,...result});
-    }else need(cleanStopped(after),'WRITER_NOT_CLEANLY_STOPPED');
+    }
     p.peers.set(name,after);if(name==='api')p.apiReady=false;save(p,'stop-'+name+'-complete.json',{id:after.Id,exit:after.State.ExitCode,startedAt:after.State.StartedAt,finishedAt:after.State.FinishedAt});await boundary(p);
   }
   async function fenceAdmissions(ctx) {

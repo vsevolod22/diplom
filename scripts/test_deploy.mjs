@@ -8,6 +8,7 @@ import { DEPLOY_ERRORS, normalizeOptions, runDeployment } from './deploy-core.mj
 import { main, parseArgs } from './deploy.mjs';
 import { deployAdapterDiagnostic } from './deploy-adapter.mjs';
 import { adapterFixture } from './deploy-adapter.test.mjs';
+import { runIsolatedDocker, isolatedDockerDiagnostic } from './public-image-stand.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const RAW = 'synthetic-private-stderr-DO-NOT-PRINT';
@@ -261,4 +262,93 @@ test('upgrade-operations actual adapter: default preserves prior preset, explici
   const preserved = await runDeployment(prior.adapter, options);
   assert.equal(preserved.ok, true, JSON.stringify({ preserved, diagnostics: prior.diagnostics }));
   assert.equal(preserved.upgradeOperations, false); assert.equal(preserved.operations, 'public-images-v2'); readOnly(prior);
+});
+
+async function preparedStopFixture(t, options) {
+  const f = await adapterFixture(t, options);
+  const ctx = { options: { ...app }, mode: 'app', services: ['api'] };
+  ctx.lease = await f.rawAdapter.acquireLock(ctx);
+  ctx.plan = await f.rawAdapter.preflight(ctx); ctx.interruptedServices = ctx.plan.interruptedServices;
+  ctx.candidate = await f.rawAdapter.build(ctx);
+  assert.equal((await f.rawAdapter.validateCandidate(ctx)).valid, true);
+  assert.equal((await f.rawAdapter.waitForIdle(ctx)).idle, true);
+  ctx.recovery = await f.rawAdapter.prepareRecovery(ctx); ctx.fenceAttempted = true;
+  return { f, ctx, pinsBefore: f.pins(), before: structuredClone(f.containers()) };
+}
+
+function assertStopCommandAndHold(f, before, pinsBefore) {
+  const stops = f.calls.filter(args => args[0] === 'container' && args[1] === 'stop');
+  assert.ok(stops.length > 0);
+  for (const command of stops) {
+    assert.deepEqual(command.slice(0, 4), ['container', 'stop', '--timeout', '30']);
+    assert.equal(command.length, 5); assert.match(command[4], /^[a-f0-9]{64}$/);
+    assert.ok(before.some(c => c.Id === command[4]), 'stop must address the exact recorded ID');
+  }
+  f.verifyStores(); assert.deepEqual(f.pins(), pinsBefore); assert.equal(f.locked(), true);
+  assert.ok(!f.events.some(e => /^(start|up|snapshot):/.test(e)));
+}
+
+test('stop-stdout real wrapper empty acknowledgement plus independent clean-stop proof succeeds', { timeout: 15000 }, async t => {
+  const id = 'a'.repeat(64), args = ['container', 'stop', '--timeout', '30', id];
+  for (const stdout of [id + '\n', '']) {
+    let invocations = 0;
+    const result = await runIsolatedDocker(args, { root: ROOT, env: {}, timeout: 1234 }, (executable, argv, options, callback) => {
+      invocations++; assert.equal(executable, 'docker'); assert.deepEqual(argv, args);
+      assert.equal(options.encoding, 'utf8'); assert.equal(options.timeout, 1234);
+      callback(null, stdout, RAW);
+    });
+    assert.equal(invocations, 1); assert.equal(typeof result, 'string'); assert.equal(result, stdout);
+    assert.ok(!result.includes(RAW));
+  }
+  await assert.rejects(runIsolatedDocker(args, { root: ROOT, env: {} }, (_exe, _args, _options, callback) => {
+    callback(Object.assign(Error(RAW), { code: 1 }), id + '\n', RAW);
+  }), error => {
+    assert.equal(isolatedDockerDiagnostic(error).exitCode, 1);
+    assert.ok(!error.message.includes(RAW)); return true;
+  });
+  const { f, ctx, pinsBefore, before } = await preparedStopFixture(t, { stopStdout: 'empty' });
+  try {
+    assert.deepEqual(await f.rawAdapter.fenceAdmissions(ctx), { fenced: true });
+  } catch (error) {
+    assert.fail(JSON.stringify({ diagnostic: deployAdapterDiagnostic(error), events: f.events,
+      stopped: f.containers().filter(c => !c.State.Running).map(c => f.role(c)), lockRetained: f.locked() }));
+  } finally {
+    assertStopCommandAndHold(f, before, pinsBefore);
+  }
+  assert.deepEqual(f.events.filter(e => e.startsWith('stop:')), ['stop:web', 'stop:api', 'stop:worker']);
+  assert.ok(f.events.indexOf('build:api') < f.events.indexOf('stop:web'));
+  for (const name of ['web', 'api', 'worker']) {
+    const c = f.containers().find(c => f.role(c) === name);
+    assert.equal(c.State.Running, false); assert.equal(c.State.Status, 'exited');
+    assert.equal(c.State.Pid, 0); assert.equal(c.State.ExitCode, 0);
+    const original = before.find(previous => f.role(previous) === name);
+    assert.equal(c.Id, original.Id); assert.equal(c.State.StartedAt, original.State.StartedAt);
+    assert.deepEqual(c.Config, original.Config); assert.deepEqual(c.HostConfig, original.HostConfig);
+  }
+  // No release/resume: the regression ends at fenced state in disposable temp files.
+});
+
+test('stop-stdout echoed ID cannot authorize bad identity/control/epoch/nonclean exit or uncertain dispatch', { timeout: 30000 }, async t => {
+  for (const fault of ['identity', 'control', 'started-at', 'nonclean', 'dispatch']) {
+    const { f, ctx, pinsBefore, before } = await preparedStopFixture(t, { stopStdout: 'id', stopFault: fault });
+    const callsBeforeFence = f.calls.length;
+    const code = fault === 'nonclean' ? 'WRITER_NOT_CLEANLY_STOPPED' : fault === 'dispatch' ? 'STOP_DISPATCH_FAILED' : 'STOP_CONTROL_CHANGED';
+    await assert.rejects(f.rawAdapter.fenceAdmissions(ctx), error => {
+      const diagnostic = deployAdapterDiagnostic(error);
+      assert.equal(diagnostic.code, code, fault);
+      if (fault === 'dispatch') {
+        assert.equal(diagnostic.cause, 'EXIT_NONZERO'); assert.equal(diagnostic.exitCode, 1);
+        assert.equal(diagnostic.stdoutBytes, 65, 'nonzero executor supplied a full ID echo but still grants no stop authority');
+      }
+      return true;
+    }, fault + ' must fail even when the executor supplied the matching ID on stdout');
+    assert.deepEqual(f.events.filter(e => e.startsWith('stop:')), ['stop:web'], fault + ': no further writers may be stopped');
+    const webId = before.find(c => f.role(c) === 'web').Id;
+    const afterCalls = f.calls.slice(callsBeforeFence);
+    const stopIndex = afterCalls.findIndex(args => args[0] === 'container' && args[1] === 'stop');
+    if (fault !== 'dispatch') {
+      assert.deepEqual(afterCalls[stopIndex + 1], ['container', 'inspect', webId], 'successful dispatch must independently inspect the exact ID');
+    }
+    assertStopCommandAndHold(f, before, pinsBefore);
+  }
 });

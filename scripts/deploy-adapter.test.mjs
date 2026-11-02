@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fixture } from './public-refresh-cve-fixtures.mjs';
-import { PROJECT, STATE, LABEL, backupExportOperation, CONFIG_SECRET } from './public-image-stand.mjs';
+import { PROJECT, STATE, LABEL, backupExportOperation, CONFIG_SECRET, runIsolatedDocker } from './public-image-stand.mjs';
 import { expectedPublicLlmConfig, publicLlmEnvironmentOverlay, PUBLIC_LLM_ENV, PUBLIC_LLM_CURRENT_BACKUP_PROGRAM, capturePublicLlmSource, readPublicLlmBinding, loadPublicLlmSettings, PUBLIC_LLM_GATEWAY_PROBE } from './public-llm-stand.mjs';
 import { createDeployAdapter, deployAdapterDiagnostic, WEB_BACKEND_SOURCE_PROBE, AUTH_SCHEMA_PROBE, ADAPTER_READY_PROBE } from './deploy-adapter.mjs';
 import { PUBLIC_LLM_EXECUTION_MODULES } from './public-llm-build-continuation.mjs';
@@ -59,7 +59,7 @@ function child(root, code, input) {
     cwd:join(root,'server/api'),env:{PATH:'/usr/bin:/bin'},input:JSON.stringify(input),encoding:'utf8',timeout:10000,maxBuffer:65536});
   assert.equal(result.error,undefined); assert.equal(result.status,0,'fixture constructor/helper failed: '+result.stderr); return result;
 }
-export async function adapterFixture(t, { failedStart = null, publishedOperations = false } = {}) {
+export async function adapterFixture(t, { failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null } = {}) {
   // Reuse metadata constructors only. Synthetic release files are not activated;
   // reset to the non-CVE profile before invoking any new adapter method.
   const f=fixture(t), root=f.root, home=temporary(t); sources(root);
@@ -119,7 +119,15 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
     if(args[0]==='context')return JSON.stringify('unix:///fixture/docker.sock');
     if(args[0]==='info')return JSON.stringify({id:'test-daemon-1234',memory:32*1024**3,cpus:8});
     if(['container','image','network','volume'].includes(args[0])&&args[1]==='inspect'){
-      const rows=args.slice(2).map(ref=>lookup(args[0],ref));assert.ok(rows.every(Boolean),'unknown fake inspect identity');return JSON.stringify(rows);
+      const rows=args.slice(2).map(ref=>lookup(args[0],ref));assert.ok(rows.every(Boolean),'unknown fake inspect identity');
+            if(args[0]==='container' && args.length===3 && events.includes('stop:web') && role(rows[0])==='web') {
+              const observed=clone(rows[0]);
+              if(stopFault==='identity')observed.Id=sha('wrong-post-stop-identity');
+              if(stopFault==='control')observed.Config.Cmd=['unapproved-command'];
+              if(stopFault==='started-at')observed.State.StartedAt=timestamp();
+              return JSON.stringify([observed]);
+            }
+            return JSON.stringify(rows);
     }
     if(args[0]==='image'){
       if(args[1]==='ls'){const reference=args.find(a=>a.startsWith('reference='))?.slice(10);return [...allImages.values()].flatMap(i=>i.RepoTags).filter(t=>!reference||t===reference).join('\n');}
@@ -169,7 +177,13 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
         }
         f.attachments();events.push('start:'+name);return c.Id+'\n';
       }
-      if(args[1]==='stop'){c.State={...c.State,Running:false,Status:'exited',Pid:0,ExitCode:0,FinishedAt:timestamp()};f.attachments();events.push('stop:'+name);return c.Id+'\n';}
+      if(args[1]==='stop'){
+              c.State={...c.State,Running:false,Status:'exited',Pid:0,ExitCode:0,FinishedAt:timestamp()};
+              if(name==='web' && stopFault==='nonclean')c.State.ExitCode=137;
+              f.attachments();events.push('stop:'+name);
+              if(name==='web' && stopFault==='dispatch')throw Object.assign(Error('synthetic uncertain stop dispatch'),{code:1,stdout:c.Id+'\n'});
+              return stopStdout === 'empty' ? '' : c.Id+'\n';
+            }
       if(args[1]==='rm'){assert.ok(h);f.containers=f.containers.filter(item=>item!==c);helpers.delete(c.Id);return c.Id+'\n';}
       assert.equal(args[1],'exec');assert.equal(c.State.Running,true);
       if(h){
@@ -192,7 +206,16 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
   assert.deepEqual(readPublicLlmBinding(root),s);
   assert.deepEqual(loadPublicLlmSettings(home,{openai:true}).selection,configured);
   capturePublicLlmSource(root,{openai:true}).verify();
-  const actual=createDeployAdapter({root,home,run:async (...args)=>{try{return await run(...args);}catch(error){diagnostics.push({fakeEngineFailure:error.message});throw error;}},Database:DB,checkSource:async()=>({typescript:true,bundle:true,openai:true}),
+  // Exercise the production process wrapper too: this executor never spawns Docker.
+    // execFile's callback has separate stdout/stderr; only stdout reaches the adapter.
+    const transport = (args, options) => runIsolatedDocker(args, options, (executable, argv, execution, callback) => {
+      assert.equal(executable, 'docker'); assert.deepEqual(argv, args);
+      Promise.resolve().then(() => run(argv, { root: execution.cwd, env: execution.env, timeout: execution.timeout }))
+        .then(stdout => callback(null, stdout, 'synthetic Docker stderr warning\n'), error => {
+          diagnostics.push({fakeEngineFailure:error.message}); callback(error, error.stdout ?? '', 'synthetic fake-engine failure');
+        });
+    });
+    const actual=createDeployAdapter({root,home,run:transport,Database:DB,checkSource:async()=>({typescript:true,bundle:true,openai:true}),
     http:async url=>{assert.ok(url.startsWith('http://127.0.0.1:8081/'));return {status:new URL(url).pathname==='/'?200:401,body:{cancel:async()=>{}}};}});
   // Keep the real implementation and its finite diagnostics, translating exactly
   // at the same boundary as createAdapter without hiding the diagnostic from tests.
