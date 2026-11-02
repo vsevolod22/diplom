@@ -399,3 +399,54 @@ test('helper-authority actual adapter accepts only proven false-to-null OOM defa
     f.verifyStores(); assert.deepEqual(f.pins(), pinsBefore); assert.equal(f.locked(), true);
   }
 });
+
+test('lifecycle-empty actual adapter complete app verifies state through helper start-stop-rm and retained starts, never stdout authority', { timeout: 45000 }, async t => {
+  for (const fault of [null, 'stop-error', 'stop-control', 'stop-137', 'rm-present']) {
+    const f = await adapterFixture(t, { lifecycleStdout: 'empty', helperTransition: 'oom-null', helperLifecycleFault: fault });
+    const pinsBefore = f.pins(); const before = structuredClone(f.containers());
+    const result = await runDeployment(f.adapter, app);
+    if (fault === null) {
+      assert.equal(result.ok, true, JSON.stringify({ result, diagnostics: f.diagnostics, events: f.events }));
+      assert.equal(result.phase, 'complete'); assert.equal(result.lock, 'released'); assert.equal(f.locked(), false);
+      assert.deepEqual(f.events.filter(event => event.startsWith('snapshot:')), ['snapshot:fenced', 'snapshot:before-api', 'snapshot:after-api']);
+      assert.equal(f.helperTransitions.length, 3); assert.equal(f.events.filter(event => event === 'rm:helper').length, 3);
+      assert.equal(f.containers().filter(c => f.role(c) === undefined).length, 0);
+      for (const name of ['worker', 'web']) {
+        const old = before.find(c => f.role(c) === name), current = f.containers().find(c => f.role(c) === name);
+        assert.equal(current.Id, old.Id, name + ' must resume unchanged, not be upgraded');
+        assert.notEqual(current.State.StartedAt, old.State.StartedAt); assert.equal(current.State.Running, true);
+        assert.ok(f.lifecycleReplies.some(reply => reply.args[0] === 'container' && reply.args[1] === 'start' && reply.args[2] === old.Id && reply.stdout === ''));
+      }
+      assert.ok(f.events.indexOf('build:api') < f.events.indexOf('stop:web'));
+      assert.ok(f.events.indexOf('stop:worker') < f.events.indexOf('start:helper'));
+      assert.ok(f.events.indexOf('snapshot:before-api') < f.events.indexOf('up:api'));
+      assert.ok(f.events.indexOf('snapshot:after-api') > f.events.indexOf('up:api'));
+      for (const c of f.containers()) assert.equal(f.pins().services[f.role(c)].image, c.Image);
+    } else {
+      failure(result, 'DEPLOY_SNAPSHOT', 'snapshot');
+      assert.equal(result.lock, 'retained'); assert.equal(result.needsRecovery, true); assert.equal(f.locked(), true);
+      assert.equal(result.publishAttempted, false); assert.equal(result.rollback, 'unsafe');
+      assert.deepEqual(f.pins(), pinsBefore); assert.ok(!f.events.includes('up:api'));
+      assert.ok(!f.events.includes('start:worker')); assert.ok(!f.events.includes('start:web'));
+      if (fault === 'stop-error') {
+        assert.ok(f.lifecycleReplies.some(reply => reply.exitCode === 1 && reply.stdout.trim().length === 64), 'subprocess failure must reject despite a matching ID echo');
+      } else assert.ok(f.lifecycleReplies.every(reply => reply.exitCode === 0), 'bad inspection/removal state must reject even with all commands exiting zero');
+      if (fault === 'rm-present') {
+        assert.ok(f.events.includes('rm:helper')); assert.equal(f.containers().filter(c => f.role(c) === undefined).length, 1,
+          'rm exit zero plus empty output cannot prove disappearance');
+      }
+    }
+    const creates = f.lifecycleReplies.filter(reply => reply.args[0] === 'create');
+    assert.equal(creates.length, fault === null ? 3 : 1);
+    for (const reply of creates) assert.match(reply.stdout.trim(), /^[a-f0-9]{64}$/, 'create must still supply an exact nonempty helper ID');
+    for (const reply of f.lifecycleReplies.filter(reply => reply.args[0] === 'container')) {
+      if (reply.exitCode === 0) assert.equal(reply.stdout, '', 'every successful start/stop/rm uses real-wrapper empty stdout');
+      if (reply.args[1] === 'stop') {
+        assert.equal(reply.args[2], '--timeout'); assert.ok(['10', '30'].includes(reply.args[3]));
+        assert.match(reply.args[4], /^[a-f0-9]{64}$/); assert.equal(reply.args.length, 5);
+      }
+    }
+    assert.ok(!f.events.some(event => /^(?:stop|start|up):.*egress/.test(event)));
+    f.verifyStores();
+  }
+});

@@ -6,10 +6,20 @@ import * as vm from 'node:vm';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 
 const source = fs.readFileSync(new URL('./deploy-reconcile-web.mjs', import.meta.url), 'utf8');
 const restoredSource = fs.readFileSync(new URL('./deploy-reconcile-restored.mjs', import.meta.url), 'utf8');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+// Execute only the real manifest validator, without importing deployment modules.
+const standSource = fs.readFileSync(new URL('./public-image-stand.mjs',import.meta.url),'utf8');
+const manifestFunction = standSource.match(/export function validateExportManifest\(m\)\{[\s\S]*?\n\}/)?.[0];
+assert.ok(manifestFunction,'Manifest validator must remain independently extractable');
+const validateExportManifest = new Function('recoverySafe','keys','HEX_SHA','equal',manifestFunction.replace('export ','')+';return validateExportManifest;')(
+  (ok,code)=>{if(!ok)throw Error(code);},
+  (value,expected)=>value!==null&&typeof value==='object'&&isDeepStrictEqual(Object.keys(value).sort(),[...expected].sort()),
+  /^[a-f0-9]{64}$/,isDeepStrictEqual);
 const project = 'synthetic';
 const attempt = 'a'.repeat(32);
 const roles = ['api','auth-volume-init','egress','llm-egress','openai-egress','scan-volume-init','web','worker'];
@@ -38,6 +48,11 @@ async function fixture(t) {
   const noOp = () => {};
   const byteFile = path => {
     if (path.startsWith(join(root,'scripts')+'/')) return {sha256:'b'.repeat(64),verify:noOp};
+    if(path.endsWith('.sqlite')) {
+      assert.ok(path.startsWith(join(audit,'snapshots/fenced')+'/'));
+      const bytes=fs.readFileSync(path), inode=fs.lstatSync(path).ino;
+      return {path,sha256:hash(bytes),verify(){assert.equal(fs.lstatSync(path).ino,inode);assert.deepEqual(fs.readFileSync(path),bytes);}};
+    }
     const proof = privateFile(path); return {...proof,sha256:hash(proof.bytes)};
   };
   const directoryIdentity = path => {
@@ -70,7 +85,7 @@ async function fixture(t) {
   put(join(lock,'deploy-adapter-owner.json'),owner);
   for (const [name,value] of Object.entries({'profile.json':{},'llm-profile.json':{},'compose.images.json':{services:model.services},'compose.llm-env.json':{},'compose.cve.json':{},'scan-jwt':{synthetic:'metadata-only'}})) put(join(state,name),value);
   let failGuardMove = false;
-  const moves = [], calls = [];
+  const moves = [], calls = [], copyChecks=[];
   const modules = {
     'node:fs':{...fs,renameSync(from,to) {
       moves.push([from,to]);
@@ -79,7 +94,31 @@ async function fixture(t) {
     }},
     'node:crypto':await import('node:crypto'),'node:path':await import('node:path'),'node:url':await import('node:url'),'node:util':await import('node:util'),
     'node:http':{get(){throw Error('Real HTTP forbidden');}},
-    './public-image-stand.mjs':{PROJECT:project,STATE:'synthetic-state',LABEL:'synthetic-label',CONFIG_SECRET:'fake-placeholder',readProfile:()=>({cve:{}}),runIsolatedDocker(){throw Error('Real Docker forbidden');},assertReconciliationHistory:noOp},
+    // Fake child seam: use actual SQLite integrity/logical reads on disposable
+    // synthetic copies, not the production child or application DB schemas.
+    'node:child_process':{spawnSync(executable,args,options){
+      assert.equal(executable,process.execPath);
+      assert.equal(options.cwd,root);
+      assert.equal(JSON.parse(options.input),join(audit,'snapshots/fenced'));
+      const dir=fs.mkdtempSync(join(root,'copy-proof-')), logical={};
+      try {
+        for(const group of ['core','llm']) {
+          logical[group]={};
+          for(const role of ['auth','ledger']) {
+            const retained=join(audit,'snapshots/fenced',group,role+'.sqlite'),copy=join(dir,group+'-'+role+'.sqlite');
+            fs.copyFileSync(retained,copy);
+            const db=new DatabaseSync(copy,{readOnly:true});
+            try {
+              assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+              logical[group][role]={logicalSha256:hash(JSON.stringify(db.prepare('SELECT value FROM synthetic ORDER BY value').all()))};
+              copyChecks.push(copy);
+            } finally { db.close(); }
+          }
+        }
+        return {status:0,signal:null,stdout:JSON.stringify(logical)};
+      } finally {fs.rmSync(dir,{recursive:true,force:true});}
+    }},
+    './public-image-stand.mjs':{PROJECT:project,STATE:'synthetic-state',LABEL:'synthetic-label',CONFIG_SECRET:'fake-placeholder',readProfile:()=>({cve:{}}),runIsolatedDocker(){throw Error('Real Docker forbidden');},assertReconciliationHistory:noOp,validateExportManifest},
     './public-llm-stand.mjs':{capturePublicLlmSource:()=>({manifest:[],verify:noOp}),readPublicLlmBinding:()=>({}),expectedPublicLlmConfig:()=>structuredClone(model),publicLlmEnvironmentOverlay:()=>({}),validatePublicLlmContainer:noOp,validatePublicLlmImage:noOp,validatePublicLlmKeyVolume:noOp,capturePublicLlmRetentions:()=>({receipts:[],verify:noOp}),validateCurrentAuditHistory:noOp,validateLlmSelection:noOp},
     './public-llm-deployment-catalog.mjs':{DEPLOYMENT_TOTAL_LIMIT:20,DEPLOYMENT_RETAINED_REFERENCE_LIMIT:20,captureDeploymentCatalog:()=>({entries:[],verify:noOp})},
     './public-llm-build-continuation.mjs':{privateFile,byteFile,directoryIdentity},
@@ -164,7 +203,7 @@ async function fixture(t) {
       fs.utimesSync(join(audit,name),1767225600,1767225600);
     }
   };
-  return {root,audit,lock,guard,guardArchive,prepare,configureFenced,api:module.namespace,moves,calls,put,owner,failMove:()=>{failGuardMove=true;}};
+  return {root,audit,lock,guard,guardArchive,prepare,configureFenced,api:module.namespace,moves,calls,copyChecks,put,owner,failMove:()=>{failGuardMove=true;}};
 }
 
 const binding = p => ({review:p.summary.review,source:p.summary.source});
@@ -212,7 +251,7 @@ test('fenced-writer restoration rejects exports/later stages then completes real
   const f=await fixture(t); f.configureFenced();
   const exportPath=join(f.audit,'snapshots/fenced/export.json');
   f.put(exportPath,{synthetic:true});
-  await assert.rejects(f.prepare('fenced-writers'),/WEB_RECONCILE_HOST_SNAPSHOT_NOT_EMPTY/);
+  await assert.rejects(f.prepare('fenced-writers'),/WEB_RECONCILE_HOST_SNAPSHOT_LAYOUT/);
   fs.unlinkSync(exportPath);
   const later=join(f.audit,'candidate-api-start-submission.json');
   f.put(later,{});
@@ -237,4 +276,59 @@ test('fenced-writer restoration rejects exports/later stages then completes real
   assert.deepEqual(f.moves,[[f.lock,join(f.audit,'operation.lock')],[f.guard,f.guardArchive]]);
   const guardIntent=JSON.parse(fs.readFileSync(join(f.guardArchive,'intent.json')));
   assert.equal(guardIntent.command,'reconcile-fenced-writers-restored');
+});
+
+test('exported writers seal four SQLite exports, reject bad manifest/partial/switch, and complete real history',async t=>{
+  const f=await fixture(t); f.configureFenced();
+  const read=name=>JSON.parse(fs.readFileSync(join(f.audit,name),'utf8'));
+  const write=(name,value)=>{f.put(join(f.audit,name),value);fs.utimesSync(join(f.audit,name),1767225600,1767225600);};
+  for(const name of fs.readdirSync(f.audit)) if(name.startsWith('probe-helper-')||name==='compensation-helper-stop-submission.json') fs.unlinkSync(join(f.audit,name));
+  const authority=read('compensation-restore-authority.json');
+  authority.operation='retire-exact-exited-ro-helper-and-start-same-old-writers';
+  authority.helper.status='exited'; authority.hostSnapshotFiles=6;
+  write('compensation-restore-authority.json',authority);
+  write('helper-fenced-stop-submission.json',{id:authority.helper.id});
+  write('failure-snapshot.json',{code:'HELPER_STOP_OUTPUT'});
+  write('compensation-helper-remove-submission.json',{...read('compensation-helper-remove-submission.json'),alreadyStopped:true});
+  write('compensation-old-restored.json',{...read('compensation-old-restored.json'),exportedSnapshotsPreserved:true});
+  const originalExports=[];
+  for(const group of ['core','llm']) {
+    const base=join(f.audit,'snapshots/fenced',group); fs.mkdirSync(base,{mode:0o700});
+    const manifest={version:1,receipt:{},files:{},sources:{}};
+    for(const role of ['auth','ledger']) {
+      const path=join(base,role+'.sqlite'),db=new DatabaseSync(path);
+      let logical;
+      try {db.exec('CREATE TABLE synthetic(value TEXT NOT NULL)');db.prepare('INSERT INTO synthetic VALUES (?)').run(group+'-'+role);logical=hash(JSON.stringify(db.prepare('SELECT value FROM synthetic ORDER BY value').all()));} finally {db.close();}
+      fs.chmodSync(path,0o600); fs.utimesSync(path,1767225600,1767225600);
+      const bytes=fs.readFileSync(path),sha256=hash(bytes);
+      const stamp={dev:'1',ino:'1',uid:'65532',mode:'384',nlink:'1',size:String(bytes.length),mtimeNs:'1',ctimeNs:'1'};
+      manifest.receipt[role]={logicalSha256:logical,sha256,bytes:bytes.length,integrity:'ok'};
+      manifest.files[role]=stamp;manifest.sources[role]=[{part:'main',stamp,sha256}];
+      originalExports.push([path,bytes]);
+    }
+    const path=join(base,'private-manifest.json');f.put(path,manifest);fs.utimesSync(path,1767225600,1767225600);
+    originalExports.push([path,fs.readFileSync(path)]);
+  }
+  const manifestPath=join(f.audit,'snapshots/fenced/core/private-manifest.json');
+  const valid=JSON.parse(fs.readFileSync(manifestPath));
+  f.put(manifestPath,{...valid,receipt:{...valid.receipt,auth:{...valid.receipt.auth,sha256:'0'.repeat(64)}}});
+  await assert.rejects(f.prepare('exported-writers'),/WEB_RECONCILE_EXPORTED_BYTES/);
+  f.put(manifestPath,valid);fs.utimesSync(manifestPath,1767225600,1767225600);
+  const partial=join(f.audit,'snapshots/fenced/core/auth.sqlite.partial');f.put(partial,{});
+  await assert.rejects(f.prepare('exported-writers'),/WEB_RECONCILE_EXPORTED_FILES/);fs.unlinkSync(partial);
+  const switchRecord=join(f.audit,'switch-api-submission.json');f.put(switchRecord,{});
+  await assert.rejects(f.prepare('exported-writers'),/WEB_RECONCILE_FENCED_UNEXPECTED_STAGE/);fs.unlinkSync(switchRecord);
+  assert.deepEqual(f.calls,[]);assert.deepEqual(f.moves,[]);assert.deepEqual(f.copyChecks,[]);
+  const p=await f.prepare('exported-writers');
+  assert.equal(p.summary.hostExportVerified,true);assert.equal(p.summary.liveDatabaseRead,false);
+  const result=await p.apply(binding(p));assert.equal(result.outcome,'WEB_ATTEMPT_RECONCILED');
+  assert.equal(f.copyChecks.length,4);assert.ok(f.copyChecks.every(path=>!fs.existsSync(path)));
+  for(const [path,bytes] of originalExports) assert.deepEqual(fs.readFileSync(path),bytes);
+  const proof=read('reconciliation-authority.json').savedExportProof;
+  assert.equal(proof.files.length,4);assert.equal(proof.copyIntegrity,true);assert.equal(proof.manifestEquality,true);
+  assert.equal(proof.liveDatabaseRead,false);assert.equal(proof.postRestartEqualityClaimed,false);
+  const complete=read('complete.json');assert.equal(complete.version,2);assert.equal(complete.outcome,'old-restored');
+  assert.deepEqual(complete.evidence,f.api.webReconcileEvidenceIndex(f.audit));
+  const history=f.api.validateWebReconcileHistory(f.root);history.verify();assert.equal(history.count,1);
+  assert.deepEqual(f.moves,[[f.lock,join(f.audit,'operation.lock')],[f.guard,f.guardArchive]]);
 });

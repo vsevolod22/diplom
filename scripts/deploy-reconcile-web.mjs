@@ -7,7 +7,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual as equal } from 'node:util';
 import * as http from 'node:http';
-import { PROJECT, STATE, LABEL, CONFIG_SECRET, readProfile, runIsolatedDocker, assertReconciliationHistory } from './public-image-stand.mjs';
+import { spawnSync } from 'node:child_process';
+import { PROJECT, STATE, LABEL, CONFIG_SECRET, readProfile, runIsolatedDocker, assertReconciliationHistory, validateExportManifest } from './public-image-stand.mjs';
 import { capturePublicLlmSource, readPublicLlmBinding, expectedPublicLlmConfig, publicLlmEnvironmentOverlay,
   validatePublicLlmContainer, validatePublicLlmImage, validatePublicLlmKeyVolume, capturePublicLlmRetentions, validateCurrentAuditHistory } from './public-llm-stand.mjs';
 import { captureDeploymentCatalog, DEPLOYMENT_TOTAL_LIMIT, DEPLOYMENT_RETAINED_REFERENCE_LIMIT } from './public-llm-deployment-catalog.mjs';
@@ -32,8 +33,8 @@ const epoch=c=>[c.Id,c.State.StartedAt,c.State.FinishedAt,c.State.Pid,c.RestartC
 const lines=s=>s.trim().split('\n').filter(Boolean).sort();
 
 // Same representation and exclusion rules as captureBuildHistory/evidenceIndex.
-// No snapshot is admissible in the attempt being reconciled. Older completed
-// histories are independently byte-validated, never modified.
+// Snapshot admission is branch-specific; older completed histories are
+// independently byte-validated, never modified.
 export function webReconcileEvidenceIndex(directory) {
   const entries=[];let total=0;
   const walk=(dir,prefix='',depth=0)=>{
@@ -66,8 +67,8 @@ export function validateWebReconcileHistory(root, exclude=null) {
 }
 
 export function validateWebCompensationRecords(read, listing, nonce, historicalIntent, branch='web') {
-  need(['web','fenced-writers'].includes(branch),'BRANCH');
-  const fenced=branch==='fenced-writers';
+  need(['web','fenced-writers','exported-writers'].includes(branch),'BRANCH');
+  const fenced=branch!=='web';
   const intent=read('intent.json'),recovery=read('recovery.json'),built=read('built.json'),comp=read(fenced?'compensation-old-restored.json':'compensation-web-restored.json'),submission=read(fenced?'compensation-restore-authority.json':'compensation-web-start-submission.json');
   need(intent.version===2&&intent.kind==='preserving-deployment'&&intent.project===PROJECT&&intent.nonce===nonce&&intent.mode==='app'&&intent.lifecycle===false,'INTENT');
   need([intent.source,intent.adapter,intent.backendSource,...intent.entrySources].every(hex)&&intent.entrySources.length===3,'HISTORICAL_SOURCE_BINDING');
@@ -77,7 +78,7 @@ export function validateWebCompensationRecords(read, listing, nonce, historicalI
   need(recovery.version===2&&recovery.project===PROJECT&&recovery.nonce===nonce&&recovery.daemon===intent.daemon&&equal(recovery.services,targets)&&equal(recovery.interruptedServices,[...new Set([...targets,'web','api','worker'])].sort())&&recovery.oldRecipe==='recipe-old.json'&&recovery.candidateRecipe==='recipe-candidate.json'&&typeof recovery.migration==='boolean'&&recovery.automaticDatabaseRollback===false,'RECOVERY');
   need(equal(recovery.old.map(v=>v.role).sort(),ALL)&&new Set(recovery.old.map(v=>v.id)).size===8&&recovery.old.every(v=>hex(v.id)&&image(v.image)&&Number.isFinite(Date.parse(v.startedAt))),'OLD_IDENTITIES');
   need(equal(intent.old,targets.map(role=>{const c=recovery.old.find(v=>v.role===role);return {role,id:c.id,image:c.image};})),'OLD_INTENT');
-  if(fenced)validateFencedWriterCompensation(read,listing,nonce,recovery,comp,submission);
+  if(fenced)validateFencedWriterCompensation(read,listing,nonce,recovery,comp,submission,branch==='exported-writers');
   else {
   const expected=['lease.json','intent.json','recovery.json','recipe-old.json','recipe-candidate.json','built.json','failure-fenceadmissions.json','stop-web-submission.json','compensation-web-start-submission.json','compensation-web-restored.json',...targets.flatMap(n=>['retain-'+n+'-submission.json','build-'+n+'-submission.json','built-'+n+'.json'])].sort();
   need(equal(listing,expected),'UNEXPECTED_STAGE'); // Reject even a partial later stage.
@@ -103,17 +104,20 @@ const WRITERS=['web','api','worker'];
 const PROBE_RECORDS=['create-submission','created','start-submission','control-difference','stop-submission','remove-submission','retired'].map(n=>'probe-helper-'+n+'.json');
 
 // Separate admission: never reinterpret a stopped-web-only receipt as writer recovery.
-export function validateFencedWriterCompensation(read,listing,nonce,recovery,comp,authority){
+export function validateFencedWriterCompensation(read,listing,nonce,recovery,comp,authority,exported=false){
+  need(typeof exported==='boolean','BRANCH');
   const common=['lease.json','intent.json','recovery.json','recipe-old.json','recipe-candidate.json','built.json',...recovery.services.flatMap(n=>['retain-'+n+'-submission.json','build-'+n+'-submission.json','built-'+n+'.json'])];
   const stage=['snapshots','failure-snapshot.json','fenced.json','helper-fenced-submission.json','helper-fenced-created.json','helper-fenced-start-submission.json','compensation-restore-authority.json','compensation-helper-stop-submission.json','compensation-helper-remove-submission.json','compensation-helper-retired.json','compensation-api-healthy.json','compensation-old-restored.json',...WRITERS.flatMap(n=>['stop-'+n+'-submission.json','stop-'+n+'-observation.json','stop-'+n+'-complete.json','compensation-start-'+n+'-submission.json','compensation-started-'+n+'.json'])];
-  need(equal(listing,[...common,...stage,...PROBE_RECORDS].sort()),'FENCED_UNEXPECTED_STAGE');
-  need(equal(read('failure-snapshot.json'),{code:'HELPER_CONTROL_CHANGED'})&&equal(read('fenced.json'),{writers:WRITERS,drain:{jobs:0,outbox:0,leases:0}}),'FENCED_FAILURE');
-  need(authority.version===1&&authority.nonce===nonce&&authority.operation==='retire-exact-ro-helper-and-start-same-old-writers'&&authority.publishedConfigUnchanged===true&&authority.lockRetained===true,'FENCED_AUTHORITY');
+  const exportedStage=stage.filter(n=>n!=='compensation-helper-stop-submission.json').concat('helper-fenced-stop-submission.json');
+  need(equal(listing,[...common,...(exported?exportedStage:[...stage,...PROBE_RECORDS])].sort()),'FENCED_UNEXPECTED_STAGE');
+  need(equal(read('failure-snapshot.json'),{code:exported?'HELPER_STOP_OUTPUT':'HELPER_CONTROL_CHANGED'})&&equal(read('fenced.json'),{writers:WRITERS,drain:{jobs:0,outbox:0,leases:0}}),'FENCED_FAILURE');
+  need(authority.version===1&&authority.nonce===nonce&&authority.operation===(exported?'retire-exact-exited-ro-helper-and-start-same-old-writers':'retire-exact-ro-helper-and-start-same-old-writers')&&authority.publishedConfigUnchanged===true&&authority.lockRetained===true,'FENCED_AUTHORITY');
   need(Array.isArray(authority.old)&&equal(authority.old.map(v=>v.id).sort(),recovery.old.map(v=>v.id).sort()),'FENCED_OLD_SET');
   const api=recovery.old.find(v=>v.role==='api'),h=authority.helper;
-  need(hex(h?.id)&&!recovery.old.some(v=>v.id===h.id)&&h.image===api.image&&h.name===PROJECT+'-llm-'+nonce+'-fenced'&&h.status==='running'&&h.exit===0&&h.network==='none'&&h.originalMountsReadOnly===true&&h.policyValidated===true&&Number.isFinite(Date.parse(h.startedAt)),'FENCED_HELPER_AUTHORITY');
+  need(hex(h?.id)&&!recovery.old.some(v=>v.id===h.id)&&h.image===api.image&&h.name===PROJECT+'-llm-'+nonce+'-fenced'&&h.status===(exported?'exited':'running')&&h.exit===0&&h.network==='none'&&h.originalMountsReadOnly===true&&h.policyValidated===true&&Number.isFinite(Date.parse(h.startedAt)),'FENCED_HELPER_AUTHORITY');
   need(equal(read('helper-fenced-submission.json'),{name:h.name,image:h.image,purpose:'backup'})&&equal(read('helper-fenced-created.json'),{id:h.id})&&equal(read('helper-fenced-start-submission.json'),{id:h.id}),'FENCED_HELPER_START');
-  need(equal(read('compensation-helper-stop-submission.json'),{id:h.id})&&equal(read('compensation-helper-remove-submission.json'),{id:h.id,exit:0,originalMountsReadOnly:true})&&equal(read('compensation-helper-retired.json'),{id:h.id,exit:0,removed:true}),'FENCED_MAIN_HELPER_RETIREMENT');
+  need(equal(read(exported?'helper-fenced-stop-submission.json':'compensation-helper-stop-submission.json'),{id:h.id})&&equal(read('compensation-helper-remove-submission.json'),{id:h.id,exit:0,originalMountsReadOnly:true,...(exported?{alreadyStopped:true}:{})})&&equal(read('compensation-helper-retired.json'),{id:h.id,exit:0,removed:true}),'FENCED_MAIN_HELPER_RETIREMENT');
+  if(exported)need(authority.hostSnapshotFiles===6,'EXPORTED_FILE_COUNT');
   const started={};
   for(const old of recovery.old){
     const prior=authority.old.find(v=>v.id===old.id),e=prior.epoch;
@@ -128,7 +132,8 @@ export function validateFencedWriterCompensation(read,listing,nonce,recovery,com
   }
   need(Date.parse(started.worker)<=Date.parse(started.api)&&Date.parse(started.api)<=Date.parse(started.web),'FENCED_RESTART_ORDER');
   need(equal(read('compensation-api-healthy.json'),{id:api.id,healthy:true}),'FENCED_API_HEALTH');
-  need(equal(comp,{version:1,nonce,outcome:'old-writers-restored-lock-retained',web:200,auth:401,apiHealthy:true,startedSameOldIds:['worker','api','web'],helperRemoved:h.id,gatewaysUnchanged:true,publishedConfigUnchanged:true,migration:false,databaseRestore:false,snapshotResumed:false,lockRetained:true}),'FENCED_COMPENSATION');
+  need(equal(comp,{version:1,nonce,outcome:'old-writers-restored-lock-retained',web:200,auth:401,apiHealthy:true,startedSameOldIds:['worker','api','web'],helperRemoved:h.id,gatewaysUnchanged:true,publishedConfigUnchanged:true,migration:false,databaseRestore:false,snapshotResumed:false,...(exported?{exportedSnapshotsPreserved:true}:{}),lockRetained:true}),'FENCED_COMPENSATION');
+    if(exported)return; // Exact exported-stage listing forbids probe or partial lifecycle records.
   // The diagnostic probe is not the main backup helper. Its 137 is not a clean
   // writer/helper stop exception and cannot qualify the main helper retirement.
   const pc=read('probe-helper-created.json'),ps=read('probe-helper-create-submission.json'),pd=read('probe-helper-control-difference.json'),pr=read('probe-helper-remove-submission.json'),pt=read('probe-helper-retired.json');
@@ -141,9 +146,36 @@ export function validateFencedWriterCompensation(read,listing,nonce,recovery,com
 
 // These existing private append-only records predate reconciliation. Bind their
 // filesystem ordering as well as their bytes; do not invent missing timestamps.
-export function validateFencedWriterRecordOrder(mtime){
+export function validateFencedWriterRecordOrder(mtime,exported=false){
+  need(typeof exported==='boolean','BRANCH');
   const order=['stop-web-submission.json','stop-web-observation.json','stop-web-complete.json','stop-api-submission.json','stop-api-observation.json','stop-api-complete.json','stop-worker-submission.json','stop-worker-observation.json','stop-worker-complete.json','fenced.json','helper-fenced-submission.json','helper-fenced-created.json','helper-fenced-start-submission.json','failure-snapshot.json','compensation-restore-authority.json','compensation-helper-stop-submission.json','compensation-helper-remove-submission.json','compensation-helper-retired.json','compensation-start-worker-submission.json','compensation-started-worker.json','compensation-start-api-submission.json','compensation-started-api.json','compensation-api-healthy.json','compensation-start-web-submission.json','compensation-started-web.json','compensation-old-restored.json',...PROBE_RECORDS];
-  let last=-Infinity;for(const name of order){const time=mtime(name);need(Number.isFinite(time)&&time>=last,'FENCED_RECORD_ORDER');last=time;}
+  const selected=exported?order.filter(n=>n!=='compensation-helper-stop-submission.json'&&!PROBE_RECORDS.includes(n)):order;
+  if(exported)selected.splice(selected.indexOf('failure-snapshot.json'),0,'helper-fenced-stop-submission.json');
+  let last=-Infinity;for(const name of selected){const time=mtime(name);need(Number.isFinite(time)&&time>=last,'FENCED_RECORD_ORDER');last=time;}
+}
+// Exported-stop branch only: exact sealed layout, no partials/sidecars, and no
+// SQLite opens on retained evidence. All content reads are bounded saved exports.
+export function captureExportedWriterSnapshots(audit){
+  const base=join(audit,'snapshots/fenced'),groups=['core','llm'],directories=[join(audit,'snapshots'),base,...groups.map(g=>join(base,g))],fences=directories.map(directoryIdentity),proofs=[],manifests={},files=[];
+  const layout=()=>{fences.forEach(f=>f());need(equal(names(directories[0]),['fenced'])&&equal(names(base),groups),'EXPORTED_LAYOUT');for(const group of groups)need(equal(names(join(base,group)),['auth.sqlite','ledger.sqlite','private-manifest.json']),'EXPORTED_FILES');};
+  layout();
+  for(const group of groups){const manifest=privateFile(join(base,group,'private-manifest.json'),16384);manifests[group]=JSON.parse(manifest.bytes);validateExportManifest(manifests[group]);proofs.push(manifest);
+    for(const role of ['auth','ledger']){const path=join(base,group,role+'.sqlite'),proof=byteFile(path,true,{maxBytes:256*1024**2}),receipt=manifests[group].receipt[role];need(fs.lstatSync(path).size===receipt.bytes&&proof.sha256===receipt.sha256,'EXPORTED_BYTES');proofs.push(proof);files.push({group,role,bytes:receipt.bytes,sha256:receipt.sha256,logicalSha256:receipt.logicalSha256});}
+  }
+  return {paths:proofs.map(p=>p.path),manifests,files,verify(){layout();proofs.forEach(p=>p.verify());}};
+}
+
+// Bounded child uses existing copy-only fingerprint readers; no app constructor,
+// migration, live volume, or comparison with post-restart databases is involved.
+export function qualifyExportedWriterSnapshots({root,audit,capture,verify,timeout=60000}){
+  need(Number.isSafeInteger(timeout)&&timeout>0&&timeout<=60000,'EXPORTED_TIMEOUT');verify();capture.verify();
+  const program=`import fs from 'node:fs';import crypto from 'node:crypto';import {createRequire} from 'node:module';import {join} from 'node:path';import {recoverySqlite} from './scripts/public-image-stand.mjs';import {sealedSnapshotDatabase,currentLlmFingerprint} from './scripts/public-llm-stand.mjs';try{const base=JSON.parse(fs.readFileSync(0,'utf8'));const DB=createRequire(join(process.cwd(),'server/api/package.json'))('better-sqlite3');const core=await recoverySqlite(sealedSnapshotDatabase(DB),fs,crypto,{auth:join(base,'core/auth.sqlite'),ledger:join(base,'core/ledger.sqlite')},null);const llm={auth:{logicalSha256:currentLlmFingerprint(DB,fs,crypto,join(base,'llm/auth.sqlite'),'history')},ledger:{logicalSha256:currentLlmFingerprint(DB,fs,crypto,join(base,'llm/ledger.sqlite'),'quota')}};process.stdout.write(JSON.stringify({core,llm}));}catch{process.exitCode=70;}`;
+  const result=spawnSync(process.execPath,['--input-type=module','-e',program],{cwd:root,env:{PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'},input:JSON.stringify(join(audit,'snapshots/fenced')),encoding:'utf8',timeout,killSignal:'SIGKILL',maxBuffer:16384});
+  verify();capture.verify();need(!result.error&&result.signal===null&&result.status===0,'EXPORTED_COPY_VALIDATION');
+  let logical;try{logical=JSON.parse(result.stdout);}catch{need(false,'EXPORTED_COPY_RESULT');}
+  const expected=Object.fromEntries(['core','llm'].map(g=>[g,Object.fromEntries(['auth','ledger'].map(r=>[r,{logicalSha256:capture.manifests[g].receipt[r].logicalSha256}]))]));
+  need(equal(logical,expected),'EXPORTED_LOGICAL_INTEGRITY');
+  return {version:1,files:capture.files,copyIntegrity:true,manifestEquality:true,liveDatabaseRead:false,postRestartEqualityClaimed:false,snapshotReceiptCompleted:false};
 }
 function httpStatus(path,timeout){return new Promise((resolveStatus,reject)=>{const r=http.get({host:'127.0.0.1',port:8081,path,agent:false},res=>{const code=res.statusCode;res.destroy();resolveStatus(code);});const timer=setTimeout(()=>r.destroy(),timeout);r.on('error',()=>reject(Error('WEB_RECONCILE_HTTP')));r.on('close',()=>clearTimeout(timer));});}
 
@@ -155,17 +187,20 @@ export async function prepareWebReconciliation({attempt,historicalIntent,branch=
   const source=capturePublicLlmSource(root,{openai:true});
   const sourceFiles=[SELF,'scripts/deploy-reconcile-restored.mjs','scripts/deploy-adapter.mjs','scripts/deploy-adapter-stores.mjs','scripts/deploy-core.mjs','scripts/deploy.mjs'].map(p=>({path:p,proof:byteFile(join(root,p),false,{maxBytes:1024**2})}));
   const sourceDigest=hash({manifest:source.manifest,modules:sourceFiles.map(p=>({path:p.path,sha256:p.proof.sha256}))});
-  need(['web','fenced-writers'].includes(branch),'BRANCH');
-  const fenced=branch==='fenced-writers',initial=names(audit),proofs=initial.filter(n=>fenced&&n==='snapshots'?false:true).map(n=>{need(/^[a-z][a-z0-9-]+\.json$/.test(n),'JOURNAL_LAYOUT');return privateFile(join(audit,n),262144);}),read=n=>{const p=proofs.find(p=>p.path===join(audit,n));need(p,'MISSING_RECORD');return JSON.parse(p.bytes);};
-  // No host export was completed. The RO helper may have read/copied DBs internally.
+  need(['web','fenced-writers','exported-writers'].includes(branch),'BRANCH');
+  const exported=branch==='exported-writers',fenced=branch!=='web',initial=names(audit),proofs=initial.filter(n=>fenced&&n==='snapshots'?false:true).map(n=>{need(/^[a-z][a-z0-9-]+\.json$/.test(n),'JOURNAL_LAYOUT');return privateFile(join(audit,n),262144);}),read=n=>{const p=proofs.find(p=>p.path===join(audit,n));need(p,'MISSING_RECORD');return JSON.parse(p.bytes);};
+  // Empty-export and sealed-export failures have distinct admission. Neither
+  // proves current live-store equality or completes the interrupted snapshot receipt.
   const snapshotDirs=fenced?[join(audit,'snapshots'),join(audit,'snapshots/fenced')]:[];
   const snapshotFences=snapshotDirs.map(directoryIdentity);
-  const snapshotFence=()=>{snapshotFences.forEach(f=>f());if(fenced)need(equal(names(snapshotDirs[0]),['fenced'])&&names(snapshotDirs[1]).length===0,'HOST_SNAPSHOT_NOT_EMPTY');};
+  const savedExports=exported?captureExportedWriterSnapshots(audit):null;
+  const snapshotFence=()=>{snapshotFences.forEach(f=>f());if(fenced)need(equal(names(snapshotDirs[0]),['fenced'])&&(exported?equal(names(snapshotDirs[1]),['core','llm']):names(snapshotDirs[1]).length===0),'HOST_SNAPSHOT_LAYOUT');savedExports?.verify();};
   snapshotFence();
   need(hash(proofs.find(p=>p.path===join(audit,'intent.json'))?.bytes??'')===historicalIntent,'HISTORICAL_INTENT');
   const records=validateWebCompensationRecords(read,initial,attempt,historicalIntent,branch),{intent,recovery,built,comp,submission,references}=records;
   need(submission.recoveryDigest===hash(proofs.find(p=>p.path===join(audit,'recovery.json')).bytes),'RECOVERY_DIGEST');
-  if(fenced)validateFencedWriterRecordOrder(n=>fs.lstatSync(join(audit,n)).mtimeMs);
+  if(fenced)validateFencedWriterRecordOrder(n=>fs.lstatSync(join(audit,n)).mtimeMs,exported);
+  if(exported){const start=fs.lstatSync(join(audit,'helper-fenced-start-submission.json')).mtimeMs,stop=fs.lstatSync(join(audit,'helper-fenced-stop-submission.json')).mtimeMs;for(const path of savedExports.paths){const t=fs.lstatSync(path).mtimeMs;need(t>=start&&t<=stop,'EXPORTED_RECORD_ORDER');}}
   const owner=privateFile(join(lock,'deploy-adapter-owner.json'));
   need(equal(JSON.parse(owner.bytes),{version:2,nonce:attempt,kind:'preserving-deployment'})&&equal(names(lock),['deploy-adapter-owner.json']),'LOCK_OWNER');
   const configFiles=['profile.json','llm-profile.json','compose.images.json','compose.llm-env.json','compose.cve.json'].map(n=>privateFile(join(state,n)));
@@ -192,6 +227,7 @@ export async function prepareWebReconciliation({attempt,historicalIntent,branch=
   const stable=()=>{time();source.verify();sourceFiles.forEach(p=>p.proof.verify());configFiles.forEach(p=>p.verify());need(equal(stamp(fs.lstatSync(jwt)),jwtStamp),'JWT_METADATA_CHANGED');catalog.verify();retentions.verify();history.verify();};
   const fence=()=>{stable();snapshotFence();need(!moved,'LOCK_ALREADY_MOVED');dirs.forEach(f=>f());owner.verify();proofs.forEach(f=>f.verify());need(equal(names(audit),[...initial,...added].sort())&&equal(names(lock),['deploy-adapter-owner.json']),'JOURNAL_CHANGED');need(equal(names(state).filter(n=>n.endsWith('.lock')),['.operation.lock',...(claimed?[GUARD]:[])].sort()),'OTHER_GUARD');need(!names(state).some(n=>/^(\.adapter-pending-|\.llm-pending-|\.profile\.pending|\.compose\.)/.test(n)),'PENDING_CONFIG');};
   fence();archiveParentFence();need(!exists(guardArchive),'ARCHIVE_EXISTS');
+  const exportProof=exported?qualifyExportedWriterSnapshots({root,audit,capture:savedExports,verify:fence,timeout:Math.min(60000,time())}):null;
   const env={PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:home,COMPOSE_DISABLE_ENV_FILE:'1'};
   const query=async args=>{fence();let out;try{out=await run(args,{root,env,timeout:Math.min(15000,time())});}catch{throw Error('WEB_RECONCILE_DOCKER_'+args[0].toUpperCase());}fence();return out;};
   const endpoint=JSON.parse(await query(['context','inspect','desktop-linux','--format','{{json .Endpoints.docker.Host}}']));need(/^unix:\/\/\/[^\s\0]+$/.test(endpoint),'ENDPOINT');env.DOCKER_HOST=endpoint;
@@ -202,7 +238,7 @@ export async function prepareWebReconciliation({attempt,historicalIntent,branch=
   let observation;
   const verify=async()=>{
     need(JSON.parse(await query(['info','--format','{{json .ID}}']))===recovery.daemon,'DAEMON');
-    if(fenced)for(const id of [submission.helper.id,read('probe-helper-created.json').id])need(lines(await query(['container','ls','--all','--no-trunc','--filter','id='+id,'--format','{{.ID}}'])).length===0,'RETIRED_HELPER_PRESENT');
+    if(fenced)for(const id of [submission.helper.id,...(exported?[]:[read('probe-helper-created.json').id])])need(lines(await query(['container','ls','--all','--no-trunc','--filter','id='+id,'--format','{{.ID}}'])).length===0,'RETIRED_HELPER_PRESENT');
     need(equal(await census('container'),[...ids].sort())&&equal(await census('network'),[...netNames].sort())&&equal(await census('volume'),volNames.filter(n=>n.startsWith(PROJECT+'_')).sort()),'NAMESPACE');
     const images=await safeInspect('image',imageIds,'Id'),byRole=Object.fromEntries(recovery.old.map(v=>[v.role,images.find(i=>i.Id===v.image)])),containers=await safeInspect('container',ids,'Id');
     for(const c of containers){
@@ -224,16 +260,16 @@ export async function prepareWebReconciliation({attempt,historicalIntent,branch=
     for(const [path,code]of [['/',200],['/api/v1/auth/me',401]])need(await request(path,Math.min(5000,time()))===code,'HTTP_STATUS');fence();
   };
   await verify();
-  const authority={version:1,kind:fenced?'adapter-fenced-writers-restored-reconciliation':'adapter-stopped-web-only-reconciliation',attempt,historicalIntent,historicalSource:{source:intent.source,adapter:intent.adapter,entrySources:intent.entrySources,backendSource:intent.backendSource},currentSource:sourceDigest,entry:sourceFiles[0].proof.sha256,originalEvidence:webReconcileEvidenceIndex(audit),owner:{digest:hash(owner.bytes),identity:owner.identity},published:configFiles.map(p=>({name:p.path.slice(state.length+1),digest:hash(p.bytes),identity:p.identity})),jwtIdentity:jwtStamp,observation,references,compensationFirstPostcheck:comp.firstPostcheck};
-  const review=hash(authority),summary={outcome:'WEB_RECONCILIATION_CHECKED_NOT_APPLIED',branch,hostSnapshotCompleted:false,helperMayHaveReadStores:fenced,attempt,review,source:sourceDigest,entry:sourceFiles[0].proof.sha256,historicalIntent,historicalAdapter:intent.adapter,currentAdapter:sourceFiles.find(p=>p.path==='scripts/deploy-adapter.mjs').proof.sha256,services:8,networks:netNames.length,volumes:volNames.length,retainedReferences:refs.length,web:200,auth:401,api:'healthy',lockRetained:true,lifecycle:false,databaseRead:false,quiescenceClaimed:false};
+  const authority={version:1,kind:exported?'adapter-exported-writers-restored-reconciliation':fenced?'adapter-fenced-writers-restored-reconciliation':'adapter-stopped-web-only-reconciliation',...(exported?{savedExportProof:exportProof,stopStdoutAvailable:false}:{} ),attempt,historicalIntent,historicalSource:{source:intent.source,adapter:intent.adapter,entrySources:intent.entrySources,backendSource:intent.backendSource},currentSource:sourceDigest,entry:sourceFiles[0].proof.sha256,originalEvidence:webReconcileEvidenceIndex(audit),owner:{digest:hash(owner.bytes),identity:owner.identity},published:configFiles.map(p=>({name:p.path.slice(state.length+1),digest:hash(p.bytes),identity:p.identity})),jwtIdentity:jwtStamp,observation,references,compensationFirstPostcheck:comp.firstPostcheck};
+  const review=hash(authority),summary={outcome:'WEB_RECONCILIATION_CHECKED_NOT_APPLIED',branch,...(exported?{helperStopStdoutAvailable:false}:{}),hostExportVerified:exported,snapshotReceiptCompleted:false,hostSnapshotCompleted:false,helperMayHaveReadStores:fenced,attempt,review,source:sourceDigest,entry:sourceFiles[0].proof.sha256,historicalIntent,historicalAdapter:intent.adapter,currentAdapter:sourceFiles.find(p=>p.path==='scripts/deploy-adapter.mjs').proof.sha256,services:8,networks:netNames.length,volumes:volNames.length,retainedReferences:refs.length,web:200,auth:401,api:'healthy',lockRetained:true,lifecycle:false,databaseRead:exported?'saved-copies-only':false,liveDatabaseRead:false,quiescenceClaimed:false};
   const record=(name,value)=>{fence();writeExclusive(join(audit,name),JSON.stringify(value),0o600);syncDirectory(audit);added.push(name);proofs.push(privateFile(join(audit,name),262144));};
   return {summary,async apply(binding){
     need(equal(binding,{review,source:sourceDigest}),'REVIEW_BINDING');await verify();fence();archiveParentFence();
-    fs.mkdirSync(guard,{mode:0o700});writeExclusive(join(guard,'intent.json'),JSON.stringify({version:1,attempt,review,source:sourceDigest,command:fenced?'reconcile-fenced-writers-restored':'reconcile-stopped-web-only'}),0o600);syncDirectory(guard);syncDirectory(state);claimed=true;
+    fs.mkdirSync(guard,{mode:0o700});writeExclusive(join(guard,'intent.json'),JSON.stringify({version:1,attempt,review,source:sourceDigest,command:exported?'reconcile-exported-writers-restored':fenced?'reconcile-fenced-writers-restored':'reconcile-stopped-web-only'}),0o600);syncDirectory(guard);syncDirectory(state);claimed=true;
     const guardIdentity=directoryIdentity(guard),guardIntent=privateFile(join(guard,'intent.json'));
     const guardFence=()=>{guardIdentity();guardIntent.verify();need(equal(names(guard),['intent.json']),'GUARD_CHANGED');};
     record('reconciliation-authority.json',authority);
-    record('reconciliation-result.json',{version:1,attempt,review,source:sourceDigest,outcome:'old-restored',web:200,auth:401,backendEpochsUnchanged:!fenced,restoredWriterEpochsVerified:fenced,hostSnapshotCompleted:false,helperMayHaveReadStores:fenced,firstPostcheck:comp.firstPostcheck,lifecycle:false,migration:false,databaseRead:false,quiescenceClaimed:false});
+    record('reconciliation-result.json',{version:1,attempt,review,source:sourceDigest,outcome:'old-restored',web:200,auth:401,backendEpochsUnchanged:!fenced,restoredWriterEpochsVerified:fenced,hostSnapshotCompleted:false,hostExportVerified:exported,snapshotReceiptCompleted:false,helperMayHaveReadStores:fenced,firstPostcheck:comp.firstPostcheck,lifecycle:false,migration:false,databaseRead:exported?'saved-copies-only':false,liveDatabaseRead:false,quiescenceClaimed:false});
     await verify();guardFence();
     if(!exists(archiveParent)){fs.mkdirSync(archiveParent,{mode:0o700});syncDirectory(state);}else archiveParentFence();
     need(!exists(guardArchive)&&fs.lstatSync(archiveParent).dev===fs.lstatSync(lock).dev,'ARCHIVE_DESTINATION');fs.mkdirSync(guardArchive,{mode:0o700});syncDirectory(archiveParent);
@@ -248,5 +284,10 @@ export async function prepareWebReconciliation({attempt,historicalIntent,branch=
     return {...summary,outcome:'WEB_ATTEMPT_RECONCILED',lockRetained:false,receipt:STATE+'/deploy-adapter-v1/'+attempt+'/complete.json',guardArchive:STATE+'/exact-recovery-compensations/adapter-web-'+attempt+'/operation.lock'};
   }};
 }
-export async function webReconciliationCli(argv){const [command,...a]=argv;const check=['check','check-fenced-writers'].includes(command),fenced=['check-fenced-writers','apply-fenced-writers'].includes(command);need(['check','apply','check-fenced-writers','apply-fenced-writers'].includes(command)&&a[0]==='--attempt'&&a[2]==='--historical-intent'&&(check?a.length===4:a.length===9&&a[4]==='--review'&&a[6]==='--source'&&a[8]===(fenced?'--ack-reconcile-restored-writers':'--ack-reconcile-restored-web')),'ARGUMENTS');const p=await prepareWebReconciliation({attempt:a[1],historicalIntent:a[3],branch:fenced?'fenced-writers':'web'});return check?p.summary:p.apply({review:a[5],source:a[7]});}
+export async function webReconciliationCli(argv){
+  const [command,...a]=argv,commands={check:'web',apply:'web','check-fenced-writers':'fenced-writers','apply-fenced-writers':'fenced-writers','check-exported-writers':'exported-writers','apply-exported-writers':'exported-writers'},branch=commands[command],check=command?.startsWith('check');
+  const ack=branch==='exported-writers'?'--ack-reconcile-exported-writers':branch==='fenced-writers'?'--ack-reconcile-restored-writers':'--ack-reconcile-restored-web';
+  need(Object.hasOwn(commands,command)&&a[0]==='--attempt'&&a[2]==='--historical-intent'&&(check?a.length===4:a.length===9&&a[4]==='--review'&&a[6]==='--source'&&a[8]===ack),'ARGUMENTS');
+  const p=await prepareWebReconciliation({attempt:a[1],historicalIntent:a[3],branch});return check?p.summary:p.apply({review:a[5],source:a[7]});
+}
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))webReconciliationCli(process.argv.slice(2)).then(v=>console.log(JSON.stringify(v))).catch(e=>{console.error(JSON.stringify({outcome:'WEB_RECONCILIATION_REFUSED_OR_HOLD',code:/^WEB_RECONCILE_[A-Z_]+$/.test(e.message)?e.message:'WEB_RECONCILE_VALIDATION',noRetry:true}));process.exitCode=1;});

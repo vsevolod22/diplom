@@ -196,6 +196,15 @@ function stopAcknowledgement(output, before) {
   return 'unexpected';
 }
 
+function lifecycleObservation(output, reference) {
+  return {dispatch:'exit-zero',acknowledgement:stopAcknowledgement(output,reference),
+    stdoutBytes:typeof output==='string'?Buffer.byteLength(output):null,
+    deprecatedTimeWarning:typeof output==='string'&&output.includes('Flag --time has been deprecated, use --timeout instead')};
+}
+function requireLifecycleOutput(observation, code) {
+  need(['empty','id','name','deprecated-warning'].includes(observation.acknowledgement),code);
+}
+
 // Classification only: no stop/start and no authority to retry an uncertain action.
 // Submission time must be sampled from the SAME daemon, not the host wall clock.
 export function classifyStatelessGatewayStop({ before, after, stopOutput, events, daemonSubmittedMs, writers, drain }) {
@@ -558,14 +567,12 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     save(p,'stop-'+name+'-submission.json',{role:name,id:before.Id,image:before.Image,...(gateway?{daemonSubmittedMs:submitted}:{})});
     // --time is deprecated and can add CLI warning output; use the canonical flag.
     const output=await request(['container','stop','--timeout','30',before.Id],p.connection.options,'STOP_DISPATCH_FAILED',45000);
-    const acknowledgement=stopAcknowledgement(output,before);
+    const observation=lifecycleObservation(output,before);
     // Inspect even when stdout is unexpected: text alone cannot prove a stop failed.
     // Use the PREVIOUS authority when stopping a retained service, never candidate defaults.
     const rows=JSON.parse(await request(['container','inspect',before.Id],p.connection.options,'STOP_INSPECT_FAILED'));need(Array.isArray(rows)&&rows.length===1,'STOP_CARDINALITY');const after=rows[0];
     const sameControl=equal(control(before),control(after)),sameStart=before.State.StartedAt===after.State.StartedAt;
-    save(p,'stop-'+name+'-observation.json',{role:name,dispatch:'exit-zero',acknowledgement,
-      stdoutBytes:typeof output==='string'?Buffer.byteLength(output):null,
-      deprecatedTimeWarning:typeof output==='string'&&output.includes('Flag --time has been deprecated, use --timeout instead'),
+    save(p,'stop-'+name+'-observation.json',{role:name,...observation,
       sameControl,sameStart,exited:after.State.Status==='exited',running:after.State.Running===true,zeroPid:after.State.Pid===0,
       cleanWriterStop:!gateway&&cleanStopped(after),
       exitCode:Number.isInteger(after.State.ExitCode)&&after.State.ExitCode>=0&&after.State.ExitCode<=255?after.State.ExitCode:null});
@@ -573,7 +580,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     need(after.State.Running===false&&after.State.Status==='exited'&&after.State.Pid===0&&after.RestartCount===0&&
       !after.State.OOMKilled&&!after.State.Paused&&!after.State.Dead&&!after.State.Restarting&&!after.State.Error,'STOP_NOT_PROVEN');
     if(!gateway)need(cleanStopped(after),'WRITER_NOT_CLEANLY_STOPPED');
-    need(['empty','id','name','deprecated-warning'].includes(acknowledgement),'STOP_OUTPUT_INVALID');
+    requireLifecycleOutput(observation,'STOP_OUTPUT_INVALID');
     if(gateway){let events=[];
       if(after.State.ExitCode===137){
         // Relative CLI deadline is finite; --until is in the daemon's already-past clock, not FinishedAt+future.
@@ -617,20 +624,34 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       for(const m of c.Mounts.filter(m=>m.Type==='volume'))need(p.before.volumes.some(v=>v.Name===m.Name&&v.Mountpoint===m.Source&&m.Driver==='local'),'HELPER_VOLUME_CHANGED');
       latest=c;guard(p);
     };
-    await check('created');await boundary(p,latest);
+    await check('created');await boundary(p,latest);const created=latest;
     save(p,'helper-'+phase+'-start-submission.json',{id:helperId});
-    need((await request(['container','start',helperId],p.connection.options,'HELPER_START_FAILED')).trim()===helperId,'HELPER_START_OUTPUT');
-    await check('running');await boundary(p,latest);
+    const startOutput=await request(['container','start',helperId],p.connection.options,'HELPER_START_FAILED');
+    const startObservation=lifecycleObservation(startOutput,created);
+    save(p,'helper-'+phase+'-start-observation.json',startObservation);
+    await check('running');
+    need(latest.State.StartedAt!==created.State.StartedAt&&Date.parse(latest.State.StartedAt)>0,'HELPER_START_NOT_PROVEN');
+    requireLifecycleOutput(startObservation,'HELPER_START_OUTPUT');await boundary(p,latest);
     const end=now()+120000;let receipt;
     do{await check('running');receipt=JSON.parse(await request(['container','exec',helperId,'node','-e',READY_FILE_PROBE],p.connection.options,'HELPER_READY_FAILED',5000));
       need(now()<end,'HELPER_READY_TIMEOUT');if(receipt.ready===true)break;need(equal(receipt,{}),'HELPER_NOT_READY');await sleep(500);
     }while(true);
     const result=await work(helperId,args=>{guard(p);return request(args,p.connection.options,'SNAPSHOT_EXPORT_FAILED');},()=>check('running'),receipt);
     await check('running');await boundary(p,latest);save(p,'helper-'+phase+'-stop-submission.json',{id:helperId});
-    need((await request(['container','stop','--time','10',helperId],p.connection.options,'HELPER_STOP_FAILED',20000)).trim()===helperId,'HELPER_STOP_OUTPUT');
-    await check('exited');await boundary(p,latest);save(p,'helper-'+phase+'-remove-submission.json',{id:helperId,exit:0});
-    need((await request(['container','rm',helperId],p.connection.options,'HELPER_REMOVE_FAILED')).trim()===helperId,'HELPER_REMOVE_OUTPUT');
-    save(p,'helper-'+phase+'-complete.json',{id:helperId,exit:0,removed:true});await boundary(p);return result;
+    const stopOutput=await request(['container','stop','--timeout','10',helperId],p.connection.options,'HELPER_STOP_FAILED',20000);
+    const stopObservation=lifecycleObservation(stopOutput,latest);
+    save(p,'helper-'+phase+'-stop-observation.json',stopObservation);
+    await check('exited');requireLifecycleOutput(stopObservation,'HELPER_STOP_OUTPUT');await boundary(p,latest);
+    save(p,'helper-'+phase+'-remove-submission.json',{id:helperId,exit:0});
+    const removeOutput=await request(['container','rm',helperId],p.connection.options,'HELPER_REMOVE_FAILED');
+    const removeObservation=lifecycleObservation(removeOutput,latest);
+    save(p,'helper-'+phase+'-remove-observation.json',removeObservation);
+    // A failed inspect is not absence. Require a successful, exact namespace census.
+    const inventory=(await request(['container','ls','--all','--filter',`label=com.docker.compose.project=${PROJECT}`,
+      '--format','{{.ID}}','--no-trunc'],p.connection.options,'HELPER_REMOVE_CENSUS_FAILED')).trim().split('\n').filter(Boolean).sort();
+    need(!inventory.includes(helperId)&&equal(inventory,[...p.peers.values()].map(c=>c.Id).sort()),'HELPER_REMOVE_NOT_PROVEN');
+    requireLifecycleOutput(removeObservation,'HELPER_REMOVE_OUTPUT');await boundary(p);
+    save(p,'helper-'+phase+'-complete.json',{id:helperId,exit:0,removed:true,namespaceVerified:true});return result;
   }
   async function snapshot(ctx) {
     const p=contextPlan(ctx);need(p.phase==='fenced','SNAPSHOT_STAGE');
@@ -669,17 +690,24 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     await boundary(p);const previous=p.peers.get(name),replace=p.targets.includes(name);
     need(replace||cleanStopped(previous),'RESUME_REQUIRES_CLEAN_STOP');
     save(p,(old?'restore-':'start-')+name+'-submission.json',{role:name,previous:previous.Id,image:(old?p.before.images:p.candidateImages)[name].Id,recreate:replace});
-    p.pending={name,previous,old,settled:false};
+    p.pending={name,previous,old,settled:false};let resumeObservation;
     if(replace){const recipePath=old?p.oldRecipe:p.newRecipe;
       await request(compose(p,recipePath,['up','-d','--no-deps','--no-build','--pull','never','--force-recreate',name]),
         {...p.connection.options,env:{...p.connection.options.env,SCAN_JWT_SECRET:p.jwt?.bytes.toString()??CONFIG_SECRET}},'SERVICE_RECREATE_FAILED',120000);
-    }else need((await request(['container','start',previous.Id],p.connection.options,'SERVICE_RESUME_FAILED')).trim()===previous.Id,'SERVICE_START_OUTPUT');
+    }else {
+      const output=await request(['container','start',previous.Id],p.connection.options,'SERVICE_RESUME_FAILED');
+      resumeObservation=lifecycleObservation(output,previous);
+      save(p,'start-'+name+'-observation.json',{role:name,...resumeObservation});
+    }
     p.pending.settled=true;
     // Unchanged resumed peers retain their original model, even during a mixed old/new transition.
     let current;
     if(replace)current=await inspectChanged(p,name,previous,{recreated:true,old});
-    else {const rows=JSON.parse(await request(['container','inspect',previous.Id],p.connection.options,'SERVICE_RESUME_INSPECT_FAILED'));need(rows.length===1,'SERVICE_RESUME_CARDINALITY');current=rows[0];
-      need(equal(control(previous),control(current))&&current.State.Running&&current.State.Pid>0&&current.State.StartedAt!==previous.State.StartedAt&&current.RestartCount===0&&!current.State.OOMKilled,'RESUME_IDENTITY');}
+    else {const rows=JSON.parse(await request(['container','inspect',previous.Id],p.connection.options,'SERVICE_RESUME_INSPECT_FAILED'));need(Array.isArray(rows)&&rows.length===1,'SERVICE_RESUME_CARDINALITY');current=rows[0];
+      need(equal(control(previous),control(current))&&current.State.Running===true&&current.State.Status==='running'&&
+        Number.isSafeInteger(current.State.Pid)&&current.State.Pid>0&&current.State.StartedAt!==previous.State.StartedAt&&Date.parse(current.State.StartedAt)>0&&
+        current.RestartCount===0&&!current.State.OOMKilled&&!current.State.Paused&&!current.State.Dead&&!current.State.Restarting&&!current.State.Error,'RESUME_IDENTITY');
+      requireLifecycleOutput(resumeObservation,'SERVICE_START_OUTPUT');}
     p.peers.set(name,current);if(replace){p.images[name]=(old?p.before.images:p.candidateImages)[name];p.authorities.set(name,{model:old?p.config.model:p.next,selection:old?p.config.selection:p.config.next});}
     p.pending=null;save(p,(old?'restore-':'start-')+name+'-complete.json',{role:name,id:current.Id,image:current.Image,startedAt:current.State.StartedAt});await boundary(p);
     if(['api','worker'].includes(name)){await ready(p,name);if(name==='api')p.apiReady=true;}

@@ -59,7 +59,7 @@ function child(root, code, input) {
     cwd:join(root,'server/api'),env:{PATH:'/usr/bin:/bin'},input:JSON.stringify(input),encoding:'utf8',timeout:10000,maxBuffer:65536});
   assert.equal(result.error,undefined); assert.equal(result.status,0,'fixture constructor/helper failed: '+result.stderr); return result;
 }
-export async function adapterFixture(t, { failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null, helperTransition = null } = {}) {
+export async function adapterFixture(t, { failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null, helperTransition = null, lifecycleStdout = 'id', helperLifecycleFault = null } = {}) {
   // Reuse metadata constructors only. Synthetic release files are not activated;
   // reset to the non-CVE profile before invoking any new adapter method.
   const f=fixture(t), root=f.root, home=temporary(t); sources(root);
@@ -82,7 +82,7 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
   for(const [name,cmd]of [['llm-egress',['python','-I','openrouter.py']],['openai-egress',[...OPENAI_DEPLOYMENT.gatewayCommand]]]){
     f.images[name]=clone(f.images.egress);f.images[name].Id='sha256:'+sha(name);f.images[name].RepoTags=[`${PROJECT}-${name}:local`];f.images[name].Config.Cmd=cmd;
   }
-  const allImages=new Map(Object.values(f.images).map(i=>[i.Id,clone(i)])), events=[],diagnostics=[],helperTransitions=[];
+  const allImages=new Map(Object.values(f.images).map(i=>[i.Id,clone(i)])), events=[],diagnostics=[],helperTransitions=[],lifecycleReplies=[];
   let generation=10, tick=0;
   const timestamp=()=>new Date(Date.UTC(2026,10,1,0,0,++tick)).toISOString();
   const materialize=(name,spec,image)=>{
@@ -164,8 +164,14 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
     }
     if(args[0]==='container'){
       if(args[1]==='ls'){
-        const volume=args.find(a=>a.startsWith('volume='))?.slice(7);
-        return f.containers.filter(c=>!volume||c.Mounts.some(m=>m.Name===volume)).map(c=>c.Id).join('\n');
+        const filters=args.filter((_,i)=>args[i-1]==='--filter');
+        return f.containers.filter(c=>filters.every(filter=>{
+          if(filter.startsWith('volume='))return c.Mounts.some(m=>m.Name===filter.slice(7));
+          if(filter.startsWith('id='))return c.Id.startsWith(filter.slice(3));
+          if(filter.startsWith('name='))return new RegExp(filter.slice(5)).test(c.Name);
+          if(filter.startsWith('label=')){const [key,value]=filter.slice(6).split('=');return value===undefined?Object.hasOwn(c.Config.Labels,key):c.Config.Labels[key]===value;}
+          assert.fail('unsupported fake container filter');
+        })).map(c=>c.Id).join('\n');
       }
       const c=lookup('container',args[1]==='stop'?args.at(-1):args[2]);assert.ok(c,'unknown fake container');const name=role(c)??'helper',h=helpers.get(c.Id);
       if(args[1]==='start'){
@@ -183,16 +189,23 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
           const program=h.program.replaceAll('/auth/',join(data,'auth')+'/').replaceAll("'/auth'",JSON.stringify(join(data,'auth'))).replaceAll('/data/',join(data,'data')+'/').replaceAll('/backup',h.backup).replace("process.on('SIGTERM',()=>process.exit(0));",'').replace('setTimeout(()=>process.exit(73),300000);','');
           child(root,program,{});const phase=c.Name.match(/-(fenced|before-api|after-api)$/)?.[1];events.push('snapshot:'+phase);
         }
-        f.attachments();events.push('start:'+name);return c.Id+'\n';
+        f.attachments();events.push('start:'+name);return lifecycleStdout === 'empty' ? '' : c.Id+'\n';
       }
       if(args[1]==='stop'){
               c.State={...c.State,Running:false,Status:'exited',Pid:0,ExitCode:0,FinishedAt:timestamp()};
               if(name==='web' && stopFault==='nonclean')c.State.ExitCode=137;
+              if(h && helperLifecycleFault==='stop-137')c.State.ExitCode=137;
+              if(h && helperLifecycleFault==='stop-control')c.Config.Cmd=['unapproved-helper-command'];
               f.attachments();events.push('stop:'+name);
+              if(h && helperLifecycleFault==='stop-error')throw Object.assign(Error('synthetic helper stop subprocess error'),{code:1,stdout:c.Id+'\n'});
               if(name==='web' && stopFault==='dispatch')throw Object.assign(Error('synthetic uncertain stop dispatch'),{code:1,stdout:c.Id+'\n'});
-              return stopStdout === 'empty' ? '' : c.Id+'\n';
+              return lifecycleStdout === 'empty' || stopStdout === 'empty' ? '' : c.Id+'\n';
             }
-      if(args[1]==='rm'){assert.ok(h);f.containers=f.containers.filter(item=>item!==c);helpers.delete(c.Id);return c.Id+'\n';}
+      if(args[1]==='rm'){
+              assert.ok(h);events.push('rm:helper');
+              if(helperLifecycleFault!=='rm-present'){f.containers=f.containers.filter(item=>item!==c);helpers.delete(c.Id);}
+              return lifecycleStdout === 'empty' ? '' : c.Id+'\n';
+            }
       assert.equal(args[1],'exec');assert.equal(c.State.Running,true);
       if(h){
         if(args.at(-1).startsWith('{')){
@@ -219,7 +232,11 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
     const transport = (args, options) => runIsolatedDocker(args, options, (executable, argv, execution, callback) => {
       assert.equal(executable, 'docker'); assert.deepEqual(argv, args);
       Promise.resolve().then(() => run(argv, { root: execution.cwd, env: execution.env, timeout: execution.timeout }))
-        .then(stdout => callback(null, stdout, 'synthetic Docker stderr warning\n'), error => {
+        .then(stdout => {
+          if(args[0]==='create'||args[0]==='container'&&['start','stop','rm'].includes(args[1]))lifecycleReplies.push({args:[...args],stdout,exitCode:0});
+          callback(null, stdout, 'synthetic Docker stderr warning\n');
+        }, error => {
+          if(args[0]==='container'&&['start','stop','rm'].includes(args[1]))lifecycleReplies.push({args:[...args],stdout:error.stdout??'',exitCode:error.code??1});
           diagnostics.push({fakeEngineFailure:error.message}); callback(error, error.stdout ?? '', 'synthetic fake-engine failure');
         });
     });
@@ -231,7 +248,7 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
   const adapter=Object.fromEntries(Object.entries(codes).map(([name,code])=>[name,async ctx=>{
     try{return await actual[name](ctx);}catch(error){diagnostics.push({method:name,...deployAdapterDiagnostic(error)});throw Object.assign(Error('withheld'),{code:'DEPLOY_'+code});}
   }]));
-  return {adapter,rawAdapter:actual,publishedSelection:clone(s),configuredSelection:clone(configured),events,calls,diagnostics,helperTransitions,role,containers:()=>f.containers,locked:()=>fs.existsSync(join(f.stand,'.operation.lock')),
+  return {adapter,rawAdapter:actual,publishedSelection:clone(s),configuredSelection:clone(configured),events,calls,diagnostics,helperTransitions,lifecycleReplies,role,containers:()=>f.containers,locked:()=>fs.existsSync(join(f.stand,'.operation.lock')),
 
         pins:()=>JSON.parse(fs.readFileSync(join(f.stand,'compose.images.json'))),verifyStores(){for(const [kind,path]of Object.entries(paths))assert.deepEqual(fs.readFileSync(path),original[kind],kind+' live bytes changed');}};
 }
