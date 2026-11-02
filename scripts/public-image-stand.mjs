@@ -26,7 +26,7 @@ const COMMANDS = { ...PUBLIC_IMAGE_COMMANDS, 'auth-volume-init': ['chown', '6553
   'scan-volume-init': ['chown', '65532:65532', '/data'], egress: ['python', '-I', 'proxy.py'], web: ['nginx', '-g', 'daemon off;'] };
 const ENTRYPOINTS = { api: ['docker-entrypoint.sh'], worker: ['docker-entrypoint.sh'], web: ['/docker-entrypoint.sh'] };
 const CVE_KEYS = ['version', 'release', 'manifestDigest', 'artifactSha256', 'publicKeySha256'];
-const USAGE = 'Usage: node scripts/public-image-stand.mjs up [--build] [--isolated] | status | stop | reconcile-build-only --ack-no-services | reconcile-network-only --ack-no-services | reconcile-running-build-only --ack-build-failed-before-start | recover-build-and-redeploy --ack-unavailable-prior-images | resume-recover-build-and-redeploy --ack-pre-lifecycle-only --audit redeploy-<32hex> | check-recover-created-drain --audit redeploy-<32hex> --helper-id <64hex> | continue-recover-created-drain --ack-created-drain-only --audit redeploy-<32hex> --helper-id <64hex> | check-recover-started-drain --audit redeploy-<32hex> --helper-id <64hex> | continue-recover-started-drain --ack-started-drain-only --audit redeploy-<32hex> --helper-id <64hex> | check-recover-backup-copy --audit redeploy-<32hex> --helper-id <64hex> | continue-recover-backup-copy --ack-quiescent-backup-transfer --audit redeploy-<32hex> --helper-id <64hex>';
+const USAGE = 'Usage: node scripts/public-image-stand.mjs up [--build] [--isolated] [--ack-history-summary-v3-to-v4 (existing LLM + --build only)] | status | stop | reconcile-build-only --ack-no-services | reconcile-network-only --ack-no-services | reconcile-running-build-only --ack-build-failed-before-start | recover-build-and-redeploy --ack-unavailable-prior-images | resume-recover-build-and-redeploy --ack-pre-lifecycle-only --audit redeploy-<32hex> | check-recover-created-drain --audit redeploy-<32hex> --helper-id <64hex> | continue-recover-created-drain --ack-created-drain-only --audit redeploy-<32hex> --helper-id <64hex> | check-recover-started-drain --audit redeploy-<32hex> --helper-id <64hex> | continue-recover-started-drain --ack-started-drain-only --audit redeploy-<32hex> --helper-id <64hex> | check-recover-backup-copy --audit redeploy-<32hex> --helper-id <64hex> | continue-recover-backup-copy --ack-quiescent-backup-transfer --audit redeploy-<32hex> --helper-id <64hex>';
 const RECONCILE_GUARD = '.reconcile-build-only.lock';
 const NETWORK_GUARD = '.reconcile-network-only.lock';
 const NETWORK_PAIR = ['auth_internal', 'registry_uplink'];
@@ -73,6 +73,27 @@ async function imageEvidence(run, options, reference, role, scope) {
     throw error;
   }
 }
+const isolatedDockerDiagnostics = new WeakMap();
+export function isolatedDockerDiagnostic(error) { return isolatedDockerDiagnostics.get(error) ?? null; }
+function diagnosticDockerFailure(error, stdout, stderr) {
+  const own = key => {
+    try { return error && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error, key)?.value : undefined; }
+    catch { return undefined; }
+  };
+  const code = own('code'), signal = own('signal');
+  const bytes = value => typeof value === 'string' ? Math.min(Buffer.byteLength(value), 64 * 1024 ** 2) : null;
+  // Preserve the historical category/exception contract. Only current readers
+  // consume this owned, bounded diagnostic; it is never recovery authority.
+  const failure = new IsolatedDockerFailure(dockerCategory(error, stdout, stderr));
+  isolatedDockerDiagnostics.set(failure, Object.freeze({
+    cause: code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'OUTPUT_LIMIT' : own('killed') ? 'TIMEOUT' :
+      code === 'ENOENT' ? 'SPAWN' : Number.isInteger(code) ? 'EXIT_NONZERO' : 'DOCKER_FAILURE',
+    exitCode: Number.isInteger(code) && code >= 0 && code <= 255 ? code : null,
+    signal: ['SIGKILL', 'SIGTERM', 'SIGABRT', 'SIGPIPE', 'SIGSEGV', 'SIGINT'].includes(signal) ? signal : null,
+    stdoutBytes: bytes(stdout), stderrBytes: bytes(stderr),
+  }));
+  return failure;
+}
 function dockerCategory(error, stdout = '', stderr = '') {
   const bounded = value => typeof value === 'string' ? `${value.slice(0, 32768)}\n${value.slice(-32768)}` : '';
   const text = `${bounded(stderr)}\n${bounded(stdout)}`.toLowerCase();
@@ -90,8 +111,8 @@ export function runIsolatedDocker(args, { root, env, timeout = 30_000 }, execute
   return new Promise((resolveOutput, reject) => {
     try {
       execute('docker', args, { cwd: root, env, timeout, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024, encoding: 'utf8' },
-        (error, stdout, stderr) => error ? reject(new IsolatedDockerFailure(dockerCategory(error, stdout, stderr))) : resolveOutput(stdout));
-    } catch (error) { reject(new IsolatedDockerFailure(dockerCategory(error))); }
+        (error, stdout, stderr) => error ? reject(diagnosticDockerFailure(error, stdout, stderr)) : resolveOutput(stdout));
+    } catch (error) { reject(diagnosticDockerFailure(error)); }
   });
 }
 function safe(ok, message = 'Isolated qualification stand refused unsafe configuration or namespace collision.') {
@@ -1898,7 +1919,8 @@ export async function publicImageStand(argv, { root = ROOT, run = runIsolatedDoc
   const continuation=createdCommand&&(checkOnly||flags[0]===ack)&&createdFlags.length===4&&createdFlags[0]==='--audit'&&/^redeploy-[a-f0-9]{32}(?![\s\S])/.test(createdFlags[1])&&createdFlags[2]==='--helper-id'&&HEX_SHA.test(createdFlags[3])?{checkOnly,helperId:createdFlags[3],started:startedCommand,backup:backupCommand}:null;
   const resumeName=continuation?createdFlags[1]:command==='resume-recover-build-and-redeploy'&&flags.length===3&&flags[0]==='--ack-pre-lifecycle-only'&&flags[1]==='--audit'&&/^redeploy-[a-f0-9]{32}(?![\s\S])/.test(flags[2])?flags[2]:null;
   safe(['up', 'status', 'stop', 'reconcile-build-only', 'reconcile-network-only', 'reconcile-running-build-only', 'recover-build-and-redeploy', 'resume-recover-build-and-redeploy','check-recover-created-drain','continue-recover-created-drain','check-recover-started-drain','continue-recover-started-drain','check-recover-backup-copy','continue-recover-backup-copy'].includes(command) && (command === 'up' ?
-    flags.every(f => ['--build', '--isolated'].includes(f)) && new Set(flags).size === flags.length :
+    flags.every(f => ['--build', '--isolated', '--ack-history-summary-v3-to-v4'].includes(f)) && new Set(flags).size === flags.length &&
+          (!flags.includes('--ack-history-summary-v3-to-v4') || flags.includes('--build') && !flags.includes('--isolated')) :
     createdCommand ? continuation!==null : command === 'resume-recover-build-and-redeploy' ? resumeName!==null : command === 'recover-build-and-redeploy' ? equal(flags,[REDEPLOY_ACK]) : command.startsWith('reconcile-') ? equal(flags, [command === 'reconcile-running-build-only' ? RUNNING_ACK : '--ack-no-services']) : flags.length === 0), USAGE);
   safe(resolve(root) === root && fs.realpathSync(root) === root, 'Use the canonical absolute repository root.');
   if (command === 'up' || command.startsWith('reconcile-') || command === 'recover-build-and-redeploy' || resumeName) checkIgnores(root);
@@ -1909,13 +1931,15 @@ export async function publicImageStand(argv, { root = ROOT, run = runIsolatedDoc
     const module = await import('./public-llm-stand.mjs');
     if (module.readPublicLlmBinding(root)) {
       try {
-        if (command === 'up') return await (llmStand ?? module.publicLlmStand)(['up', ...(flags.includes('--build') ? ['--build'] : []), '--ack-public-maintenance'],
+        if (command === 'up') return await (llmStand ?? module.publicLlmStand)(['up', ...(flags.includes('--build') ? ['--build'] : []), '--ack-public-maintenance',
+                  ...(flags.includes(module.PUBLIC_LLM_SUMMARY_MIGRATION_ACK) ? [module.PUBLIC_LLM_SUMMARY_MIGRATION_ACK] : [])],
           { ...llmOptions, root, run, ambient, log, sleep, request });
         return await (await import('./public-cve-bridge-runtime.mjs')).publicLlmMainOperation(command, { root, run, ambient, log, platform });
       } catch { throw new IsolatedError('Public LLM operation refused/HOLD; no overlay fallback, automatic recovery or secret rotation. Inspect only public operation state.'); }
     }
   }
-  safe(command !== 'up' || profile !== undefined || flags.includes('--isolated'), 'First up requires --isolated: NEW accounts and databases on port 8081; no copy or migration of existing data.');
+  safe(!flags.includes('--ack-history-summary-v3-to-v4'), 'History migration requires an existing public LLM binding; no base/legacy fallback.');
+    safe(command !== 'up' || profile !== undefined || flags.includes('--isolated'), 'First up requires --isolated: NEW accounts and databases on port 8081; no copy or migration of existing data.');
   const dir = join(root, STATE), lockPath = join(dir, '.operation.lock');
   let options = { root, env: dockerEnvironment(ambient) };
   if (!profile && command !== 'up') {

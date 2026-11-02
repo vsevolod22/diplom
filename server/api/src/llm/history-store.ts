@@ -5,8 +5,18 @@ import Database from 'better-sqlite3';
 import { HttpException } from '@nestjs/common';
 import { HISTORY, bytes, hashValue, historyCapacity, historyConflict, historyUnavailable, isId, historyProjection, validateHead,
   type Decision, type HistoryHead, type Pending, type Turn, type ChatReply } from './history-contract.js';
+import type { SummaryValidationPolicy } from './provider-runtime-contract.js';
+import type { ReportContext } from './report-context.js';
+import { SUMMARY_STORAGE, decodeSummaryRecord, summaryRecordHash, summaryRecordMatches, validateStoredSummary,
+  type SummaryRow } from './summary-record.js';
+import type { SummaryResponse } from './summary-result-cache.js';
 
 const APPLICATION = 1145655602;
+export const HISTORY_SCHEMA_VERSION = 4;
+const summarySchema = `CREATE TABLE llm_summary(
+  scope TEXT PRIMARY KEY CHECK(length(scope)=64),
+  content TEXT NOT NULL CHECK(length(CAST(content AS BLOB))<=${SUMMARY_STORAGE.entryBytes}),
+  content_hash TEXT NOT NULL CHECK(length(content_hash)=64)) STRICT;`;
 type Row = { epoch: string; revision: number; content: string; content_hash: string };
 // One bounded head per transaction; DELETE journal's entire source DB is <=8MiB,
 // so even a full rollback journal plus record headers fits the 16MiB sidecar ceiling.
@@ -28,7 +38,7 @@ export class HistoryStore {
     this.db = new Database(this.path, { timeout: HISTORY.busyMs, fileMustExist: true });
     try {
       const application = this.db.pragma('application_id', { simple: true }), version = this.db.pragma('user_version', { simple: true });
-      if (initialize ? application !== 0 || version !== 0 : application !== APPLICATION || version !== 3) return historyUnavailable();
+      if (initialize ? application !== 0 || version !== 0 : application !== APPLICATION || version !== 3 && version !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
       this.db.pragma('page_size = 4096');
       if (this.db.pragma('page_size', { simple: true }) !== 4096) return historyUnavailable();
       this.db.pragma('journal_mode = DELETE'); this.db.pragma('synchronous = FULL'); this.db.pragma('journal_size_limit = 0');
@@ -41,7 +51,8 @@ export class HistoryStore {
           content TEXT NOT NULL CHECK(length(CAST(content AS BLOB))<=524288),content_hash TEXT NOT NULL) STRICT;
         CREATE TABLE history_completion_space(scope TEXT PRIMARY KEY REFERENCES history_head(scope),
           padding BLOB NOT NULL CHECK(length(padding)=102400)) STRICT;
-        PRAGMA application_id=${APPLICATION}; PRAGMA user_version=3;
+        ${summarySchema}
+        PRAGMA application_id=${APPLICATION}; PRAGMA user_version=${HISTORY_SCHEMA_VERSION};
       `)).immediate();
       const metadata = this.db.prepare('SELECT incarnation FROM history_meta WHERE id=1').get() as { incarnation: string } | undefined;
       if (!metadata || !isId(metadata.incarnation) || this.db.pragma('quick_check', { simple: true }) !== 'ok') return historyUnavailable();
@@ -51,6 +62,8 @@ export class HistoryStore {
             const spaces = (this.db.prepare('SELECT count(*) AS n FROM history_completion_space').get() as { n: number }).n;
             const pending = (this.db.prepare("SELECT count(*) AS n FROM history_head WHERE json_extract(content,'$.pending') IS NOT NULL").get() as { n: number }).n;
             if (spaces !== pending) return historyUnavailable();
+      if (this.schemaVersion() === HISTORY_SCHEMA_VERSION)
+        for (const row of this.db.prepare('SELECT scope,content,content_hash FROM llm_summary').all() as SummaryRow[]) decodeSummaryRecord(row);
     } catch (error) { this.db.close(); if (error instanceof HttpException) throw error; return historyUnavailable(); }
   }
   close() { this.db.close(); }
@@ -69,21 +82,98 @@ export class HistoryStore {
     const fs = statfsSync(dirname(this.path), { bigint: true });
     if (fs.bavail * fs.bsize < BigInt(HISTORY.diskHeadroom)) return historyUnavailable();
   }
+  private schemaVersion(): number {
+    const version = this.db.pragma('user_version', { simple: true });
+    if (this.db.pragma('application_id', { simple: true }) !== APPLICATION || version !== 3 && version !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
+    return version as number;
+  }
+  private summarySafety() {
+    if (this.schemaVersion() !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
+    const totals = this.db.prepare('SELECT count(*) AS entries,coalesce(sum(length(CAST(content AS BLOB))),0) AS bytes FROM llm_summary')
+      .get() as { entries: number; bytes: number };
+    if (!Number.isSafeInteger(totals.entries) || !Number.isSafeInteger(totals.bytes) ||
+        totals.entries > SUMMARY_STORAGE.entries || totals.bytes > SUMMARY_STORAGE.bytes) return historyCapacity();
+    return totals;
+  }
   private safety() {
     this.fileSafety();
+    if (this.schemaVersion() === HISTORY_SCHEMA_VERSION) this.summarySafety();
     const pages = this.db.pragma('page_count', { simple: true }) as number;
     const heads = (this.db.prepare('SELECT count(*) AS n FROM history_head').get() as { n: number }).n;
     if (!Number.isSafeInteger(pages) || pages * 4096 > HISTORY.dbBytes || heads > HISTORY.heads) return historyCapacity();
     if (this.incarnation && (this.db.prepare('SELECT incarnation FROM history_meta WHERE id=1').get() as { incarnation: string } | undefined)?.incarnation !== this.incarnation) return historyUnavailable();
   }
-  private transaction<T>(action: () => T): T {
+  private transaction<T>(action: () => T, mode: 'commit' | 'rollback' = 'commit'): T {
+    const rolledBack = Symbol('rollback-only');
+    let result!: T;
     try {
-      return this.db.transaction(() => { this.safety(); const result = action(); this.safety(); return result; }).immediate();
+      return this.db.transaction(() => {
+        this.safety(); result = action(); this.safety();
+        if (mode === 'rollback') throw rolledBack;
+        return result;
+      }).immediate();
     } catch (error) {
+      // The driver must finish rollback before this sentinel can mean success.
+      if (error === rolledBack) return result;
       if (error instanceof HttpException) throw error;
       if (error instanceof Error && 'code' in error && error.code === 'SQLITE_FULL') return historyCapacity();
       return historyUnavailable();
     }
+  }
+  // Explicit operator-only v3 -> v4 upgrade. No history row, pending reservation,
+  // epoch/revision or incarnation is rewritten. DDL and version commit together.
+  migrateSummarySchema(): void {
+    this.transaction(() => {
+      if (this.schemaVersion() === HISTORY_SCHEMA_VERSION) { this.summarySafety(); return; }
+      this.db.exec(summarySchema);
+      this.db.pragma(`user_version = ${HISTORY_SCHEMA_VERSION}`);
+      this.summarySafety();
+    });
+  }
+  requireSummarySchema(): void { this.transaction(() => { this.summarySafety(); }); }
+  private summaryCapacity(scope: string, size: number) {
+    const totals = this.summarySafety();
+    const old = this.db.prepare('SELECT scope,content,content_hash FROM llm_summary WHERE scope=?').get(scope) as SummaryRow | undefined;
+    if (old) decodeSummaryRecord(old);
+    if (size > SUMMARY_STORAGE.entryBytes || !old && totals.entries >= SUMMARY_STORAGE.entries ||
+        totals.bytes - (old ? Buffer.byteLength(old.content) : 0) + size > SUMMARY_STORAGE.bytes) return historyCapacity();
+  }
+  private upsertSummary(scope: string, content: string): void {
+    this.db.prepare(`INSERT INTO llm_summary(scope,content,content_hash) VALUES(?,?,?)
+      ON CONFLICT(scope) DO UPDATE SET content=excluded.content,content_hash=excluded.content_hash`)
+      .run(scope, content, summaryRecordHash(scope, content));
+  }
+  // Exercise the real main-DB allocation, including row/index/overflow pages,
+  // while chat completion padding remains allocated. The opaque probe MUST roll
+  // back, restoring any existing summary. This is not a reservation: concurrent
+  // history writes can still fill the DB before the final commit.
+  assertSummaryWritable(owner: string, scanId: string): void {
+    this.transaction(() => {
+      const scope = this.key(owner, scanId);
+      this.summaryCapacity(scope, SUMMARY_STORAGE.entryBytes);
+      this.upsertSummary(scope, ' '.repeat(SUMMARY_STORAGE.entryBytes));
+    }, 'rollback');
+  }
+  readSummary(owner: string, report: ReportContext, policy: SummaryValidationPolicy): SummaryResponse | undefined {
+    return this.transaction(() => {
+      this.summarySafety();
+      const scope = this.key(owner, report.scanId);
+      const row = this.db.prepare('SELECT scope,content,content_hash FROM llm_summary WHERE scope=?').get(scope) as SummaryRow | undefined;
+      if (!row) return undefined;
+      const record = decodeSummaryRecord(row);
+      if (!summaryRecordMatches(record, report, policy)) return undefined;
+      return validateStoredSummary(record.value, report, policy);
+    });
+  }
+  writeSummary(owner: string, report: ReportContext, policy: SummaryValidationPolicy, value: unknown): SummaryResponse {
+    const validated = validateStoredSummary(value, report, policy);
+    const scope = this.key(owner, report.scanId);
+    const content = JSON.stringify({ version: SUMMARY_STORAGE.version, policyVersion: policy.version, value: validated });
+    return this.transaction(() => {
+      this.summaryCapacity(scope, Buffer.byteLength(content));
+      this.upsertSummary(scope, content);
+      return validated;
+    });
   }
   private key(owner: string, scanId: string) {
     if (!/^[a-f0-9]{32}$/.test(owner) || !isId(scanId)) return historyUnavailable();

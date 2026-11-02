@@ -2,16 +2,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, lstatSync, openSync, realpathSync, statfsSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
-import { DAY, integer, quotaExceeded, quotaUnavailable, type QuotaAdmission, type AdmissionSignal, type QuotaPolicy, type UsageObservation, type Vector } from './quota-policy.js';
+import { PUBLIC_FREE_OUTPUT_TOKENS } from './policy.js';
+import { checkedOpenAiQuotaContext, checkedOpenAiQuotaUsage, type OpenAiQuotaContext } from './openai-accounting.js';
+import type { OpenAiUsage } from './openai-usage.js';
+import { DAY, checkedQuotaMonetaryPolicy, integer, quotaExceeded, quotaUnavailable, type QuotaAdmission, type AdmissionSignal, type LimitVector, type MonetaryLimit, type QuotaPolicy, type UsageObservation, type Vector } from './quota-policy.js';
 
 const APPLICATION = 1145655601;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
 export type QuotaBindings = { subject: string; scanId: string; reportVersion: string; policyVersion: string; requestHash: string };
 type Row = { id: string; state: string; window: number; expires: number; input: number; output: number; cost: number;
-  reserve_input: number; reserve_output: number; reserve_cost: number; receipt: string | null };
-export type ScopeUsage = { limits: Vector; used: Vector; held: Vector; carried: Vector; remaining: Vector; warning: boolean; exhausted: boolean };
-export type QuotaSnapshot = { admission: QuotaAdmission; window: { start: number; end: number }; user: ScopeUsage; scan: ScopeUsage;
+  reserve_input: number; reserve_output: number; reserve_cost: number; receipt: string | null;
+  user_key: string; scan_key: string; report_hash: string; policy_hash: string; request_hash: string; quota_policy: string };
+export type ScopeUsage = { limits: LimitVector; used: Vector; held: Vector; carried: Vector; remaining: LimitVector; warning: boolean; exhausted: boolean };
+export type QuotaSnapshot = { admission: QuotaAdmission; monetaryLimit?: MonetaryLimit; window: { start: number; end: number }; user: ScopeUsage; scan: ScopeUsage;
   reason: 'ready' | 'warning' | 'exhausted' | 'policy_fault';
   signals: Array<{ scope: 'user' | 'scan'; dimension: 'input' | 'output' | 'costMicros' | 'all'; reason: 'warning' | 'exhausted' | 'policy_fault' }> };
 
@@ -21,6 +25,7 @@ export class QuotaLedger {
   private readonly db: Database.Database;
   private readonly path: string;
   constructor(path: string, readonly policy: QuotaPolicy, private readonly clock: () => number = Date.now, initialize = false) {
+    checkedQuotaMonetaryPolicy(policy);
     this.path = resolve(path);
     if (basename(this.path) !== 'llm-usage.sqlite' || realpathSync(dirname(this.path)) !== dirname(this.path)) throw quotaUnavailable();
     if (!existsSync(this.path)) {
@@ -114,7 +119,7 @@ export class QuotaLedger {
       throw quotaUnavailable();
     }
   }
-  private scope(key: 'user_key' | 'scan_key', value: string, window: number, limits: Vector): ScopeUsage {
+  private scope(key: 'user_key' | 'scan_key', value: string, window: number, limits: LimitVector): ScopeUsage {
     const aggregate = (condition: string): Vector => {
       const row = this.db.prepare(`SELECT coalesce(sum(input),0) AS input, coalesce(sum(output),0) AS output,
         coalesce(sum(cost),0) AS costMicros FROM quota_attempt WHERE ${key}=? AND ${condition}`).get(value, window) as Vector;
@@ -126,27 +131,43 @@ export class QuotaLedger {
     const held = aggregate("window=? AND state IN ('reserved','dispatched','fault')");
     const carried = aggregate("window<? AND state IN ('reserved','dispatched','fault')");
     const total = (dimension: keyof Vector) => integer(used[dimension] + held[dimension] + carried[dimension], Number.MAX_SAFE_INTEGER);
-    const remaining = { input: Math.max(0, limits.input - total('input')), output: Math.max(0, limits.output - total('output')), costMicros: Math.max(0, limits.costMicros - total('costMicros')) };
+    const remaining = { input: Math.max(0, limits.input - total('input')), output: Math.max(0, limits.output - total('output')),
+      costMicros: limits.costMicros === null ? null : Math.max(0, limits.costMicros - total('costMicros')) };
     return { limits, used, held, carried, remaining,
-      warning: (['input', 'output'] as const).some(d => limits[d] > 0 && total(d) >= limits[d] * this.policy.warningPercent / 100),
-      exhausted: remaining.input === 0 || remaining.output === 0 || total('costMicros') > limits.costMicros || limits.costMicros > 0 && remaining.costMicros === 0 };
+      warning: (['input', 'output', 'costMicros'] as const).some(d => {
+        const cap = limits[d];
+        return cap !== null && cap > 0 && total(d) >= cap * this.policy.warningPercent / 100;
+      }),
+      exhausted: remaining.input === 0 || remaining.output === 0 || limits.costMicros !== null &&
+        (total('costMicros') > limits.costMicros || limits.costMicros > 0 && remaining.costMicros === 0) };
   }
-  private admission(user: ScopeUsage, scan: ScopeUsage, userFault: boolean, scanFault: boolean, reserve?: Vector): QuotaAdmission {
+  private validateReserve(reserve: Vector, paid = false): void {
+    checkedQuotaMonetaryPolicy(this.policy);
+    // The uncapped mode is an opt-in paid seam, never a widening of freeOnly.
+    if (!paid && this.policy.monetaryLimit === 'uncapped') throw quotaUnavailable();
+    integer(reserve.input, this.policy.requestInput);
+    integer(reserve.output, paid ? 4096 : PUBLIC_FREE_OUTPUT_TOKENS);
+    integer(reserve.costMicros, paid ? this.policy.observationCostMicros : 0);
+    if (reserve.input === 0 || reserve.output === 0 || paid && reserve.costMicros === 0) throw quotaUnavailable();
+  }
+  private admission(user: ScopeUsage, scan: ScopeUsage, userFault: boolean, scanFault: boolean, reserve?: Vector, paid = false): QuotaAdmission {
       if (!reserve) return { status: 'unavailable' };
-      integer(reserve.input, this.policy.requestInput); integer(reserve.output, 2048); integer(reserve.costMicros, 0);
-      if (reserve.input === 0 || reserve.output === 0) throw quotaUnavailable();
+      // Storage admits the largest supported envelope; preparation/runtime still
+      // enforce the narrower legacy profile ceiling before producing a vector.
+      this.validateReserve(reserve, paid);
       const signals: AdmissionSignal[] = [];
       for (const [name, scope, fault] of [['user', user, userFault], ['scan', scan, scanFault]] as const) {
         if (fault) signals.push({ scope: name, dimension: 'all', reason: 'policy_fault' });
         for (const dimension of ['input', 'output', 'costMicros'] as const) {
-          if (reserve[dimension] > scope.remaining[dimension]) signals.push({ scope: name, dimension, reason: 'insufficient',
-            required: reserve[dimension], remaining: scope.remaining[dimension] });
+          const remaining = scope.remaining[dimension];
+          if (remaining !== null && reserve[dimension] > remaining) signals.push({ scope: name, dimension, reason: 'insufficient',
+            required: reserve[dimension], remaining });
         }
       }
       return Object.freeze({ status: userFault || scanFault ? 'policy_fault' : signals.length ? 'insufficient' : 'fits',
         reserve: Object.freeze({ ...reserve }), signals: Object.freeze(signals.map(s => Object.freeze(s))) });
     }
-    private snapshotAt(subject: string, scanId: string, time: number, reserve?: Vector): QuotaSnapshot {
+    private snapshotAt(subject: string, scanId: string, time: number, reserve?: Vector, paid = false): QuotaSnapshot {
     const window = Math.floor(time / DAY) * DAY;
     const userKey = hash(subject), scanKey = hash(JSON.stringify([subject, scanId]));
     const user = this.scope('user_key', userKey, window, this.policy.user), scan = this.scope('scan_key', scanKey, window, this.policy.scan);
@@ -157,13 +178,17 @@ export class QuotaLedger {
       if (fault) signals.push({ scope: name, dimension: 'all', reason: 'policy_fault' });
       for (const dimension of ['input', 'output', 'costMicros'] as const) {
         const total = scope.used[dimension] + scope.held[dimension] + scope.carried[dimension];
-        const exhausted = scope.remaining[dimension] === 0 && (dimension !== 'costMicros' || scope.limits[dimension] > 0 || total > 0);
+        const cap = scope.limits[dimension];
+        if (cap === null) continue;
+        const exhausted = scope.remaining[dimension] === 0 && (dimension !== 'costMicros' || cap > 0 || total > 0);
         if (exhausted) signals.push({ scope: name, dimension, reason: 'exhausted' });
-        else if (dimension !== 'costMicros' && scope.limits[dimension] > 0 && total >= scope.limits[dimension] * this.policy.warningPercent / 100)
+        else if (cap > 0 && total >= cap * this.policy.warningPercent / 100)
           signals.push({ scope: name, dimension, reason: 'warning' });
       }
     }
-    return { admission: this.admission(user, scan, !!userFault, !!scanFault, reserve), window: { start: window, end: window + DAY }, user, scan, signals,
+    return { admission: this.admission(user, scan, !!userFault, !!scanFault, reserve, paid),
+      ...(this.policy.monetaryLimit !== undefined ? { monetaryLimit: this.policy.monetaryLimit } : {}),
+      window: { start: window, end: window + DAY }, user, scan, signals,
       reason: userFault || scanFault ? 'policy_fault' : user.exhausted || scan.exhausted ? 'exhausted' : user.warning || scan.warning ? 'warning' : 'ready' };
   }
   snapshot(subject: string, scanId: string, reserve?: Vector): QuotaSnapshot {
@@ -171,37 +196,138 @@ export class QuotaLedger {
     catch { throw quotaUnavailable(); }
   }
   reserve(binding: QuotaBindings, reserve: Vector): string {
+    return this.reserveAttempt(binding, reserve);
+  }
+  private reserveAttempt(binding: QuotaBindings, reserve: Vector, context?: OpenAiQuotaContext): string {
     return this.write(() => {
       // The authoritative clock is intentionally sampled AFTER BEGIN IMMEDIATE.
       const time = this.time();
       if (!binding.subject || binding.subject.length > 200 || !binding.scanId || binding.scanId.length > 200 ||
           ![binding.reportVersion, binding.policyVersion, binding.requestHash].every(v => /^[a-f0-9]{64}$/.test(v))) throw quotaUnavailable();
-      integer(reserve.input, this.policy.requestInput); integer(reserve.output, 2048); integer(reserve.costMicros, 0);
-      if (reserve.input === 0 || reserve.output === 0) throw quotaUnavailable();
+      this.validateReserve(reserve, context !== undefined);
       this.db.prepare(`DELETE FROM quota_attempt WHERE id IN (SELECT id FROM quota_attempt
         WHERE state IN ('settled','released') AND window+?<? LIMIT ?)`)
         .run(DAY * (1 + this.policy.replayDays), time, this.policy.cleanupBatch);
-      const view = this.snapshotAt(binding.subject, binding.scanId, time, reserve);
+      const view = this.snapshotAt(binding.subject, binding.scanId, time, reserve, context !== undefined);
       if (view.admission.status !== 'fits') throw quotaExceeded(view.admission);
       const id = randomUUID();
       this.db.prepare(`INSERT INTO quota_attempt VALUES(?,?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?,NULL)`).run(
         id, hash(binding.subject), hash(JSON.stringify([binding.subject, binding.scanId])), binding.reportVersion, binding.policyVersion,
-        binding.requestHash, JSON.stringify(this.policy), view.window.start, time + this.policy.receiptMs,
+        binding.requestHash, context ? this.openAiPolicySnapshot(context) : JSON.stringify(this.policy), view.window.start, time + this.policy.receiptMs,
         reserve.input, reserve.output, reserve.costMicros, reserve.input, reserve.output, reserve.costMicros);
       this.db.prepare('UPDATE quota_meta SET clock=? WHERE id=1').run(time);
       return id;
     });
   }
+  // Schema v1 already stores the original policy as JSON. This is an additive
+  // payload contract, not a DDL migration. Never run old free-only writers against
+  // paid rows: they cannot enforce the separate receipt semantics below.
+  private openAiPolicySnapshot(context: OpenAiQuotaContext): string {
+    const { quota } = checkedOpenAiQuotaContext(context);
+    return JSON.stringify({ ...quota, paidAccounting: context.accounting });
+  }
+  private currentOpenAiPolicy(context: OpenAiQuotaContext): void {
+    const { quota } = checkedOpenAiQuotaContext(context);
+    if (JSON.stringify(quota) !== JSON.stringify(this.policy)) throw quotaUnavailable();
+  }
+  private openAiRow(id: string, context: OpenAiQuotaContext): Row | undefined {
+    const snapshot = this.openAiPolicySnapshot(context), binding = context.binding;
+    const row = this.db.prepare('SELECT * FROM quota_attempt WHERE id=?').get(id) as Row | undefined;
+    if (!row || row.quota_policy !== snapshot || row.user_key !== hash(binding.subject) ||
+        row.scan_key !== hash(JSON.stringify([binding.subject, binding.scanId])) || row.report_hash !== binding.reportVersion ||
+        row.policy_hash !== binding.policyVersion || row.request_hash !== binding.requestHash ||
+        row.reserve_input !== context.reserve.input || row.reserve_output !== context.reserve.output ||
+        row.reserve_cost !== context.reserve.costMicros) return undefined;
+    return row;
+  }
+  snapshotOpenAi(context: OpenAiQuotaContext): QuotaSnapshot {
+    this.currentOpenAiPolicy(context);
+    try {
+      return this.db.transaction(() => {
+        this.safety();
+        return this.snapshotAt(context.binding.subject, context.binding.scanId, this.time(), context.reserve, true);
+      })();
+    } catch { throw quotaUnavailable(); }
+  }
+  reserveOpenAi(context: OpenAiQuotaContext): string {
+    this.currentOpenAiPolicy(context);
+    return this.reserveAttempt(context.binding, context.reserve, context);
+  }
+  assertOpenAiReserved(id: string, context: OpenAiQuotaContext): boolean {
+    this.currentOpenAiPolicy(context);
+    try {
+      return this.db.transaction(() => {
+        this.safety();
+        const row = this.openAiRow(id, context);
+        return !!row && row.state === 'reserved' && row.expires >= this.time();
+      })();
+    } catch { throw quotaUnavailable(); }
+  }
+  dispatchOpenAi(id: string, context: OpenAiQuotaContext): boolean {
+    this.currentOpenAiPolicy(context);
+    return this.write(() => {
+      const time = this.time(), row = this.openAiRow(id, context);
+      if (!row || row.state !== 'reserved' || row.expires < time) return false;
+      const dispatched = this.db.prepare("UPDATE quota_attempt SET state='dispatched' WHERE id=? AND state='reserved'").run(id).changes === 1;
+      this.db.prepare('UPDATE quota_meta SET clock=? WHERE id=1').run(time);
+      return dispatched;
+    });
+  }
+  releaseOpenAi(id: string, context: OpenAiQuotaContext): boolean {
+    return this.write(() => this.openAiRow(id, context) !== undefined && this.releaseReserved(id));
+  }
+  observeOpenAi(id: string, context: OpenAiQuotaContext, observation: OpenAiUsage): boolean {
+    checkedOpenAiQuotaUsage(context, observation);
+    return this.write(() => {
+      const row = this.openAiRow(id, context);
+      if (!row) return false;
+      const receipt = hash(JSON.stringify([context.accounting, observation.source, observation.normal,
+        observation.input ?? null, observation.output ?? null, observation.costMicros ?? null]));
+      if (row.state === 'settled' || row.state === 'fault') return row.state === 'settled' && row.receipt === receipt;
+      const time = this.time();
+      if (row.state !== 'dispatched' || time > row.expires) return false;
+      // Bounds and price provenance belong to the reservation, NOT the currently
+      // selected provider/policy. Known overages remain liabilities even above a
+      // configured observation ceiling; only settlement is disallowed then.
+      const { quota } = checkedOpenAiQuotaContext(context);
+      const input = observation.input === undefined ? undefined : integer(observation.input, 1_048_576);
+      const output = observation.output === undefined ? undefined : integer(observation.output, 1_048_576);
+      const cost = observation.costMicros === undefined ? undefined : integer(observation.costMicros, Number.MAX_SAFE_INTEGER);
+      const normal = observation.normal && input !== undefined && output !== undefined && cost !== undefined &&
+        input <= row.reserve_input && output <= row.reserve_output && cost <= row.reserve_cost &&
+        input <= quota.observationTokens && output <= quota.observationTokens && cost <= quota.observationCostMicros;
+      if (!normal && input === undefined && output === undefined && cost === undefined) return false;
+      this.db.prepare(`UPDATE quota_attempt SET state=?,input=?,output=?,cost=?,receipt=? WHERE id=? AND state='dispatched'`).run(
+        normal ? 'settled' : 'fault', normal ? input : Math.max(row.reserve_input, input ?? 0),
+        normal ? output : Math.max(row.reserve_output, output ?? 0), normal ? cost : Math.max(row.reserve_cost, cost ?? 0), receipt, id);
+      this.db.prepare('UPDATE quota_meta SET clock=? WHERE id=1').run(time);
+      return normal;
+    });
+  }
+  private freeRow(row: Row): boolean {
+    return row.reserve_cost === 0 && !Object.hasOwn(JSON.parse(row.quota_policy), 'paidAccounting');
+  }
   dispatch(id: string): boolean {
-    return this.write(() => this.db.prepare("UPDATE quota_attempt SET state='dispatched' WHERE id=? AND state='reserved' AND expires>=?").run(id, this.time()).changes === 1);
+    return this.write(() => {
+      const row = this.db.prepare('SELECT * FROM quota_attempt WHERE id=?').get(id) as Row | undefined;
+      if (!row || !this.freeRow(row)) return false;
+      return this.db.prepare("UPDATE quota_attempt SET state='dispatched' WHERE id=? AND state='reserved' AND expires>=?").run(id, this.time()).changes === 1;
+    });
   }
   release(id: string): boolean {
-    return this.write(() => this.db.prepare("UPDATE quota_attempt SET state='released',input=0,output=0,cost=0 WHERE id=? AND state='reserved'").run(id).changes === 1);
+    return this.write(() => {
+      const row = this.db.prepare('SELECT * FROM quota_attempt WHERE id=?').get(id) as Row | undefined;
+      if (!row || !this.freeRow(row)) return false;
+      return this.releaseReserved(id);
+    });
+  }
+  private releaseReserved(id: string): boolean {
+    return this.db.prepare("UPDATE quota_attempt SET state='released',input=0,output=0,cost=0 WHERE id=? AND state='reserved'").run(id).changes === 1;
   }
   observe(id: string, observation: UsageObservation): boolean {
     return this.write(() => {
       const row = this.db.prepare('SELECT * FROM quota_attempt WHERE id=?').get(id) as Row | undefined;
-      if (!row) return false;
+      if (!row || !this.freeRow(row)) return false;
       const receipt = hash(JSON.stringify([observation.normal, observation.input ?? null, observation.output ?? null, observation.costMicros ?? null]));
       if (['settled', 'fault'].includes(row.state)) return row.receipt === receipt && row.state === 'settled';
       if (row.state !== 'dispatched' || this.time() > row.expires) return false;

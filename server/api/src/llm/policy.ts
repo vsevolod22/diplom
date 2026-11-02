@@ -72,3 +72,11 @@ export function disclosure(policy: LlmPolicy) {
     maxPrice: { prompt: policy.inputPricePerMillion, completion: policy.outputPricePerMillion, request: policy.requestPriceUsd },
     data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.' };
 }
+
+// Dependency exports retain the established public profile and output ceiling.
+export const PUBLIC_FREE_OUTPUT_TOKENS = CEILINGS.outputTokens;
+export function publicFreePolicy(policy: LlmPolicy | null | undefined): boolean {
+  return !!policy && policy.freeOnly && policy.model === PUBLIC_FREE_MODEL && policy.providers.length === 1 &&
+    policy.providers[0] === PUBLIC_FREE_PROVIDER && policy.region === 'global' && policy.retention === 'no-storage' &&
+    policy.budgetUsd === 0 && policy.inputPricePerMillion === 0 && policy.outputPricePerMillion === 0 && policy.requestPriceUsd === 0;
+}

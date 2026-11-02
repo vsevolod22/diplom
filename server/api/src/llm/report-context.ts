@@ -26,7 +26,8 @@ export type ReportContext = { scanId: string; digest: string; platform: string; 
   state: string; attempt: number; requestedChecks: Check[]; coverage: Record<Check, unknown>; findings: SafeFinding[];
   findingCount: number; findingCounts?: { byCheck: Record<string, number | null>; bySeverity: Record<string, number> }; profile?: typeof PUBLIC_IMAGE_PROFILE; identifierCounts?: { cve: number; debianTemp: number };
     contextSelection?: { totalFindings: number; selectedFindings: number; omittedFindings: number; strategy: string; selectedFindingIds: string[] };
-    checkedIsNotSafe: true; omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' };
+    checkedIsNotSafe: true; omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' |
+          'All free text, URLs, credentials, env and raw output excluded; package identities and versions are sanitized scanner facts' };
 const invalid = (): never => { throw new ConflictException({ errorCode: 'LLM_REPORT_UNAVAILABLE' }); };
 const overflow = (): never => { throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' }); };
 const record = (v: unknown): Record<string, unknown> => object(v) ? v : invalid();

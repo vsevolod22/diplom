@@ -55,10 +55,11 @@ export function byteFile(path, privateMode = true, { maxBytes = 256 * 1024 ** 2,
 // Container API/runtime and web sources are separately fenced in source.manifest;
 // Node/npm dependencies remain bound by the existing manifests and lockfile.
 export const PUBLIC_LLM_EXECUTION_MODULES = Object.freeze([
-  'scripts/local-stand.mjs', 'scripts/public-cve-bridge-capacity.mjs',
+  'scripts/local-stand.mjs', 'scripts/public-current-backup-transfer.mjs', 'scripts/public-cve-bridge-capacity.mjs',
   'scripts/public-cve-bridge-runtime.mjs', 'scripts/public-cve-bridge.mjs',
   'scripts/public-cve-provision.mjs', 'scripts/public-image-stand-profile.mjs',
   'scripts/public-image-stand.mjs', 'scripts/public-llm-build-continuation.mjs',
+  'scripts/public-llm-deployment-catalog.mjs',
   'scripts/public-llm-source-build.mjs', 'scripts/public-llm-stand.mjs', 'scripts/public-llm-initialize-continuation.mjs', 'scripts/public-llm-rollout-completion.mjs',
   'scripts/public-refresh-cve-preservation.mjs', 'scripts/refresh-local-cve.mjs',
   'scripts/refresh-public-cve.mjs', 'scripts/setup-local-cve.mjs',

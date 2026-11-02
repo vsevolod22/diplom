@@ -26,3 +26,32 @@ export function selectSummaryReport(report: ReportContext, policy: LlmPolicy, in
   }
   throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
 }
+
+// Separate cap for the new prepared-summary/storage contract, not legacy selection.
+export const SUMMARY_OPTIONAL_FINDINGS = 8;
+export function selectPreparedSummary<T extends { reserve: { input: number } }>(report: ReportContext, maxFindings: number,
+  inputCeiling: number, prepare: (report: ReportContext) => T): { report: ReportContext; prepared: T } {
+  if (!report.profile) {
+    try {
+      const prepared = prepare(report);
+      if (report.findings.length <= maxFindings && prepared.reserve.input <= inputCeiling) return { report, prepared };
+    } catch { /* Legacy reports require all evidence. */ }
+    throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
+  }
+  const required = report.findings.filter(mandatoryFinding);
+  const optional = report.findings.filter(f => !mandatoryFinding(f)).sort(compareFindings);
+  // This helper has a separate limit; the established selector above retains 32.
+  for (let n = Math.min(SUMMARY_OPTIONAL_FINDINGS, optional.length, maxFindings - required.length); n >= 0; n--) {
+    const findings = [...required, ...optional.slice(0, n)].sort((a, b) => a.findingId.localeCompare(b.findingId));
+    if (!findings.length) break;
+    const selected: ReportContext = { ...report, findings, contextSelection: {
+      totalFindings: report.findingCount, selectedFindings: findings.length, omittedFindings: report.findingCount - findings.length,
+      strategy: 'all-critical-and-unknown-then-severity', selectedFindingIds: findings.map(f => f.findingId),
+    } };
+    try {
+      const prepared = prepare(selected);
+      if (prepared.reserve.input <= inputCeiling) return { report: selected, prepared };
+    } catch { /* Drop optional findings only. */ }
+  }
+  throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
+}
