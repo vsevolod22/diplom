@@ -106,7 +106,7 @@ async function fixture(t) {
     const [kind,action] = args;
     if (kind==='context') return JSON.stringify('unix:///synthetic.sock');
     if (kind==='info') return JSON.stringify(intent.daemon);
-    if (action==='ls') return kind==='container'?containers.map(c=>c.Id).join('\n'):'';
+    if (action==='ls') return args.some(a=>a.startsWith('id='))?'':kind==='container'?containers.map(c=>c.Id).join('\n'):'';
     assert.equal(action,'inspect','Only read-only runtime calls allowed');
     if (kind==='container') return containers.map(wire).join('\n');
     if (kind==='image') {
@@ -115,8 +115,56 @@ async function fixture(t) {
     }
     return '[]';
   };
-  const prepare = () => module.namespace.prepareWebReconciliation({attempt,historicalIntent:hash(JSON.stringify(intent)),root,run,request:async path=>path==='/'?200:401,home:root});
-  return {root,audit,lock,guard,guardArchive,prepare,api:module.namespace,moves,calls,put,owner,failMove:()=>{failGuardMove=true;}};
+  const prepare = (branch='web') => module.namespace.prepareWebReconciliation({attempt,historicalIntent:hash(JSON.stringify(intent)),branch,root,run,request:async path=>path==='/'?200:401,home:root});
+  const configureFenced = () => {
+    for (const name of ['failure-fenceadmissions.json','stop-web-submission.json','compensation-web-start-submission.json','compensation-web-restored.json']) fs.unlinkSync(join(audit,name));
+    fs.mkdirSync(join(audit,'snapshots/fenced'),{recursive:true,mode:0o700});
+    const stoppedAt='2026-01-01T01:00:00Z', helperAt='2026-01-01T02:00:00Z';
+    const helper={id:'e'.repeat(64),image:apiOld.image,name:`${project}-llm-${attempt}-fenced`,status:'running',exit:0,network:'none',originalMountsReadOnly:true,policyValidated:true,startedAt:helperAt};
+    const prior=containers.map(c=>{
+      const role=c.Config.Labels['com.docker.compose.service'], e=epoch(c);
+      e[1]=old.find(v=>v.id===c.Id).startedAt;
+      if (['web','api','worker'].includes(role)) {
+        e[2]=stoppedAt; e[3]=0; e[5]=false; e[6]='exited';
+        c.State.StartedAt='2026-01-02T00:00:00Z'; c.State.FinishedAt=stoppedAt;
+      }
+      return {id:c.Id,image:c.Image,control:restoredModule.namespace.restoredControl(c),epoch:e};
+    });
+    const rows={
+      'fenced.json':{writers:['web','api','worker'],drain:{jobs:0,outbox:0,leases:0}},
+      'failure-snapshot.json':{code:'HELPER_CONTROL_CHANGED'},
+      'helper-fenced-submission.json':{name:helper.name,image:helper.image,purpose:'backup'},
+      'helper-fenced-created.json':{id:helper.id},'helper-fenced-start-submission.json':{id:helper.id},
+      'compensation-restore-authority.json':{version:1,nonce:attempt,operation:'retire-exact-ro-helper-and-start-same-old-writers',publishedConfigUnchanged:true,lockRetained:true,old:prior,helper,recoveryDigest:hash(JSON.stringify(recovery))},
+      'compensation-helper-stop-submission.json':{id:helper.id},
+      'compensation-helper-remove-submission.json':{id:helper.id,exit:0,originalMountsReadOnly:true},
+      'compensation-helper-retired.json':{id:helper.id,exit:0,removed:true},
+      'compensation-api-healthy.json':{id:apiOld.id,healthy:true},
+      'compensation-old-restored.json':{version:1,nonce:attempt,outcome:'old-writers-restored-lock-retained',web:200,auth:401,apiHealthy:true,startedSameOldIds:['worker','api','web'],helperRemoved:helper.id,gatewaysUnchanged:true,publishedConfigUnchanged:true,migration:false,databaseRestore:false,snapshotResumed:false,lockRetained:true},
+    };
+    for(const role of ['web','api','worker']) {
+      const c=containers.find(c=>c.Config.Labels['com.docker.compose.service']===role);
+      rows[`stop-${role}-submission.json`]={role,id:c.Id,image:c.Image};
+      rows[`stop-${role}-observation.json`]={role,dispatch:'exit-zero',acknowledgement:'id',stdoutBytes:65,deprecatedTimeWarning:false,sameControl:true,sameStart:true,exited:true,running:false,zeroPid:true,cleanWriterStop:true,exitCode:0};
+      rows[`stop-${role}-complete.json`]={id:c.Id,exit:0,startedAt:'2026-01-01T00:00:00Z',finishedAt:stoppedAt};
+      rows[`compensation-start-${role}-submission.json`]={id:c.Id,image:c.Image,operation:'start-same-old-id'};
+      rows[`compensation-started-${role}.json`]={id:c.Id,image:c.Image,epoch:epoch(c)};
+    }
+    const probe={id:'f'.repeat(64),image:apiOld.image,name:`${project}-llm-${'b'.repeat(32)}-fenced`};
+    Object.assign(rows,{
+      'probe-helper-create-submission.json':{version:1,purpose:'create-start-control-difference-no-real-stores',name:probe.name,image:probe.image,volumeMounts:0,bindMounts:0,network:'none',processDeadlineMs:30000},
+      'probe-helper-created.json':probe,'probe-helper-start-submission.json':{id:probe.id},'probe-helper-stop-submission.json':{id:probe.id},
+      'probe-helper-control-difference.json':{version:1,id:probe.id,image:probe.image,adapterControlEqual:false,changedFields:['HostConfig.OomKillDisable'],createdMounts:[],startedMounts:[],memorySwappiness:{before:null,after:null},oomKillDisable:{before:false,after:null},realStoreMounts:0,network:'none'},
+      'probe-helper-remove-submission.json':{version:1,...probe,daemon:recovery.daemon,exitCode:137,oomKilled:false,restartCount:0,network:'none',realStoreMounts:0,cleanExit:false,action:'remove-exited-owned-disposable-no-force',submittedAt:'2026-01-03T00:00:00Z'},
+      'probe-helper-retired.json':{version:1,id:probe.id,removed:true,exitCode:137,cleanExit:false,originalEvidencePreserved:true,retiredAt:'2026-01-03T00:00:01Z'},
+    });
+    for(const [name,value] of Object.entries(rows)) {
+      put(join(audit,name),value);
+      // Equal filesystem timestamps satisfy nondecreasing append order without sleeps.
+      fs.utimesSync(join(audit,name),1767225600,1767225600);
+    }
+  };
+  return {root,audit,lock,guard,guardArchive,prepare,configureFenced,api:module.namespace,moves,calls,put,owner,failMove:()=>{failGuardMove=true;}};
 }
 
 const binding = p => ({review:p.summary.review,source:p.summary.source});
@@ -158,4 +206,35 @@ test('failure after operation-lock move leaves recognized HOLD and valid history
   assert.ok(!fs.existsSync(f.lock)&&!fs.existsSync(f.guardArchive));
   const history=f.api.validateWebReconcileHistory(f.root); history.verify(); assert.equal(history.count,1);
   assert.equal(f.moves.at(-1)[0],f.guard);
+});
+
+test('fenced-writer restoration rejects exports/later stages then completes real history with probe evidence',async t=>{
+  const f=await fixture(t); f.configureFenced();
+  const exportPath=join(f.audit,'snapshots/fenced/export.json');
+  f.put(exportPath,{synthetic:true});
+  await assert.rejects(f.prepare('fenced-writers'),/WEB_RECONCILE_HOST_SNAPSHOT_NOT_EMPTY/);
+  fs.unlinkSync(exportPath);
+  const later=join(f.audit,'candidate-api-start-submission.json');
+  f.put(later,{});
+  await assert.rejects(f.prepare('fenced-writers'),/WEB_RECONCILE_FENCED_UNEXPECTED_STAGE/);
+  fs.unlinkSync(later);
+  assert.deepEqual(f.calls,[]); assert.deepEqual(f.moves,[]);
+  const originals=fs.readdirSync(f.audit).filter(n=>n.endsWith('.json')).map(n=>[n,fs.readFileSync(join(f.audit,n))]);
+  const p=await f.prepare('fenced-writers');
+  assert.equal(p.summary.branch,'fenced-writers');
+  assert.equal(p.summary.hostSnapshotCompleted,false);
+  assert.equal(p.summary.helperMayHaveReadStores,true);
+  const result=await p.apply(binding(p));
+  assert.equal(result.outcome,'WEB_ATTEMPT_RECONCILED');
+  for(const [name,bytes] of originals) assert.deepEqual(fs.readFileSync(join(f.audit,name)),bytes);
+  const receipt=JSON.parse(fs.readFileSync(join(f.audit,'complete.json')));
+  assert.equal(receipt.version,2); assert.equal(receipt.outcome,'old-restored');
+  assert.deepEqual(receipt.evidence,f.api.webReconcileEvidenceIndex(f.audit));
+  assert.ok(receipt.evidence.some(e=>e.path==='probe-helper-retired.json'));
+  assert.deepEqual(fs.readdirSync(join(f.audit,'snapshots/fenced')),[]);
+  const history=f.api.validateWebReconcileHistory(f.root); history.verify();
+  assert.equal(history.count,1); assert.equal(history.references.length,2);
+  assert.deepEqual(f.moves,[[f.lock,join(f.audit,'operation.lock')],[f.guard,f.guardArchive]]);
+  const guardIntent=JSON.parse(fs.readFileSync(join(f.guardArchive,'intent.json')));
+  assert.equal(guardIntent.command,'reconcile-fenced-writers-restored');
 });

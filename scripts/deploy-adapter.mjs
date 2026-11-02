@@ -606,7 +606,10 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       guard(p);const expected=[...p.peers.values()],rows=JSON.parse(await request(['container','inspect',helperId,...expected.map(c=>c.Id)],p.connection.options,'HELPER_BATCH_INSPECT_FAILED'));
       need(rows.length===expected.length+1&&new Set(rows.map(c=>c.Id)).size===rows.length,'HELPER_BATCH_CARDINALITY');
       const c=rows.find(c=>c.Id===helperId);need(c,'HELPER_MISSING');validateCurrentPublicLlmHelper(c,name,image,'backup',state);
-      const ctl=control(c);if(authority)need(equal(ctl,authority),'HELPER_CONTROL_CHANGED');else authority=ctl;
+      // Observed helper create/start transition: false -> null; strict policy above permits only these values.
+      need([null,false].includes(c.HostConfig.OomKillDisable),'HELPER_OOM_POLICY');
+      const ctl=control(c);ctl.HostConfig={...ctl.HostConfig,OomKillDisable:false};
+      if(authority)need(equal(ctl,authority),'HELPER_CONTROL_CHANGED');else authority=ctl;
       if(state==='running'){const e=[c.State.StartedAt,c.State.Pid,c.RestartCount];if(epoch)need(equal(e,epoch),'HELPER_EPOCH_CHANGED');else epoch=e;}
       if(state==='exited')need(c.State.ExitCode===0&&c.State.StartedAt===epoch[0],'HELPER_EXIT_INVALID');
       for(const previous of expected){const current=rows.find(c=>c.Id===previous.Id);need(current&&equal(control(current),control(previous))&&equal(processState(current),processState(previous)),'PEER_CHANGED_DURING_EXPORT');

@@ -59,7 +59,7 @@ function child(root, code, input) {
     cwd:join(root,'server/api'),env:{PATH:'/usr/bin:/bin'},input:JSON.stringify(input),encoding:'utf8',timeout:10000,maxBuffer:65536});
   assert.equal(result.error,undefined); assert.equal(result.status,0,'fixture constructor/helper failed: '+result.stderr); return result;
 }
-export async function adapterFixture(t, { failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null } = {}) {
+export async function adapterFixture(t, { failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null, helperTransition = null } = {}) {
   // Reuse metadata constructors only. Synthetic release files are not activated;
   // reset to the non-CVE profile before invoking any new adapter method.
   const f=fixture(t), root=f.root, home=temporary(t); sources(root);
@@ -82,7 +82,7 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
   for(const [name,cmd]of [['llm-egress',['python','-I','openrouter.py']],['openai-egress',[...OPENAI_DEPLOYMENT.gatewayCommand]]]){
     f.images[name]=clone(f.images.egress);f.images[name].Id='sha256:'+sha(name);f.images[name].RepoTags=[`${PROJECT}-${name}:local`];f.images[name].Config.Cmd=cmd;
   }
-  const allImages=new Map(Object.values(f.images).map(i=>[i.Id,clone(i)])), events=[],diagnostics=[];
+  const allImages=new Map(Object.values(f.images).map(i=>[i.Id,clone(i)])), events=[],diagnostics=[],helperTransitions=[];
   let generation=10, tick=0;
   const timestamp=()=>new Date(Date.UTC(2026,10,1,0,0,++tick)).toISOString();
   const materialize=(name,spec,image)=>{
@@ -160,7 +160,7 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
       c.State={Status:'created',Running:false,Pid:0,ExitCode:0,StartedAt:'0001-01-01T00:00:00Z'};c.NetworkSettings={Networks:{},Ports:{}};
       Object.assign(c.HostConfig,{Memory:1073741824,MemorySwap:1073741824,NanoCpus:1e9,PidsLimit:32,NetworkMode:'none',PortBindings:{},RestartPolicy:{Name:'no',MaximumRetryCount:0},Tmpfs:{'/backup':'rw,noexec,nosuid,uid=65532,gid=65532,size=512m'},Mounts:[['auth_accounts','/auth'],['scan_ledger','/data']].map(([name,target])=>({Type:'volume',Source:PROJECT+'_'+name,Target:target,ReadOnly:true,VolumeOptions:{NoCopy:true,DriverConfig:{}}}))});
       delete c.HostConfig.Ulimits;c.HostConfig.OomKillDisable=false;c.Mounts=c.HostConfig.Mounts.map(m=>({Type:'volume',Name:m.Source,Source:'/fixture/volumes/'+m.Source,Driver:'local',Destination:m.Target,RW:false,Propagation:'rprivate'}));
-      helpers.set(c.Id,{backup,phase:name.split('-').slice(-2).join('-'),program:args.at(-1)});f.containers.push(c);return c.Id+'\n';
+      helpers.set(c.Id,{backup,phase:name.split('-').slice(-2).join('-'),program:args.at(-1),created:clone(c)});f.containers.push(c);return c.Id+'\n';
     }
     if(args[0]==='container'){
       if(args[1]==='ls'){
@@ -171,6 +171,14 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
       if(args[1]==='start'){
         c.State={...c.State,Running:true,Status:'running',Pid:123,ExitCode:0,StartedAt:timestamp(),FinishedAt:'0001-01-01T00:00:00Z'};
         if(h){c.NetworkSettings.Networks={none:{}};c.HostConfig.OomKillDisable=false;
+          // a7 same-image evidence: the sole benign control delta is false -> null.
+          if(helperTransition)c.HostConfig.OomKillDisable=null;
+          if(helperTransition==='oom-true')c.HostConfig.OomKillDisable=true;
+          if(helperTransition==='readonly-drift')c.HostConfig.ReadonlyRootfs=false;
+          if(helperTransition==='mount-drift'){
+            c.HostConfig.Mounts[0].ReadOnly=false;c.Mounts[0].RW=true;
+          }
+          helperTransitions.push({created:h.created,running:clone(c)});
           assert.equal(h.program,PUBLIC_LLM_CURRENT_BACKUP_PROGRAM);
           const program=h.program.replaceAll('/auth/',join(data,'auth')+'/').replaceAll("'/auth'",JSON.stringify(join(data,'auth'))).replaceAll('/data/',join(data,'data')+'/').replaceAll('/backup',h.backup).replace("process.on('SIGTERM',()=>process.exit(0));",'').replace('setTimeout(()=>process.exit(73),300000);','');
           child(root,program,{});const phase=c.Name.match(/-(fenced|before-api|after-api)$/)?.[1];events.push('snapshot:'+phase);
@@ -223,7 +231,7 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
   const adapter=Object.fromEntries(Object.entries(codes).map(([name,code])=>[name,async ctx=>{
     try{return await actual[name](ctx);}catch(error){diagnostics.push({method:name,...deployAdapterDiagnostic(error)});throw Object.assign(Error('withheld'),{code:'DEPLOY_'+code});}
   }]));
-  return {adapter,rawAdapter:actual,publishedSelection:clone(s),configuredSelection:clone(configured),events,calls,diagnostics,role,containers:()=>f.containers,locked:()=>fs.existsSync(join(f.stand,'.operation.lock')),
+  return {adapter,rawAdapter:actual,publishedSelection:clone(s),configuredSelection:clone(configured),events,calls,diagnostics,helperTransitions,role,containers:()=>f.containers,locked:()=>fs.existsSync(join(f.stand,'.operation.lock')),
 
         pins:()=>JSON.parse(fs.readFileSync(join(f.stand,'compose.images.json'))),verifyStores(){for(const [kind,path]of Object.entries(paths))assert.deepEqual(fs.readFileSync(path),original[kind],kind+' live bytes changed');}};
 }

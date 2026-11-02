@@ -352,3 +352,50 @@ test('stop-stdout echoed ID cannot authorize bad identity/control/epoch/nonclean
     assertStopCommandAndHold(f, before, pinsBefore);
   }
 });
+
+test('helper-authority actual adapter accepts only proven false-to-null OOM default and completes fenced four-store snapshot', { timeout: 35000 }, async t => {
+  const control = c => Object.fromEntries(['Id', 'Image', 'Name', 'Path', 'Args', 'Config', 'HostConfig', 'Mounts'].map(key => [key, c[key]]));
+  for (const transition of ['oom-null', 'oom-true', 'readonly-drift', 'mount-drift']) {
+    const { f, ctx, pinsBefore, before } = await preparedStopFixture(t, { helperTransition: transition });
+    assert.deepEqual(await f.rawAdapter.fenceAdmissions(ctx), { fenced: true });
+    assertStopCommandAndHold(f, before, pinsBefore);
+    const callsBeforeSnapshot = f.calls.length;
+    if (transition === 'oom-null') {
+      ctx.snapshot = await f.rawAdapter.snapshot(ctx);
+      assert.equal(ctx.snapshot.durable, true); assert.equal(ctx.snapshot.stores.historyVersion, 4);
+      assert.deepEqual(Object.keys(ctx.snapshot.stores.core).sort(), ['auth', 'ledger']);
+      assert.deepEqual(Object.keys(ctx.snapshot.stores.llm).sort(), ['history', 'quota']);
+      for (const value of Object.values(ctx.snapshot.stores.core)) assert.match(value.logicalSha256, /^[a-f0-9]{64}$/);
+      for (const value of Object.values(ctx.snapshot.stores.llm)) assert.match(value, /^[a-f0-9]{64}$/);
+      assert.equal(f.containers().filter(c => f.role(c) === undefined).length, 0, 'validated helper must finish and be removed');
+    } else {
+      await assert.rejects(f.rawAdapter.snapshot(ctx), error => {
+        const diagnostic = deployAdapterDiagnostic(error);
+        assert.match(diagnostic.code, /^(?:HELPER_[A-Z_]+|ADAPTER_SNAPSHOT_FAILED)$/);
+        return true;
+      }, transition + ' must not gain authority from normalizing OomKillDisable');
+      assert.ok(!f.calls.slice(callsBeforeSnapshot).some(args => args[0] === 'container' && ['exec', 'rm'].includes(args[1])),
+        'invalid helper must be rejected before readiness/export or successful removal');
+    }
+    assert.equal(f.helperTransitions.length, 1);
+    const observed = f.helperTransitions[0];
+    assert.equal(observed.created.HostConfig.OomKillDisable, false);
+    if (transition === 'oom-null') {
+      const expected = structuredClone(control(observed.created)); expected.HostConfig.OomKillDisable = null;
+      assert.deepEqual(control(observed.running), expected, 'only the evidenced OOM default may change; mounts/security/commands stay exact');
+    } else if (transition === 'oom-true') assert.equal(observed.running.HostConfig.OomKillDisable, true);
+    else if (transition === 'readonly-drift') assert.equal(observed.running.HostConfig.ReadonlyRootfs, false);
+    else assert.equal(observed.running.Mounts[0].RW, true);
+    assert.ok(f.events.indexOf('stop:worker') < f.events.indexOf('start:helper'), 'writers must be stopped before helper startup');
+    for (const name of ['web', 'api', 'worker']) {
+      const current = f.containers().find(c => f.role(c) === name);
+      const old = before.find(c => f.role(c) === name);
+      assert.equal(current.State.Running, false); assert.equal(current.State.ExitCode, 0);
+      assert.equal(current.Id, old.Id); assert.equal(current.State.StartedAt, old.State.StartedAt);
+      assert.deepEqual(control(current), control(old), 'helper equivalence must not weaken peer control checks');
+    }
+    assert.ok(!f.diagnostics.some(diagnostic => diagnostic.fakeEngineFailure), 'failures must come from adapter validation, not a broken fake');
+    assert.ok(!f.events.some(event => event.startsWith('up:') || event.startsWith('start:') && event !== 'start:helper'));
+    f.verifyStores(); assert.deepEqual(f.pins(), pinsBefore); assert.equal(f.locked(), true);
+  }
+});
