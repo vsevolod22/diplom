@@ -12,13 +12,15 @@ live-квалификации: `liveQualified=false`.
 после drain clamp: **offline PASS 15/15 за 21.05s**, без edits во время финального теста.
 Snapshot bug исправлен, reviewer fixes selection/web restore приняты;
 drain fix CLOSED: scoped GO, findings нет. Это source/offline acceptance,
-не live qualification или native acceptance. HOLD ниже не изменён.
-Commit blocker по handoff: prerequisites ещё не закоммичены; пакет из 9 файлов
-не самодостаточен относительно HEAD и не готов как изолированный standalone commit.
-Git-состояние в этой docs lane не проверялось и не менялось.
-По handoff координатора старый сайт UP после incident415, но HOLD сохранён.
-Здесь runtime не проверялся. Пока HOLD не разрешён штатно и нет rollout GO,
-**не выполнять команды с `--apply`** и не обходить отказ старым launcher.
+не live qualification или native acceptance нового deployment engine.
+По handoff координатора sole a7 завершил archive-only incident415: SUCCESS после
+независимого review и четырёх focused tests. Архив:
+`exact-recovery-compensations/restored-41522be2994d3a54fd5cd010ac26d3d4`.
+В нём сохранены `incident`, `operation.lock`, `archive-operation.lock`, `archived-restored.json`.
+Активные guards отсутствуют; наблюдавшиеся HTTP-коды — root200/auth401.
+Это завершение архивирования: **старый deployment не обновлён**, миграция не выполнена.
+Эта docs lane runtime и git не проверяла; запись не утверждает готовность всего сайта.
+Новый rollout требует отдельного GO и свежих checks; снятие прежнего HOLD его не разрешает.
 
 ## План и статус
 
@@ -109,3 +111,33 @@ CLI выдаёт безопасный JSON; exit 0 — успех либо пл�
 App после попытки fencing сохраняет HOLD при отказе даже без миграции.
 Общей recovery-команды нет; требуется отдельное операторское recovery-решение.
 Наличие команды, успешная сборка и план не являются live/native acceptance.
+
+## Archive-only после подтверждённого restored-v6
+
+`scripts/deploy-reconcile-restored.mjs` поддерживает только точный restored-v6 layout
+с завершённым restore и его receipts; это не общий recovery, restore или deploy.
+Нужны сохранённый historical restore source, проверенные audit/restore-review bindings,
+независимое review актуального check и отдельный operator GO. Порядок флагов строгий.
+Ниже шаблоны: замените placeholders проверенными значениями; реальные hashes не приведены.
+
+```sh
+node scripts/deploy-reconcile-restored.mjs check --audit '<audit-id>' --restore-review '<restore-review>' --restore-entry 'scripts/public-images-v6-restore-<id>.mjs'
+node scripts/deploy-reconcile-restored.mjs apply --audit '<audit-id>' --restore-review '<restore-review>' --restore-entry 'scripts/public-images-v6-restore-<id>.mjs' --review '<check-review>' --source '<check-source>' --ack-archive-only
+```
+
+`check` читает evidence, source, Docker inventory и HTTP health, не изменяя lifecycle
+или архив. Для `apply` берутся именно проверенные `review`/`source` из этого check;
+apply повторяет проверки и сохраняет evidence при переносе incident и operation lock.
+Отдельный archive guard создаётся до переносов и архивируется последним.
+Нет build/switch/restart, migration, чтения live stores или содержимого secret-файлов;
+сохранность stores опирается на прежние restore receipts, не на новое сравнение БД.
+Успешный итог — `RESTORED_INCIDENT_ARCHIVED`, не rollout/native qualification.
+Любой отказ: **остановиться, без retry/resume и ручного удаления guards**;
+частичное архивирование требует отдельного review/operator решения. Уже архивированный
+incident415 повторно не запускать. Не печатать env, секреты или raw container configs.
+
+Отдельная offline проверка модуля (не часть обычного deploy и не live acceptance):
+
+```sh
+node --experimental-vm-modules --test scripts/test_deploy_reconcile_restored.mjs
+```
