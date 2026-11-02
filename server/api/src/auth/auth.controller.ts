@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Header, HttpCode, HttpException, HttpStatus, Inject, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
-import { AuthStore, type User } from './auth.store.js';
+import { AuthStore, validPassword, type AuthAction, type SessionSnapshot, type User } from './auth.store.js';
+import { PasswordResetService, type PasswordResetStatus } from './password-reset.service.js';
 
 const COOKIE = 'demo_session';
 type Request = { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string; encrypted?: boolean } };
@@ -49,9 +50,29 @@ function setCookie(res: Response, token: string, secure: boolean): void {
   res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${secure ? '; Secure' : ''}`);
 }
 
+function clearCookie(res: Response, secure: boolean): void {
+  res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? '; Secure' : ''}`);
+}
+
+function exactInput(body: unknown, keys: string[]): Record<string, unknown> {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== keys.sort().join(','))
+    return invalid(HttpStatus.BAD_REQUEST, 'INVALID_INPUT');
+  return body as Record<string, unknown>;
+}
+
+function normalizedEmail(value: unknown): string {
+  if (typeof value !== 'string') return invalid(HttpStatus.BAD_REQUEST, 'INVALID_INPUT');
+  const email = value.trim().toLowerCase();
+  if (Buffer.byteLength(email) > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return invalid(HttpStatus.BAD_REQUEST, 'INVALID_INPUT');
+  return email;
+}
+
 @Controller('api/v1/auth')
 export class AuthController {
-  constructor(@Inject(AuthStore) private readonly store: AuthStore) {}
+  constructor(
+    @Inject(AuthStore) private readonly store: AuthStore,
+    @Inject(PasswordResetService) private readonly reset: PasswordResetService,
+  ) {}
 
   @Post('register')
   @Header('Cache-Control', 'no-store')
@@ -62,7 +83,7 @@ export class AuthController {
       return invalid(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED');
     const user = await this.store.register(email, password);
     if (!user) return invalid(HttpStatus.CONFLICT, 'REGISTRATION_UNAVAILABLE');
-    setCookie(res, this.store.createSession(user.id, tokenFrom(req)), secure);
+    setCookie(res, this.store.createAuthenticatedSession(user, tokenFrom(req)), secure);
     return user;
   }
 
@@ -76,7 +97,7 @@ export class AuthController {
       return invalid(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED');
     const user = await this.store.login(email, password);
     if (!user) throw new UnauthorizedException({ errorCode: 'INVALID_CREDENTIALS' });
-    setCookie(res, this.store.createSession(user.id, tokenFrom(req)), secure);
+    setCookie(res, this.store.createAuthenticatedSession(user, tokenFrom(req)), secure);
     return user;
   }
 
@@ -100,11 +121,97 @@ export class AuthController {
     return user;
   }
 
-  private checkMutation(req: Request): { secure: boolean } {
+  @Post('change-password')
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(204)
+  async changePassword(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Body() body: unknown): Promise<void> {
+    return this.safe(async () => {
+      const { secure } = this.checkMutation(req, 2048);
+      const snapshot = this.currentSession(req);
+      this.limit('change-password', snapshot.subject, req);
+      const input = exactInput(body, ['currentPassword', 'newPassword']);
+      if (!validPassword(input.currentPassword) || !validPassword(input.newPassword)) return invalid(HttpStatus.BAD_REQUEST, 'INVALID_INPUT');
+      if (!await this.store.changePassword(snapshot, input.currentPassword, input.newPassword))
+        return invalid(HttpStatus.UNAUTHORIZED, 'INVALID_CREDENTIALS');
+      clearCookie(res, secure);
+    });
+  }
+
+  @Post('revoke-all')
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(204)
+  async revokeAll(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Body() body: unknown): Promise<void> {
+    return this.safe(async () => {
+      const { secure } = this.checkMutation(req, 2048);
+      const snapshot = this.currentSession(req);
+      this.limit('revoke-all', snapshot.subject, req);
+      const input = exactInput(body, ['currentPassword']);
+      if (!validPassword(input.currentPassword)) return invalid(HttpStatus.BAD_REQUEST, 'INVALID_INPUT');
+      if (!await this.store.revokeAll(snapshot, input.currentPassword)) return invalid(HttpStatus.UNAUTHORIZED, 'INVALID_CREDENTIALS');
+      clearCookie(res, secure);
+    });
+  }
+
+  @Get('password-reset/status')
+  @Header('Cache-Control', 'no-store')
+  passwordResetStatus(): PasswordResetStatus { return this.reset.status(); }
+
+  @Post('password-reset/request')
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(202)
+  async requestPasswordReset(@Req() req: Request, @Body() body: unknown): Promise<{ status: 'accepted' }> {
+    return this.safe(() => {
+      this.checkMutation(req, 2048);
+      this.reset.requireAvailable();
+      const input = exactInput(body, ['email']);
+      const email = normalizedEmail(input.email);
+      this.limit('reset-request', email, req);
+      this.reset.request(email);
+      // Acceptance of a bounded recovery attempt, NOT confirmation of an account or delivery.
+      return { status: 'accepted' as const };
+    });
+  }
+
+  @Post('password-reset/confirm')
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(204)
+  async confirmPasswordReset(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Body() body: unknown): Promise<void> {
+    return this.safe(async () => {
+      const { secure } = this.checkMutation(req, 2048);
+      this.reset.requireAvailable();
+      const input = exactInput(body, ['token', 'newPassword']);
+      if (typeof input.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.token) || !validPassword(input.newPassword))
+        return invalid(HttpStatus.BAD_REQUEST, 'INVALID_INPUT');
+      this.limit('reset-confirm', input.token, req);
+      if (!await this.store.confirmPasswordReset(input.token, input.newPassword)) return invalid(HttpStatus.BAD_REQUEST, 'INVALID_RESET_TOKEN');
+      clearCookie(res, secure);
+    });
+  }
+
+  private currentSession(req: Request): SessionSnapshot {
+    const snapshot = this.store.sessionForToken(tokenFrom(req) ?? '');
+    if (!snapshot) return invalid(HttpStatus.UNAUTHORIZED, 'UNAUTHORIZED');
+    return snapshot;
+  }
+
+  private limit(action: AuthAction, identity: string, req: Request): void {
+    // Forwarded headers remain untrusted until infra supplies a qualified proxy contract.
+    if (!this.store.rateLimit(action, identity, req.socket.remoteAddress ?? 'unknown')) return invalid(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED');
+  }
+
+  private async safe<T>(action: () => T | Promise<T>): Promise<T> {
+    try { return await action(); }
+    catch (error) {
+      if (error instanceof HttpException) throw error;
+      return invalid(HttpStatus.SERVICE_UNAVAILABLE, 'AUTH_UNAVAILABLE');
+    }
+  }
+
+  private checkMutation(req: Request, maxBytes = 512): { secure: boolean } {
     const origin = originForRequest(req);
     const length = req.headers['content-length'];
     if (!/^application\/json(?:\s*;\s*charset=utf-8)?\s*$/i.test(String(req.headers['content-type'] ?? '')) ||
-      typeof length !== 'string' || !/^(0|[1-9][0-9]*)$/.test(length) || Number(length) > 512) {
+      typeof length !== 'string' || !/^(0|[1-9][0-9]*)$/.test(length) || Number(length) > maxBytes) {
       return invalid(HttpStatus.UNSUPPORTED_MEDIA_TYPE, 'INVALID_CONTENT_TYPE');
     }
     return origin;
