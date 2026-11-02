@@ -1,0 +1,221 @@
+// Focused offline lane. Run explicitly: node --test scripts/test_deploy.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { DEPLOY_ERRORS, runDeployment } from './deploy-core.mjs';
+import { main } from './deploy.mjs';
+import { adapterFixture } from './deploy-adapter.test.mjs';
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const RAW = 'synthetic-private-stderr-DO-NOT-PRINT';
+const web = { mode: 'web', apply: true };
+const app = { mode: 'app', apply: true, services: ['api'] };
+function fake({ migration = false, safe = true, fault, mutate } = {}) {
+  const calls = [], lease = Object.freeze({ owner: 'test-only' });
+  const values = {
+    status: { ready: true, locked: false }, acquireLock: lease,
+    releaseLock: { released: true }, build: { image: 'candidate' },
+    validateCandidate: { valid: true, requiredCapabilities: ['auth-a3'], availableCapabilities: ['auth-a3'] },
+    verify: { valid: true }, waitForIdle: { idle: true }, prepareRecovery: { durable: true },
+    fenceAdmissions: { fenced: true }, snapshot: { durable: true },
+    qualifyState: { qualified: true, migration }, switchServices: { switched: true },
+    health: { healthy: true }, publishReceipt: { published: true }, restoreOld: { restored: true },
+  };
+  const adapter = Object.fromEntries(['preflight', ...Object.keys(values)].map(name => [name, async ctx => {
+    calls.push({ name, ctx });
+    if (name !== 'acquireLock' && name !== 'status' && ctx.options.apply) assert.equal(ctx.lease, lease);
+    mutate?.(name, ctx);
+    if (name === fault) throw Object.assign(new Error(RAW), { stderr: RAW });
+    if (name === 'preflight') return { services: [...ctx.services], interruptedServices: ctx.mode === 'web' ? ['web'] : ['api', 'web', 'worker'],
+      migration, rollbackSafe: safe, old: { image: 'immutable-old', recipe: 'exact' }, availableCapabilities: ['auth-a3'] };
+    return values[name];
+  }]));
+  return { adapter, calls, names: () => calls.map(c => c.name) };
+}
+function failure(result, code, phase) {
+  assert.equal(result.ok, false); assert.equal(result.code, code); assert.equal(result.phase, phase);
+  assert.ok(Object.hasOwn(DEPLOY_ERRORS, result.code)); assert.ok(result.nextAction.length > 10);
+  assert.ok(!JSON.stringify(result).includes(RAW));
+}
+
+test('real CLI help/invalid arguments never instantiate an adapter or execute an engine', async () => {
+  for (const args of [['--help'], [], ['app'], ['web', '--services', 'api'], ['web', '--apply', '--plan'], ['status', '--apply'], ['web', '--bogus']]) {
+    const child = spawnSync(process.execPath, [join(ROOT, 'scripts/deploy.mjs'), ...args], {
+      cwd: ROOT, env: { PATH: '/nonexistent-test-engine' }, encoding: 'utf8', timeout: 3000,
+    });
+    assert.equal(child.error, undefined); assert.equal(child.stderr, '');
+    assert.equal(child.status, args[0] === '--help' ? 0 : 1);
+    if (args[0] === '--help') assert.match(child.stdout, /Usage:/);
+    else failure(JSON.parse(child.stdout), 'DEPLOY_USAGE', 'arguments');
+  }
+  const original = console.log; const output = []; let loaded = 0;
+  try {
+    console.log = value => output.push(value);
+    const factory = async () => { loaded++; throw Error(RAW); };
+    assert.equal(await main(['--help'], factory), 0);
+    assert.equal(await main(['invalid'], factory), 1);
+    assert.equal(loaded, 0);
+    assert.equal(await main(['web'], factory), 1);
+  } finally { console.log = original; }
+  assert.ok(!output.join('').includes(RAW));
+});
+
+test('plan and status are read-only; verification never autoexecutes', async () => {
+  for (const options of [{ mode: 'web' }, { mode: 'status' }]) {
+    const f = fake(); assert.equal((await runDeployment(f.adapter, options)).ok, true);
+    assert.deepEqual(f.names(), [options.mode === 'status' ? 'status' : 'preflight']);
+  }
+});
+
+test('web single lease builds before switch and never fences, snapshots, migrates or verifies by default', async () => {
+  const f = fake(); const result = await runDeployment(f.adapter, web);
+  assert.equal(result.ok, true);
+  assert.deepEqual(f.names(), ['acquireLock', 'preflight', 'build', 'validateCandidate', 'prepareRecovery', 'switchServices', 'health', 'publishReceipt', 'releaseLock']);
+  for (const { ctx } of f.calls) assert.deepEqual(ctx.services, ['web']);
+});
+
+test('every non-migrating app snapshots and qualifies copies after durable recovery/fencing', async () => {
+  const f = fake(); assert.equal((await runDeployment(f.adapter, app)).ok, true);
+  assert.deepEqual(f.names(), ['acquireLock', 'preflight', 'build', 'validateCandidate', 'waitForIdle', 'prepareRecovery', 'fenceAdmissions', 'snapshot', 'qualifyState', 'switchServices', 'health', 'publishReceipt', 'releaseLock']);
+  const qualify = f.calls.find(c => c.name === 'qualifyState').ctx;
+  assert.equal(qualify.expectedMigration, false); assert.equal(qualify.snapshot.durable, true);
+  assert.equal(f.calls.find(c => c.name === 'fenceAdmissions').ctx.fenceAttempted, true);
+});
+
+test('migration consent precedes build; actual startup boundary is flagged BEFORE switch dispatch', async () => {
+  const denied = fake({ migration: true });
+  failure(await runDeployment(denied.adapter, app), 'DEPLOY_MIGRATION_REQUIRED', 'preflight');
+  assert.deepEqual(denied.names(), ['acquireLock', 'preflight', 'releaseLock']);
+  const f = fake({ migration: true, fault: 'switchServices', mutate(name, ctx) {
+    if (name === 'switchServices') { assert.equal(ctx.migrationAttempted, true); assert.equal(ctx.switchAttempted, true); }
+  } });
+  const result = await runDeployment(f.adapter, { ...app, migrate: true });
+  failure(result, 'DEPLOY_SWITCH', 'switchServices'); assert.equal(result.lock, 'retained');
+  assert.ok(!f.names().includes('restoreOld')); assert.ok(!f.names().includes('releaseLock'));
+});
+
+test('build failure leaves OLD serving and releases exactly the owned lease', async () => {
+  const f = fake({ fault: 'build' }); const result = await runDeployment(f.adapter, web);
+  failure(result, 'DEPLOY_BUILD', 'build'); assert.equal(result.keptOldServing, true);
+  assert.equal(result.lock, 'released'); assert.deepEqual(f.names(), ['acquireLock', 'preflight', 'build', 'releaseLock']);
+});
+
+test('shared lock refusal has no preflight, build or release side effects', async () => {
+  const f = fake(); f.adapter.acquireLock = async () => { throw Object.assign(Error(RAW), { code: 'DEPLOY_LOCKED' }); };
+  const result = await runDeployment(f.adapter, web); failure(result, 'DEPLOY_LOCKED', 'acquireLock');
+  assert.deepEqual(f.names(), []); assert.equal(result.lock, 'not-acquired');
+});
+
+test('fencing/snapshot/copy-qualification failures HOLD without app or DB rollback', async () => {
+  for (const [fault, code] of [['fenceAdmissions', 'DEPLOY_FENCE'], ['snapshot', 'DEPLOY_SNAPSHOT'], ['qualifyState', 'DEPLOY_QUALIFY']]) {
+    const f = fake({ fault }); const result = await runDeployment(f.adapter, app);
+    failure(result, code, fault); assert.equal(result.lock, 'retained'); assert.equal(result.needsRecovery, true);
+    assert.ok(!f.names().includes('releaseLock')); assert.ok(!f.names().includes('restoreOld')); assert.ok(!f.names().includes('switchServices'));
+  }
+});
+
+test('publication uncertainty always HOLDs, even for known-safe web', async () => {
+  const f = fake({ fault: 'publishReceipt' }); const result = await runDeployment(f.adapter, web);
+  failure(result, 'DEPLOY_RECEIPT', 'publishReceipt'); assert.equal(result.state, 'publication-uncertain');
+  assert.equal(result.lock, 'retained'); assert.equal(result.publishAttempted, true);
+  assert.ok(!f.names().includes('restoreOld')); assert.ok(!f.names().includes('releaseLock'));
+});
+
+test('web health failure restores only proven OLD then verifies OLD health before unlock', async () => {
+  const f = fake(); f.adapter.health = async ctx => {
+    f.calls.push({ name: 'health', ctx }); if (ctx.target === 'candidate') throw Error(RAW); return { healthy: true };
+  };
+  const result = await runDeployment(f.adapter, web); failure(result, 'DEPLOY_HEALTH', 'health');
+  assert.equal(result.rollback, 'restored'); assert.equal(result.lock, 'released');
+  assert.deepEqual(f.names().slice(-3), ['restoreOld', 'health', 'releaseLock']);
+  assert.equal(f.calls.at(-2).ctx.target, 'old');
+});
+
+test('unknown OLD identity or uncertain restore retains recovery and never unlocks', async () => {
+  for (const options of [{ safe: false, fault: 'health' }, { fault: 'restoreOld' }]) {
+    const f = fake(options);
+    if (options.fault === 'restoreOld') f.adapter.health = async () => { throw Error(RAW); };
+    const result = await runDeployment(f.adapter, web); assert.equal(result.ok, false); assert.equal(result.lock, 'retained');
+    assert.equal(result.state, 'recovery-required'); assert.ok(!f.names().includes('releaseLock'));
+  }
+});
+
+test('finite errors ignore code getters; drain settles before owned lease release without a competing timer', async () => {
+  const f = fake(); f.adapter.build = async () => { const e = Error(RAW); Object.defineProperty(e, 'code', { get() { assert.fail('unsafe getter'); } }); throw e; };
+  failure(await runDeployment(f.adapter, web), 'DEPLOY_BUILD', 'build');
+  const d = fake(); let rejectDrain, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  d.adapter.waitForIdle = async ctx => {
+    assert.equal(ctx.options.drainTimeoutMs, 1); assert.equal(ctx.signal, undefined);
+    entered(); return new Promise((_, reject) => { rejectDrain = reject; });
+  };
+  const pending = runDeployment(d.adapter, { ...app, drainTimeoutMs: 1 });
+  await started;
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(!d.names().includes('releaseLock'), 'core must await adapter settlement even past the drain budget');
+  rejectDrain(Object.assign(Error(RAW), { code: 'DEPLOY_DRAIN' }));
+  const result = await pending; failure(result, 'DEPLOY_DRAIN', 'waitForIdle');
+  assert.equal(result.lock, 'released'); assert.ok(!d.names().includes('fenceAdmissions'));
+});
+
+test('actual adapter web: publish happy path and restore identified exited candidate with backend isolation', { timeout: 20000 }, async t => {
+  for (const failedStart of [null, 'web']) {
+    const f = await adapterFixture(t, { failedStart }); const before = structuredClone(f.containers());
+    const oldWeb = before.find(c => f.role(c) === 'web');
+    const result = await runDeployment(f.adapter, web);
+    if (failedStart) {
+      failure(result, 'DEPLOY_SWITCH', 'switchServices');
+      assert.equal(result.rollback, 'restored', JSON.stringify(f.diagnostics));
+      assert.equal(result.state, 'old-restored');
+      assert.equal(f.containers().find(c => f.role(c) === 'web').Image, oldWeb.Image);
+      assert.notEqual(f.containers().find(c => f.role(c) === 'web').Id, oldWeb.Id);
+      assert.equal(f.events.filter(e => e === 'up:web').length, 2);
+    } else assert.equal(result.ok, true, JSON.stringify({ result, diagnostics: f.diagnostics }));
+    assert.equal(result.lock, 'released'); assert.equal(f.locked(), false);
+    assert.deepEqual(f.containers().filter(c => f.role(c) !== 'web'), before.filter(c => f.role(c) !== 'web'));
+    assert.ok(f.events.includes('build:web')); assert.ok(f.events.includes('up:web'));
+    assert.ok(f.events.indexOf('build:web') < f.events.indexOf('up:web'));
+    assert.ok(!f.events.some(e => /^(stop|start|up):(api|worker|.*egress)|helper/.test(e)));
+    assert.equal(f.pins().services.web.image, f.containers().find(c => f.role(c) === 'web').Image);
+    f.verifyStores();
+  }
+});
+
+test('actual adapter app: full copy-qualified happy path and failed API startup HOLD', { timeout: 30000 }, async t => {
+  for (const failedStart of [null, 'api']) {
+    const f = await adapterFixture(t, { failedStart }); const pinsBefore = f.pins();
+    const result = await runDeployment(f.adapter, app);
+    if (failedStart) {
+      failure(result, 'DEPLOY_SWITCH', 'switchServices');
+      assert.equal(result.lock, 'retained'); assert.equal(f.locked(), true);
+      assert.equal(result.rollback, 'unsafe'); assert.equal(result.publishAttempted, false);
+      assert.equal(f.containers().find(c => f.role(c) === 'web').State.Running, false);
+      assert.deepEqual(f.pins(), pinsBefore);
+      assert.ok(!f.events.includes('snapshot:after-api'));
+    } else {
+      assert.equal(result.ok, true, JSON.stringify({ result, diagnostics: f.diagnostics, events: f.events }));
+      assert.equal(f.locked(), false);
+      assert.ok(f.events.indexOf('snapshot:after-api') > f.events.indexOf('up:api'));
+      for (const c of f.containers()) assert.equal(f.pins().services[f.role(c)].image, c.Image);
+    }
+    assert.ok(f.events.indexOf('build:api') < f.events.indexOf('stop:web'));
+    assert.deepEqual(f.events.filter(e => e.startsWith('stop:') && !e.includes('helper')), ['stop:web', 'stop:api', 'stop:worker']);
+    assert.ok(f.events.includes('up:api'), JSON.stringify({ result, diagnostics: f.diagnostics }));
+    assert.ok(f.events.indexOf('snapshot:fenced') < f.events.indexOf('up:api'));
+    assert.ok(f.events.indexOf('snapshot:before-api') < f.events.indexOf('up:api'));
+    assert.ok(!f.events.some(e => /^(stop|start|up):.*egress/.test(e)));
+    f.verifyStores();
+  }
+});
+
+test('actual adapter shared lease rejects a second owner and preserves first owner record', { timeout: 10000 }, async t => {
+  const f = await adapterFixture(t); const lease = await f.adapter.acquireLock({ options: web });
+  assert.equal(f.locked(), true);
+  await assert.rejects(f.adapter.acquireLock({ options: web }), e => e.code === 'DEPLOY_LOCKED');
+  await assert.rejects(f.adapter.releaseLock({ lease: {}, options: web }), e => e.code === 'DEPLOY_UNLOCK');
+  assert.equal(f.locked(), true);
+  assert.deepEqual(await f.adapter.releaseLock({ lease, options: web }), { released: true });
+  assert.equal(f.locked(), false);
+});
