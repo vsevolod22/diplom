@@ -120,7 +120,8 @@ function captureBuildHistory(root, own = null) {
   const verify=()=>{guards.forEach(g=>g());need(equal(exists(parent)?fs.readdirSync(parent).filter(n=>n!==own).sort():[],names),'ADAPTER_HISTORY_CHANGED');};
   verify();return {references,verify,count:names.length};
 }
-function loadConfiguration(root, home, desired) {
+function loadConfiguration(root, home, desired, upgradeOperations = false) {
+  need(typeof upgradeOperations === 'boolean' && (!upgradeOperations || desired), 'OPERATIONS_FLAG_INVALID');
   const state = join(root, STATE), verifyDirectory = protectedDirectory(state);
   need(!fs.readdirSync(state).some(n=>n.startsWith('.adapter-pending-')||n.startsWith('.llm-pending-')),'CONFIG_PUBLICATION_PENDING');
   const files = ['profile.json','llm-profile.json','compose.images.json','compose.llm-env.json'];
@@ -134,7 +135,7 @@ function loadConfiguration(root, home, desired) {
     equal(Object.keys(pins.services).sort(),Object.keys(model.services).sort()) &&
     Object.values(pins.services).every(v => plain(v) && equal(Object.keys(v),['image']) && imageId(v.image)), 'PINS_INVALID');
   const settings = desired ? loadPublicLlmSettings(home,{openai:true}) : null;
-  const next = settings ? selectOpenAiOperations(settings.selection,selection,false) : selection;
+  const next = settings ? selectOpenAiOperations(settings.selection,selection,upgradeOperations) : selection;
   if (settings) validatePublicLlmTransition(selection,next);
   const verify = () => { verifyDirectory(); proofs.forEach(p => p.verify()); settings?.verify(); };
   verify(); return { profile, selection, model, pins, next, verify,
@@ -317,8 +318,11 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         networks:observed.networks.length,volumes:observed.volumes.length,capabilities:DEPLOY_ADAPTER_CAPABILITIES});
     } catch(error){throw safeError('STATUS_REFUSED',error);}
   }
-  async function prepare({mode,services,lease}={}) {
-    try {rootCheck();const owned=lease?ownedLease(lease):null;if(!owned)noLock();else need(!owned.plan,'PREFLIGHT_ALREADY_PREPARED');const targets=deploymentTargets(mode,services),config=loadConfiguration(root,home,true);
+  async function prepare({mode,services,lease,upgradeOperations=false}={}) {
+    try {rootCheck();const owned=lease?ownedLease(lease):null;if(!owned)noLock();else need(!owned.plan,'PREFLIGHT_ALREADY_PREPARED');const targets=deploymentTargets(mode,services);
+      need(typeof upgradeOperations === 'boolean', 'OPERATIONS_FLAG_INVALID');
+      need(!upgradeOperations || mode === 'app' && equal(targets,[...ROLES].sort()), 'OPERATIONS_UPGRADE_REQUIRES_ALL_APP_TARGETS');
+      const config=loadConfiguration(root,home,true,upgradeOperations);
       need(mode!=='web'||equal(config.selection,config.next),'WEB_REQUIRES_UNCHANGED_RUNTIME_CONFIG');
       const next=expectedPublicLlmConfig(root,config.profile.cve,config.next);
       if(!equal(config.selection,config.next))need(ROLES.every(n=>targets.includes(n)),'CONFIG_CHANGE_REQUIRES_ALL_APP_TARGETS');
@@ -360,7 +364,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         need(plain(proof)&&equal(Object.keys(proof).sort(),['source','version'])&&proof.version===1&&proof.source===contract.digest,'WEB_BACKEND_A3_COMPATIBILITY_UNPROVEN');
       }
       await stable(plan);const token=Object.freeze({version:2,mode,services:targets,interruptedServices:Object.freeze(mode==='web'?['web']:[...new Set([...targets,'web','api','worker'])].sort()),
-              migration:plan.migration,rollbackSafe:mode==='web',old:Object.freeze({images:Object.fromEntries(targets.map(n=>[n,before.images[n].Id]))}),
+              migration:plan.migration,...(config.next.operations?{operations:config.next.operations}:{}),upgradeOperations,rollbackSafe:mode==='web',old:Object.freeze({images:Object.fromEntries(targets.map(n=>[n,before.images[n].Id]))}),
               availableCapabilities:Object.freeze([contract.name]),backendContract:contract.name,lifecycleSupported:true});plans.set(token,plan);plan.token=token;return token;
     }catch(error){throw safeError('PREFLIGHT_REFUSED',error);}
   }
@@ -728,7 +732,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     fs.renameSync(state.lock.path,join(state.audit,'operation.lock'));syncDirectory(state.audit);syncDirectory(join(root,STATE));state.released=true;leaseDeadline=null;return {released:true};
   }
   const methods={acquireLock:acquire,releaseLock:release,
-    preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease}),
+    preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease,upgradeOperations:ctx.options?.upgradeOperations}),
     build:ctx=>{contextPlan(ctx);return buildCandidate(ctx.plan);},validateCandidate:validate,
     verify:async ctx=>{const p=contextPlan(ctx);need(p.phase==='validated','VERIFY_STAGE');await stable(p);return {valid:true};},
     waitForIdle,prepareRecovery,fenceAdmissions,snapshot,qualifyState,switchServices,health,publishReceipt,restoreOld};
@@ -749,7 +753,7 @@ export async function createAdapter(options = {}) {
       const { code } = deployAdapterDiagnostic(error);
       const mapped = code === 'SHARED_OPERATION_HOLD' ? 'DEPLOY_LOCKED' :
         code === 'WEB_BACKEND_A3_COMPATIBILITY_UNPROVEN' ? 'DEPLOY_COMPATIBILITY' :
-        code === 'TARGETS_INVALID' || code === 'WEB_ONLY_TARGET_REQUIRED' || code === 'APP_API_REQUIRED' ? 'DEPLOY_SCOPE' : fallback;
+        code === 'TARGETS_INVALID' || code === 'WEB_ONLY_TARGET_REQUIRED' || code === 'APP_API_REQUIRED' || code === 'OPERATIONS_UPGRADE_REQUIRES_ALL_APP_TARGETS' || code === 'OPERATIONS_FLAG_INVALID' ? 'DEPLOY_SCOPE' : fallback;
       throw coreError(mapped);
     }
   };

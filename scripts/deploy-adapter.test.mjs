@@ -14,7 +14,7 @@ import { PROJECT, STATE, LABEL, backupExportOperation, CONFIG_SECRET } from './p
 import { expectedPublicLlmConfig, publicLlmEnvironmentOverlay, PUBLIC_LLM_ENV, PUBLIC_LLM_CURRENT_BACKUP_PROGRAM, capturePublicLlmSource, readPublicLlmBinding, loadPublicLlmSettings, PUBLIC_LLM_GATEWAY_PROBE } from './public-llm-stand.mjs';
 import { createDeployAdapter, deployAdapterDiagnostic, WEB_BACKEND_SOURCE_PROBE, AUTH_SCHEMA_PROBE, ADAPTER_READY_PROBE } from './deploy-adapter.mjs';
 import { PUBLIC_LLM_EXECUTION_MODULES } from './public-llm-build-continuation.mjs';
-import { OPENAI_DEPLOYMENT, validateOpenAiDeployment } from './public-llm-source-build.mjs';
+import { OPENAI_DEPLOYMENT, PUBLIC_IMAGE_OPERATIONS, validateOpenAiDeployment } from './public-llm-source-build.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DB = createRequire(join(ROOT, 'server/api/package.json'))('better-sqlite3');
@@ -59,7 +59,7 @@ function child(root, code, input) {
     cwd:join(root,'server/api'),env:{PATH:'/usr/bin:/bin'},input:JSON.stringify(input),encoding:'utf8',timeout:10000,maxBuffer:65536});
   assert.equal(result.error,undefined); assert.equal(result.status,0,'fixture constructor/helper failed: '+result.stderr); return result;
 }
-export async function adapterFixture(t, { failedStart = null } = {}) {
+export async function adapterFixture(t, { failedStart = null, publishedOperations = false } = {}) {
   // Reuse metadata constructors only. Synthetic release files are not activated;
   // reset to the non-CVE profile before invoking any new adapter method.
   const f=fixture(t), root=f.root, home=temporary(t); sources(root);
@@ -70,11 +70,13 @@ export async function adapterFixture(t, { failedStart = null } = {}) {
     t.after(() => { capacityMock.mock.restore(); syncBuiltinESMExports(); });
   fs.writeFileSync(join(f.stand,'profile.json'),JSON.stringify({version:1,project:PROJECT,cve:null}));
   fs.rmSync(join(f.stand,'compose.cve.json'));
-  const s=validateOpenAiDeployment(selection()), settings=join(home,'.local/state/diplom-public-images/llm');
+  const configured=validateOpenAiDeployment(selection());
+    const s=validateOpenAiDeployment({ ...configured, ...(publishedOperations ? { operations: PUBLIC_IMAGE_OPERATIONS } : {}) });
+    const settings=join(home,'.local/state/diplom-public-images/llm');
   fs.mkdirSync(settings,{recursive:true,mode:0o700});
   const write=(path,value)=>fs.writeFileSync(path,typeof value==='string'?value:JSON.stringify(value),{mode:0o600});
   write(join(settings,'llm.env'),Object.entries(PUBLIC_LLM_ENV).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
-  write(join(settings,'openai-deployment.json'),s);
+  write(join(settings,'openai-deployment.json'),configured);
   write(join(f.stand,'llm-profile.json'),s); write(join(f.stand,'compose.llm-env.json'),publicLlmEnvironmentOverlay(s));
   const model=expectedPublicLlmConfig(root,null,s);
   for(const [name,cmd]of [['llm-egress',['python','-I','openrouter.py']],['openai-egress',[...OPENAI_DEPLOYMENT.gatewayCommand]]]){
@@ -188,7 +190,7 @@ export async function adapterFixture(t, { failedStart = null } = {}) {
     assert.fail('unsupported fake engine command '+args.slice(0,2).join(' '));
   };
   assert.deepEqual(readPublicLlmBinding(root),s);
-  assert.deepEqual(loadPublicLlmSettings(home,{openai:true}).selection,s);
+  assert.deepEqual(loadPublicLlmSettings(home,{openai:true}).selection,configured);
   capturePublicLlmSource(root,{openai:true}).verify();
   const actual=createDeployAdapter({root,home,run:async (...args)=>{try{return await run(...args);}catch(error){diagnostics.push({fakeEngineFailure:error.message});throw error;}},Database:DB,checkSource:async()=>({typescript:true,bundle:true,openai:true}),
     http:async url=>{assert.ok(url.startsWith('http://127.0.0.1:8081/'));return {status:new URL(url).pathname==='/'?200:401,body:{cancel:async()=>{}}};}});
@@ -198,7 +200,7 @@ export async function adapterFixture(t, { failedStart = null } = {}) {
   const adapter=Object.fromEntries(Object.entries(codes).map(([name,code])=>[name,async ctx=>{
     try{return await actual[name](ctx);}catch(error){diagnostics.push({method:name,...deployAdapterDiagnostic(error)});throw Object.assign(Error('withheld'),{code:'DEPLOY_'+code});}
   }]));
-  return {adapter,events,calls,diagnostics,role,containers:()=>f.containers,locked:()=>fs.existsSync(join(f.stand,'.operation.lock')),
+  return {adapter,rawAdapter:actual,publishedSelection:clone(s),configuredSelection:clone(configured),events,calls,diagnostics,role,containers:()=>f.containers,locked:()=>fs.existsSync(join(f.stand,'.operation.lock')),
 
         pins:()=>JSON.parse(fs.readFileSync(join(f.stand,'compose.images.json'))),verifyStores(){for(const [kind,path]of Object.entries(paths))assert.deepEqual(fs.readFileSync(path),original[kind],kind+' live bytes changed');}};
 }

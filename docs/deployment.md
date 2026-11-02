@@ -63,10 +63,13 @@ networks/volumes менять этим CLI нельзя.
 план требует миграции, после qualification/rollout GO и штатного разрешения HOLD:
 
 ```sh
-pnpm deploy:app --services web,api,worker,egress,llm-egress,openai-egress --migrate
-pnpm deploy:app --services web,api,worker,egress,llm-egress,openai-egress --migrate --apply
+pnpm deploy:app --services web,api,worker,egress,llm-egress,openai-egress --upgrade-operations --migrate
+pnpm deploy:app --services web,api,worker,egress,llm-egress,openai-egress --upgrade-operations --migrate --apply
 ```
 
+`--upgrade-operations` явно выбирает `public-images-v2` только для app со всеми шестью services.
+Обычные последующие обновления сохраняют operations selection без этого флага;
+он не разрешает неявную смену provider/config или fallback и не доказывает live rollout.
 Первая команда — только план. `--migrate` — явное app-only согласие, не команда
 самостоятельного запуска миграции и не разрешение reset/пересоздания БД.
 При отсутствии требуемой миграции не добавляйте флаг механически.

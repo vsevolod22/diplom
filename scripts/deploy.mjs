@@ -14,6 +14,8 @@ export const HELP = `Usage: node scripts/deploy.mjs <web|app|status> [options]
   --plan, --dry-run          Explicit read-only plan (not a build or reservation).
   --services <csv>           Required for app; web permits only web.
   --migrate                 Consent to migration at API startup after copy qualification.
+  --upgrade-operations      Explicit operations-v2 upgrade; app only, requires exactly
+                            web,api,worker,egress,llm-egress,openai-egress.
   --verify                  Opt in to focused verification, not a full test suite.
   --drain-timeout-ms <ms>    App idle-wait budget, 1..300000 (default 30000).
   --help                    Show this help without loading the adapter.
@@ -53,6 +55,7 @@ export function parseArgs(argv) {
       if (flag === '--apply') options.apply = true;
       else if (flag === '--verify') options.verify = true;
       else if (flag === '--migrate') options.migrate = true;
+      else if (flag === '--upgrade-operations') options.upgradeOperations = true;
       else if (!['--plan', '--dry-run'].includes(flag)) throw new DeploymentError('DEPLOY_USAGE');
     }
   }

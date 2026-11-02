@@ -65,6 +65,10 @@
  * Dry-run: preflight only, no lock/writes. Status: status only. Import is inert.
  * options: mode=web|app|status, apply=false, explicit services for app,
  * verify=false, migrate=false (CONSENT only), drainTimeoutMs=30000 (1..300000), root.
+ * upgradeOperations=false: explicit opt-in, app with exactly web/api/worker/egress/
+ * llm-egress/openai-egress. Adapter receives ctx.options.upgradeOperations.
+ * plan.operations: public non-secret preset label, 1..128 alphanumeric/._- chars;
+ * required with upgradeOperations, optional otherwise; exposed in read-only plan.
  */
 
 export const DEPLOY_ERRORS = Object.freeze({
@@ -78,6 +82,7 @@ export const DEPLOY_ERRORS = Object.freeze({
   DEPLOY_IDENTITY: ['Current container identity does not match the known deployment state.', false, 'Reconcile current container identities with the recovery record before applying changes.'],
   DEPLOY_UNSUPPORTED: ['The adapter cannot safely perform this requested operation.', false, 'Use a supported service set or add the required safe adapter implementation before applying.'],
   DEPLOY_SCOPE: ['The adapter plan changes services outside the requested scope.', false, 'Correct the adapter plan; web may change only web.'],
+  DEPLOY_OPERATIONS_SCOPE: ['Operations upgrade requires app mode and all six services.', false, 'Use --upgrade-operations with app --services web,api,worker,egress,llm-egress,openai-egress.'],
   DEPLOY_MIGRATION_REQUIRED: ['A database migration requires explicit consent.', false, 'Review snapshot/recovery support, then use app --migrate --apply.'],
   DEPLOY_BUILD: ['Candidate compilation or build failed; OLD was not switched.', true, 'Fix the build/configuration and retry the deployment.'],
   DEPLOY_CANDIDATE: ['Candidate validation failed.', true, 'Fix candidate configuration or its isolated health check, then retry.'],
@@ -112,9 +117,9 @@ const stringList = value => Array.isArray(value) && value.length <= 256 &&
   value.every(item => typeof item === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(item));
 
 export function normalizeOptions(input = {}) {
-  const { mode, apply = false, verify = false, migrate = false, drainTimeoutMs = 30000 } = input;
+  const { mode, apply = false, verify = false, migrate = false, upgradeOperations = false, drainTimeoutMs = 30000 } = input;
   requireValue(['web', 'app', 'status'].includes(mode), 'DEPLOY_USAGE');
-  requireValue([apply, verify, migrate].every(value => typeof value === 'boolean'), 'DEPLOY_USAGE');
+  requireValue([apply, verify, migrate, upgradeOperations].every(value => typeof value === 'boolean'), 'DEPLOY_USAGE');
   requireValue(Number.isInteger(drainTimeoutMs) && drainTimeoutMs > 0 && drainTimeoutMs <= 300000, 'DEPLOY_USAGE');
   const services = input.services ?? (mode === 'web' ? ['web'] : []);
   requireValue(Array.isArray(services) && services.length <= 32 &&
@@ -123,7 +128,9 @@ export function normalizeOptions(input = {}) {
   requireValue(mode !== 'app' || services.length > 0, 'DEPLOY_USAGE');
   requireValue(mode !== 'web' || (services.length === 1 && services[0] === 'web' && !migrate), 'DEPLOY_USAGE');
   requireValue(mode !== 'status' || (!apply && !verify && !migrate && services.length === 0), 'DEPLOY_USAGE');
-  return Object.freeze({ ...input, mode, apply, verify, migrate, drainTimeoutMs, services: Object.freeze([...services]) });
+  requireValue(!upgradeOperations || (mode === 'app' && services.length === 6 &&
+    ['web', 'api', 'worker', 'egress', 'llm-egress', 'openai-egress'].every(name => services.includes(name))), 'DEPLOY_OPERATIONS_SCOPE');
+  return Object.freeze({ ...input, mode, apply, verify, migrate, upgradeOperations, drainTimeoutMs, services: Object.freeze([...services]) });
 }
 
 // Only finite known codes cross the adapter boundary. Never forward error text,
@@ -188,9 +195,13 @@ export async function runDeployment(adapter, input = {}) {
     ctx.interruptedServices = Object.freeze([...interrupted]);
     requireValue(ctx.mode !== 'web' || (!ctx.plan.migration && interrupted.length === 1 && interrupted[0] === 'web'), 'DEPLOY_SCOPE');
     requireValue(!ctx.plan.rollbackSafe || ctx.plan.old != null);
+    const operations = ctx.plan.operations;
+    requireValue((operations === undefined && !options.upgradeOperations) ||
+      (typeof operations === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(operations)));
     if (!options.apply) return { ok: true, mode: ctx.mode, phase: 'plan', state: 'unchanged',
       services: [...ctx.services], interruptedServices: [...interrupted], migration: ctx.plan.migration,
       rollbackSafe: ctx.mode === 'web' && ctx.plan.rollbackSafe, verify: options.verify,
+      upgradeOperations: options.upgradeOperations, operations: operations ?? null,
       nextAction: 'Review upgrades AND interrupted services, then use --apply; migration also requires --migrate.' };
     state = 'old-serving';
     if (ctx.plan.migration) requireValue(options.migrate, 'DEPLOY_MIGRATION_REQUIRED');

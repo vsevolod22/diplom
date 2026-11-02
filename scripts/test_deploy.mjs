@@ -4,14 +4,16 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEPLOY_ERRORS, runDeployment } from './deploy-core.mjs';
-import { main } from './deploy.mjs';
+import { DEPLOY_ERRORS, normalizeOptions, runDeployment } from './deploy-core.mjs';
+import { main, parseArgs } from './deploy.mjs';
+import { deployAdapterDiagnostic } from './deploy-adapter.mjs';
 import { adapterFixture } from './deploy-adapter.test.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const RAW = 'synthetic-private-stderr-DO-NOT-PRINT';
 const web = { mode: 'web', apply: true };
 const app = { mode: 'app', apply: true, services: ['api'] };
+const allServices = ['web', 'api', 'worker', 'egress', 'llm-egress', 'openai-egress'];
 function fake({ migration = false, safe = true, fault, mutate } = {}) {
   const calls = [], lease = Object.freeze({ owner: 'test-only' });
   const values = {
@@ -40,15 +42,18 @@ function failure(result, code, phase) {
   assert.ok(!JSON.stringify(result).includes(RAW));
 }
 
-test('real CLI help/invalid arguments never instantiate an adapter or execute an engine', async () => {
-  for (const args of [['--help'], [], ['app'], ['web', '--services', 'api'], ['web', '--apply', '--plan'], ['status', '--apply'], ['web', '--bogus']]) {
+test('upgrade-operations CLI: valid all-six app parsing; invalid scopes never instantiate an adapter or execute an engine', async () => {
+  const valid = parseArgs(['app', '--services', allServices.join(','), '--upgrade-operations', '--plan']);
+  assert.equal(valid.upgradeOperations, true); assert.equal(valid.apply, false); assert.deepEqual(valid.services, allServices);
+  const invalidUpgrade = [['web', '--upgrade-operations'], ['status', '--upgrade-operations'], ['app', '--services', 'api', '--upgrade-operations']];
+  for (const args of [['--help'], [], ['app'], ['web', '--services', 'api'], ['web', '--apply', '--plan'], ['status', '--apply'], ['web', '--bogus'], ...invalidUpgrade]) {
     const child = spawnSync(process.execPath, [join(ROOT, 'scripts/deploy.mjs'), ...args], {
       cwd: ROOT, env: { PATH: '/nonexistent-test-engine' }, encoding: 'utf8', timeout: 3000,
     });
     assert.equal(child.error, undefined); assert.equal(child.stderr, '');
     assert.equal(child.status, args[0] === '--help' ? 0 : 1);
     if (args[0] === '--help') assert.match(child.stdout, /Usage:/);
-    else failure(JSON.parse(child.stdout), 'DEPLOY_USAGE', 'arguments');
+    else failure(JSON.parse(child.stdout), args.includes('--upgrade-operations') ? 'DEPLOY_OPERATIONS_SCOPE' : 'DEPLOY_USAGE', 'arguments');
   }
   const original = console.log; const output = []; let loaded = 0;
   try {
@@ -56,13 +61,22 @@ test('real CLI help/invalid arguments never instantiate an adapter or execute an
     const factory = async () => { loaded++; throw Error(RAW); };
     assert.equal(await main(['--help'], factory), 0);
     assert.equal(await main(['invalid'], factory), 1);
+    for (const args of invalidUpgrade) assert.equal(await main(args, factory), 1);
     assert.equal(loaded, 0);
     assert.equal(await main(['web'], factory), 1);
   } finally { console.log = original; }
   assert.ok(!output.join('').includes(RAW));
 });
 
-test('plan and status are read-only; verification never autoexecutes', async () => {
+test('upgrade-operations core defaults false and rejects invalid scopes before lease; plan/status stay read-only', async () => {
+  for (const options of [{ mode: 'web' }, { mode: 'status' }, { mode: 'app', services: allServices }]) {
+    assert.equal(normalizeOptions(options).upgradeOperations, false);
+    assert.equal(normalizeOptions({ ...options, upgradeOperations: false }).upgradeOperations, false);
+  }
+  for (const options of [{ mode: 'web' }, { mode: 'status' }, { mode: 'app', services: ['api'] }]) {
+    const f = fake(); const result = await runDeployment(f.adapter, { ...options, upgradeOperations: true });
+    failure(result, 'DEPLOY_OPERATIONS_SCOPE', 'arguments'); assert.deepEqual(f.names(), []);
+  }
   for (const options of [{ mode: 'web' }, { mode: 'status' }]) {
     const f = fake(); assert.equal((await runDeployment(f.adapter, options)).ok, true);
     assert.deepEqual(f.names(), [options.mode === 'status' ? 'status' : 'preflight']);
@@ -210,7 +224,7 @@ test('actual adapter app: full copy-qualified happy path and failed API startup 
   }
 });
 
-test('actual adapter shared lease rejects a second owner and preserves first owner record', { timeout: 10000 }, async t => {
+test('upgrade-operations actual adapter: default preserves prior preset, explicit all-six plans v2, invalid scope is inert; shared lease ownership', { timeout: 20000 }, async t => {
   const f = await adapterFixture(t); const lease = await f.adapter.acquireLock({ options: web });
   assert.equal(f.locked(), true);
   await assert.rejects(f.adapter.acquireLock({ options: web }), e => e.code === 'DEPLOY_LOCKED');
@@ -218,4 +232,33 @@ test('actual adapter shared lease rejects a second owner and preserves first own
   assert.equal(f.locked(), true);
   assert.deepEqual(await f.adapter.releaseLock({ lease, options: web }), { released: true });
   assert.equal(f.locked(), false);
+  const readOnly = fixture => {
+    assert.deepEqual(fixture.events, [], 'planning must not build, stop, snapshot or switch');
+    assert.equal(fixture.locked(), false);
+    assert.ok(!fixture.calls.some(args => ['build', 'create'].includes(args[0]) ||
+      args[0] === 'container' && ['stop', 'start', 'rm'].includes(args[1]) || args[0] === 'compose' && args.includes('up')));
+  };
+  assert.equal(f.publishedSelection.operations, undefined); assert.equal(f.configuredSelection.operations, undefined);
+  const options = { mode: 'app', services: allServices };
+  const unchanged = await runDeployment(f.adapter, options);
+  assert.equal(unchanged.ok, true, JSON.stringify({ unchanged, diagnostics: f.diagnostics }));
+  assert.equal(unchanged.upgradeOperations, false); assert.equal(unchanged.operations, null); readOnly(f);
+  // Both descriptor and OLD lack operations: only the real adapter's explicit
+  // selectOpenAiOperations(..., true) path can select the v2 preset here.
+  const upgraded = await runDeployment(f.adapter, { ...options, upgradeOperations: true });
+  assert.equal(upgraded.ok, true, JSON.stringify({ upgraded, diagnostics: f.diagnostics }));
+  assert.equal(upgraded.phase, 'plan'); assert.equal(upgraded.operations, 'public-images-v2');
+  assert.equal(upgraded.upgradeOperations, true); assert.deepEqual([...upgraded.services].sort(), [...allServices].sort()); readOnly(f);
+  for (const [mode, services] of [['web', ['web']], ['status', []], ['app', ['api']]]) {
+    const callsBefore = f.calls.length;
+    await assert.rejects(f.rawAdapter.prepare({ mode, services, upgradeOperations: true }), error =>
+      ['OPERATIONS_UPGRADE_REQUIRES_ALL_APP_TARGETS', 'TARGETS_INVALID'].includes(deployAdapterDiagnostic(error).code));
+    assert.equal(f.calls.length, callsBefore, 'invalid scope must fail before any engine command'); readOnly(f);
+  }
+  const prior = await adapterFixture(t, { publishedOperations: true });
+  assert.equal(prior.publishedSelection.operations, 'public-images-v2');
+  assert.equal(prior.configuredSelection.operations, undefined, 'operator descriptor need not repeat the published preset');
+  const preserved = await runDeployment(prior.adapter, options);
+  assert.equal(preserved.ok, true, JSON.stringify({ preserved, diagnostics: prior.diagnostics }));
+  assert.equal(preserved.upgradeOperations, false); assert.equal(preserved.operations, 'public-images-v2'); readOnly(prior);
 });
