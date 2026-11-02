@@ -5,22 +5,23 @@
 
 ## Текущая готовность
 
-CLI/core и конкретный Docker adapter реализуют web/app switch, сохранительные
-проверки и publication. Source capability `applyWeb/applyApp=true` не равна
-live-квалификации: `liveQualified=false`.
-По финальному handoff координатора Sol actual-adapter focused suite на final source
-после drain clamp: **offline PASS 15/15 за 21.05s**, без edits во время финального теста.
-Snapshot bug исправлен, reviewer fixes selection/web restore приняты;
-drain fix CLOSED: scoped GO, findings нет. Это source/offline acceptance,
-не live qualification или native acceptance нового deployment engine.
-По handoff координатора sole a7 завершил archive-only incident415: SUCCESS после
-независимого review и четырёх focused tests. Архив:
-`exact-recovery-compensations/restored-41522be2994d3a54fd5cd010ac26d3d4`.
-В нём сохранены `incident`, `operation.lock`, `archive-operation.lock`, `archived-restored.json`.
-Активные guards отсутствуют; наблюдавшиеся HTTP-коды — root200/auth401.
-Это завершение архивирования: **старый deployment не обновлён**, миграция не выполнена.
-Эта docs lane runtime и git не проверяла; запись не утверждает готовность всего сайта.
-Новый rollout требует отдельного GO и свежих checks; снятие прежнего HOLD его не разрешает.
+По actual evidence sole a7 в TASK32 app rollout **READY**:
+`e8746d1a298cd49ebe42f3d729c167c5`, 505.5s, `new-healthy`, lock released,
+HTTP8081 root200/anonymous auth-me401; опубликован `public-images-v2`.
+Auth A2→A3: две квалификации constructor на копии, actual after-API fingerprint
+совпал с expected; четыре stores сохранены с разрешённым additive auth изменением,
+ledger/history/quota, включая liabilities, неизменны. Web открыт после preservation receipt.
+Это первая успешная actual app-квалификация, не универсальная recovery/web-only/native
+приёмка, не проверка нового AI token или paid AI. GET-only smoke учитывается отдельно.
+Mandatory build/guards/health пройдены; optional --verify/fullsuite не запускались.
+Исторический offline PASS 15/15 за 21.05s не предотвратил последующие actual отказы:
+STOP_OUTPUT_INVALID, HELPER_CONTROL_CHANGED и HELPER_STOP_OUTPUT сохранены в TASK32.
+Их OLD restore/reconciliation не означали новый rollout; неизвестный stop stdout не восстановлен.
+Incident415 ранее архивирован в
+`exact-recovery-compensations/restored-41522be2994d3a54fd5cd010ac26d3d4`
+с incident и обоими locks. Прежние «OLD не обновлён» относятся к тем попыткам, не к текущему READY.
+Docs lane runtime/git не проверяла. Public host/TLS/DR остаются отдельными gates;
+каждый следующий rollout требует нового GO и свежих checks.
 
 ## План и статус
 
@@ -78,7 +79,7 @@ pnpm deploy:app --services web,api,worker,egress,llm-egress,openai-egress --upgr
 проверяет auth/ledger/history/quota на копиях. `--migrate` разрешает требуемое
 изменение auth A2→A3 при старте нового API, а не отдельный live-migrate шаг.
 После worker и API сравниваются stores, затем открывается web и публикуется receipt.
-Это source-порядок; реальная сохранность ещё требует независимой приёмки.
+Этот порядок квалифицирован для указанного выше app rollout, не для любого будущего запуска.
 
 ## Проверки и ошибки
 
@@ -112,8 +113,27 @@ CLI выдаёт безопасный JSON; exit 0 — успех либо пл�
 не восстанавливает прежний container ID; требует settled dispatch, проверенных
 границ и health. Неизвестный dispatch или начатая publication исключают auto rollback.
 App после попытки fencing сохраняет HOLD при отказе даже без миграции.
-Общей recovery-команды нет; требуется отдельное операторское recovery-решение.
+Универсальной recovery-команды нет; узкое reconciliation ниже не восстанавливает сервисы или БД.
 Наличие команды, успешная сборка и план не являются live/native acceptance.
+
+## Reconciliation уже восстановленного OLD adapter attempt
+
+`scripts/deploy-reconcile-web.mjs` завершает только проверенное восстановление, не выполняет его.
+Три отдельные пары команд, без автоматического выбора или fallback:
+- `check` / `apply`: остановлен только web, same OLD web уже восстановлен; backend epochs неизменны.
+- `check-fenced-writers` / `apply-fenced-writers`: три writers восстановлены, helper clean retired,
+  host export пуст; helper мог читать stores — это не доказательство отсутствия чтения БД.
+- `check-exported-writers` / `apply-exported-writers`: сохранены четыре DB exports и два manifests;
+  проверяются bytes/hash и integrity/logical fingerprints сохранённых копий, не live DB.
+Для всех: точный journal без qualification/switch/migration/publication, historical intent отдельно
+от current source, validated OLD identities/config/epochs, retained refs и health обязательны.
+`check* --attempt '<id>' --historical-intent '<sha256>'` не снимает lock.
+После независимого review и operator GO соответствующий `apply*` получает те же аргументы,
+затем `--review '<review>' --source '<source>'` и ack: `--ack-reconcile-restored-web`,
+`--ack-reconcile-restored-writers` либо `--ack-reconcile-exported-writers` соответственно.
+Apply сохраняет evidence, пишет complete v2 `old-restored`, архивирует original lock и guard последним.
+`WEB_ATTEMPT_RECONCILED` не означает новый deploy, completed snapshot или post-restart DB equality.
+Неизвестный/частичный layout или отказ: HOLD, без retry/resume/ручного unlock; lifecycle здесь нет.
 
 ## Archive-only после подтверждённого restored-v6
 
