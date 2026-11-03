@@ -8,7 +8,10 @@ import {
   saveReportPreferences,
   subscribeReportPreferences,
   useReportPreferences,
+  type OpenAiSummaryConsent,
 } from './reportPreferences';
+import { allowSummaryAutomation, reportPreferencesCurrent } from '@/shared/api/scans/reportAutomation';
+import { OPENAI_COST_BASIS, OPENAI_MODEL } from '@/shared/api/scans/llmPublicContract';
 
 const client = new QueryClient();
 const key = (subject: string) => `report-preferences:v1:${encodeURIComponent(subject)}`;
@@ -28,6 +31,138 @@ afterEach(() => {
   login(null, true);
   localStorage.clear();
   client.clear();
+});
+
+function paidConsent(): OpenAiSummaryConsent {
+  return {
+    version: 1,
+    policyVersion: 'c'.repeat(64),
+    disclosure: {
+      provider: 'OpenAI',
+      model: OPENAI_MODEL,
+      retention: 'no-training',
+      operatorApprovedRouting: true,
+      providerComplianceNotProvenByDeclaration: true,
+      zeroDataRetentionVerified: false,
+      costBasis: OPENAI_COST_BASIS,
+      estimatedPrice: { unit: 'microUSD-per-million-tokens', input: 750000, output: 4500000 },
+      data: 'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.',
+      monetaryLimit: 'capped',
+      requestBudgetMicros: 10000,
+      userBudgetMicros: 100000,
+      scanBudgetMicros: 50000,
+    },
+  };
+}
+function consentContext(consent: OpenAiSummaryConsent) {
+  return { enabled: true, policyVersion: consent.policyVersion, disclosure: consent.disclosure };
+}
+function loadPaidConsent(origin: 'save' | 'parsed-storage', consent: OpenAiSummaryConsent) {
+  const preferences = { language: 'original', autoSummary: true, openAiSummaryConsent: consent } as const;
+  if (origin === 'save') expect(saveReportPreferences(preferences)).toBe(true);
+  else
+    localStorage.setItem(
+      key('owner-a'),
+      JSON.stringify({
+        version: 1,
+        automationRevision: REPORT_AUTOMATION_REVISION,
+        ...preferences,
+      }),
+    );
+  return readReportPreferences();
+}
+
+describe.each(['save', 'parsed-storage'] as const)('nested paid consent from %s', (origin) => {
+  it.each(['policy', 'disclosure', 'prices', 'capped-to-uncapped'] as const)(
+    '%s mutation cannot create authority while snapshot identity remains current',
+    (attack) => {
+      const original = paidConsent();
+      const accepted = loadPaidConsent(origin, original);
+      const nested = accepted.openAiSummaryConsent;
+      if (!nested) throw new Error('Expected parsed paid grant');
+      const before = JSON.stringify(accepted);
+      const stored = localStorage.getItem(key('owner-a'));
+      const base = paidConsent();
+      const target: OpenAiSummaryConsent =
+        attack === 'policy'
+          ? { ...base, policyVersion: 'd'.repeat(64) }
+          : attack === 'prices'
+            ? {
+                ...base,
+                disclosure: {
+                  ...base.disclosure,
+                  estimatedPrice: { ...base.disclosure.estimatedPrice, input: 900000 },
+                },
+              }
+            : {
+                ...base,
+                disclosure: {
+                  ...base.disclosure,
+                  monetaryLimit: 'uncapped',
+                  requestBudgetMicros: null,
+                  userBudgetMicros: null,
+                  scanBudgetMicros: null,
+                },
+              };
+      expect(allowSummaryAutomation(accepted, consentContext(original))).toBe(true);
+      expect(allowSummaryAutomation(accepted, consentContext(target))).toBe(false);
+      const save = vi.spyOn(Storage.prototype, 'setItem');
+      // Reflect attempts runtime mutation even if the public TypeScript type becomes readonly.
+      const writes =
+        attack === 'policy'
+          ? [Reflect.set(nested, 'policyVersion', target.policyVersion)]
+          : attack === 'disclosure'
+            ? [Reflect.set(nested, 'disclosure', target.disclosure)]
+            : attack === 'prices'
+              ? [Reflect.set(nested.disclosure.estimatedPrice, 'input', 900000)]
+              : ['monetaryLimit', 'requestBudgetMicros', 'userBudgetMicros', 'scanBudgetMicros'].map(
+                  (field) => Reflect.set(nested.disclosure, field, Reflect.get(target.disclosure, field)),
+                );
+      expect(readReportPreferences()).toBe(accepted);
+      expect(reportPreferencesCurrent(accepted, 'summary')).toBe(true);
+      expect(allowSummaryAutomation(accepted, consentContext(target))).toBe(false);
+      expect(allowSummaryAutomation(accepted, consentContext(original))).toBe(true);
+      expect(JSON.stringify(accepted)).toBe(before);
+      expect(localStorage.getItem(key('owner-a'))).toBe(stored);
+      expect(save).not.toHaveBeenCalled();
+      expect(writes.every((result) => result === false)).toBe(true);
+      for (const value of [accepted, nested, nested.disclosure, nested.disclosure.estimatedPrice])
+        expect(Object.isFrozen(value)).toBe(true);
+    },
+  );
+
+  it('detaches caller-owned grant/disclosure/price aliases; mutating them is not a save', () => {
+    const supplied = paidConsent();
+    const original = paidConsent();
+    const accepted = loadPaidConsent(origin, supplied);
+    const nested = accepted.openAiSummaryConsent;
+    if (!nested) throw new Error('Expected parsed paid grant');
+    expect(nested).not.toBe(supplied);
+    expect(nested.disclosure).not.toBe(supplied.disclosure);
+    expect(nested.disclosure.estimatedPrice).not.toBe(supplied.disclosure.estimatedPrice);
+    const raw = localStorage.getItem(key('owner-a'));
+    const save = vi.spyOn(Storage.prototype, 'setItem');
+    expect(Object.isFrozen(supplied)).toBe(false);
+    expect(Object.isFrozen(supplied.disclosure)).toBe(false);
+    expect(Object.isFrozen(supplied.disclosure.estimatedPrice)).toBe(false);
+    expect(Reflect.set(supplied, 'policyVersion', 'd'.repeat(64))).toBe(true);
+    expect(Reflect.set(supplied.disclosure.estimatedPrice, 'input', 900000)).toBe(true);
+    const changed = {
+      ...supplied.disclosure,
+      monetaryLimit: 'uncapped',
+      requestBudgetMicros: null,
+      userBudgetMicros: null,
+      scanBudgetMicros: null,
+    } as const;
+    Reflect.set(supplied, 'disclosure', changed);
+    expect(readReportPreferences()).toBe(accepted);
+    expect(reportPreferencesCurrent(accepted, 'summary')).toBe(true);
+    expect(accepted.openAiSummaryConsent).toEqual(original);
+    expect(allowSummaryAutomation(accepted, consentContext(original))).toBe(true);
+    expect(allowSummaryAutomation(accepted, consentContext(supplied))).toBe(false);
+    expect(localStorage.getItem(key('owner-a'))).toBe(raw);
+    expect(save).not.toHaveBeenCalled();
+  });
 });
 
 describe('owner-scoped report automation preferences', () => {
@@ -139,6 +274,8 @@ describe('owner-scoped report automation preferences', () => {
     JSON.stringify({ ...record, version: 2 }),
     JSON.stringify({ ...record, automationRevision: 'report-automation-v0' }),
     JSON.stringify({ ...record, automationRevision: 'report-automation-v2' }),
+    JSON.stringify({ ...record, automationRevision: 'report-automation-v2-nvidia-no-training' }),
+        JSON.stringify({ ...record, automationRevision: 'report-automation-v3-dots-no-training' }),
     JSON.stringify({ ...record, language: 'en' }),
     JSON.stringify({ ...record, autoSummary: 'true' }),
     JSON.stringify({ language: 'ru', autoSummary: true }),
@@ -147,6 +284,7 @@ describe('owner-scoped report automation preferences', () => {
   ])('fails closed for invalid or obsolete stored settings: %s', (raw) => {
     localStorage.setItem(key('owner-a'), raw);
     expect(readReportPreferences()).toMatchObject(defaults);
+    expect(localStorage.getItem(key('owner-a'))).toBe(raw);
   });
 
   it('revokes a live hook when another tab writes settings for a different policy revision', () => {

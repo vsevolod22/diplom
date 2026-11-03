@@ -11,6 +11,7 @@ import type { OciResolver } from '../oci/oci-resolver.js';
 import { PUBLIC_IMAGE_LIMITS } from '../oci/public-image-policy.js';
 import { PublicImageScansService, type PublicImageInspection, type PublicImageInspector } from './public-image-scans.service.js';
 import { ScansService } from './scans.service.js';
+import { ImageSearchSessions } from './image-search.js';
 import { PRODUCTION_DB_TRUST_ANCHOR, localDbTrustAnchorFromEnv } from '../worker/vuln-db-trust.js';
 
 const identity = { subject: 'alice', scope: ['scan:create'] };
@@ -31,6 +32,30 @@ function setup(inspect: PublicImageInspector = async () => target) {
   return { ledger, store, resolver, service, close() { ledger.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
+test('generic discovery composition confirms tag selection but never inspects, enqueues or bypasses launch readiness', async () => {
+  let inspections = 0;
+  const f = setup(async () => { inspections++; return target; });
+  try {
+    const sessions = new ImageSearchSessions(async (kind, query, page, repository) => {
+      assert.deepEqual([kind, query, page, repository], ['tags', 'RC', 1, 'example/app']);
+      return { results: [{ name: 'RC' }], count: 1, next: null };
+    }, undefined, item => f.service.imageSuggestion(item));
+    const page = await sessions.search('alice', 'RC', 'gen', undefined, 'example/app');
+    const selected = page.items[0];
+    assert.equal(selected.reference, 'registry-1.docker.io/example/app:RC');
+    assert.equal(selected.tagConfirmed, true);
+    assert.equal(selected.scannable, false);
+    assert.equal(selected.eligibility, 'public-hub-profile');
+    assert.ok(selected.allowedCheckSets?.length);
+    assert.equal(inspections, 0);
+    assert.equal(f.ledger.pending().length, 0);
+    f.service.ready = false;
+    await assert.rejects(f.service.create(identity, { ...request, imageReference: selected.reference }), ServiceUnavailableException);
+    assert.equal(inspections, 0);
+    assert.equal(f.ledger.pending().length, 0);
+  } finally { f.close(); }
+});
+
 test('public adapters cannot enqueue foreign identities, absent config digests or out-of-budget inventories', async () => {
   const layer = target.layers[0];
   for (const invalid of [
@@ -38,8 +63,8 @@ test('public adapters cannot enqueue foreign identities, absent config digests o
     { ...target, configDigest: '' }, { ...target, platform: 'linux/arm64' }, { ...target, layers: [] },
     { ...target, layers: Array.from({ length: PUBLIC_IMAGE_LIMITS.maxLayers + 1 }, () => layer) },
     { ...target, layers: [{ ...layer, size: PUBLIC_IMAGE_LIMITS.compressedLayer + 1 }] },
-    { ...target, layers: Array.from({ length: 5 }, () => ({ ...layer, size: PUBLIC_IMAGE_LIMITS.compressedLayer })) },
-    { ...target, layers: [{ ...layer, mediaType: 'application/vnd.oci.image.layer.v1.tar+zstd' }] },
+    { ...target, layers: Array.from({ length: 4 }, () => ({ ...layer, size: PUBLIC_IMAGE_LIMITS.compressedLayer })) },
+    { ...target, layers: [{ ...layer, mediaType: 'application/vnd.oci.image.layer.v1.tar+unknown' }] },
   ]) {
     const f = setup(async () => invalid as PublicImageInspection);
     try { await assert.rejects(f.service.create(identity, request), ServiceUnavailableException); assert.equal(f.ledger.pending().length, 0); }

@@ -98,7 +98,7 @@ test('grounding requires current cited findings and forbids newly invented CVE/T
 test('new prompt revision invalidates previous consent; prompts separate scanner facts from uncertain interpretations', () => {
   const current = policyFromEnvironment(fixtureEnv)!;
   assert.equal(current.version, fixturePolicy.version);
-  const free = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'xingchen-agi/xing4.0-29b-a4b:free', LLM_PROVIDER_ALLOWLIST: 'phala',
+  const free = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'dots-studio/dots-3-note-preview:free', LLM_PROVIDER_ALLOWLIST: 'atlas-cloud/fp8', LLM_RETENTION: 'no-training',
     LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0', LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0' })!;
   for (const prepared of [prepareSummary(fixtureReport, current), prepareHistory({}, free)]) {
     const wire = JSON.parse(prepared.body), prompt = wire.messages[0].content;

@@ -56,6 +56,6 @@ it('renders Russian report-control labels while preserving every option value an
   }
   fireEvent.click(screen.getByRole('button', { name: 'Высокие и критические (HIGH + CRITICAL)' }));
   expect(onVuln).toHaveBeenLastCalledWith({ view: 'report-v1', severity: ['HIGH', 'CRITICAL'] });
-  expect(screen.getByText(/UNKNOWN.*всегда в конце при любом порядке сортировки/)).toBeVisible();
+  expect(screen.getByText('Находки с неизвестным уровнем опасности — в конце списка.')).toBeVisible();
   expect(screen.queryByText(/\/page/)).not.toBeInTheDocument();
 });

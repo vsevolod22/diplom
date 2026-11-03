@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
-import { llmBridgeFixture } from './public-cve-bridge-llm-fixtures.mjs';
-import { publicImageStand, PROJECT } from './public-image-stand.mjs';
-import { publicLlmComposeArguments } from './public-llm-stand.mjs';
+import { currentLlmBridgeFixture as llmBridgeFixture } from './public-cve-bridge-llm-fixtures.mjs';
+import { publicImageStand, PROJECT, runIsolatedDocker } from './public-image-stand.mjs';
+import { publicLlmComposeArguments, PUBLIC_LLM_EXPORT_PROGRAM } from './public-llm-stand.mjs';
 import { publicCveFailure } from './refresh-public-cve.mjs';
-for (const supplied of [false, true])
-  test(`CVE default bridge preserves seven-service LLM ${supplied ? 'key-mounted' : 'key-absent'} descriptor and FOUR native stores`, async (t) => {
-    const f = llmBridgeFixture(t, supplied),
+for (const version of [1, 2]) for (const supplied of [false, true])
+  test(`CVE default bridge preserves seven-service LLM v${version} ${supplied ? 'key-mounted' : 'key-absent'} descriptor and FOUR native stores`, async (t) => {
+    const f = llmBridgeFixture(t, supplied, version),
       metadata = ['llm-profile.json', 'compose.llm-env.json', 'compose.images.json'].map((n) => [
         n,
         fs.readFileSync(join(f.stand, n)),
@@ -25,6 +25,13 @@ for (const supplied of [false, true])
       assert.equal(fs.statSync(join(f.stand, n)).ino, ino);
     }
     assert.equal(f.containers.find((c) => c.Id === gateway.Id).State.StartedAt, gateway.State.StartedAt);
+    const gatewayCommand = ['python', '-I', 'openrouter.py', ...(version === 2 ? ['--public-90s'] : [])];
+    assert.deepEqual(gateway.Config.Cmd, gatewayCommand);
+    assert.deepEqual(f.containers.find((c) => c.Id === gateway.Id).Config.Cmd, gatewayCommand);
+    assert.deepEqual(f.images['llm-egress'].Config.Cmd, ['python', '-I', 'openrouter.py']);
+    assert(f.containers.find((c) => c.Name === `/${PROJECT}-api-1`).Config.Env.includes(`LLM_TIMEOUT_MS=${version === 2 ? '90000' : '30000'}`));
+    const persisted = JSON.parse(fs.readFileSync(join(f.stand, 'compose.llm-env.json')));
+    assert.deepEqual(persisted.services['llm-egress'], version === 2 ? { command: gatewayCommand } : undefined);
     assert(f.containers.some((c) => c.Id === web.Id && c.State.Running));
     const audit = join(f.stand, 'llm-deployments', fs.readdirSync(join(f.stand, 'llm-deployments'))[0]);
     for (const phase of ['fenced', 'before-api', 'after-api'])
@@ -126,3 +133,26 @@ for (const name of ['llm-profile.json', 'compose.llm-env.json', 'compose.images.
     assert(!f.calls.some((c) => c.kind === 'docker' && (c.args[1] === 'stop' || c.args.includes('up'))));
     assert(!fs.existsSync(join(f.stand, '.operation.lock')));
   });
+
+for(const cause of ['OUTPUT_LIMIT','TIMEOUT'])test(`CURRENT BACKUP actual bridge to refresh carries ${cause} privately and preserves fenced HOLD`,async t=>{
+  const f=llmBridgeFixture(t),canary='PRIVATE_BACKUP_PROVIDER_PATH_CANARY';let injected=0;
+  const docker=async(args,options)=>{
+    if(args.includes(PUBLIC_LLM_EXPORT_PROGRAM)){
+      const envelope=JSON.parse(args.at(-1));
+      if(envelope.request.action==='chunk'){
+        injected++;
+        return runIsolatedDocker(args,options,(_cmd,_args,_opts,cb)=>cb(Object.assign(Error(canary),{code:cause==='OUTPUT_LIMIT'?'ERR_CHILD_PROCESS_STDIO_MAXBUFFER':null,killed:true,signal:'SIGKILL'}),canary,canary));
+      }
+    }
+    return f.llmDocker(args,options);
+  };
+  await assert.rejects(f.refresh([],{integration:undefined,docker,run:f.llmRun}),error=>{
+    const report=publicCveFailure(error);assert.equal(report.hold,true);assert.equal(report.phase,'preservation');
+    assert.equal(report.diagnostic.cause,'PRESERVATION_EXPORT');
+    const d=report.diagnostic.preservation;assert.equal(d.cause,cause);assert.equal(d.phase,'fenced');assert.equal(d.group,'core');assert.equal(d.role,'auth');assert.equal(d.requestedOffset,0);assert.equal(d.validatedBytes,0);assert.equal(d.writtenBytes,0);
+    assert(!JSON.stringify(report).includes(canary));assert(!String(error).includes(canary));return true;
+  });
+  assert.equal(injected,1);assert(fs.existsSync(join(f.stand,'.operation.lock/mutation.json')));
+  assert.equal(f.containers.find(c=>c.Name===`/${PROJECT}-web-1`).State.Running,false);
+  assert(!f.calls.some(c=>c.args[0]==='compose'&&c.args.includes('up')));
+});

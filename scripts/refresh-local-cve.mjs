@@ -15,7 +15,9 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const HEX = /^[a-f0-9]{64}(?![\s\S])/;
 const DIGEST = /^sha256:[a-f0-9]{64}(?![\s\S])/;
 const GiB = 1024 ** 3;
-export const DISK_POLICY = Object.freeze({ maxReleases: 8, maxBytes: 16 * GiB, reserveBytes: 6 * GiB });
+// Admission only: current + previous + one incoming; reviewed GC remains manual.
+export const DISK_POLICY = Object.freeze({ maxReleases: 3, maxBytes: 10 * GiB, reserveBytes: 6 * GiB });
+const MAX_RELEASE_BYTES = 2 * GiB + 512 * 1024 ** 2 + 4096 + 4096 + 64;
 // Only source-defined labels may cross the error boundary. In particular, never
 // attach a cause, child error, argv, output, URL, path, JWT or key material.
 const FAILURE_CHECKPOINTS = Object.freeze({
@@ -49,7 +51,8 @@ const fail = (phase = 'preflight', checkpoint = 'validation', diagnostic = null)
     phase = 'preflight'; checkpoint = 'validation';
   }
   const detail = diagnostic ? ` cause=${diagnostic.cause}${diagnostic.transport ? ` transport=${diagnostic.transport.boundary}/${diagnostic.transport.cause}${diagnostic.transport.status ? ` status=${diagnostic.transport.status}` : ''}` : ''};` : '';
-  const message = `LOCAL CVE refresh refused/HOLD; phase=${phase}; checkpoint=${checkpoint}.${detail} No automatic recovery or cleanup.`;
+  const budget = phase === 'staging' && checkpoint === 'disk-budget' ? ' Storage admission limit: 3 total releases, 10 GiB including incoming, 6 GiB free reserve; reviewed manual GC required if exhausted.' : '';
+  const message = `LOCAL CVE refresh refused/HOLD; phase=${phase}; checkpoint=${checkpoint}.${detail} No automatic recovery or cleanup.${budget}`;
   const error = new Error(message);
   const details = Object.freeze({ phase, checkpoint, message, ...(diagnostic ? { diagnostic } : {}) });
   publicFailures.set(error, details);
@@ -116,25 +119,26 @@ export function validateNetworkMembership(resources, project = PROJECT) {
 
 // Count bytes without following links or reading any key/JWT. Never delete an old
 // release: it may be a retained/mounted version. Budget exhaustion is an operator HOLD.
-export function checkDisk(paths) {
-  const names = fs.readdirSync(paths.releases);
-  requireSafe(names.length < DISK_POLICY.maxReleases);
+export function checkDisk(paths, { io = fs } = {}) {
+  const budget = ok => { if (!ok) throw fail('staging', 'disk-budget'); };
+  const names = io.readdirSync(paths.releases);
+  budget(names.length < DISK_POLICY.maxReleases);
   let bytes = 0, entries = 0;
   function count(path, depth) {
     requireSafe(++entries <= 128 && depth <= 3);
-    const stat = fs.lstatSync(path);
+    const stat = io.lstatSync(path);
     requireSafe(stat.uid === process.getuid() && !stat.isSymbolicLink());
     if (stat.isDirectory()) {
-      for (const name of fs.readdirSync(path)) count(join(path, name), depth + 1);
+      for (const name of io.readdirSync(path)) count(join(path, name), depth + 1);
     } else {
       requireSafe(stat.isFile() && stat.nlink === 1);
       bytes += stat.size;
-      requireSafe(bytes <= DISK_POLICY.maxBytes - DISK_POLICY.reserveBytes);
+      budget(bytes + MAX_RELEASE_BYTES <= DISK_POLICY.maxBytes);
     }
   }
   for (const name of names) count(join(paths.releases, name), 0);
-  const disk = fs.statfsSync(paths.stand);
-  requireSafe(disk.bavail * disk.bsize >= DISK_POLICY.reserveBytes);
+  const disk = io.statfsSync(paths.stand);
+  budget(disk.bavail * disk.bsize >= DISK_POLICY.reserveBytes);
 }
 
 export function verifierArguments(root, release, keys, pins) {

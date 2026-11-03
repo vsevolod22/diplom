@@ -17,6 +17,16 @@ import time
 
 SHA = re.compile(r'sha256:[a-f0-9]{64}\Z')
 HEX = re.compile(r'[a-f0-9]{64}\Z')
+MAX_RELEASES = 3
+MAX_PENDING_CANDIDATES = 1
+STORAGE_BUDGET_MESSAGE = ('DB storage budget refused: 3 total releases including incoming, 1 pending digest; '
+                          'reviewed manual GC required; no automatic deletion')
+
+
+class StorageBudgetError(ValueError):
+    pass
+
+
 REPO = Path(__file__).resolve().parents[3]
 TRUST = REPO / 'server/deploy/trust'
 ROOT = REPO / '.local-auth'
@@ -181,8 +191,86 @@ def report_update_failure(values, phase):
         print(f'Active release remains usable; update {phase} still failed', file=sys.stderr)
 
 
-def prepare_candidate(candidates, releases, manifest):
+def candidate_budget(candidates, releases, manifest):
+    """Count complete AND incomplete entries; never prune or adopt another digest."""
+    check(SHA.fullmatch(manifest))
+    for path in (candidates, releases):
+        st = path.lstat()
+        check(st.st_mode & 0o170000 == 0o040000 and st.st_uid == os.getuid() and not st.st_mode & 0o022)
+    retained, pending = list(releases.iterdir()), list(candidates.iterdir())
+    if len(retained) >= MAX_RELEASES or len(pending) > MAX_PENDING_CANDIDATES or any(p.name != manifest for p in pending):
+        raise StorageBudgetError(STORAGE_BUDGET_MESSAGE)
+    # A partial or previously signed release is investigated, never overwritten.
+    check(not os.path.lexists(releases / manifest[7:]))
+
+
+def candidate_stamp(st):
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_mode, st.st_nlink,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def candidate_snapshot(candidate):
+    """Exact owned download only; no key, release, backup or arbitrary tree reads."""
+    check(candidate.parent == ROOT / 'trivy-db-candidates' and SHA.fullmatch(candidate.name))
+    directories = []
+    for path in (ROOT, candidate.parent, candidate):
+        st = path.lstat()
+        check(st.st_mode & 0o170000 == 0o040000 and st.st_uid == os.getuid() and not st.st_mode & 0o022)
+        directories.append(candidate_stamp(st)[:4])
+    fd = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        check(candidate_stamp(os.fstat(fd))[:4] == directories[-1])
+        check(sorted(os.listdir(fd)) == ['layer.tar.gz', 'manifest.json'])
+        files = {}
+        for name, cap in (('manifest.json', 65536), ('layer.tar.gz', 512 * 1024 ** 2)):
+            source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            try:
+                before = os.fstat(source)
+                check(before.st_mode & 0o170000 == 0o100000 and before.st_uid == os.getuid() and before.st_nlink == 1 and
+                      not before.st_mode & 0o022 and 0 < before.st_size <= cap)
+                h, size = hashlib.sha256(), 0
+                while block := os.read(source, 1024 * 1024):
+                    size += len(block)
+                    check(size <= before.st_size)
+                    h.update(block)
+                check(size == before.st_size and candidate_stamp(before) == candidate_stamp(os.fstat(source)) ==
+                      candidate_stamp(os.stat(name, dir_fd=fd, follow_symlinks=False)))
+                files[name] = (candidate_stamp(before), h.hexdigest())
+            finally:
+                os.close(source)
+        check(sorted(os.listdir(fd)) == sorted(files))
+        check(tuple(candidate_stamp(path.lstat())[:4] for path in (ROOT, candidate.parent, candidate)) == tuple(directories))
+        return (tuple(directories), files)
+    finally:
+        os.close(fd)
+
+
+def cleanup_completed_candidate(candidate, proof):
+    """Post-success only. Any mismatch retains remaining evidence for manual review."""
+    check(candidate_snapshot(candidate) == proof)
+    fd = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        check(candidate_stamp(os.fstat(fd))[:4] == proof[0][-1])
+        for name in ('manifest.json', 'layer.tar.gz'):
+            check(tuple(candidate_stamp(path.lstat())[:4] for path in (ROOT, candidate.parent, candidate)) == proof[0])
+            check(candidate_stamp(os.stat(name, dir_fd=fd, follow_symlinks=False)) == proof[1][name][0])
+            os.unlink(name, dir_fd=fd)
+        os.fsync(fd)
+        check(not os.listdir(fd) and candidate_stamp(candidate.lstat())[:4] == proof[0][-1])
+        candidate.rmdir()
+    finally:
+        os.close(fd)
+    parent = os.open(candidate.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        check(candidate_stamp(os.fstat(parent))[:4] == proof[0][-2])
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def prepare_candidate(candidates, releases, manifest, *, completed=None):
     """All candidate work precedes any active pin/service mutation."""
+    candidate_budget(candidates, releases, manifest)
     key = ROOT / 'trust/db-signing-key.pem'
     check(regular(key, 8192).st_mode & 0o077 == 0)
     candidate = candidates / manifest
@@ -190,6 +278,7 @@ def prepare_candidate(candidates, releases, manifest):
         check(candidate.is_dir() and not candidate.is_symlink())
     else:
         run('node', str(TRUST / 'fetch-db-layer.mjs'), manifest, str(candidate), timeout=600)
+    proof = candidate_snapshot(candidate)
     regular(candidate / 'manifest.json', 65536)
     manifest_bytes = (candidate / 'manifest.json').read_bytes()
     check(len(manifest_bytes) <= 65536 and 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest() == manifest)
@@ -217,6 +306,9 @@ def prepare_candidate(candidates, releases, manifest):
         folder.chmod(0o555)
     for name in ('bundle.bin', 'descriptor.json', 'descriptor.sig', 'db/trivy.db', 'db/metadata.json'):
         (release / name).chmod(0o444)
+    check(candidate_snapshot(candidate) == proof)
+    if completed is not None:
+        completed.append((candidate, proof))
     return release, hashes['bundle']
 
 
@@ -239,8 +331,9 @@ def refresh_selected():
         verify_active(values)
         print('DB usable under operator v2; upstream unchanged; no release/pin change')
         return
+    completed = []
     try:
-        release, bundle = prepare_candidate(candidates, releases, manifest)
+        release, bundle = prepare_candidate(candidates, releases, manifest, completed=completed)
         updated = replace_pins(current, release, manifest, bundle)
     except Exception:
         report_update_failure(values, 'candidate')
@@ -248,6 +341,12 @@ def refresh_selected():
     # A switch/rollback failure cannot be described as unchanged-active readiness.
     switch(current, updated, manifest, bundle)
     print('DB release activated; TLS/OCI/local signature verified (NOT publisher identity)')
+    try:
+        check(len(completed) == 1)
+        cleanup_completed_candidate(*completed[0])
+    except Exception:
+        # Activation already succeeded. Never re-switch, rollback or report it as an unchanged-active update failure.
+        print('DB download cleanup deferred after successful activation; operator review required; no retry or rollback', file=sys.stderr)
 
 
 if __name__ == '__main__':
@@ -255,5 +354,7 @@ if __name__ == '__main__':
         check(len(sys.argv) == 1)
         refresh()
     except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.TimeoutExpired, UnicodeError) as error:
+        if isinstance(error, StorageBudgetError):
+            print(STORAGE_BUDGET_MESSAGE, file=sys.stderr)
         print('Local DB refresh failed; inspect operator logs and active pins; no scanner DB fallback', file=sys.stderr)
         sys.exit(1)

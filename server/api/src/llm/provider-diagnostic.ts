@@ -20,6 +20,12 @@ export type GroundingPredicate = typeof GROUNDING_PREDICATES[number];
 // Index is a zero-based summary paragraph (0..11); chat has one text at index 0.
 export type GroundingDiagnostic = Readonly<{ predicate: GroundingPredicate; index: number; witness?: GroundingWitness }>;
 export type LanguageDiagnostic = Readonly<{ index: number; rejection: LanguageRejection }>;
+export const CHAT_CONTENT_PREDICATES = Object.freeze([
+  'chat_shape', 'chat_binding', 'chat_citation_type', 'chat_citation_count', 'chat_citation_duplicate',
+  'chat_citation_unknown', 'chat_source_bytes', 'chat_sources_bytes', 'chat_text',
+  'chat_text_length', 'chat_narrative',
+] as const);
+export type ChatContentPredicate = typeof CHAT_CONTENT_PREDICATES[number];
 // Only normalized, explicitly known finish values are classified. Never echo native/provider strings.
 export function rejectedFinishReason(value: unknown): FailureReason {
   switch (value) {
@@ -34,6 +40,7 @@ export function rejectedFinishReason(value: unknown): FailureReason {
 const diagnostics = new WeakMap<object, FailureDiagnostic>();
 const groundingDiagnostics = new WeakMap<object, GroundingDiagnostic>();
 const languageDiagnostics = new WeakMap<object, LanguageDiagnostic>();
+const chatContentDiagnostics = new WeakMap<object, ChatContentPredicate>();
 export function diagnose<T extends object>(target: T, phase: FailurePhase, reason: FailureReason): T {
   if (!diagnostics.has(target) && FAILURE_PHASES.includes(phase) && FAILURE_REASONS.includes(reason))
     diagnostics.set(target, Object.freeze({ phase, reason }));
@@ -67,10 +74,21 @@ export function diagnoseLanguage<T extends object>(target: T, rejection: Languag
 export function languageDiagnostic(value: unknown): LanguageDiagnostic | undefined {
   return value !== null && typeof value === 'object' ? languageDiagnostics.get(value) : undefined;
 }
+export function diagnoseChatContent<T extends object>(target: T, predicate: ChatContentPredicate): T {
+  if (diagnostics.has(target)) return target;
+  diagnose(target, 'content', 'invalid_content');
+  if (CHAT_CONTENT_PREDICATES.includes(predicate)) chatContentDiagnostics.set(target, predicate);
+  return target;
+}
+export function chatContentDiagnostic(value: unknown): ChatContentPredicate | undefined {
+  return value !== null && typeof value === 'object' ? chatContentDiagnostics.get(value) : undefined;
+}
 export function carryDiagnostic<T extends object>(from: unknown, to: T): T {
   const value = diagnostic(from);
   if (!value || diagnostics.has(to)) return to;
   carryOpenAiHttp(from, to);
+  const content = chatContentDiagnostic(from);
+  if (content) return diagnoseChatContent(to, content);
   const grounding = groundingDiagnostic(from);
   if (grounding) return diagnoseGrounding(to, grounding.predicate, grounding.index, grounding.witness);
   const language = languageDiagnostic(from);
@@ -81,8 +99,10 @@ export function diagnosticHeaders(value: unknown): Record<string, string> {
   if (!detail) return {};
   const grounding = groundingDiagnostic(value);
   const language = languageDiagnostic(value);
+  const content = chatContentDiagnostic(value);
   return { 'X-LLM-Failure-Phase': detail.phase, 'X-LLM-Failure-Reason': detail.reason,
       ...openAiHttpHeaders(value),
+    ...(content ? { 'X-LLM-Content-Predicate': content } : {}),
     ...(grounding ? { 'X-LLM-Grounding-Predicate': grounding.predicate, 'X-LLM-Grounding-Index': String(grounding.index) } : {}),
     ...(grounding?.witness ? {
       'X-LLM-Grounding-Source-Relation': grounding.witness.sourceRelation,

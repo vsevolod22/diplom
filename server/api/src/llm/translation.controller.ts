@@ -13,6 +13,11 @@ export class TranslationController {
     const result = await this.safe(() => this.llm.translation().context(req, scanId, query));
     await this.safe(() => this.write(res, result));
   }
+  @Get('readiness')
+  async readiness(@Req() req: BrowserRequest, @Res() res: ServerResponse, @Param('scanId') scanId: string) {
+    const result = await this.safe(() => this.llm.translation().readiness(req, scanId));
+    await this.safe(() => this.write(res, result));
+  }
   @Post()
   async translate(@Req() req: IncomingMessage, @Res() res: ServerResponse, @Param('scanId') scanId: string, @Body() body: unknown) {
     const controller = new AbortController(), abort = () => controller.abort();

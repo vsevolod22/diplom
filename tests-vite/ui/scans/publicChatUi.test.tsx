@@ -35,9 +35,7 @@ function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher) {
   return render(<ScanChatPanel status={status} transport={sourceTransport()} client={client} />);
 }
 async function open() {
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Обновить историю и условия чата' })).toBeEnabled(),
-  );
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Обновить историю' })).toBeEnabled());
 }
 function prepare(question = 'Что проверить дальше?') {
   fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: question } });
@@ -70,20 +68,20 @@ it('announces automatic GET connection, request wait and continuation; submittin
     return response;
   });
   mount(api, fetcher);
-  expect(connection()).toHaveTextContent('Подключение: читаем');
+  expect(connection()).toHaveTextContent('Читаем сохранённую историю');
   expect(screen.getByLabelText('Вопрос чату')).toBeVisible();
   expect(api.requests.every((request) => request.init.method === 'GET')).toBe(true);
   await open();
-  expect(connection()).toHaveTextContent('доступность провайдера проверяется только при отправке');
+  expect(connection()).toBeEmptyDOMElement();
   prepare();
   fireEvent.submit(screen.getByRole('form', { name: 'Отправка вопроса по отчёту' }));
   fireEvent.submit(screen.getByRole('form', { name: 'Отправка вопроса по отчёту' }));
-  expect(connection()).toHaveTextContent('Ожидаем проверенный полный ответ');
-  expect(screen.queryByText('Ответ ИИ · требует проверки')).toBeNull();
+  expect(connection()).toHaveTextContent('Ожидаем ответ');
+  expect(screen.queryByText('Ответ · проверьте по источникам')).toBeNull();
   await act(async () => finish());
   await screen.findByText(/Последний ответ/);
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
-  expect(screen.getByText(/Продолжите чат новым вопросом/)).toBeVisible();
+  expect(screen.getByRole('textbox', { name: 'Вопрос чату' })).toBeVisible();
   expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
   prepare('Как проверить исправление?');
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
@@ -95,7 +93,7 @@ it('announces automatic GET connection, request wait and continuation; submittin
     consent: { accepted: true, policyVersion: context.policyVersion },
   });
   await screen.findByText('Как проверить исправление?');
-  expect(screen.getAllByText('Ответ ИИ · требует проверки')).toHaveLength(2);
+  expect(screen.getAllByText('Ответ · проверьте по источникам')).toHaveLength(2);
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
 });
 
@@ -126,10 +124,10 @@ it('prepares a failed question without POST, focuses the composer and requires a
 });
 
 it.each([
-  ['LLM_CONFIGURATION_UNAVAILABLE', /Серверный ключ или политика/],
-  ['LLM_PROVIDER_UNAVAILABLE', /Провайдер недоступен/],
-  ['LLM_UNAVAILABLE', /Провайдер недоступен/],
-  ['LLM_QUOTA_EXCEEDED', /лимит запросов или квоты/],
+  ['LLM_CONFIGURATION_UNAVAILABLE', /Чат не настроен/],
+  ['LLM_PROVIDER_UNAVAILABLE', /Сервис ответов недоступен/],
+  ['LLM_UNAVAILABLE', /Сервис ответов недоступен/],
+  ['LLM_QUOTA_EXCEEDED', /лимит запросов/],
   ['LLM_NO_EVIDENCE', /Нет подтверждённых источников/],
 ] as const)(
   'recovers %s only through a manual history GET; never auto-resends or exposes backend diagnostics',
@@ -146,8 +144,9 @@ it.each([
     fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(message);
     expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
-    expect(connection()).toHaveTextContent('Подключение не подтверждено');
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
+    expect(connection()).toHaveTextContent('Не удалось подключить чат');
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/LLM_|HTTP|PRIVATE_CANARY|receipt/);
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
     await open();
     expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeEnabled();
@@ -186,6 +185,8 @@ it('an unknown usage failure remains unknown, not zero or guaranteed provider ad
   );
   mount(api, fetcher);
   await open();
+  expect(screen.getByText(/Учёт недоступен, не ноль/)).not.toBeVisible();
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   expect(screen.getByText(/Учёт недоступен, не ноль/)).toBeVisible();
 });
 
@@ -201,11 +202,11 @@ it('shows duplicate-only delivery as recovery, not an answer; rereads history on
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Запрос уже зарегистрирован');
   expect(client.chat).toHaveBeenCalledTimes(1);
-  expect(screen.queryByText('Ответ ИИ · требует проверки')).toBeNull();
+  expect(screen.queryByText('Ответ · проверьте по источникам')).toBeNull();
   const reads = api.requests.length;
   fireEvent.focus(window);
   expect(api.requests).toHaveLength(reads);
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
   await open();
   expect(api.requests.length).toBeGreaterThan(reads);
   expect(client.chat).toHaveBeenCalledTimes(1);
@@ -280,8 +281,12 @@ it('reads every public page through the existing cookie transport, preserving CV
   const client = createChatClient(scanSession(), api.fetcher);
   render(<ScanChatPanel status={publicStatus} transport={transport} client={client} />);
   await open();
+  expect(screen.getByText('Подробности · история решений, условия и использование').closest('details')).not.toHaveAttribute('open');
+  expect(screen.getByLabelText('Границы отчёта публичного образа в чате')).not.toBeVisible();
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
+  fireEvent.click(screen.getByText('Основания решения'));
   const scope = within(screen.getByLabelText('Границы отчёта публичного образа в чате'));
-  expect(scope.getByText(/CVE: 51; уведомления Debian: 1/)).toBeVisible();
+  expect(scope.getByText(/находок всего: 52; CVE: 51; Debian TEMP: 1; Debian DLA: 0/)).toBeVisible();
   expect(scope.getByText(/Node.js: не поддерживается · состав пакетов Node.js не установлен/)).toBeVisible();
   expect(
     screen.getByRole('checkbox', { name: /TEMP-1234567-ABCDEF · Уведомление Debian \(не CVE\)/ }),
@@ -339,11 +344,19 @@ it('publishes a public TEMP citation only after framed completion and matching h
   prepare();
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByText(/Последний ответ/);
+  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).not.toBeVisible();
+  fireEvent.click(screen.getByText('Источники (1)'));
   expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
-  const link = screen.getByRole('link', { name: `Находка ${rows[51].findingId}` });
-  expect(document.getElementById(link.getAttribute('href')!.slice(1))).toHaveTextContent(
-    'Источник текущего отчёта',
-  );
+  const citation = document.getElementById(`chat-${turnId}-${temp.finding.findingId}`);
+  expect(citation).toBeVisible();
+  expect(citation?.tagName).toBe('LI');
+  expect(citation).toHaveAttribute('tabindex', '-1');
+  expect(citation).toHaveTextContent('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)');
+  expect(citation).toHaveTextContent('Экосистема: deb');
+  expect(citation).toHaveTextContent('Пакет и установленная версия не включены в источник.');
+  expect(citation).toHaveTextContent('Сообщённая исправленная версия: не сообщена.');
+  expect(citation).toHaveTextContent('Источник текущего отчёта, проверен по результатам сканирования.');
+  expect(within(citation!).queryByRole('link')).toBeNull();
   expect(screen.queryByRole('link', { name: /CVERecord|NVD/ })).toBeNull();
   first.unmount();
   render(
@@ -354,7 +367,13 @@ it('publishes a public TEMP citation only after framed completion and matching h
     />,
   );
   await open();
+  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).not.toBeVisible();
+  fireEvent.click(screen.getByText('Источники (1)'));
   expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
+  expect(document.getElementById(`chat-${turnId}-${temp.finding.findingId}`)).toHaveTextContent(
+    'Источник текущего отчёта, проверен по результатам сканирования.',
+  );
+  expect(screen.queryByRole('link', { name: /CVERecord|NVD/ })).toBeNull();
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
 });
@@ -404,9 +423,9 @@ it('rejects public source pages with a different whole-report partition before e
 });
 
 it.each([
-  ['missing', true, /Серверный ключ не настроен или отсутствует/],
+  ['missing', true, /Чат не настроен/],
   ['unsafe', true, /не прошли проверку безопасности/],
-  ['metadata-valid', false, /Хранилище квоты недоступно/],
+  ['metadata-valid', false, /Не удалось проверить лимиты/],
 ] as const)(
   'public readiness %s / quota %s blocks generation but preserves owner history and manual decisions',
   async (credential, quota, reason) => {
@@ -423,8 +442,9 @@ it.each([
       />,
     );
     await open();
+    expect(connection()).toHaveTextContent(reason);
+    fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
     expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(reason);
-    expect(connection()).toHaveTextContent('Готовность генерации не подтверждена');
     expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
     fireEvent.submit(screen.getByRole('form', { name: 'Отправка вопроса по отчёту' }));
     expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(0);
@@ -457,8 +477,9 @@ it('keeps public readiness blockers visible even when the history store prevents
     />,
   );
   await screen.findByRole('alert');
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
-    'Хранилище истории недоступно',
+    'История временно недоступна',
   );
   expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(0);
@@ -475,10 +496,19 @@ it('local public readiness is explicitly unverified generation, not a provider s
     />,
   );
   await open();
+  expect(screen.getByText(/dots-studio\/dots-3-note-preview:free/)).not.toBeVisible();
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toBeVisible();
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toHaveTextContent(
+    'Запрет обучения не гарантирует отсутствие хранения',
+  );
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Генерация не проверена.',
   );
-  expect(screen.getByText(/xingchen-agi\/xing4.0-29b-a4b:free/)).toHaveTextContent('phala');
+  expect(screen.getByText(/dots-studio\/dots-3-note-preview:free/)).toHaveTextContent('atlas-cloud/fp8');
+  expect(document.body.textContent).toContain('отсутствие обучения (no-training)');
+  expect(document.body.textContent).toContain('отсутствие хранения не заявлено, это не ZDR');
+  expect(document.body.textContent).not.toContain('декларирует отсутствие хранения и обучения');
   expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
@@ -500,6 +530,7 @@ it('malformed readiness remains unknown without hiding valid history or revealin
     />,
   );
   await open();
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Готовность генерации неизвестна',
   );
@@ -527,9 +558,26 @@ it('rechecks readiness before public send and dispatches no POST when the key be
   prepare();
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByRole('alert');
+  expect(connection()).toHaveTextContent('Не удалось подключить чат');
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
+  expect(checks).toBe(2);
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
-    'Серверный ключ не настроен или отсутствует',
+    'Готовность генерации неизвестна',
   );
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
+  expect(screen.getByLabelText('Вопрос чату')).toHaveValue('Что проверить дальше?');
+  expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(0);
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(checks).toBe(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
+  await open();
+  expect(checks).toBe(3);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent('Чат не настроен');
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
+  expect(screen.getByLabelText('Вопрос чату')).toHaveValue('Что проверить дальше?');
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(0);
 });
 
@@ -550,9 +598,11 @@ it('allows public history with absent generation policy while showing configurat
     />,
   );
   await open();
+  expect(connection()).toHaveTextContent('Чат не настроен');
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   const status = screen.getByRole('region', { name: 'Готовность генерации' });
-  expect(status).toHaveTextContent('Требуется настройка политики генерации');
-  expect(status).toHaveTextContent('Профиль провайдера недоступен');
+  expect(status).toHaveTextContent('Чат не настроен');
+  expect(status).toHaveTextContent('Сервис ответов недоступен');
   expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
   expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
 });
@@ -595,6 +645,7 @@ it('rejects readiness for a different report revision even when its local setup 
   );
   await screen.findByRole('alert');
   expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   expect(screen.getByRole('region', { name: 'Готовность генерации' })).toHaveTextContent(
     'Готовность генерации неизвестна',
   );
@@ -612,7 +663,13 @@ it('never reconstructs unknown public counts as checked zero when vulnerability 
     />,
   );
   await open();
-  expect(screen.getByText(/число CVE и уведомлений Debian неизвестно/)).toBeVisible();
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
+  expect(
+    screen.getByText(/число находок и их распределение по типам идентификаторов неизвестно/),
+  ).toBeVisible();
+  expect(screen.getByLabelText('Границы отчёта публичного образа в чате')).not.toHaveTextContent(
+    /CVE: 0|Debian TEMP: 0|Debian DLA: 0/,
+  );
   expect(
     screen.getByText(/Покрытие уязвимостей: неизвестно; ОС: неизвестно; Node.js: неизвестно/),
   ).toBeVisible();

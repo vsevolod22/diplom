@@ -3,7 +3,8 @@ import socket
 import sys
 import threading
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, call, patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 import proxy
@@ -35,9 +36,10 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_public_dns_dials_numeric_answer_and_checks_each_connect(self):
         calls = []
+        timeouts = []
         class Socket:
             def settimeout(self, seconds):
-                pass
+                timeouts.append(seconds)
             def connect(self, sockaddr):
                 calls.append(sockaddr)
             def close(self):
@@ -50,6 +52,7 @@ class GatewayPolicyTests(unittest.TestCase):
         with self.assertRaises(OSError):
             proxy.dial("registry-1.docker.io", lookup, lambda *_args: Socket())
         self.assertEqual(calls, [("1.1.1.1", 443)])
+        self.assertEqual(timeouts, [5])
 
     def test_fixture_pairs_are_exact_and_production_remains_public_only(self):
         fixture = (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('172.30.92.10', 443))
@@ -64,6 +67,31 @@ class GatewayPolicyTests(unittest.TestCase):
             proxy.addresses_for('registry-1.docker.io', lambda *_args, **_kwargs: mixed, policy)
         with self.assertRaises(ValueError):
             proxy.authority('169.254.169.254:443', policy)
+
+    def test_legacy_tunnel_timeouts_and_bidirectional_bytes(self):
+        request = Mock()
+        request.recv.side_effect = [b'CONNECT registry-1.docker.io:443 HTTP/1.1\r\n'
+                                    b'Host: registry-1.docker.io:443\r\n\r\n', b'client TLS bytes']
+        upstream = Mock()
+        upstream.recv.return_value = b'server TLS bytes'
+        selector = MagicMock()
+        selector.select.side_effect = [
+            [(SimpleNamespace(fileobj=request, data=upstream), proxy.selectors.EVENT_READ)],
+            [(SimpleNamespace(fileobj=upstream, data=request), proxy.selectors.EVENT_READ)],
+            [],
+        ]
+        with patch.object(proxy, 'dial', return_value=upstream) as dial, \
+                patch.object(proxy.selectors, 'DefaultSelector') as factory:
+            factory.return_value.__enter__.return_value = selector
+            proxy.Handler(request, ('127.0.0.1', 1234), SimpleNamespace())
+        dial.assert_called_once_with('registry-1.docker.io')
+        self.assertEqual(request.settimeout.call_args_list, [call(10), call(35)])
+        upstream.settimeout.assert_called_once_with(35)
+        self.assertEqual(selector.select.call_args_list, [call(timeout=30)] * 3)
+        upstream.sendall.assert_called_once_with(b'client TLS bytes')
+        self.assertEqual(request.sendall.call_args_list, [
+            call(b'HTTP/1.1 200 Connection Established\r\n\r\n'), call(b'server TLS bytes')])
+        upstream.close.assert_called_once_with()
 
     def test_go_client_connect_headers_are_accepted_without_forward_auth(self):
         upstream, peer = socket.socketpair()

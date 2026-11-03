@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { BadRequestException, HttpException, ServiceUnavailableException } from '@nestjs/common';
-import { dockerHubSearch, hubSearchUrl, type HubSearchResponse } from '../oci/gateway-transport.js';
+import { dockerHubSearch, hubSearchUrl, isHubSearchRepository, type HubSearchResponse } from '../oci/gateway-transport.js';
 
 export type ImageSuggestion = { label: string; reference: string; scannable: boolean; kind: 'tag' | 'repository'; tagConfirmed: boolean; eligibility: 'alpine-only' | 'isolated-exact-profile' | 'qualified-exact-profile' | 'public-hub-profile' | 'unsupported'; allowedCheckSets?: readonly (readonly string[])[]; qualificationId?: string; reason: string; checks: { secret: boolean; sbom: boolean; vuln: 'conditional' | 'unsupported' } };
 export const searchPolicy = Object.freeze({ pageSize: 12, maxPages: 5, maxCandidates: 60, maxPageBytes: 128_000, maxBytes: 640_000, idleMs: 300_000, maxFetchMs: 5000, maxTotalMs: 25_000, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' as const });
@@ -11,30 +11,44 @@ const tagName = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/;
 
 export function parseImageSearch(value: unknown): { query: string; alpineTag: string | null } {
   if (typeof value !== 'string' || value.length < 2 || value.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(value)) throw new BadRequestException({ errorCode: 'INVALID_IMAGE_SEARCH' });
-  const query = value.trim().toLowerCase().replace(/ +/g, ' ');
-  if (query.length < 2 || query.includes('://') || query.includes('..') || query.includes('//')) throw new BadRequestException({ errorCode: 'INVALID_IMAGE_SEARCH' });
-  const match = /^(?:(?:library\/)?alpine[: ]([a-z0-9][a-z0-9_.-]{0,63})|(\d[\da-z_.-]{1,63}))$/.exec(query);
+  const normalized = value.trim().replace(/ +/g, ' ');
+  if (normalized.length < 2 || normalized.includes('://') || normalized.includes('..') || normalized.includes('//')) throw new BadRequestException({ errorCode: 'INVALID_IMAGE_SEARCH' });
+  const match = /^(?:(?:library\/)?alpine[: ]([a-z0-9][a-z0-9_.-]{0,63})|(\d[\da-z_.-]{1,63}))$/i.exec(normalized);
   const tag = match?.[1] ?? match?.[2];
+  // Repository search is case-insensitive; tag suffixes are not.
+  const query = tag ? normalized.slice(0, -tag.length).toLowerCase() + tag : normalized.toLowerCase();
   return { query, alpineTag: tag && tagName.test(tag) ? tag : null };
 }
 
-export function normalizeImageSuggestions(response: HubSearchResponse, tagSearch: boolean): ImageSuggestion[] {
+function parseSearchRequest(raw: unknown, repository: unknown): { query: string; tag: string | null; repository: string | null } {
+  if (repository === undefined) {
+    const { query, alpineTag } = parseImageSearch(raw);
+    return { query, tag: alpineTag, repository: null };
+  }
+  if (!isHubSearchRepository(repository) || typeof raw !== 'string' || raw.length > 64 || /[^a-zA-Z0-9_.-]/.test(raw))
+    throw new BadRequestException({ errorCode: 'INVALID_IMAGE_SEARCH' });
+  return { query: raw, tag: raw, repository };
+}
+
+export function normalizeImageSuggestions(response: HubSearchResponse, tagSearch: boolean, tagRepository = 'library/alpine'): ImageSuggestion[] {
+  if (tagSearch && !isHubSearchRepository(tagRepository)) throw new Error('Invalid search repository');
   if (!response || !Array.isArray(response.results) || response.results.length > searchPolicy.pageSize) throw new Error('Invalid search response');
   const found = new Map<string, ImageSuggestion>();
   for (const item of response.results) {
     if (!item || typeof item !== 'object') continue;
     const name = tagSearch ? item.name : item.repo_name;
     if (typeof name !== 'string' || (tagSearch ? !tagName.test(name) : name.length > 120 || !repoName.test(name))) continue;
-    const repository = tagSearch ? 'library/alpine' : name.includes('/') ? name : `library/${name}`;
+    const repository = tagSearch ? tagRepository : name.includes('/') ? name : `library/${name}`;
     const scannable = repository === 'library/alpine';
     const reference = `registry-1.docker.io/${repository}:${tagSearch ? name : 'latest'}`;
-    found.set(reference, { label: tagSearch ? `Alpine · ${name}` : name, reference, scannable, kind: tagSearch ? 'tag' : 'repository', tagConfirmed: tagSearch, eligibility: scannable ? 'alpine-only' : 'unsupported', reason: scannable ? 'Только Alpine; платформа и допуск проверяются при запуске' : 'найден в Docker Hub, сканирование пока недоступно', checks: { secret: scannable, sbom: scannable, vuln: scannable ? 'conditional' : 'unsupported' } });
+    found.set(reference, { label: tagSearch ? `${repository === 'library/alpine' ? 'Alpine' : repository} · ${name}` : name, reference, scannable, kind: tagSearch ? 'tag' : 'repository', tagConfirmed: tagSearch, eligibility: scannable ? 'alpine-only' : 'unsupported', reason: scannable ? 'Только Alpine; платформа и допуск проверяются при запуске' : 'найден в Docker Hub, сканирование пока недоступно', checks: { secret: scannable, sbom: scannable, vuln: scannable ? 'conditional' : 'unsupported' } });
   }
   return [...found.values()];
 }
 
-type FetchHub = (kind: 'tags' | 'repositories', query: string, page?: number) => Promise<HubSearchResponse>;
-type Session = { subject: string; query: string; generation: string; tag: string | null; until: number; page: number; bytes: number; elapsed: number; seen: Set<string>; cursor: string | null; cached?: { cursor: string; response: ImageSearchPage }; busy: boolean };
+type FetchHub = (kind: 'tags' | 'repositories', query: string, page?: number, repository?: string) => Promise<HubSearchResponse>;
+const fetchHubPage: FetchHub = (kind, query, page, repository) => dockerHubSearch(kind, query, page, undefined, repository);
+type Session = { subject: string; query: string; generation: string; tag: string | null; repository: string | null; until: number; page: number; bytes: number; elapsed: number; seen: Set<string>; cursor: string | null; cached?: { cursor: string; response: ImageSearchPage }; busy: boolean };
 function reject(code: string, status: number): never { throw new HttpException({ errorCode: code }, status); }
 
 // Ephemeral scoped cursors contain no upstream URLs. Restart requires a new search.
@@ -42,10 +56,10 @@ export class ImageSearchSessions {
   private readonly sessions = new Map<string, Session>();
   private readonly rates = new Map<string, { until: number; count: number }>();
   private active = 0;
-  constructor(private readonly fetchHub: FetchHub = dockerHubSearch, private readonly now = Date.now,
+  constructor(private readonly fetchHub: FetchHub = fetchHubPage, private readonly now = Date.now,
     private readonly mapSuggestion: (item: ImageSuggestion) => ImageSuggestion = item => item) {}
-  async search(subject: string, raw: unknown, generation: unknown, cursor?: unknown): Promise<ImageSearchPage> {
-    const { query, alpineTag } = parseImageSearch(raw);
+  async search(subject: string, raw: unknown, generation: unknown, cursor?: unknown, rawRepository?: unknown): Promise<ImageSearchPage> {
+    const { query, tag, repository } = parseSearchRequest(raw, rawRepository);
     if (typeof generation !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(generation) || (cursor !== undefined && (typeof cursor !== 'string' || !/^[a-f0-9]{48}$/.test(cursor)))) reject('INVALID_IMAGE_SEARCH', 400);
     const now = this.now();
     for (const [key, session] of this.sessions) if (!session.busy && session.until <= now) this.sessions.delete(key);
@@ -59,12 +73,12 @@ export class ImageSearchSessions {
     let session: Session | undefined;
     if (cursor !== undefined) {
       session = [...this.sessions.values()].find(value => value.cursor === cursor || value.cached?.cursor === cursor);
-      if (!session || session.subject !== subject || session.query !== query || session.tag !== alpineTag || session.generation !== generation) reject('IMAGE_SEARCH_EXPIRED', 410);
+      if (!session || session.subject !== subject || session.query !== query || session.tag !== tag || session.repository !== repository || session.generation !== generation) reject('IMAGE_SEARCH_EXPIRED', 410);
       if (session.busy) reject('IMAGE_SEARCH_BUSY', 429);
       if (session.cached?.cursor === cursor) { session.until = now + searchPolicy.idleMs; return session.cached.response; }
     } else {
       if (this.sessions.size >= searchPolicy.maxSessions) reject('IMAGE_SEARCH_CAPACITY', 429);
-      session = { subject, query, generation: generation as string, tag: alpineTag, until: now + searchPolicy.idleMs, page: 0, bytes: 0, elapsed: 0, seen: new Set(), cursor: null, busy: false };
+      session = { subject, query, generation: generation as string, tag, repository, until: now + searchPolicy.idleMs, page: 0, bytes: 0, elapsed: 0, seen: new Set(), cursor: null, busy: false };
       this.sessions.set(randomBytes(24).toString('hex'), session);
     }
     const current = session!;
@@ -77,19 +91,19 @@ export class ImageSearchSessions {
     try {
       if (current.page >= searchPolicy.maxPages || current.elapsed >= searchPolicy.maxTotalMs) reject('IMAGE_SEARCH_EXHAUSTED', 429);
       const page = current.page + 1;
-      const kind = alpineTag ? 'tags' : 'repositories';
-      const term = alpineTag ?? query;
-      const response = await this.fetchHub(kind, term, page);
+      const kind = tag !== null ? 'tags' : 'repositories';
+      const term = tag ?? query;
+      const response = await this.fetchHub(kind, term, page, repository ?? undefined);
       const bytes = response.bytes ?? Buffer.byteLength(JSON.stringify(response));
       current.bytes += bytes;
       if (!Number.isInteger(bytes) || bytes < 0 || bytes > searchPolicy.maxPageBytes || current.bytes > searchPolicy.maxBytes || performance.now() - started > searchPolicy.maxFetchMs || current.elapsed + performance.now() - started > searchPolicy.maxTotalMs) throw new Error('Search budget');
       if (!Number.isInteger(response.count) || response.count! < 0 || !(response.next === null || typeof response.next === 'string')) throw new Error('Invalid page');
       if (response.next !== null) {
         const next = new URL(response.next!);
-        const expected = hubSearchUrl(kind, term, page + 1);
+        const expected = hubSearchUrl(kind, term, page + 1, repository ?? undefined);
         if (next.origin !== expected.origin || next.pathname !== expected.pathname || next.username || next.password || next.hash || [...next.searchParams].length !== [...expected.searchParams].length || [...expected.searchParams].some(([key, value]) => next.searchParams.getAll(key).length !== 1 || next.searchParams.get(key) !== value)) throw new Error('Invalid continuation');
       }
-      const items = normalizeImageSuggestions(response, alpineTag !== null).map(this.mapSuggestion).filter(item => !current.seen.has(item.reference));
+      const items = normalizeImageSuggestions(response, tag !== null, repository ?? undefined).map(this.mapSuggestion).filter(item => !current.seen.has(item.reference));
       for (const item of items) current.seen.add(item.reference);
       current.page = page;
       const state = response.next === null ? 'terminal' : page >= searchPolicy.maxPages || current.seen.size >= searchPolicy.maxCandidates ? 'quota-exhausted' : 'more-available';
@@ -107,8 +121,8 @@ export class ImageSearchSessions {
   }
 }
 
-export async function searchImages(raw: unknown, fetchHub: FetchHub = dockerHubSearch): Promise<ImageSuggestion[]> {
-  const { query, alpineTag } = parseImageSearch(raw);
-  try { return normalizeImageSuggestions(await fetchHub(alpineTag ? 'tags' : 'repositories', alpineTag ?? query, 1), alpineTag !== null); }
+export async function searchImages(raw: unknown, fetchHub: FetchHub = fetchHubPage, rawRepository?: unknown): Promise<ImageSuggestion[]> {
+  const { query, tag, repository } = parseSearchRequest(raw, rawRepository);
+  try { return normalizeImageSuggestions(await fetchHub(tag !== null ? 'tags' : 'repositories', tag ?? query, 1, repository ?? undefined), tag !== null, repository ?? undefined); }
   catch { throw new ServiceUnavailableException({ errorCode: 'IMAGE_SEARCH_UNAVAILABLE' }); }
 }

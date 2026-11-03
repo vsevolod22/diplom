@@ -1,6 +1,8 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render as renderUi, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { ScanReportSections } from '@/pages/scans/ScanReportSections';
 import { createAuthorizedScanTransport } from '@/shared/api/scans/httpScanTransport';
 import { fixtureScanTransport } from '@/shared/api/scans/fixtureScanTransport';
@@ -11,10 +13,15 @@ import { meta, scanId, sbomRows, sbomWire, secretRows, secretWire, status, v2Evi
 
 type Override = (wire: ReturnType<typeof vulnWire>) => Response | Promise<Response>;
 const json = (wire: unknown, status = 200) => new Response(JSON.stringify(wire), { status });
+let queryClient: QueryClient;
+function render(ui: ReactNode) {
+  return renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+}
 let requests: URL[];
 let overrides: Override[];
 let secretOverride: ((wire: ReturnType<typeof secretWire>) => Response) | null;
 beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   requests = [];
   overrides = [];
   secretOverride = null;
@@ -62,7 +69,7 @@ beforeEach(() => {
     return kind === 'vuln' && overrides.length ? overrides.shift()!(wire as ReturnType<typeof vulnWire>) : json(wire);
   }));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); queryClient.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const transport = () => createAuthorizedScanTransport({ subject: 'synthetic', currentSubject: () => 'synthetic' });
 function mount(checks: ScanCheck[] = ['vuln'], scanStatus: ScanStatus = status) {
   const props = { status: { ...scanStatus, checks }, transport: transport(), scope: ['synthetic', 1], demo: false, filter: 'all', onResetFilter: vi.fn() };
@@ -146,6 +153,7 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
     expect(cve().queryByText(/0 CVE в выполненной/)).not.toBeInTheDocument();
   });
   it('sends independent global SBOM name/ecosystem and meaningful Secrets rule/line/sort controls', async () => {
+    const fetchQuery = vi.spyOn(queryClient, 'fetchQuery');
     mount(['secret', 'sbom', 'vuln']);
     await screen.findByText('CVE-2026-1000');
     const sbom = within(screen.getByRole('region', { name: 'Пакеты SBOM' }));
@@ -159,12 +167,21 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
     fireEvent.submit(sbom.getByLabelText('Имя пакета · SBOM').closest('form')!);
     await sbom.findByText('Совпадений во всём отчёте SBOM: 10');
     expect(requests.at(-1)?.searchParams.get('name')).toBe('package-2');
+    const sbomKey = fetchQuery.mock.calls.at(-1)![0].queryKey;
+    expect(sbomKey.slice(0, 5)).toEqual(['synthetic', 1, 'report-page', status.scanId, 'sbom']);
+    expect(sbomKey[5]).toEqual({ view: 'report-v1', limit: 25, sort: 'name:asc', filters: { ecosystem: 'npm', name: 'package-2' } });
+    expect(sbomKey.at(-1)).toBeNull();
     fireEvent.change(secrets.getByLabelText('Номер строки · Secrets'), { target: { value: 'known' } });
     await secrets.findByText('Совпадений во всём отчёте Secrets: 15');
     fireEvent.change(secrets.getByLabelText('Rule ID · Secrets'), { target: { value: 'RULE_B' } });
     fireEvent.submit(secrets.getByLabelText('Rule ID · Secrets').closest('form')!);
     await secrets.findByText('Совпадений во всём отчёте Secrets: 8');
     expect(requests.at(-1)?.searchParams.get('ruleId')).toBe('RULE_B');
+    const secretKey = fetchQuery.mock.calls.at(-1)![0].queryKey;
+    expect(secretKey.slice(0, 5)).toEqual(['synthetic', 1, 'report-page', status.scanId, 'secret']);
+    expect(secretKey[5]).toEqual({ view: 'report-v1', limit: 25, sort: 'ruleId:asc', filters: { ruleId: 'RULE_B', linePresence: 'known' } });
+    expect(secretKey.at(-1)).toBeNull();
+    expect(queryClient.getQueryCache().getAll()).toEqual([]);
     expect(secrets.queryByText(/severity:/)).not.toBeInTheDocument();
     expect(cve().getByText('Строки 1–25')).toBeVisible();
   });
@@ -321,7 +338,7 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   it('labels fixture controls unsupported and never sends view options', async () => {
     render(<ScanReportSections status={{ scanId: 'partial-demo', state: 'partial' }} transport={fixtureScanTransport} scope={['demo']} demo filter="all" onResetFilter={vi.fn()} />);
     await screen.findByText('SECRET_DETECTED');
-    expect(screen.getByText(/Демо: размер страницы/)).toBeVisible();
+    expect(screen.getByText('Демонстрационные данные. Фильтры и размер страницы в этом режиме недоступны.')).toBeVisible();
     expect(screen.queryByLabelText('Строк на странице · Secrets')).not.toBeInTheDocument();
     expect(requests).toHaveLength(0);
   });

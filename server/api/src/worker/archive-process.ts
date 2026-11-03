@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 
+import { ImageFailure, type ImageFailureDetail } from '../oci/image-failure.js';
+
 type Check = 'secret' | 'sbom' | 'vuln';
 // Internal test seam, never sourced from a request, environment or profile.
 type Runtime = { launch?: (command: string, args: string[], options: SpawnOptions) => ChildProcess; timeoutMs?: number; fallback?: () => void };
@@ -16,6 +18,7 @@ export async function runArchiveProcess(check: Check, archivePath: string, direc
       PATH: '/usr/local/bin:/usr/bin:/bin', HOME: directory, TMPDIR: directory,
     } });
     let bytes = 0, killed = false;
+        let detail: ImageFailureDetail | undefined;
     const chunks: Buffer[] = [];
     let fallback: ReturnType<typeof setTimeout> | undefined;
     const kill = () => {
@@ -23,20 +26,27 @@ export async function runArchiveProcess(check: Check, archivePath: string, direc
       killed = true; chunks.length = 0; child.kill('SIGKILL');
       fallback = setTimeout(runtime.fallback ?? (() => process.exit(1)), 2000);
     };
-    const timer = setTimeout(kill, runtime.timeoutMs ?? 120_000);
+    const timer = setTimeout(() => {
+          if (!killed) detail = { reason: 'DEADLINE_EXCEEDED', stage: 'scan' };
+          kill();
+        }, runtime.timeoutMs ?? 120_000);
     signal.addEventListener('abort', kill, { once: true });
     if (signal.aborted) kill();
     child.stdout!.on('data', (chunk: Buffer) => {
       if (killed) return;
       bytes += chunk.length;
-      if (bytes > cap) kill(); else chunks.push(Buffer.from(chunk));
+      if (bytes > cap) { detail = { reason: 'RESOURCE_LIMIT', stage: 'scan', resource: 'output_bytes' }; kill(); }
+            else chunks.push(Buffer.from(chunk));
     });
     child.on('error', kill);
     child.on('close', code => {
       clearTimeout(timer); clearTimeout(fallback); signal.removeEventListener('abort', kill);
-      if (killed || code !== 0 || signal.aborted) { reject(new Error('Archive scanner failed')); return; }
+      if (killed || code !== 0 || signal.aborted) {
+              reject(new ImageFailure('Archive scanner failed', detail ?? (signal.aborted ? undefined : { reason: 'SCANNER_FAILED', stage: 'scan' })));
+              return;
+            }
       try { resolve(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)))); }
-      catch { reject(new Error('Archive scanner failed')); }
+      catch { reject(new ImageFailure('Archive scanner failed', { reason: 'SCANNER_FAILED', stage: 'scan' })); }
     });
   });
 }

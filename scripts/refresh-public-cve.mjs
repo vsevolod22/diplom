@@ -30,6 +30,7 @@ import {
   READY_PROBE,
 } from './refresh-local-cve.mjs';
 import { createPublicCveBridge } from './public-cve-bridge.mjs';
+import { currentBackupDiagnostic, currentBackupStep } from './public-current-backup-transfer.mjs';
 import { loadCveRuntime } from './public-cve-bridge-runtime.mjs';
 import { publicImageCveConfig, validatePublicImageCveRelease } from './public-image-stand-profile.mjs';
 import {
@@ -82,10 +83,21 @@ const known = [
   'cleanup',
 ];
 const failures = new WeakMap();
+// Public-only capacity boundaries; do not extend the shared LOCAL/recovery
+// checkpoint vocabulary or infer diagnostics from arbitrary error messages.
+function publicCheckpoint(phase, checkpoint) {
+  if (phase === 'preflight' && checkpoint === 'preservation-capacity' ||
+      phase === 'namespace' && checkpoint === 'preservation-capacity-recheck') return checkpoint;
+  return cveCheckpoint(phase, checkpoint);
+}
+function publicRefreshDiagnostic(error) {
+  const preservation = currentBackupDiagnostic(error);
+  return preservation?.group ? Object.freeze({ cause: 'PRESERVATION_EXPORT', preservation }) : cveRefreshDiagnostic(error);
+}
 function failure(phase = 'preflight', hold = false, checkpoint = 'validation', diagnostic = null) {
   if (!known.includes(phase)) phase = 'preflight';
-  checkpoint = cveCheckpoint(phase, checkpoint);
-  const detail = diagnostic ? ` cause=${diagnostic.cause}${diagnostic.transport ? ` transport=${diagnostic.transport.boundary}/${diagnostic.transport.cause}${diagnostic.transport.status ? ` status=${diagnostic.transport.status}` : ''}` : ''};` : '';
+  checkpoint = publicCheckpoint(phase, checkpoint);
+  const detail = diagnostic ? ` cause=${diagnostic.cause}${diagnostic.preservation ? ` preservation=${JSON.stringify(diagnostic.preservation)}` : ''}${diagnostic.transport ? ` transport=${diagnostic.transport.boundary}/${diagnostic.transport.cause}${diagnostic.transport.status ? ` status=${diagnostic.transport.status}` : ''}` : ''};` : '';
   const details = Object.freeze({
     phase, hold, checkpoint, ...(diagnostic ? { diagnostic } : {}),
     message: `PUBLIC CVE refresh refused${hold ? '/HOLD' : ''}; phase=${phase}; checkpoint=${checkpoint}.${detail} No automatic recovery.`,
@@ -408,7 +420,7 @@ export async function refreshPublicCve(
     temporaryOverlay;
   const records = new Map();
   const mark = (p, nextCheckpoint = 'validation') => {
-    safe(known.includes(p)); phase = p; checkpoint = cveCheckpoint(p, nextCheckpoint);
+    safe(known.includes(p)); phase = p; checkpoint = publicCheckpoint(p, nextCheckpoint);
   };
   const deadline = now() + 900_000;
   const remaining = (cap) => cveTimeout(cap, deadline, now());
@@ -496,8 +508,20 @@ export async function refreshPublicCve(
         await child(process.execPath, verifierArguments(root, release, anchor, pins), 120_000),
         pins,
       );
+    let earlyReservation;
+    const reservePreservation = async () => {
+      const previousPhase = phase, previousCheckpoint = checkpoint;
+      mark('preflight', 'preservation-capacity');
+      cas();
+      earlyReservation = await integration.preflightPreservation({ root, lock, runtime });
+      safe(earlyReservation && typeof earlyReservation.verify === 'function');
+      earlyReservation.verify();
+      cas();
+      mark(previousPhase, previousCheckpoint);
+    };
     let candidate, next, pins, release, manifest, candidateAnchor;
     if (migration) {
+      await reservePreservation();
       ({ candidate, next, pins, release } = migration);
       manifest = candidate.manifestDigest;
       candidateAnchor = { publicPath: next.publicKeyPath, publicKeySha256: candidate.publicKeySha256 };
@@ -517,6 +541,9 @@ export async function refreshPublicCve(
         log('PUBLIC CVE unchanged; signature/hashes/freshness verified; no Docker or signing.');
         return { outcome: 'unchanged', manifest };
       }
+      // Discovery/unchanged verification needs no preservation slot. A changed
+      // candidate (including stage-only) must fit before any payload preparation.
+      await reservePreservation();
       const signerFile = fileFence(join(paths.trust, 'refresh-signer.json'), 4096);
       const signer = JSON.parse(signerFile.bytes);
       safe(
@@ -548,7 +575,12 @@ export async function refreshPublicCve(
       }));
     }
     cas();
-    if (argv[0] === '--stage-only') return { outcome: 'staged', manifest };
+    if (argv[0] === '--stage-only') {
+      mark('preflight', 'preservation-capacity');
+      earlyReservation.verify();
+      cas();
+      return { outcome: 'staged', manifest };
+    }
 
     mark('namespace');
     // Never inherit Docker selectors, proxy/provider/scanner/hook env. Resolve
@@ -564,10 +596,14 @@ export async function refreshPublicCve(
     safe(typeof endpoint === 'string' && /^unix:\/\/\/[^\s\0]+(?![\s\S])/.test(endpoint));
     const env = Object.freeze({ ...base, DOCKER_HOST: endpoint });
     const d = async (args, extra = {}) => {
-      lock.verify();
-      runtime.verify();
-      const result = await docker(args, { root, env, ...extra, timeout: remaining(extra.timeout ?? 30_000) });
-      runtime.verify();
+      // Keep the same guards, order, command and timeout. Only tag failures.
+      const timeout = currentBackupStep('dispatch-guard', () => {
+        lock.verify();
+        runtime.verify();
+        return remaining(extra.timeout ?? 30_000);
+      });
+      const result = await docker(args, { root, env, ...extra, timeout });
+      currentBackupStep('post-dispatch-guard', () => runtime.verify(), result);
       return result;
     };
     const config = runtime.model(cve),
@@ -709,6 +745,10 @@ export async function refreshPublicCve(
     runtime.membership(fencedBaseline);
     for (const prior of before.containers) sameEpoch(prior, one(fencedBaseline, role(prior)));
     cas();
+    mark('namespace', 'preservation-capacity-recheck');
+    // Keep the original pre-fence admission check AND the early identity fence:
+    // recapturing alone would silently accept history replacement during staging.
+    earlyReservation.verify();
     const reservation = await integration.preflightPreservation({ root, lock, runtime });
     reservation.verify();
     cas();
@@ -1007,7 +1047,7 @@ export async function refreshPublicCve(
     );
     return { outcome: 'activated', manifest };
   } catch (error) {
-    throw failure(phase, hold, checkpoint, cveRefreshDiagnostic(error));
+    throw failure(phase, hold, checkpoint, publicRefreshDiagnostic(error));
   } finally {
     if (lock && !hold) {
       try {

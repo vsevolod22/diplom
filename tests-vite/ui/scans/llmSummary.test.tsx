@@ -1,7 +1,11 @@
 import '@testing-library/jest-dom/vitest';
 import { webcrypto } from 'node:crypto';
 import { StrictMode } from 'react';
-import { readReportPreferences, saveReportPreferences } from '@/shared/api/preferences/reportPreferences';
+import {
+  readReportPreferences,
+  REPORT_AUTOMATION_REVISION,
+  saveReportPreferences,
+} from '@/shared/api/preferences/reportPreferences';
 import { usage } from './llmChatFixtures';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -19,8 +23,6 @@ import {
 import { type ScanStatus, type ScanTransport } from '@/shared/api/scans/scanTransport';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 
-vi.mock('@/features/scans/ScanChatPanel', () => ({ ScanChatPanel: () => null }));
-
 const id = '00000000-0000-4000-8000-000000000038';
 const digest = `sha256:${'a'.repeat(64)}`;
 const tuple = { scanId: id, digest, platform: 'linux/amd64' as const, reportVersion: 'b'.repeat(64) };
@@ -30,18 +32,20 @@ const context: SummaryContext = {
   policyVersion: 'c'.repeat(64),
   disclosure: {
     provider: 'OpenRouter',
-    model: 'xingchen-agi/xing4.0-29b-a4b:free',
-    providers: ['phala'],
+    model: 'dots-studio/dots-3-note-preview:free',
+    providers: ['atlas-cloud/fp8'],
     region: 'global',
-    retention: 'no-storage',
+    retention: 'no-training',
     operatorApprovedRouting: true,
     providerComplianceNotProvenByDeclaration: true,
     requestBudgetUsd: 0,
     freeOnly: true,
     maxPrice: { prompt: 0, completion: 0, request: 0 },
-    data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.',
+    data: 'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.',
   },
 };
+const openRouterDisclosure = context.disclosure;
+if (openRouterDisclosure?.provider !== 'OpenRouter') throw new Error('Expected OpenRouter fixture');
 const reply: SummaryReply = {
   ...tuple,
   hypotheses: [{ kind: 'hypothesis', text: 'Проверьте исходную находку', citations: ['secret-0-1'] }],
@@ -106,6 +110,26 @@ const posts = () => requests.filter((request) => request.init?.method === 'POST'
 async function generate() {
   await waitFor(() => expect(posts()).toHaveLength(1));
 }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+function expectProgress(phase: string, label: string) {
+  const progress = screen.getByRole('progressbar', { name: 'Подготовка ИИ-отчёта' });
+  expect(progress).not.toHaveAttribute('value');
+  expect(progress).not.toHaveAttribute('aria-valuenow');
+  expect(progress.closest('[data-phase]')).toHaveAttribute('data-phase', phase);
+  expect(screen.getByRole('status')).toHaveTextContent(`Готовим разбор… ${label}`);
+  expect(screen.getByText('Готовим разбор…')).toHaveClass('sr-only');
+  expect(screen.queryByText(/\d+\s*%/)).not.toBeInTheDocument();
+  expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+  expect(screen.queryByText('Проверьте исходную находку')).not.toBeInTheDocument();
+}
 beforeEach(() => {
   vi.stubGlobal('crypto', webcrypto);
   localStorage.clear();
@@ -119,6 +143,480 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it.each([false, true])('B2 recovered summary context selection is visible and legacy never implies coverage: metadata=%s', async metadata => {
+  saveReportPreferences({ language: 'original', autoSummary: false });
+  const unknown = { outcome: 'unknown', reason: 'CHECK_NOT_REQUESTED' };
+  const meta = { findingCount: 2, findingCounts: {
+    byCheck: { secret: 2, sbom: null, vuln: null, config: null },
+    bySeverity: { UNKNOWN: 1, LOW: 1, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
+  }, coverage: { secret: { outcome: 'checked', scope: 'image', reason: null, errorCode: null, findingCount: 2,
+    os: unknown, node: unknown, db: unknown }, sbom: unknown, vuln: unknown, config: unknown } };
+  const existing = vi.fn(async () => json({ ...reply, ...(metadata ? { ...meta, scannerFacts: [{ ...reply.scannerFacts[0], ruleId: 'rule-0000000000000000', line: null, evidenceRef: 'result-0-secret-1' }], contextSelection: {
+    totalFindings: 2, selectedFindings: 1, omittedFindings: 1,
+    strategy: 'all-critical-and-unknown-then-severity', selectedFindingIds: ['secret-0-1'],
+  } } : {}) }));
+  mockApi(() => ({ ...context, summaryResultRead: true }), undefined, existing);
+  const view = mount();
+  await screen.findByText('ИИ-разбор готов');
+  const copy = metadata ? 'Модель получила 1 из 2 находок; 1 не включены в контекст.' : /Объём контекста модели неизвестен/;
+  expect(screen.getByText(copy)).toBeVisible();
+  const full = screen.getByRole('link', { name: 'Полный отчёт сканеров · находки и исправления' });
+  expect(full).toHaveAttribute('href', '#scan-a1-findings');
+  expect(screen.getByText('Прочитать объяснение и проверить его источники').closest('details')).not.toHaveAttribute('open');
+  expect(posts()).toHaveLength(0);
+  view.unmount();
+  mount();
+  await screen.findByText('ИИ-разбор готов'); expect(posts()).toHaveLength(0); expect(existing).toHaveBeenCalledTimes(2);
+});
+
+it.each(['unsaved', 'off', 'disabled-policy'] as const)('legacy capability=true restores via passive GET with %s and no consent/POST/translation', async setting => {
+  if (setting === 'off') saveReportPreferences({ language: 'ru', autoSummary: false });
+  else localStorage.clear();
+  const capable: SummaryContext = setting === 'disabled-policy'
+    ? { ...context, enabled: false, policyVersion: null, disclosure: null, summaryResultRead: true }
+    : { ...context, summaryResultRead: true };
+  mockApi(() => capable, undefined, () => json(reply));
+  const source = transport(); const originalStatus = JSON.stringify(status);
+  mount(source, status);
+  await screen.findByText('Проверьте исходную находку');
+  expect(status.profile).toBeUndefined(); expect(JSON.stringify(status)).toBe(originalStatus);
+  expect(source.results).toHaveBeenCalledTimes(2);
+  expect(requests.filter(request => request.path.endsWith('/summary') && request.init?.method === 'GET')).toHaveLength(1);
+  expect(requests.filter(request => request.path.endsWith('/context'))).toHaveLength(2);
+  expect(posts()).toHaveLength(0);
+  expect(requests.some(request => /translation|usage/.test(request.path))).toBe(false);
+  expect(screen.queryByRole('button', { name: 'Включить авторазбор' })).toBeNull();
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+  expect(readReportPreferences().autoSummary).toBe(false);
+});
+
+it.each([
+  { profile: 'legacy', capability: false }, { profile: 'public', capability: false },
+  { profile: 'legacy', capability: undefined },
+] as const)('recovery gate honors explicit false and absent legacy contract: $profile / $capability', async ({ profile, capability }) => {
+  localStorage.clear();
+  mockApi(() => ({ ...context, ...(capability === undefined ? {} : { summaryResultRead: capability }) }), undefined, () => json(reply));
+  mount(transport(), profile === 'public' ? publicStatus : status);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Включить авторазбор' })).toBeEnabled());
+  expect(requests.filter(request => request.path.endsWith('/summary'))).toHaveLength(0);
+  expect(posts()).toHaveLength(0); expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
+});
+
+it('legacy missing cache permits exactly one POST only with current opt-in, not on focus/reconnect', async () => {
+  mockApi(() => ({ ...context, summaryResultRead: true }));
+  mount();
+  await screen.findByText('Проверьте исходную находку');
+  expect(requests.filter(request => request.path.endsWith('/summary') && request.init?.method === 'GET')).toHaveLength(1);
+  expect(posts()).toHaveLength(1);
+  expect(JSON.parse(String(posts()[0].init?.body))).toEqual({ reportVersion: tuple.reportVersion, consent: { accepted: true, policyVersion: context.policyVersion } });
+  fireEvent.focus(window); fireEvent(window, new Event('online')); await act(async () => {});
+  expect(posts()).toHaveLength(1);
+});
+
+it.each(['off', 'unsaved'] as const)('legacy exact cache miss with %s consent never grants generation', async setting => {
+  if (setting === 'off') saveReportPreferences({ language: 'original', autoSummary: false }); else localStorage.clear();
+  mockApi(() => ({ ...context, summaryResultRead: true })); mount();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Включить авторазбор' })).toBeEnabled());
+  expect(requests.filter(request => request.path.endsWith('/summary') && request.init?.method === 'GET')).toHaveLength(1);
+  expect(posts()).toHaveLength(0);
+});
+
+it.each([[404, 'SCAN_NOT_FOUND'], [403, 'FORBIDDEN'], [404, 'LLM_SUMMARY_MISSING_EXTRA']] as const)(
+  'legacy capability=true denial %s/%s never becomes a generation cache miss', async (code, errorCode) => {
+    mockApi(() => ({ ...context, summaryResultRead: true }), undefined, () => json({ errorCode }, code)); mount();
+    await screen.findByRole('alert'); expect(posts()).toHaveLength(0);
+    expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
+  },
+);
+
+it.each(['context', 'http', 'generation'] as const)('unsupported legacy report from %s shows specific message without opt-in/retry, keeps original results', async from => {
+  if (from !== 'generation') localStorage.clear();
+  const unsupported: SummaryContext = { ...context, enabled: false, policyVersion: null, disclosure: null, summaryResultRead: false, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' };
+  if (from === 'context') mockApi(() => unsupported);
+  else if (from === 'generation') mockApi(undefined, () => json({ errorCode: 'LLM_SUMMARY_UNSUPPORTED_REPORT' }, 409));
+  else mockApi(() => ({ ...context, summaryResultRead: true }), undefined, () => json({ errorCode: 'LLM_SUMMARY_UNSUPPORTED_REPORT' }, 409));
+  mount();
+  expect(await screen.findByRole('alert')).toHaveTextContent('ИИ-разбор недоступен для этого формата отчёта. Исходные результаты сканирования доступны ниже.');
+  expect(screen.queryByRole('button', { name: 'Включить авторазбор' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Повторить разбор' })).toBeNull();
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+  expect(posts()).toHaveLength(from === 'generation' ? 1 : 0);
+  fireEvent.focus(window); fireEvent(window, new Event('online')); await act(async () => {});
+  expect(posts()).toHaveLength(from === 'generation' ? 1 : 0);
+});
+
+it('disabled legacy configuration without unsupported reason stays neutral', async () => {
+  localStorage.clear();
+  mockApi(() => ({ ...context, enabled: false, policyVersion: null, disclosure: null, summaryResultRead: false }));
+  mount();
+  expect(await screen.findByRole('alert')).toHaveTextContent('ИИ-разбор сейчас недоступен. Отчёт сканеров доступен.');
+  expect(screen.getByRole('button', { name: 'Включить авторазбор' })).toBeDisabled();
+  expect(screen.queryByText(/для этого формата отчёта/)).toBeNull(); expect(posts()).toHaveLength(0);
+});
+
+it.each(['bob', 'alice'] as const)('legacy passive recovery cannot publish after owner/generation switch to %s', async owner => {
+  localStorage.clear(); mockApi(() => ({ ...context, summaryResultRead: true }));
+  const client = createSummaryClient(scanSession()); const pending = deferred<SummaryReply | null>();
+  const existing = vi.spyOn(client, 'existing').mockImplementation(() => pending.promise);
+  render(<ScanSummaryPanel status={status} transport={transport()} client={client} />);
+  await waitFor(() => expect(existing).toHaveBeenCalledTimes(1));
+  act(() => transitionScanSession(owner, new QueryClient(), true));
+  expect(existing.mock.calls[0][1].aborted).toBe(true);
+  await act(async () => pending.resolve(reply));
+  expect(screen.queryByText('Проверьте исходную находку')).toBeNull(); expect(posts()).toHaveLength(0);
+});
+
+it('legacy capability does not relax stale-report verification or fall back to POST', async () => {
+  mockApi(() => ({ ...context, summaryResultRead: true }), undefined, () => json({ ...reply, reportVersion: 'f'.repeat(64) }));
+  mount(); await screen.findByRole('alert');
+  expect(screen.queryByText('Проверьте исходную находку')).toBeNull(); expect(posts()).toHaveLength(0);
+});
+
+it('reports real deferred context, recovery, generation and verification without premature success', async () => {
+  mockApi();
+  const client = createSummaryClient(scanSession());
+  const initial = deferred<SummaryContext>();
+  const recovered = deferred<SummaryReply | null>();
+  const generated = deferred<SummaryReply>();
+  const finalContext = deferred<SummaryContext>();
+  const contexts = vi.spyOn(client, 'context').mockResolvedValue(context);
+  contexts.mockImplementationOnce(() => initial.promise);
+  const existing = vi.spyOn(client, 'existing').mockImplementation(() => recovered.promise);
+  const summary = vi.spyOn(client, 'summary').mockImplementation(() => generated.promise);
+  const source = transport();
+  const firstPage = deferred<Awaited<ReturnType<ScanTransport['results']>>>();
+  const readPage = source.results;
+  vi.mocked(source.results).mockImplementationOnce(() => firstPage.promise);
+  render(<ScanSummaryPanel status={publicStatus} transport={source} client={client} />);
+
+  expectProgress('context', 'Проверяем доступность разбора');
+  expect(existing).not.toHaveBeenCalled();
+  expect(summary).not.toHaveBeenCalled();
+  await act(async () => initial.resolve(context));
+  await waitFor(() => expect(existing).toHaveBeenCalledTimes(1));
+  expectProgress('recovery', 'Ищем сохранённый разбор');
+  expect(summary).not.toHaveBeenCalled();
+  await act(async () => recovered.resolve(null));
+  await waitFor(() => expect(summary).toHaveBeenCalledTimes(1));
+  expectProgress('generation', 'Модель готовит рекомендации');
+  expect(source.results).not.toHaveBeenCalled();
+  contexts.mockImplementationOnce(() => finalContext.promise);
+  await act(async () => generated.resolve(reply));
+  await waitFor(() => expect(source.results).toHaveBeenCalledTimes(1));
+  expectProgress('verification', 'Проверяем источники и готовим результат');
+  await act(async () =>
+    firstPage.resolve({
+      findings: [
+        { findingId: 'secret-0-0', category: 'secret', ruleId: 'rule-0000000000000000', severity: 'unknown' },
+      ],
+      nextCursor: '1',
+      coverage: [{ check: 'Secrets', status: 'checked', findingCount: 2 }],
+    }),
+  );
+  await waitFor(() => expect(readPage).toHaveBeenCalledTimes(2));
+  expectProgress('verification', 'Проверяем источники и готовим результат');
+  await act(async () => finalContext.resolve(context));
+  expect(await screen.findByText('Проверьте исходную находку')).toBeVisible();
+  expect(screen.getByRole('status')).toHaveTextContent('ИИ-разбор готов');
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  expect(summary).toHaveBeenCalledTimes(1);
+});
+
+it.each(['invalid-citation', 'unknown-source-error'] as const)(
+  'deferred verification failure %s never announces success or leaks unverified content',
+  async (failure) => {
+    mockApi(undefined, () =>
+      json(
+        failure === 'invalid-citation'
+          ? {
+              ...reply,
+              hypotheses: [{ ...reply.hypotheses[0], citations: ['secret-0-99'] }],
+              scannerFacts: [{ ...reply.scannerFacts[0], findingId: 'secret-0-99' }],
+            }
+          : reply,
+      ),
+    );
+    const source = transport();
+    const page = deferred<Awaited<ReturnType<ScanTransport['results']>>>();
+    vi.mocked(source.results).mockImplementationOnce(() => page.promise);
+    mount(source);
+    await waitFor(() => expect(source.results).toHaveBeenCalledTimes(1));
+    expectProgress('verification', 'Проверяем источники и готовим результат');
+    await act(async () => {
+      if (failure === 'unknown-source-error') page.reject(new Error('private-source-token internal.example'));
+      else
+        page.resolve({
+          findings: [
+            {
+              findingId: 'secret-0-0',
+              category: 'secret',
+              ruleId: 'rule-0000000000000000',
+              severity: 'unknown',
+            },
+          ],
+          nextCursor: '1',
+          coverage: [{ check: 'Secrets', status: 'checked', findingCount: 2 }],
+        });
+    });
+    const alert = await screen.findByRole('alert');
+    expect(alert).not.toHaveTextContent(/private-source-token|internal\.example/);
+    if (failure === 'invalid-citation')
+      expect(alert).toHaveTextContent(
+        'Ответ ИИ не прошёл проверку достоверности или формата и не показан. Исходные находки сохранены; можно повторить разбор вручную.',
+      );
+    expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+    expect(screen.queryByText('Проверьте исходную находку')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+    fireEvent(window, new Event('focus'));
+    fireEvent(window, new Event('online'));
+    await act(async () => {});
+    expect(posts()).toHaveLength(1);
+  },
+);
+
+it('recovered output stays private until deferred source verification finishes and sends no POST', async () => {
+  const recovered = deferred<Response>();
+  mockApi(undefined, undefined, () => recovered.promise);
+  const source = transport();
+  const page = deferred<Awaited<ReturnType<ScanTransport['results']>>>();
+  vi.mocked(source.results).mockImplementationOnce(() => page.promise);
+  mount(source, publicStatus);
+  await waitFor(() => expect(requests.some((request) => request.path.endsWith('/summary'))).toBe(true));
+  expectProgress('recovery', 'Ищем сохранённый разбор');
+  await act(async () => recovered.resolve(json(reply)));
+  await waitFor(() => expect(source.results).toHaveBeenCalledTimes(1));
+  expectProgress('verification', 'Проверяем источники и готовим результат');
+  expect(posts()).toHaveLength(0);
+  await act(async () =>
+    page.resolve({
+      findings: [
+        { findingId: 'secret-0-0', category: 'secret', ruleId: 'rule-0000000000000000', severity: 'unknown' },
+      ],
+      nextCursor: '1',
+      coverage: [{ check: 'Secrets', status: 'checked', findingCount: 2 }],
+    }),
+  );
+  expect(await screen.findByText('Проверьте исходную находку')).toBeVisible();
+  expect(screen.getByRole('status')).toHaveTextContent('ИИ-разбор готов');
+  expect(posts()).toHaveLength(0);
+});
+
+it('shows elapsed time only after ten seconds while context remains unresolved', async () => {
+  mockApi();
+  const client = createSummaryClient(scanSession());
+  vi.spyOn(client, 'context').mockImplementation(() => new Promise(() => {}));
+  vi.useFakeTimers();
+  render(<ScanSummaryPanel status={status} transport={transport()} client={client} />);
+  await act(async () => vi.advanceTimersByTimeAsync(9_999));
+  expect(screen.queryByText(/Ожидание:/)).not.toBeInTheDocument();
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(screen.getByText('Ожидание: 10 с')).toBeVisible();
+  expectProgress('context', 'Проверяем доступность разбора');
+  expect(posts()).toHaveLength(0);
+});
+
+it('cancel during source verification aborts delivery and never publishes a late verified reply', async () => {
+  mockApi();
+  const source = transport();
+  const page = deferred<Awaited<ReturnType<ScanTransport['results']>>>();
+  vi.mocked(source.results).mockImplementationOnce(() => page.promise);
+  mount(source);
+  await waitFor(() => expect(source.results).toHaveBeenCalledTimes(1));
+  expectProgress('verification', 'Проверяем источники и готовим результат');
+  fireEvent.click(screen.getByRole('button', { name: 'Отменить разбор' }));
+  await act(async () => page.resolve({ findings: [], nextCursor: null, coverage: [] }));
+  fireEvent(window, new Event('focus'));
+  fireEvent(window, new Event('online'));
+  expect(source.results).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+  expect(screen.queryByText('Проверьте исходную находку')).not.toBeInTheDocument();
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  expect(screen.getByRole('alert')).toHaveTextContent('Разбор отменён');
+  expect(posts()).toHaveLength(1);
+});
+
+it.each(['LLM_INVALID_RESPONSE', 'PRIVATE_PROVIDER_ERROR'])(
+  'safe %s failure retains findings and only a manual retry generates again',
+  async (code) => {
+    let failing = true;
+    mockApi(undefined, () =>
+      failing
+        ? json({ errorCode: code, message: 'secret-provider-token internal.example stack trace' }, 502)
+        : json(reply),
+    );
+    mount();
+    const alert = await screen.findByRole('alert');
+    if (code === 'LLM_INVALID_RESPONSE')
+      expect(alert).toHaveTextContent(
+        'Ответ ИИ не прошёл проверку достоверности или формата и не показан. Исходные находки сохранены; можно повторить разбор вручную.',
+      );
+    expect(alert).not.toHaveTextContent(
+      /secret-provider-token|internal\.example|stack trace|PRIVATE_PROVIDER_ERROR/,
+    );
+    expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+    expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    fireEvent(window, new Event('focus'));
+    fireEvent(window, new Event('online'));
+    await act(async () => {});
+    expect(posts()).toHaveLength(1);
+    failing = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить разбор' }));
+    expect(await screen.findByText('Проверьте исходную находку')).toBeVisible();
+    expect(posts()).toHaveLength(2);
+    expect(screen.getByRole('status')).toHaveTextContent('ИИ-разбор готов');
+  },
+);
+
+it('one opt-in click persists the existing language and generates once; later reports autoload without another button', async () => {
+  saveReportPreferences({ language: 'ru', autoSummary: false });
+  mockApi();
+  const view = mount();
+  const button = await screen.findByRole('button', { name: 'Включить авторазбор' });
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(posts()).toHaveLength(0);
+  expect(screen.getByText(/Находки отчёта, имена пакетов и версии/)).toBeVisible();
+  fireEvent.click(button);
+  await screen.findByText('Проверьте исходную находку');
+  expect(readReportPreferences()).toMatchObject({
+    language: 'ru',
+    autoSummary: true,
+    revision: 'report-automation-v4-remediation',
+  });
+  expect(posts()).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: 'Включить авторазбор' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /Получить отчёт|Получить сводку/ })).toBeNull();
+  view.unmount();
+  const next = { ...tuple, scanId: '00000000-0000-4000-8000-000000000039' };
+  mockApi(
+    () => ({ ...context, ...next }),
+    () => json({ ...reply, ...next }),
+  );
+  const nextFetch = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input, init) =>
+      String(input).endsWith('/usage')
+        ? Promise.resolve(json({ ...usage, ...next, integrationEnabled: true, quotaEnabled: true }))
+        : nextFetch(input, init),
+    ),
+  );
+  mount(transport(), { ...status, scanId: next.scanId });
+  await screen.findByText('Проверьте исходную находку');
+  expect(posts()).toHaveLength(2);
+});
+
+it('does not silently renew stale consent and only saves v4 after an explicit opt-in', async () => {
+  const raw = JSON.stringify({
+    version: 1,
+    automationRevision: 'report-automation-v3-dots-no-training',
+    language: 'original',
+    autoSummary: true,
+  });
+  localStorage.setItem('report-preferences:v1:alice', raw);
+  mockApi();
+  mount();
+  const button = await screen.findByRole('button', { name: 'Включить авторазбор' });
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(localStorage.getItem('report-preferences:v1:alice')).toBe(raw);
+  expect(posts()).toHaveLength(0);
+  fireEvent.click(button);
+  await screen.findByText('Проверьте исходную находку');
+  expect(posts()).toHaveLength(1);
+  expect(readReportPreferences().revision).toBe('report-automation-v4-remediation');
+});
+
+it.each(['unsaved', 'off'] as const)(
+  'a failed opt-in save from %s never generates or grants in-memory consent',
+  async (setting) => {
+    localStorage.clear();
+    if (setting === 'off') saveReportPreferences({ language: 'ru', autoSummary: false });
+    mockApi();
+    mount();
+    const button = await screen.findByRole('button', { name: 'Включить авторазбор' });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('Unavailable');
+    });
+    fireEvent.click(button);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось сохранить настройку');
+    expect(readReportPreferences().authorized).toBe(false);
+    expect(posts()).toHaveLength(0);
+  },
+);
+
+it('a stale opt-in click cannot grant authorization after a silent preference change', async () => {
+  saveReportPreferences({ language: 'original', autoSummary: false });
+  mockApi();
+  mount();
+  const button = await screen.findByRole('button', { name: 'Включить авторазбор' });
+  await waitFor(() => expect(button).toBeEnabled());
+  const raw = JSON.stringify({
+    version: 1,
+    automationRevision: REPORT_AUTOMATION_REVISION,
+    language: 'ru',
+    autoSummary: false,
+  });
+  localStorage.setItem('report-preferences:v1:alice', raw);
+  fireEvent.click(button);
+  expect(localStorage.getItem('report-preferences:v1:alice')).toBe(raw);
+  expect(posts()).toHaveLength(0);
+});
+
+it('renders only actual model paragraphs, with sources collapsed and no duplicate chat or policy wall', async () => {
+  const paragraphs = [
+    'Сначала проверьте наиболее серьёзную находку сканера.',
+    'Определите, затрагивает ли она используемый образ.',
+    'После изменения пересоберите образ и повторите проверку.',
+    'Неизвестное покрытие не позволяет считать образ безопасным.',
+  ];
+  mockApi(undefined, () =>
+    json({
+      ...reply,
+      hypotheses: paragraphs.map((text) => ({ kind: 'hypothesis', text, citations: ['secret-0-1'] })),
+    }),
+  );
+  mount();
+  await screen.findByText(paragraphs[0]);
+  const output = screen.getByLabelText('ИИ-разбор отчёта');
+  const blocks = [...output.children].filter(block => block.querySelector(':scope > p'));
+  expect(blocks.map(block => block.querySelector(':scope > p')?.textContent)).toEqual(paragraphs);
+  for (const [index, block] of blocks.entries()) {
+    const details = block.querySelector<HTMLDetailsElement>(':scope > details')!;
+    expect(details.querySelector('summary')?.textContent).toBe(`Источники абзаца ${index + 1} (1)`);
+    expect(details.open).toBe(false);
+    expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+    expect(details.querySelector('strong')?.textContent).toBe('rule-0000000000000000 · Секреты');
+  }
+  expect(screen.queryByRole('region', { name: 'Чат по отчёту' })).toBeNull();
+  expect(document.body.textContent).not.toMatch(
+    /модель|маршрутизация|политика|бюджет|квота|receipt|Пункт 1/i,
+  );
+});
+
+it('shows honest failure without generated fallback text and retries initial context errors manually', async () => {
+  let failing = true;
+  mockApi();
+  const real = createSummaryClient(scanSession());
+  const client = {
+    ...real,
+    context: vi.fn((scanId: string, signal: AbortSignal) => {
+      if (failing) return Promise.reject(new Error('PRIVATE_PROVIDER_DIAGNOSTIC'));
+      return real.context(scanId, signal);
+    }),
+  };
+  render(<ScanSummaryPanel status={status} transport={transport()} client={client} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось получить разбор ИИ');
+  expect(screen.queryByLabelText('ИИ-разбор отчёта')).toBeNull();
+  expect(document.body.textContent).not.toContain('PRIVATE_PROVIDER_DIAGNOSTIC');
+  expect(posts()).toHaveLength(0);
+  failing = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Повторить разбор' }));
+  await screen.findByText('Проверьте исходную находку');
+  expect(posts()).toHaveLength(1);
 });
 
 it.each([403, 404])(
@@ -148,17 +646,29 @@ it('automatically generates once with saved authorization, exact consent and ver
   const view = mount(source);
   await screen.findByText('Проверьте исходную находку');
   expect(posts()).toHaveLength(1);
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить условия' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Обновить условия' })).toBeEnabled());
-  expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'ИИ-отчёт' })).toBeVisible();
+  const citationLabel = screen.getByText('Источники абзаца 1 (1)');
+  const details = citationLabel.closest('details')!;
+  expect(details.parentElement?.querySelector(':scope > p')?.textContent).toBe(reply.hypotheses[0].text);
+  expect(details.open).toBe(false);
+  expect(document.body.textContent).not.toMatch(
+    /OpenRouter|no-training|ZDR|политика|бюджет|Пункт 1|гипотеза/i,
+  );
+  expect(screen.queryByRole('region', { name: 'Чат по отчёту' })).toBeNull();
+  fireEvent.click(citationLabel);
+  expect(details.open).toBe(true);
   expect(JSON.parse(String(posts()[0].init?.body))).toEqual({
     reportVersion: tuple.reportVersion,
     consent: { accepted: true, policyVersion: context.policyVersion },
   });
   expect(posts()[0].init).toMatchObject({ cache: 'no-store', credentials: 'same-origin', redirect: 'error' });
   expect(source.results).toHaveBeenCalledTimes(2);
-  const link = screen.getByRole('link', { name: 'Находка secret-0-1' });
-  expect(document.getElementById(link.getAttribute('href')!.slice(1))).toBeTruthy();
+  const citedPage = await vi.mocked(source.results).mock.results[1].value;
+  const citedFinding = citedPage.findings[0];
+  expect(citedFinding.findingId).toBe(reply.hypotheses[0].citations[0]);
+  expect(citedFinding.findingId).toBe('secret-0-1');
+  expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+  expect(details.querySelector('strong')?.textContent).toBe(`${citedFinding.ruleId} · Секреты`);
   expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
   fireEvent.focus(window);
   fireEvent(window, new Event('online'));
@@ -168,6 +678,28 @@ it('automatically generates once with saved authorization, exact consent and ver
   expect(posts()).toHaveLength(1);
   expect(sessionStorage.getItem('report-automation-v1:attempts')).toMatch(/^\["[a-f0-9]{64}"\]$/);
   expect(localStorage.getItem('report-preferences:v1:alice')).not.toContain('Проверьте');
+});
+
+it.each([
+  'report-automation-v1',
+  'report-automation-v2-nvidia-no-training',
+  'report-automation-v3-dots-no-training',
+])('old account consent %s never authorizes a Dots summary POST', async (automationRevision) => {
+  localStorage.setItem(
+    'report-preferences:v1:alice',
+    JSON.stringify({
+      version: 1,
+      automationRevision,
+      language: 'ru',
+      autoSummary: true,
+    }),
+  );
+  mockApi();
+  mount();
+  await act(async () => {});
+  expect(readReportPreferences().authorized).toBe(false);
+  expect(posts()).toHaveLength(0);
+  expect(sessionStorage.getItem('report-automation-v1:attempts')).toBeNull();
 });
 
 it.each(['before-post', 'before-publication'] as const)(
@@ -183,7 +715,7 @@ it.each(['before-post', 'before-publication'] as const)(
         'report-preferences:v1:alice',
         JSON.stringify({
           version: 1,
-          automationRevision: 'report-automation-v1',
+          automationRevision: REPORT_AUTOMATION_REVISION,
           language: 'original',
           autoSummary: false,
         }),
@@ -217,36 +749,45 @@ it.each(['before-post', 'before-publication'] as const)(
 it('fresh preference equality blocks POST even before another-tab storage event is delivered', async () => {
   mockApi();
   const fetcher = globalThis.fetch;
+  let revoked = false;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input).endsWith('/usage'))
+    if (String(input).endsWith('/usage')) {
+      revoked = true;
       localStorage.setItem(
         'report-preferences:v1:alice',
         JSON.stringify({
           version: 1,
-          automationRevision: 'report-automation-v1',
+          automationRevision: REPORT_AUTOMATION_REVISION,
           language: 'original',
           autoSummary: false,
         }),
       );
+    }
     return fetcher(input, init);
   });
   mount();
-  await screen.findByRole('alert');
+  await waitFor(() => expect(revoked).toBe(true));
+  await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'Подготовка ИИ-отчёта' })).toBeNull());
+  expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
   expect(posts()).toHaveLength(0);
 });
 
 it.each([
   { model: 'other/model:free' },
-  { providers: ['phala', 'other'] },
+  { providers: ['atlas-cloud/fp8', 'other'] },
+  { model: 'nvidia/nemotron-3.5-super-vl:free', providers: ['nvidia'], retention: 'no-training' },
+  { providers: ['phala'] },
+  { model: 'xingchen-agi/xing4.0-29b-a4b:free', providers: ['phala'], retention: 'no-storage' },
   { providers: ['other'] },
   { provider: 'Other' },
   { region: 'other' },
-  { retention: 'no-training' },
+  { retention: 'no-storage' },
   { freeOnly: false },
   { requestBudgetUsd: 0.1 },
   { maxPrice: { prompt: 1, completion: 0, request: 0 } },
   { maxPrice: { prompt: 0, completion: 0, request: null } },
   { data: 'All raw evidence, credentials and chat history.' },
+  { data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.' },
   { widenedEgress: true },
 ])(
   'account consent never permits the unallowed disclosure %j, even with a fresh policy hash',
@@ -261,7 +802,7 @@ it.each([
     vi.spyOn(client, 'existing').mockResolvedValue(null);
     const summary = vi.spyOn(client, 'summary').mockResolvedValue(reply);
     render(<ScanSummaryPanel status={status} transport={transport()} client={client} />);
-    expect(await screen.findByRole('alert')).toHaveTextContent('не совпадают с разрешением аккаунта');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Условия ИИ-разбора изменились');
     expect(summary).not.toHaveBeenCalled();
     expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
   },
@@ -273,7 +814,7 @@ it('same report/policy identity never sends again if disclosure changes without 
   const view = mount();
   await screen.findByText('Проверьте исходную находку');
   view.unmount();
-  current = { ...context, disclosure: { ...context.disclosure!, model: 'different/model' } };
+  current = { ...context, disclosure: { ...openRouterDisclosure, model: 'different/model' } };
   mount();
   await screen.findByRole('alert');
   expect(posts()).toHaveLength(1);
@@ -289,6 +830,7 @@ it.each(['unsaved', 'off', 'anonymous'] as const)(
     mockApi();
     mount();
     expect(screen.getByRole('link', { name: 'настройках аккаунта' })).toHaveAttribute('href', '/account');
+    expect(screen.getAllByRole('button', { name: 'Включить авторазбор' })).toHaveLength(1);
     await act(async () => {});
     expect(posts()).toHaveLength(0);
     expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
@@ -328,7 +870,7 @@ it('a failed automatic attempt is retained across focus, reconnect and remount; 
   await screen.findByRole('alert');
   expect(posts()).toHaveLength(1);
   fail = false;
-  fireEvent.click(screen.getByRole('button', { name: 'Повторить сводку' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Повторить разбор' }));
   await screen.findByText('Проверьте исходную находку');
   expect(posts()).toHaveLength(2);
 });
@@ -348,7 +890,10 @@ it('reload/fresh-login recovery reads the owner cache before the retained tab ma
   const marker = sessionStorage.getItem('report-automation-v1:attempts');
   expect(marker).not.toBeNull();
   act(() => transitionScanSession('alice', new QueryClient(), true));
-  await screen.findByText('Сводка восстановлена из кэша процесса сервера; это не долговечная история.');
+  await waitFor(() =>
+    expect(requests.filter((r) => r.path.endsWith('/summary') && r.init?.method === 'GET')).toHaveLength(2),
+  );
+  await screen.findByText('Проверьте исходную находку');
   expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
   expect(requests.filter((r) => r.path.endsWith('/summary') && r.init?.method === 'GET')).toHaveLength(2);
   expect(posts()).toHaveLength(1);
@@ -360,7 +905,7 @@ it('a server-cache miss after process restart or eviction never bypasses the tab
   mount(transport(), publicStatus);
   await screen.findByText('Проверьте исходную находку');
   act(() => transitionScanSession('alice', new QueryClient(), true));
-  await screen.findByText(/Автоматический запрос уже выполнялся/);
+  await screen.findByText(/Не удалось подготовить разбор/);
   expect(posts()).toHaveLength(1);
   expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
   expect(requests.filter((r) => r.path.endsWith('/summary') && r.init?.method === 'GET')).toHaveLength(2);
@@ -375,14 +920,13 @@ it.each(['off', 'unsaved'] as const)(
     const source = transport();
     mount(source, publicStatus);
     await screen.findByText('Проверьте исходную находку');
-    expect(screen.getByText(/Сводка восстановлена из кэша процесса сервера/)).toBeVisible();
+    expect(screen.queryByText(/кэша процесса/)).toBeNull();
     expect(source.results).toHaveBeenCalledTimes(2);
     expect(requests.filter((r) => r.path.endsWith('/context'))).toHaveLength(2);
     expect(requests.some((r) => r.path.endsWith('/usage'))).toBe(false);
     expect(posts()).toHaveLength(0);
     expect(sessionStorage.getItem('report-automation-v1:attempts')).toBeNull();
-    expect(document.body.textContent).toContain('Это не долговечное хранение');
-    expect(document.body.textContent).toContain('перезапуска процесса или вытеснения');
+    expect(screen.queryByRole('button', { name: 'Включить авторазбор' })).toBeNull();
   },
 );
 
@@ -397,7 +941,7 @@ it('an explicit error retry first recovers a completed server result without an 
   await screen.findByRole('alert');
   expect(posts()).toHaveLength(1);
   cached = reply;
-  fireEvent.click(screen.getByRole('button', { name: 'Повторить сводку' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Повторить разбор' }));
   await screen.findByText('Проверьте исходную находку');
   expect(posts()).toHaveLength(1);
 });
@@ -465,7 +1009,7 @@ it.each(['cancel', 'preferences', 'owner', 'same-owner'] as const)(
     render(<ScanSummaryPanel status={publicStatus} transport={source} client={client} />);
     await waitFor(() => expect(existing).toHaveBeenCalledTimes(1));
     await act(async () => {
-      if (kind === 'cancel') fireEvent.click(screen.getByRole('button', { name: 'Отменить запрос сводки' }));
+      if (kind === 'cancel') fireEvent.click(screen.getByRole('button', { name: 'Отменить разбор' }));
       else if (kind === 'preferences') saveReportPreferences({ language: 'original', autoSummary: false });
       else transitionScanSession(kind === 'owner' ? 'bob' : 'alice', new QueryClient(), true);
     });
@@ -486,7 +1030,7 @@ it('fresh preference identity fences recovery publication even before storage no
       'report-preferences:v1:alice',
       JSON.stringify({
         version: 1,
-        automationRevision: 'report-automation-v1',
+        automationRevision: REPORT_AUTOMATION_REVISION,
         language: 'ru',
         autoSummary: false,
       }),
@@ -620,14 +1164,15 @@ it('cancel suppresses late output and never retries automatically', async () => 
   );
   mount();
   await generate();
-  fireEvent.click(screen.getByRole('button', { name: 'Отменить запрос сводки' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Готовим разбор…');
+  fireEvent.click(screen.getByRole('button', { name: 'Отменить разбор' }));
   await act(async () => finish());
   expect(posts()[0].init!.signal!.aborted).toBe(true);
   expect(screen.queryByText('Проверьте исходную находку')).toBeNull();
   expect(posts()).toHaveLength(1);
 });
 
-it('bounds a noncooperative generation at 45 seconds and never continues source reads after timeout', async () => {
+it('bounds a noncooperative generation at 120 seconds and never continues source reads after timeout', async () => {
   mockApi();
   const client = createSummaryClient(scanSession());
   let finish!: (value: SummaryReply) => void;
@@ -638,13 +1183,18 @@ it('bounds a noncooperative generation at 45 seconds and never continues source 
       }),
   );
   const source = transport();
-  const timers = vi.spyOn(globalThis, 'setTimeout');
+  vi.useFakeTimers();
+
   render(<ScanSummaryPanel status={status} transport={source} client={client} />);
-  await waitFor(() => expect(summary).toHaveBeenCalledTimes(1));
-  const deadline = timers.mock.calls.filter(([, delay]) => delay === 45_000).at(-1)![0] as () => void;
   await act(async () => {
-    deadline();
+    await vi.waitFor(() => expect(summary).toHaveBeenCalledTimes(1));
   });
+  await act(async () => vi.advanceTimersByTimeAsync(45_001));
+  expect(summary.mock.calls[0][1].aborted).toBe(false);
+  expect(screen.queryByRole('alert')).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(summary.mock.calls[0][1].aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(15_000));
   expect(screen.getByRole('alert')).toBeTruthy();
   expect(summary.mock.calls[0][1].aborted).toBe(true);
   await act(async () => {
@@ -680,11 +1230,12 @@ it('bounded streamed bytes reject oversize and foreign scan/digest/version repli
     await expect(client().summary(context, signal)).rejects.toMatchObject({ code: 'STALE' });
   }
 });
-it('freeOnly uses the new server field and zero-price contract, no model suffix inference', async () => {
+it('freeOnly requires an exact approved profile as well as zero prices, not merely a free model suffix', async () => {
   const free = {
     ...context,
     disclosure: {
       ...context.disclosure!,
+      ...openRouterDisclosure,
       model: 'vendor/model:free',
       freeOnly: true,
       requestBudgetUsd: 0,
@@ -692,13 +1243,12 @@ it('freeOnly uses the new server field and zero-price contract, no model suffix 
     },
   };
   mockApi(() => free);
-  mount();
-  await screen.findByText(/только бесплатный режим/);
-  mockApi(() => ({
-    ...free,
-    disclosure: { ...free.disclosure, maxPrice: { prompt: 0, completion: 1, request: 0 } },
-  }));
   const client = createSummaryClient(scanSession());
+  await expect(client.context(id, new AbortController().signal)).rejects.toThrow();
+  mockApi(() => ({
+    ...context,
+    disclosure: { ...context.disclosure!, maxPrice: { prompt: 0, completion: 1, request: 0 } },
+  }));
   await expect(client.context(id, new AbortController().signal)).rejects.toThrow();
 });
 it('hostile generated text remains literal plaintext, not HTML, Markdown, URL or executable link', async () => {
@@ -760,7 +1310,7 @@ it('already aborted requests do not start a POST', async () => {
   await expect(client.summary(context, controller.signal)).rejects.toMatchObject({ code: 'ABORTED' });
   expect(requests).toHaveLength(0);
 });
-it('config hash citation resolves a local source anchor without URL decoding mismatch', async () => {
+it('config hash citation resolves only its paragraph-local source details', async () => {
   const configStatus: ScanStatus = {
     ...status,
     checks: ['config'],
@@ -803,10 +1353,18 @@ it('config hash citation resolves a local source anchor without URL decoding mis
   const sources = transport();
   mount(sources, configStatus);
   await generate();
-  const link = await screen.findByRole('link', { name: `Находка ${digest}` });
-  expect(
-    document.getElementById(decodeURIComponent(link.getAttribute('href')!.slice(1)))?.textContent,
-  ).toContain('IMGCFG_USER_ROOT');
+  await screen.findByText('Проверьте исходную находку');
+  const label = screen.getByText('Источники абзаца 1 (1)');
+  const details = label.closest('details')!;
+  expect(details.parentElement?.querySelector(':scope > p')?.textContent).toBe(reply.hypotheses[0].text);
+  expect(details.open).toBe(false);
+  fireEvent.click(label);
+  expect(details.open).toBe(true);
+  expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+  const configFinding = configStatus.config!.findings[0];
+  expect(configFinding.findingId).toBe(digest);
+  expect(details.querySelector('strong')?.textContent).toBe(`${configFinding.ruleId} · Средняя`);
+  expect(details).not.toHaveTextContent('Секреты');
   expect(sources.results).not.toHaveBeenCalled();
 });
 it('CVE source collection verifies every page and target, independent of the current category', async () => {

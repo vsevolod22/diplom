@@ -6,7 +6,7 @@ import { prepareNginxArchive, NGINX_ARCHIVE_TARGET, type ArchiveTarget, type Arc
 import { validateArchiveJson, type ArchiveBinding } from '../oci/archive-identity.js';
 import { ARCHIVE_LIMITS } from '../oci/layer-tar-validator.js';
 import { preparePublicImageArchive } from '../oci/public-image-archive.js';
-import { PUBLIC_IMAGE_LIMITS, isPublicReceipt, validPublicTarget, type PublicImageTarget } from '../oci/public-image-policy.js';
+import { PUBLIC_IMAGE_LIMITS, PUBLIC_IMAGE_RESOURCE_POLICY, publicReceiptLimits, isPublicReceipt, validPublicTarget, type PublicImageTarget } from '../oci/public-image-policy.js';
 import { publicOs } from './public-image-evidence.js';
 import { parseImageSbom, type ImageSbom } from './cyclonedx-components.js';
 import { parseSecretFindings, type SecretFinding } from './secret-findings.js';
@@ -17,7 +17,9 @@ import { CURRENT_DB_POLICY, LEGACY_DB_POLICY, evaluateDbPolicy, type DbPolicyRec
 import { runArchiveProcess } from './archive-process.js';
 import { auditArchiveScratch } from './archive-scratch.js';
 
-type Failure = { outcome: 'failed'; reason: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'DB_UNAVAILABLE' };
+import { imageFailureDetail, type ImageFailureDetail } from '../oci/image-failure.js';
+
+type Failure = { outcome: 'failed'; reason: 'SCAN_FAILED' | 'SCAN_TIMEOUT' | 'DB_UNAVAILABLE'; failureDetail?: ImageFailureDetail };
 type Unsupported = { outcome: 'unsupported'; reason: 'OS_EOL' | 'OS_UNKNOWN' | 'NODE_INVENTORY_ABSENT' | 'NODE_INVENTORY_UNKNOWN' };
 export type ArchiveScanReport = {
   receipt: ArchiveReceipt; scannerVersion: '0.69.3'; checkedAt: number;
@@ -35,7 +37,7 @@ async function verifiedArchive(binding: ArchiveBinding): Promise<void> {
   const file = await open(binding.archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = await file.stat();
-    if (!before.isFile() || before.size > (isPublicReceipt(binding.receipt) ? PUBLIC_IMAGE_LIMITS.archiveBytes : ARCHIVE_LIMITS.archiveBytes) || before.mode & 0o222) throw new Error('Invalid archive');
+    if (!before.isFile() || before.size > (publicReceiptLimits(binding.receipt) ?? ARCHIVE_LIMITS).archiveBytes || before.mode & 0o222) throw new Error('Invalid archive');
     const hash = createHash('sha256');
     for await (const chunk of file.createReadStream({ autoClose: false })) hash.update(chunk);
     const after = await file.stat();
@@ -110,20 +112,25 @@ async function scanArchiveChecks(checks: Array<'secret' | 'sbom' | 'vuln'>,
     index > 0 && order.indexOf(checks[index - 1]) >= order.indexOf(check))) throw new Error('Invalid archive checks');
   lifecycle.requireScanner();
   const controller = new AbortController();
-  const signal = AbortSignal.any([controller.signal, ...(options.signal ? [options.signal] : []),
-      AbortSignal.timeout(600_000), ...(lifecycle.deadlineSignal ? [lifecycle.deadlineSignal] : [])]);
+  const deadline = AbortSignal.any([AbortSignal.timeout(600_000), ...(lifecycle.deadlineSignal ? [lifecycle.deadlineSignal] : [])]);
+  const signal = AbortSignal.any([controller.signal, deadline, ...(options.signal ? [options.signal] : [])]);
   const archive = await lifecycle.prepare(signal);
   const targetImage = `${archive.receipt.registry}/${archive.receipt.repository}@${archive.receipt.digest}`;
   const binding = { receipt: archive.receipt, archivePath: archive.archivePath };
   let scratchPeak = archive.metrics.archiveBytes;
   let monitoring = false, scratchInvalid = false, checkpointAccepted = false;
-  const abortedFailure = () => failure(scratchInvalid ? 'SCAN_FAILED' : 'SCAN_TIMEOUT');
+  let scratchDetail: ImageFailureDetail | undefined;
+  const detailed = publicImage && archive.receipt.resourcePolicyVersion === PUBLIC_IMAGE_RESOURCE_POLICY;
+  const withDetail = (value: Failure, detail?: ImageFailureDetail): Failure =>
+    detailed && detail ? { ...value, failureDetail: detail } : value;
+  const abortedFailure = () => withDetail(failure(scratchInvalid ? 'SCAN_FAILED' : 'SCAN_TIMEOUT'),
+    scratchInvalid ? scratchDetail : deadline.aborted ? { reason: 'DEADLINE_EXCEEDED', stage: 'scan' } : undefined);
   const monitor = setInterval(() => {
     if (monitoring) return; monitoring = true;
     void (async () => {
       const bytes = await lifecycle.audit(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined, undefined, limits);
       scratchPeak = Math.max(scratchPeak, bytes);
-    })().catch(() => { scratchInvalid = true; controller.abort(); }).finally(() => { monitoring = false; });
+    })().catch((error: unknown) => { scratchDetail = imageFailureDetail(error); scratchInvalid = true; controller.abort(); }).finally(() => { monitoring = false; });
   }, 100);
   const report: ArchiveScanReport = { receipt: archive.receipt, scannerVersion: '0.69.3', checkedAt: 0,
     metrics: { ...archive.metrics, scratchPeak } };
@@ -192,8 +199,11 @@ async function scanArchiveChecks(checks: Array<'secret' | 'sbom' | 'vuln'>,
             }
           }
         }
-      } catch { report[check] = signal.aborted ? abortedFailure() : failure(); }
-      finally {
+      } catch (error) {
+        const detail = imageFailureDetail(error);
+        report[check] = signal.aborted ? abortedFailure() : withDetail(
+          failure(detailed && detail?.reason === 'DEADLINE_EXCEEDED' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED'), detail);
+      } finally {
         if (options.onCheckpoint && !signal.aborted) {
           // A completed subprocess and parser are not enough: close the scratch audit
           // for this check before granting durable publication authority.
@@ -202,7 +212,7 @@ async function scanArchiveChecks(checks: Array<'secret' | 'sbom' | 'vuln'>,
             const bytes = await lifecycle.audit(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined, undefined, limits);
             scratchPeak = Math.max(scratchPeak, bytes);
             if (bytes > limits.scratchBytes) { scratchInvalid = true; controller.abort(); }
-          } catch { scratchInvalid = true; controller.abort(); }
+          } catch (error) { scratchDetail = imageFailureDetail(error); scratchInvalid = true; controller.abort(); }
           if (!signal.aborted) {
             const completed: ArchiveScanReport = { receipt: report.receipt, scannerVersion: report.scannerVersion,
               checkedAt: Date.now(), metrics: { ...archive.metrics, scratchPeak }, [check]: report[check] };
@@ -228,7 +238,7 @@ async function scanArchiveChecks(checks: Array<'secret' | 'sbom' | 'vuln'>,
       const finalBytes = await lifecycle.audit(archive.directory, options.vuln ? `${options.vuln.cacheDir}/db` : undefined, undefined, limits);
       scratchPeak = Math.max(scratchPeak, finalBytes);
       if (finalBytes > limits.scratchBytes) throw new Error('Invalid archive scratch');
-    } catch { scratchInvalid = true; controller.abort(); }
+    } catch (error) { scratchDetail = imageFailureDetail(error); scratchInvalid = true; controller.abort(); }
     // Accepted audited evidence belongs to the fenced checkpoint, not this mutable
     // report. A later audit/deadline failure must retain recovery authority instead
     // of delivering replacement failures (or any later unaudited checked output).

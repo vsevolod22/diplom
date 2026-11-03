@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { ImageFailure, type ImageFailureDetail } from './image-failure.js';
 import { PUBLIC_IMAGE_LIMITS, PUBLIC_IMAGE_PROFILE } from './public-image-policy.js';
 
 export const ARCHIVE_LIMITS = Object.freeze({ maxLayers: 32, compressedLayer: 32 * 1024 ** 2,
@@ -7,8 +8,10 @@ export const ARCHIVE_LIMITS = Object.freeze({ maxLayers: 32, compressedLayer: 32
   fileBytes: 64 * 1024 ** 2, extensionBytes: 64 * 1024, fieldBytes: 512, paxRecords: 1024,
   archiveBytes: 272 * 1024 ** 2, scratchBytes: 448 * 1024 ** 2 });
 export type ArchiveRejectionReason = 'ARCHIVE_REJECTED' | 'GZIP_HEADER' | 'GZIP_NAME' | 'GZIP_INTEGRITY';
-export class ArchiveRejected extends Error {
-  constructor(readonly reason: ArchiveRejectionReason = 'ARCHIVE_REJECTED') { super('Image archive rejected'); }
+export class ArchiveRejected extends ImageFailure {
+  constructor(readonly reason: ArchiveRejectionReason = 'ARCHIVE_REJECTED', detail?: ImageFailureDetail) {
+    super('Image archive rejected', detail);
+  }
 }
 export type TarBudget = { bytes: number; entries: number; paxRecords: number };
 export type ArchiveResourceProfile = 'legacy' | typeof PUBLIC_IMAGE_PROFILE;
@@ -18,7 +21,9 @@ export function archiveLimits(profile: ArchiveResourceProfile = 'legacy') {
   if (profile === PUBLIC_IMAGE_PROFILE) return PUBLIC_IMAGE_LIMITS;
   throw new ArchiveRejected();
 }
-const reject = (): never => { throw new ArchiveRejected(); };
+const reject = (detail: ImageFailureDetail = { reason: 'ARCHIVE_UNSAFE', stage: 'archive' }): never => {
+  throw new ArchiveRejected(undefined, detail);
+};
 const ustarFormat = Buffer.from('ustar\0' + '00', 'ascii');
 const gnuFormat = Buffer.from('ustar  \0', 'ascii');
 function text(bytes: Buffer): string {
@@ -65,11 +70,16 @@ export class LayerTarValidator {
   private reject(): never { this.failed = true; return reject(); }
   push(chunk: Buffer): void {
     if (this.failed) reject();
-    try { this.consume(chunk); } catch { this.reject(); }
+    try { this.consume(chunk); } catch (error) {
+          this.failed = true;
+          if (error instanceof ArchiveRejected) throw error;
+          this.reject();
+        }
   }
   private consume(chunk: Buffer): void {
     this.size += chunk.length; this.budget.bytes += chunk.length;
-    if (this.size > this.limits.expandedLayer || this.budget.bytes > this.limits.expandedTotal) reject();
+    if (this.size > this.limits.expandedLayer || this.budget.bytes > this.limits.expandedTotal)
+          reject({ reason: 'RESOURCE_LIMIT', stage: 'decode', resource: 'expanded_bytes' });
     this.hash.update(chunk);
     let offset = 0;
     while (offset < chunk.length) {
@@ -101,7 +111,8 @@ export class LayerTarValidator {
   }
   private header(header: Buffer): void {
     if (header.every(byte => byte === 0)) { if (++this.zeros === 2) this.ended = true; return; }
-    if (this.zeros || ++this.budget.entries > this.limits.entries) reject();
+    if (this.zeros) reject();
+        if (++this.budget.entries > this.limits.entries) reject({ reason: 'RESOURCE_LIMIT', stage: 'archive', resource: 'entries' });
     const checksum = octal(header.subarray(148, 156));
     let actual = 0;
     for (let i = 0; i < 512; i++) actual += i >= 148 && i < 156 ? 32 : header[i];
@@ -126,7 +137,8 @@ export class LayerTarValidator {
       name(attributes.path ?? this.longName ?? [prefix, text(header.subarray(0, 100))].filter(Boolean).join('/'), this.limits.fieldBytes);
       if (type === '1' || type === '2') name(attributes.linkpath ?? this.longLink ?? text(header.subarray(157, 257)), this.limits.fieldBytes, true, type === '2');
       if (attributes.size !== undefined && attributes.size !== String(size)) reject();
-      if (size > this.limits.fileBytes || (type !== '0' && size !== 0)) reject();
+      if (size > this.limits.fileBytes) reject({ reason: 'RESOURCE_LIMIT', stage: 'archive', resource: 'file_bytes' });
+            if (type !== '0' && size !== 0) reject();
       this.local = {}; this.longName = undefined; this.longLink = undefined;
     }
     this.remaining = size; this.padding = (512 - size % 512) % 512;

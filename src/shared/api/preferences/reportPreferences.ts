@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { openAiDisclosureSchema } from '@/shared/api/scans/llmPublicContract';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 
-export const REPORT_AUTOMATION_REVISION = 'report-automation-v1';
+export const REPORT_AUTOMATION_REVISION = 'report-automation-v4-remediation';
 const STORAGE_PREFIX = 'report-preferences:v1:';
 
 export const openAiSummaryConsentSchema = z

@@ -1,4 +1,4 @@
-import { PUBLIC_FREE_MODEL, PUBLIC_FREE_PROVIDER, type LlmPolicy } from './policy.js';
+import { publicFreePolicy, type LlmPolicy } from './policy.js';
 import type { TranslationText } from './translation-contract.js';
 
 type Operation = { kind: 'summary' } | { kind: 'chat' } | { kind: 'translation'; text: TranslationText };
@@ -9,15 +9,18 @@ const objectSchema = (properties: Record<string, unknown>) => ({
   type: 'object', properties, required: Object.keys(properties), additionalProperties: false,
 });
 
-// Shape only: local validators still enforce bindings, citations, byte limits,
+// Provider bounds prevent an open-ended summary array from exhausting output
+// tokens. Local validators still enforce bindings, citations, byte limits,
 // Russian prose, source identifiers and safety. No provider-side repair/plugin.
 export function responseFormat(policy: LlmPolicy, operation: Operation) {
-  // Structured-output support was checked for this exact endpoint, not for the
-  // separate legacy/Apodex profile. Unsupported requests fail, never downgrade.
-  if (!policy.freeOnly || policy.model !== PUBLIC_FREE_MODEL || policy.providers.length !== 1 || policy.providers[0] !== PUBLIC_FREE_PROVIDER)
+  // Require the existing strict schemas for the public profile; unsupported
+  // provider parameters fail closed, never downgrade to JSON-object mode.
+  if (!publicFreePolicy(policy))
     return { type: 'json_object' };
   const properties = operation.kind === 'summary' ? { ...binding,
-    hypotheses: { type: 'array', items: objectSchema({ text: string, citations }) },
+    hypotheses: { type: 'array', minItems: 1, maxItems: 6,
+          items: objectSchema({ text: { type: 'string', maxLength: 320 },
+            citations: { ...citations, minItems: 1, maxItems: 2 } }) },
   } : operation.kind === 'chat' ? { ...binding, text: string, citations } : {
     title: { type: operation.text.title === null ? 'null' : 'string' },
     description: { type: operation.text.description === null ? 'null' : 'string' },

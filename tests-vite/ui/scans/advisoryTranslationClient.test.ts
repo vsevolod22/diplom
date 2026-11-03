@@ -245,8 +245,13 @@ it('bounds noncooperative fetch timeout and never resends automatically', async 
   const rejected = expect(client.translate(contextFor(), consentFor(), signal())).rejects.toMatchObject({
     code: 'TIMEOUT',
   });
-  await vi.advanceTimersByTimeAsync(40001);
+  await vi.advanceTimersByTimeAsync(45_001);
+  expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(59_998);
+  expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
   await rejected;
+  expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
 

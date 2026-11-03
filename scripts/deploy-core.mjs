@@ -2,7 +2,8 @@
  * FINAL adapter contract: deploy-adapter.mjs exports async createAdapter(options).
  * Methods take ctx = { options, mode, services, interruptedServices, lease, plan,
  * candidate, recovery, snapshot, qualification, receipt, expectedMigration?,
- * fenceAttempted, switchAttempted, migrationAttempted, publishAttempted }.
+ * fenceAttempted, switchAttempted, migrationAttempted, historyMigrationAttempted,
+ * publishAttempted }.
  * Undefined fields are not yet available. Throw finite DEPLOY_* codes below,
  * never raw stderr/env/token. No legacy monolith lifecycle invocation.
  *
@@ -13,7 +14,8 @@
  *   or reject merely because this owned lock exists. Plan preflight has no lease.
  * releaseLock(ctx) -> { released: true }; release only this lease, preserve history.
  * preflight(ctx) -> { services: string[], interruptedServices: string[],
- *   migration: boolean, rollbackSafe: boolean, old: opaque,
+ *   migration: boolean (auth only), historyMigration?: 'none'|'history-reservations-v4-to-v5',
+ *   historyVersion?: 4|5|null, rollbackSafe: boolean, old: opaque,
  *   availableCapabilities: string[] }. Read-only config/current-state validation.
  *   services = exact requested UPGRADES; interruptedServices = full explicit
  *   interruption set (includes upgrades), e.g. writers fenced for snapshots even
@@ -44,7 +46,10 @@
  * switchServices(ctx) -> { switched: true }; upgrade ONLY services; resume other
  *   interruptedServices unchanged. No dependency expansion/build/pull. Actual API
  *   startup/migration happens HERE. Core sets migrationAttempted BEFORE await if
- *   plan.migration. There is NO live migrate() method and NEVER database rollback.
+ *   plan.migration. For history, historyMigrationAttempted is also set BEFORE await;
+ *   switch runs the separately consented network-none helper while writers are stopped,
+ *   proves sealed B0->B1, then uses B1 for every later equality check. No implicit API
+ *   startup history migration. There is NO live migrate() method or database rollback.
  * health(ctx) -> { healthy: true }; check all interrupted services/routing and
  *   qualified state expectations; target='candidate' or 'old'. No paid calls.
  * publishReceipt(ctx) -> { published: true }; durably publish ACTUAL config/pins
@@ -64,7 +69,8 @@
  * deadlines, including drain, and journals BEFORE dispatch. No timeout races.
  * Dry-run: preflight only, no lock/writes. Status: status only. Import is inert.
  * options: mode=web|app|status, apply=false, explicit services for app,
- * verify=false, migrate=false (CONSENT only), drainTimeoutMs=30000 (1..300000), root.
+ * verify=false, migrate=false (AUTH CONSENT only), migrateHistoryV4ToV5=false
+ * (separate history consent), drainTimeoutMs=30000 (1..300000), root.
  * upgradeOperations=false: explicit opt-in, app with exactly web/api/worker/egress/
  * llm-egress/openai-egress. Adapter receives ctx.options.upgradeOperations.
  * plan.operations: public non-secret preset label, 1..128 alphanumeric/._- chars;
@@ -83,7 +89,9 @@ export const DEPLOY_ERRORS = Object.freeze({
   DEPLOY_UNSUPPORTED: ['The adapter cannot safely perform this requested operation.', false, 'Use a supported service set or add the required safe adapter implementation before applying.'],
   DEPLOY_SCOPE: ['The adapter plan changes services outside the requested scope.', false, 'Correct the adapter plan; web may change only web.'],
   DEPLOY_OPERATIONS_SCOPE: ['Operations upgrade requires app mode and all six services.', false, 'Use --upgrade-operations with app --services web,api,worker,egress,llm-egress,openai-egress.'],
-  DEPLOY_MIGRATION_REQUIRED: ['A database migration requires explicit consent.', false, 'Review snapshot/recovery support, then use app --migrate --apply.'],
+  DEPLOY_MIGRATION_REQUIRED: ['An auth database migration requires explicit consent.', false, 'Review snapshot/recovery support, then use app --migrate --apply.'],
+  DEPLOY_HISTORY_MIGRATION_REQUIRED: ['History schema4 requires a separately authorized v5 migration.', false, 'Review B0/B1 preservation and HOLD recovery, then explicitly use --migrate-history-v4-to-v5 with app --apply.'],
+  DEPLOY_HISTORY_MIGRATION_SCOPE: ['History migration cannot be combined with auth or operations migration.', false, 'Use an app API-only upgrade on auth A3 with unchanged operations.'], 
   DEPLOY_BUILD: ['Candidate compilation or build failed; OLD was not switched.', true, 'Fix the build/configuration and retry the deployment.'],
   DEPLOY_CANDIDATE: ['Candidate validation failed.', true, 'Fix candidate configuration or its isolated health check, then retry.'],
   DEPLOY_COMPATIBILITY: ['Required backend capabilities are not available.', false, 'Deploy a compatible explicit app service set, or build a UI compatible with the running API.'],
@@ -117,20 +125,27 @@ const stringList = value => Array.isArray(value) && value.length <= 256 &&
   value.every(item => typeof item === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(item));
 
 export function normalizeOptions(input = {}) {
-  const { mode, apply = false, verify = false, migrate = false, upgradeOperations = false, drainTimeoutMs = 30000 } = input;
-  requireValue(['web', 'app', 'status'].includes(mode), 'DEPLOY_USAGE');
-  requireValue([apply, verify, migrate, upgradeOperations].every(value => typeof value === 'boolean'), 'DEPLOY_USAGE');
+  const { mode, apply = false, verify = false, migrate = false, migrateHistoryV4ToV5 = false, upgradeOperations = false, drainTimeoutMs = 30000 } = input;
+  requireValue(['web', 'app', 'status', 'recover'].includes(mode), 'DEPLOY_USAGE');
+  requireValue([apply, verify, migrate, migrateHistoryV4ToV5, upgradeOperations].every(value => typeof value === 'boolean'), 'DEPLOY_USAGE');
   requireValue(Number.isInteger(drainTimeoutMs) && drainTimeoutMs > 0 && drainTimeoutMs <= 300000, 'DEPLOY_USAGE');
   const services = input.services ?? (mode === 'web' ? ['web'] : []);
   requireValue(Array.isArray(services) && services.length <= 32 &&
     services.every(name => typeof name === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(name)) &&
     new Set(services).size === services.length, 'DEPLOY_USAGE');
   requireValue(mode !== 'app' || services.length > 0, 'DEPLOY_USAGE');
+  if (mode === 'recover') {
+    requireValue(services.length === 0 && !verify && !migrate && !migrateHistoryV4ToV5 && !upgradeOperations &&
+      /^[a-f0-9]{32}$/.test(input.audit ?? '') && (input.checkpoint === undefined || /^[a-f0-9]{64}$/.test(input.checkpoint)) &&
+      (!apply || typeof input.checkpoint === 'string'), 'DEPLOY_USAGE');
+  } else requireValue(input.audit === undefined && input.checkpoint === undefined, 'DEPLOY_USAGE');
   requireValue(mode !== 'web' || (services.length === 1 && services[0] === 'web' && !migrate), 'DEPLOY_USAGE');
   requireValue(mode !== 'status' || (!apply && !verify && !migrate && services.length === 0), 'DEPLOY_USAGE');
   requireValue(!upgradeOperations || (mode === 'app' && services.length === 6 &&
     ['web', 'api', 'worker', 'egress', 'llm-egress', 'openai-egress'].every(name => services.includes(name))), 'DEPLOY_OPERATIONS_SCOPE');
-  return Object.freeze({ ...input, mode, apply, verify, migrate, upgradeOperations, drainTimeoutMs, services: Object.freeze([...services]) });
+  requireValue(!migrateHistoryV4ToV5 || (mode === 'app' && services.includes('api') && !migrate && !upgradeOperations &&
+    services.every(name => ['web', 'api'].includes(name))), 'DEPLOY_HISTORY_MIGRATION_SCOPE');
+  return Object.freeze({ ...input, mode, apply, verify, migrate, migrateHistoryV4ToV5, upgradeOperations, drainTimeoutMs, services: Object.freeze([...services]) });
 }
 
 // Only finite known codes cross the adapter boundary. Never forward error text,
@@ -154,8 +169,8 @@ export function deploymentFailure(error, { phase = 'arguments', fallback = 'DEPL
 export async function runDeployment(adapter, input = {}) {
   let ctx, phase = 'arguments', fallback = 'DEPLOY_USAGE';
   let state = 'unchanged', lock = 'not-acquired', rollback = 'not-needed';
-  let switchAttempted = false, fenceAttempted = false, migrationAttempted = false, publishAttempted = false;
-  const attempts = () => ({ fenceAttempted, switchAttempted, migrationAttempted, publishAttempted });
+  let switchAttempted = false, fenceAttempted = false, migrationAttempted = false, historyMigrationAttempted = false, publishAttempted = false;
+  const attempts = () => ({ fenceAttempted, switchAttempted, migrationAttempted, historyMigrationAttempted, publishAttempted });
   const step = async (name, code, extra = {}) => {
     phase = name; fallback = code; hasMethod(adapter, name);
     return adapter[name]({ ...ctx, ...attempts(), ...extra });
@@ -169,6 +184,22 @@ export async function runDeployment(adapter, input = {}) {
   try {
     const options = normalizeOptions(input);
     ctx = { options, mode: options.mode, services: options.services };
+    if (ctx.mode === 'recover') {
+      phase = options.apply ? 'recovery-apply' : 'recovery-plan'; fallback = 'DEPLOY_RECOVERY';
+      hasMethod(adapter, options.apply ? 'applyRecovery' : 'planRecovery');
+      // Any apply failure retains the original evidence/lock; never call release or restore here.
+      if (options.apply) { lock = 'retained'; state = 'recovery-required'; rollback = 'unsafe'; historyMigrationAttempted = true; }
+      const value = await adapter[options.apply ? 'applyRecovery' : 'planRecovery'](ctx);
+      requireValue(value?.audit === options.audit && /^[a-f0-9]{64}$/.test(value.checkpoint ?? '') && value.migrationReplay === false);
+      if (options.apply) {
+        requireValue(value.recovered === true && value.phase === 'published');
+        return {ok:true,mode:'recover',phase:'complete',state:'new-healthy',lock:'released',audit:value.audit,checkpoint:value.checkpoint,migrationReplay:false};
+      }
+      requireValue(value.eligible === true && value.phase === 'v5-committed-prestart' && stringList(value.services));
+      return {ok:true,mode:'recover',phase:'plan',state:'unchanged',audit:value.audit,checkpoint:value.checkpoint,services:value.services,
+        recoveryPhase:value.phase,migrationReplay:false,currentStores:'not-inspected-requires-fresh-B1-equality-on-apply',
+        nextAction:'Review exact audit/checkpoint; explicit recovery --apply requires the OS supervisor and fresh B1 equality. No migration replay or old-binary restore.'};
+    }
     if (ctx.mode === 'status') {
       const status = await step('status', 'DEPLOY_STATUS');
       requireValue(typeof status?.ready === 'boolean' && typeof status.locked === 'boolean');
@@ -198,13 +229,24 @@ export async function runDeployment(adapter, input = {}) {
     const operations = ctx.plan.operations;
     requireValue((operations === undefined && !options.upgradeOperations) ||
       (typeof operations === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(operations)));
+    const historyMigration = ctx.plan.historyMigration ?? 'none';
+    requireValue(['none', 'history-reservations-v4-to-v5'].includes(historyMigration));
+    requireValue(!options.migrateHistoryV4ToV5 || [4,5].includes(ctx.plan.historyVersion));
+    requireValue(historyMigration === 'none' || ctx.plan.historyVersion === 4);
+    requireValue(historyMigration === 'none' || (ctx.mode === 'app' && !ctx.plan.migration && !options.migrate && !options.upgradeOperations &&
+      ctx.services.includes('api') && ctx.services.every(name => ['web', 'api'].includes(name))), 'DEPLOY_HISTORY_MIGRATION_SCOPE');
     if (!options.apply) return { ok: true, mode: ctx.mode, phase: 'plan', state: 'unchanged',
       services: [...ctx.services], interruptedServices: [...interrupted], migration: ctx.plan.migration,
       rollbackSafe: ctx.mode === 'web' && ctx.plan.rollbackSafe, verify: options.verify,
       upgradeOperations: options.upgradeOperations, operations: operations ?? null,
-      nextAction: 'Review upgrades AND interrupted services, then use --apply; migration also requires --migrate.' };
+      historyMigration, historyVersion: ctx.plan.historyVersion ?? null,
+      historyMigrationConsent: options.migrateHistoryV4ToV5,
+      nextAction: historyMigration !== 'none'
+        ? 'History4 requires --migrate-history-v4-to-v5 separately from auth consent; review B0/B1 preservation and guarded HOLD before --apply.'
+        : 'Review upgrades AND interrupted services, then use --apply; auth migration also requires --migrate.' };
     state = 'old-serving';
     if (ctx.plan.migration) requireValue(options.migrate, 'DEPLOY_MIGRATION_REQUIRED');
+    if (historyMigration !== 'none') requireValue(options.migrateHistoryV4ToV5, 'DEPLOY_HISTORY_MIGRATION_REQUIRED');
     ctx.candidate = await step('build', 'DEPLOY_BUILD');
     requireValue(ctx.candidate != null && ctx.candidate !== false, 'DEPLOY_BUILD');
     const validation = await step('validateCandidate', 'DEPLOY_CANDIDATE');
@@ -226,15 +268,17 @@ export async function runDeployment(adapter, input = {}) {
       ctx.snapshot = await step('snapshot', 'DEPLOY_SNAPSHOT');
       requireValue(ctx.snapshot?.durable === true, 'DEPLOY_SNAPSHOT');
       ctx.qualification = await step('qualifyState', 'DEPLOY_QUALIFY', { expectedMigration: ctx.plan.migration });
-      requireValue(ctx.qualification?.qualified === true && ctx.qualification.migration === ctx.plan.migration, 'DEPLOY_QUALIFY');
+      requireValue(ctx.qualification?.qualified === true && ctx.qualification.migration === ctx.plan.migration &&
+        (ctx.qualification.historyMigration ?? 'none') === historyMigration, 'DEPLOY_QUALIFY');
     }
     // API startup inside switch may migrate live state even if dispatch throws.
-    switchAttempted = true; migrationAttempted = ctx.plan.migration; state = 'recovery-required';
+    switchAttempted = true; migrationAttempted = ctx.plan.migration;
+    historyMigrationAttempted = historyMigration !== 'none'; state = 'recovery-required';
     requireValue((await step('switchServices', 'DEPLOY_SWITCH'))?.switched === true, 'DEPLOY_SWITCH');
     requireValue((await step('health', 'DEPLOY_HEALTH', { target: 'candidate' }))?.healthy === true, 'DEPLOY_HEALTH');
     state = 'new-healthy';
     ctx.receipt = Object.freeze({ version: 1, mode: ctx.mode, services: [...ctx.services],
-      interruptedServices: [...ctx.interruptedServices], migration: migrationAttempted,
+      interruptedServices: [...ctx.interruptedServices], migration: migrationAttempted, historyMigration,
       verified: options.verify, healthy: true, completedAt: new Date().toISOString() });
     // Config may already be published when receipt publication rejects. HOLD.
     publishAttempted = true;
@@ -268,6 +312,7 @@ export async function runDeployment(adapter, input = {}) {
       result.causeCode = deploymentFailure(error, { fallback: failedCode }).code;
       result.causePhase = failedPhase;
     }
+    if (historyMigrationAttempted) result.nextAction += ' History may be schema5: HOLD; no old-v4 binary, header downgrade, stale snapshot restore or automatic resume. Use independently qualified forward recovery.';
     return { ...result, ...attempts() };
   }
 }

@@ -1,6 +1,8 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render as renderUi, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { ScanReportSections } from '@/pages/scans/ScanReportSections';
 import { CursorReportPager } from '@/pages/scans/CursorReportPager';
 import { SecretReportControls } from '@/pages/scans/ReportViewControls';
@@ -22,13 +24,18 @@ const firstText = { vuln: 'CVE-2026-1000', sbom: 'package-00', secret: 'ID: secr
 const tailText = { vuln: 'CVE-2026-1025', sbom: 'package-25', secret: 'ID: secret-25' };
 const changedAt = '2026-01-03T00:00:00.000Z';
 const json = (body: unknown, code = 200) => new Response(JSON.stringify(body), { status: code });
+let queryClient: QueryClient;
+function render(ui: ReactNode) {
+  return renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+}
 let requests: URL[];
 beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   requests = [];
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Unexpected network request'); }));
   for (const name of ['XMLHttpRequest', 'WebSocket', 'EventSource']) vi.stubGlobal(name, class { constructor() { throw new Error('Network forbidden'); } });
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); queryClient.clear(); vi.unstubAllGlobals(); });
 const transport = () => createAuthorizedScanTransport({ subject: 'r2-synthetic', currentSubject: () => 'r2-synthetic' });
 function responses(kind: ReportKind, replies: Response[]) {
   vi.stubGlobal('fetch', vi.fn(async (path: string, options: RequestInit) => {
@@ -202,7 +209,7 @@ describe('R2 deterministic HTTP errors and corrupt pagination strictly reset rep
     const second: Page = { ids: ['b'], nextCursor: 'cursor-b', offset: 1 };
     const third: Page = { ids: ['c'], nextCursor: mode === 'cycle' ? 'cursor-a' : null, offset: 2 };
     const load = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third).mockResolvedValueOnce(first);
-    render(<CursorReportPager reportKey="r2-direct-view" label="CVE" enabled waiting="waiting" load={load}
+    render(<CursorReportPager reportKey="r2-direct-view" queryKey={['r2-synthetic', 'report-page', 'view']} label="CVE" enabled waiting="waiting" load={load}
       describe={(page: Page) => ({ checked: true, identity: 'constant', rowIds: page.ids, rowFingerprint: fingerprintReportRows(page.ids), total: 4, wholeTotal: 4, offset: page.offset, nextCursor: page.nextCursor })}>
       {page => <p>{page.ids.join(',')}</p>}
     </CursorReportPager>);
@@ -223,7 +230,7 @@ describe('R2 deterministic HTTP errors and corrupt pagination strictly reset rep
     const first: Page = { ids: ['a'], nextCursor: '5' };
     const bad: Page = { ids: ['b', 'b'], nextCursor: null };
     const load = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(bad).mockResolvedValueOnce(bad);
-    render(<CursorReportPager reportKey="r2-direct-legacy" label="CVE" enabled waiting="waiting" load={load}
+    render(<CursorReportPager reportKey="r2-direct-legacy" queryKey={['r2-synthetic', 'report-page', 'legacy']} label="CVE" enabled waiting="waiting" load={load}
       describe={(page: Page) => ({ checked: true, identity: 'constant', rowIds: page.ids, rowFingerprint: fingerprintReportRows(page.ids), total: 3, nextCursor: page.nextCursor })}>
       {page => <p>{page.ids.join(',')}</p>}
     </CursorReportPager>);

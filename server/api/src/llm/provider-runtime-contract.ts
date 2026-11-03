@@ -15,7 +15,9 @@ export type SummaryValidationPolicy = LlmPolicy | OpenAiSummaryPolicy;
 export type RuntimeSendFence = (dispatchAndSend: () => void) => void;
 export type RuntimeAttempt<T> = Readonly<{
   id: string;
-  generate(signal: AbortSignal, fence: RuntimeSendFence, observed: (receipt: ChatReceipt) => void): Promise<T>;
+  // Notification after accounting dispatch, inside the actual send fence (not
+  // the lazy credential fence). It may still refuse send; liability stays held.
+  generate(signal: AbortSignal, fence: RuntimeSendFence, observed: (receipt: ChatReceipt) => void, dispatched?: () => void): Promise<T>;
   release(): void;
 }>;
 export type PreparedOperation<T> = Readonly<{

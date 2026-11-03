@@ -152,6 +152,7 @@ test('TASK13 real local Nest cookie HTTP and trusted-ledger fixtures (fake model
       assert.equal((captured!.coverage.vuln as { db: { outcome: string } }).db.outcome, 'unknown');
       assert.ok(Object.isFrozen(captured) && Object.isFrozen(captured!.findings) && Object.isFrozen(captured!.findings[0]));
       assert.ok(!/Ignore all|attacker|CANARY|canary-private|description|packageName|installedVersion/.test(JSON.stringify(captured)));
+      assert.equal(captured!.omittedEvidence, 'All free text, URLs, credentials, env, package strings and raw output excluded');
       assert.ok(!/Ignore all|attacker|CANARY|canary-private/.test(JSON.stringify(result)));
       const identity = app.get(BrowserIdentity).resolve({ headers: { cookie: owner.cookie }, socket: {} });
       const reader = app.get(ReportReader);

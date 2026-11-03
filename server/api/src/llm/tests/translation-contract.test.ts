@@ -9,8 +9,8 @@ import { checkedPrepared, prepareHistory, prepareSummary, prepareTranslation } f
 import { selectedTranslation, translationDisclosure, translationEnabled, translationPolicy, translationQuery, translationRequest, validateTranslationReply } from '../translation-contract.js';
 import { fixtureEnv, fixtureReport } from './fixtures.js';
 
-const policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'xingchen-agi/xing4.0-29b-a4b:free',
-  LLM_PROVIDER_ALLOWLIST: 'phala', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
+const policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'dots-studio/dots-3-note-preview:free',
+  LLM_PROVIDER_ALLOWLIST: 'atlas-cloud/fp8', LLM_RETENTION: 'no-training', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
   LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0' })!;
 const ref = `target-${'b'.repeat(64)}`, id = 'CVE-2026-1000';
 function selected(raw: Record<string, unknown>) {
@@ -46,8 +46,8 @@ test('translation exact selection/body, separate consent, registered prepared wi
   const prepared = prepareTranslation({ title: 'Memory issue', description: null }, policy);
   const wire = JSON.parse(checkedPrepared(prepared, policy));
   assert.deepEqual(JSON.parse(wire.messages[1].content), { title: 'Memory issue', description: null });
-  assert.deepEqual(wire.provider, { only: ['phala'], allow_fallbacks: false, require_parameters: true,
-    data_collection: 'deny', zdr: true, max_price: { prompt: 0, completion: 0, request: 0 } });
+  assert.deepEqual(wire.provider, { only: ['atlas-cloud/fp8'], allow_fallbacks: false, require_parameters: true,
+    data_collection: 'deny', max_price: { prompt: 0, completion: 0, request: 0 } });
   assert.equal(prepared.reserve.input, Buffer.byteLength(prepared.body) + 1024); assert.equal(prepared.reserve.costMicros, 0);
   assert.throws(() => checkedPrepared({ ...prepared }, policy));
     for (const text of [{ title: 'https://private.invalid', description: null }, { title: 'x'.repeat(513), description: null },

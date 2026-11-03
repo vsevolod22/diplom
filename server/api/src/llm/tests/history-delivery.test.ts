@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
+import { carryDiagnostic, diagnoseGrounding, diagnoseLanguage } from '../provider-diagnostic.js';
+import type { LanguageRejection } from '../language-rejection.js';
 import {
   DELIVERY,
   chatRepresentation,
@@ -76,6 +78,54 @@ class Socket extends EventEmitter {
 }
 const frame = (line: string) => JSON.parse(line);
 
+test('grounding carry is header-only on both failed receipt shapes; immutable delivery/body and successful headers stay unchanged', async () => {
+  const source = diagnoseGrounding(new Error('synthetic-private-raw-text'), 'version_label', 0,
+    { sourceRelation: 'no_cited_value_match', lexicalClass: 'ascii_identity', boundaryClass: 'end' });
+  for (const receipt of [{ usage: outcome.usage }, { receipt: 'unavailable' as const }]) {
+    const failed: ChatDelivery = Object.freeze({ ...binding, epoch: outcome.epoch, revision: outcome.revision,
+      mutationId: outcome.mutationId, turnId: outcome.turnId, outcome: 'failed', ...receipt });
+    const before: readonly string[] = encodeDelivery(failed).lines;
+    carryDiagnostic(source, failed);
+    assert.deepEqual(encodeDelivery(failed).lines, before, 'WeakMap carry must not add fields to the NDJSON contract');
+    const socket = new Socket(); let releases = 0;
+    await writeDelivery({ delivery: failed, write: action => action(), release: () => { releases++; } }, socket.response, new AbortController().signal);
+    const headers = socket.headers as Record<string, string>;
+    assert.equal(headers['X-LLM-Grounding-Predicate'], 'version_label'); assert.equal(headers['X-LLM-Grounding-Index'], '0');
+    assert.deepEqual(Object.fromEntries(Object.entries(headers).filter(([key]) => key.startsWith('X-LLM-'))), {
+      'X-LLM-Failure-Phase': 'grounding', 'X-LLM-Failure-Reason': 'unknown_identifier',
+      'X-LLM-Grounding-Predicate': 'version_label', 'X-LLM-Grounding-Index': '0',
+      'X-LLM-Grounding-Source-Relation': 'no_cited_value_match', 'X-LLM-Grounding-Lexical-Class': 'ascii_identity',
+      'X-LLM-Grounding-Boundary-Class': 'end',
+    });
+    assert.deepEqual(socket.lines, before); assert.equal(releases, 1);
+    assert.doesNotMatch(socket.lines.join('') + JSON.stringify(failed), /synthetic-private|version_label|predicate|unknown_identifier|witness|no_cited_value_match|ascii_identity/);
+  }
+  const completed = carryDiagnostic(source, Object.freeze({ ...outcome }));
+  const socket = new Socket();
+  await writeDelivery({ delivery: completed, write: action => action(), release() {} }, socket.response, new AbortController().signal);
+  assert.ok(!Object.keys(socket.headers as object).some(key => key.startsWith('X-LLM-')),
+    'successful delivery never publishes failure metadata even if a server-local object was annotated');
+});
+
+test('language carry is finite header-only on both NDJSON failure receipt shapes without changing frames or disclosing raw text', async () => {
+  const rejection: LanguageRejection = { reason: 'residual_latin', tokenClass: 'unknown' };
+  const source = diagnoseLanguage(new Error('synthetic-private-English-output'), rejection, 0);
+  for (const receipt of [{ usage: outcome.usage }, { receipt: 'unavailable' as const }]) {
+    const delivery: ChatDelivery = Object.freeze({ ...binding, epoch: outcome.epoch, revision: outcome.revision,
+      mutationId: outcome.mutationId, turnId: outcome.turnId, outcome: 'failed', ...receipt });
+    const before: readonly string[] = encodeDelivery(delivery).lines;
+    carryDiagnostic(source, delivery);
+    const socket = new Socket(); let releases = 0;
+    await writeDelivery({ delivery, write: action => action(), release: () => { releases++; } }, socket.response, new AbortController().signal);
+    assert.deepEqual(Object.fromEntries(Object.entries(socket.headers as Record<string, string>).filter(([key]) => key.startsWith('X-LLM-'))), {
+      'X-LLM-Failure-Phase': 'language', 'X-LLM-Failure-Reason': 'not_russian',
+      'X-LLM-Language-Reason': 'residual_latin', 'X-LLM-Language-Index': '0', 'X-LLM-Language-Token-Class': 'unknown',
+    });
+    assert.deepEqual(socket.lines, before); assert.equal(releases, 1);
+    assert.doesNotMatch(socket.lines.join('') + JSON.stringify(delivery), /synthetic-private|not_russian|residual_latin|tokenClass|languageDiagnostic|rejection/);
+  }
+});
+
 test('TASK16 codec exact literal tuple, receipt first, source projections, UTF8 chunks and bounded terminal', () => {
   const text = 'я '.repeat(4096),
     plan = encodeDelivery({ ...outcome, reply: { ...outcome.reply, text } });
@@ -103,6 +153,28 @@ test('TASK16 codec exact literal tuple, receipt first, source projections, UTF8 
   for (const bad of ['<script>', 'javascript:evil', 'https://evil.example', 'x'.repeat(16385)])
     assert.throws(() => encodeDelivery({ ...outcome, reply: { ...outcome.reply, text: bad } }));
 });
+test('public configured4096 receipt delivery keeps its cap server-local; default/legacy encoding remains2048', async () => {
+  const expanded = { ...outcome, usage: { ...outcome.usage, output: 4096 } };
+  const failed: ChatDelivery = { ...binding, epoch: expanded.epoch, revision: expanded.revision,
+    mutationId: expanded.mutationId, turnId: expanded.turnId, outcome: 'failed', usage: expanded.usage };
+  for (const delivery of [expanded, failed]) {
+    assert.throws(() => encodeDelivery(delivery));
+    assert.throws(() => encodeDelivery(delivery, 2048));
+    const plan = encodeDelivery(delivery, 4096);
+    assert.equal(frame(plan.lines[0]).usage.output, 4096);
+    assert.ok(plan.lines.every(line => Buffer.byteLength(line) <= DELIVERY.lineBytes));
+    assert.doesNotMatch(plan.lines.join(''), /outputTokens/);
+    assert.throws(() => encodeDelivery({ ...delivery, usage: { ...delivery.usage, output: 4097 } }, 4096));
+    for (const cap of [0, 4097, 1.5, NaN, Infinity]) assert.throws(() => encodeDelivery(delivery, cap));
+  }
+  const socket = new Socket();
+  let releases = 0;
+  await writeDelivery({ delivery: expanded, outputTokens: 4096, write: action => action(), release: () => { releases++; } },
+    socket.response, new AbortController().signal);
+  assert.equal(frame(socket.lines[0]).usage.output, 4096);
+  assert.equal(frame(socket.lines.at(-1)!).type, 'done'); assert.equal(releases, 1);
+});
+
 test('TASK16 exact reply/source/count ceilings and escaped encoded bytes are preflight bounded', () => {
   const sources = Array.from({ length: 32 }, (_, i) => ({
     ...outcome.reply.sources[0],

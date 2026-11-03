@@ -5,32 +5,31 @@ import { useLiveScanSession } from '@/features/scans/liveScanContext';
 import { useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { GuideTabs, GuideTabsContent, GuideTabsList, GuideTabsTrigger } from '@/features/scans/GuideTabs';
 import { ScanShell } from '@/features/scans/ScanShell';
-import { ScanScene } from '@/features/scans/ScanScene';
+import { scanCheckLabels } from '@/features/scans/scanProgressPresentation';
 import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import { scanChecks } from '@/shared/api/scans/scanTransport';
 import { scanSession } from '@/shared/api/auth/scanSession';
+import { acknowledgePendingCreateIntent, readPendingCreateIntent, rememberPendingCreateIntent, type PendingCreateIntent } from '@/shared/api/scans/pendingCreateIntent';
 import { EligibilityClient, type ScanWait } from '@/shared/api/scans/eligibilityClient';
 import { RuntimeScanPanel } from '@/features/scans/RuntimeScanPanel';
-import { publicImageReference, PUBLIC_IMAGE_PROFILE, PUBLIC_IMAGE_RESOURCE_POLICY } from '@/shared/api/scans/publicImageProfile';
+import { publicImageReference } from '@/shared/api/scans/publicImageProfile';
+import { imageFailureDetailSchema, parseImageFailureDetail, presentImageFailure, type ImageFailureDetail } from '@/shared/api/scans/imageFailure';
+import { normalizeDockerHubReference, OLDER_IMAGE_PRESETS, repositoryFromReference, tagFromReference, validDiscoveryQuery } from './imageSelection';
+import './scan-create-selection.css';
 
-const alpineTargets = [
-  { label: 'Alpine · latest', reference: 'registry-1.docker.io/library/alpine:latest' },
-  { label: 'Alpine · 3.21', reference: 'registry-1.docker.io/library/alpine:3.21' },
-  { label: 'Alpine · 3.20', reference: 'registry-1.docker.io/library/alpine:3.20' },
-  { label: 'Alpine · 3.16 (архивный · CVE-пример)', reference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6' },
-] as const;
 const pinnedExample = { label: 'nginx · закреплённый пример с большим числом находок', reference: 'registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3', scannable: false };
-type ImageSuggestion = { label: string; reference: string; scannable: boolean; reason?: string; tagConfirmed?: boolean;
+type ImageSuggestion = { label: string; reference: string; scannable: boolean; reason?: string; kind?: 'tag' | 'repository'; tagConfirmed?: boolean;
   eligibility?: 'alpine-only' | 'isolated-exact-profile' | 'qualified-exact-profile' | 'public-hub-profile' | 'unsupported'; allowedCheckSets?: readonly (readonly string[])[]; qualificationId?: string };
 const checkSetSchema = z.array(z.enum(scanChecks)).min(1).max(4).refine(set =>
   JSON.stringify(set) === JSON.stringify(scanChecks.filter(check => set.includes(check))), 'Invalid canonical check set');
 const eligibilitySchema = z.object({ imageReference: publicImageReference, eligible: z.boolean(),
   eligibility: z.enum(['alpine-only', 'isolated-exact-profile', 'qualified-exact-profile', 'public-hub-profile', 'unsupported']),
   allowedCheckSets: z.array(checkSetSchema).max(15), qualificationId: z.string().max(64).optional(),
-  reason: z.enum(['READY', 'UNSUPPORTED_SCAN', 'SCANNER_UNAVAILABLE', 'DB_UNAVAILABLE']) }).strict().superRefine((result, context) => {
+  reason: z.enum(['READY', 'UNSUPPORTED_SCAN', 'SCANNER_UNAVAILABLE', 'DB_UNAVAILABLE']),
+  failureDetail: imageFailureDetailSchema.optional() }).strict().superRefine((result, context) => {
     if (result.eligible !== (result.reason === 'READY') ||
+      result.failureDetail !== undefined && (result.eligible || result.reason !== 'SCANNER_UNAVAILABLE') ||
       new Set(result.allowedCheckSets.map(set => set.join(','))).size !== result.allowedCheckSets.length ||
       result.eligibility === 'unsupported' && (result.eligible || result.allowedCheckSets.length || result.qualificationId) ||
       result.eligibility === 'qualified-exact-profile' && (!result.qualificationId || !result.allowedCheckSets.length || result.allowedCheckSets.some(set => set.includes('config')))) {
@@ -48,9 +47,40 @@ const formSchema = z.object({
   imageReference: publicImageReference,
   checks: z.array(z.enum(scanChecks)).min(1, 'Выберите хотя бы одну проверку'),
 });
+// Remembering a convenient target is optional; storage denial must not disable scan creation.
+function readSavedTarget(key: string): string | null {
+  try { return sessionStorage.getItem(key); } catch { return null; }
+}
+function writeSavedTarget(key: string, value: string | null) {
+  try {
+    if (value === null) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, value);
+  } catch { /* The current form and owner-bound pending intent remain usable without storage. */ }
+}
+
+function failureDetailMessage(value: ImageFailureDetail): string {
+  const detail = presentImageFailure(value);
+  return `${detail.title}. ${detail.description} ${detail.nextStep}`;
+}
+
+function imageFailureMessage(error: unknown): string | null {
+  if (!(error instanceof ScanHttpError) || !('failureDetail' in error) || error.failureDetail === undefined) return null;
+  try {
+    return failureDetailMessage(parseImageFailureDetail(error.failureDetail));
+  } catch {
+    // Malformed optional detail is not evidence. Keep the generic error and all existing retry gates.
+    return null;
+  }
+}
+
 type FormValues = z.infer<typeof formSchema>;
 type FocusActivation = { element: HTMLButtonElement; keyboard: boolean; moved: boolean; stop: () => void };
 export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
+  const live = useLiveScanSession();
+  const subject = live?.scope[2] ?? null;
+  const epoch = live?.scope[1] ?? -1;
+  const sessionIdentity = live?.scope.join(':') ?? '';
+  const [initialIntent] = useState(() => demo ? null : readPendingCreateIntent({ subject, generation: epoch }));
   const {
     register,
     control,
@@ -60,11 +90,18 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: { imageReference: '', checks: ['secret'] },
+    defaultValues: {
+      imageReference: initialIntent?.target ?? '',
+      checks: initialIntent ? scanChecks.filter(check => initialIntent.checks.split(',').includes(check)) : ['secret'],
+    },
   });
   const imageReference = useWatch({ control, name: 'imageReference' });
   const checks = useWatch({ control, name: 'checks' }) ?? [];
   const [search, setSearch] = useState('');
+  const [repository, setRepository] = useState<string | null>(null);
+  const [tagFilter, setTagFilter] = useState('');
+  const pickerInput = useRef<HTMLInputElement>(null);
+  const focusPicker = useRef(false);
   const [suggestions, setSuggestions] = useState<ImageSuggestion[]>([]);
   const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'error' | 'expired'>('idle');
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -78,22 +115,23 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   const restartButton = useRef<HTMLButtonElement>(null);
   const activatedControl = useRef<FocusActivation | null>(null);
   const focusHandoff = useRef<{ activation: FocusActivation; generation: number; subject: string; epoch: number } | null>(null);
-  const discovery = useRef<{ generation: string; cursor: string | null; identity: string; query: string; pages: number }>({ generation: '', cursor: null, identity: '', query: '', pages: 0 });
+  const discovery = useRef<{ generation: string; cursor: string | null; identity: string; query: string; repository: string | null; pages: number }>({ generation: '', cursor: null, identity: '', query: '', repository: null, pages: 0 });
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
   const [error, setError] = useState('');
   const selectedTarget = useRef<ImageSuggestion | null>(null);
   const [localEligibility, setLocalEligibility] = useState<z.infer<typeof eligibilitySchema> | null>(null);
   const [eligibilityBusy, setEligibilityBusy] = useState(false);
   const [eligibilityRefresh, setEligibilityRefresh] = useState(0);
+  const manualEligibilityRefresh = useRef(false);
+  const [eligibilityAccessError, setEligibilityAccessError] = useState<401 | 403 | null>(null);
   const savedIdentity = useRef('');
-  const attempt = useRef<{ target: string; checks: string; key: string } | null>(null);
+  const attempt = useRef<PendingCreateIntent | null>(initialIntent);
+  const [restoredAttempt, setRestoredAttempt] = useState(!!initialIntent);
+  const [recoveryApproval, setRecoveryApproval] = useState('');
   // Changing back to the same values must not revive a preflight for an earlier consent.
   const submissionVersion = useRef(0);
-  const live = useLiveScanSession();
-  const subject = live?.scope[2] ?? null;
-  const epoch = live?.scope[1] ?? -1;
-  const sessionIdentity = live?.scope.join(':') ?? '';
   const [eligibilityWait, setEligibilityWait] = useState<ScanWait | null>(null);
   const [admissionWait, setAdmissionWait] = useState<ScanWait | null>(null);
   const [eligibilityError, setEligibilityError] = useState('');
@@ -104,6 +142,8 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     }) : null, [subject, epoch, demo]);
   useEffect(() => {
     eligibilityClient?.activate();
+    manualEligibilityRefresh.current = false;
+    setEligibilityAccessError(null);
     setLocalEligibility(null); setEligibilityWait(null); setAdmissionWait(null); setEligibilityError(''); setError(''); setBusy(false);
     return () => eligibilityClient?.retire();
   }, [eligibilityClient]);
@@ -123,80 +163,110 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   useEffect(() => {
     if (!subject || demo) return;
     const key = `scan-target-v1:${subject}`;
-    if (savedIdentity.current && savedIdentity.current !== key) sessionStorage.removeItem(savedIdentity.current);
+    if (savedIdentity.current && savedIdentity.current !== key) writeSavedTarget(savedIdentity.current, null);
     savedIdentity.current = key;
-    const saved = sessionStorage.getItem(key);
+    const saved = readSavedTarget(key);
     if (saved && /^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(saved)) {
       selectedTarget.current = { label: 'Сохранённая закреплённая цель', reference: saved, scannable: false };
       setValue('imageReference', saved);
-    } else if (saved) sessionStorage.removeItem(key);
+    } else if (saved) writeSavedTarget(key, null);
     const currentEpoch = epoch;
     return () => {
       const session = scanSession();
-      if (session.subject !== subject || session.generation !== currentEpoch) sessionStorage.removeItem(key);
+      if (session.subject !== subject || session.generation !== currentEpoch) writeSavedTarget(key, null);
     };
   }, [subject, epoch, demo, setValue]);
-  const eligibilityReference = publicImageReference.safeParse(imageReference).success &&
-      (!alpineTargets.some(target => target.reference === imageReference) || localEligibility?.eligibility === 'public-hub-profile')
-      ? imageReference : pinnedExample.reference;
+  const eligibilityReference = publicImageReference.safeParse(imageReference).success ? imageReference : null;
   const canonicalSelected = scanChecks.filter(check => checks.includes(check));
   const checkIdentity = canonicalSelected.join(',');
   useEffect(() => {
-    if (!eligibilityClient) return;
+    setRecoveryApproval('');
+    if (!eligibilityClient || !eligibilityReference) {
+      setLocalEligibility(null); setEligibilityBusy(false);
+      return;
+    }
+    if (restoredAttempt && !manualEligibilityRefresh.current) {
+      setEligibilityBusy(false);
+      return;
+    }
     let mounted = true;
     const current = () => mounted && scanSession().subject === subject && scanSession().generation === epoch;
     setEligibilityBusy(true);
     setLocalEligibility(previous => previous?.imageReference === eligibilityReference ? { ...previous, eligible: false } : null);
     const timer = window.setTimeout(async () => {
       try {
-        const result = eligibilitySchema.parse(await eligibilityClient.request(eligibilityReference, checkIdentity ? checkIdentity.split(',') : ['secret'], false, current));
-        if (result.imageReference !== eligibilityReference || result.eligible &&
-          !result.allowedCheckSets.some(set => set.join(',') === (checkIdentity || 'secret'))) throw new Error('Eligibility identity mismatch');
-        if (current()) { setLocalEligibility(result); setEligibilityError(''); }
+        const validate = (value: unknown) => {
+          const result = eligibilitySchema.parse(value);
+          if (result.imageReference !== eligibilityReference || result.eligible &&
+            !result.allowedCheckSets.some(set => set.join(',') === (checkIdentity || 'secret'))) throw new Error('Eligibility identity mismatch');
+          return result;
+        };
+        const manual = manualEligibilityRefresh.current;
+        manualEligibilityRefresh.current = false;
+        const selectedChecks = checkIdentity ? checkIdentity.split(',') : ['secret'];
+        const result = manual
+          ? await eligibilityClient.retryAuthorization(eligibilityReference, selectedChecks, validate, current)
+          : validate(await eligibilityClient.request(eligibilityReference, selectedChecks, false, current));
+        if (current()) {
+          setLocalEligibility(result); setEligibilityError('');
+          if (manual && result.eligible) setRecoveryApproval(JSON.stringify([epoch, eligibilityReference, checkIdentity]));
+          setEligibilityAccessError(previous => manual && previous === 403 ? null : previous);
+        }
       } catch (reason) {
         if (!current()) return;
+        if (reason instanceof ScanAccessError) setEligibilityAccessError(reason.status);
         if (reason instanceof ScanHttpError && reason.status === 429) {
           setLocalEligibility(previous => previous ? { ...previous, eligible: false } : null);
         } else {
           setLocalEligibility(null);
-          setEligibilityError(reason instanceof ScanAccessError ? reason.status === 401 ? 'Сессия недействительна. Войдите заново.' : 'Аккаунту не выдан доступ к сканированию.' : 'Не удалось проверить серверный допуск. Повторите проверку вручную.');
+          setEligibilityError(imageFailureMessage(reason) ?? (reason instanceof ScanAccessError ? reason.status === 401 ? 'Сессия недействительна. Войдите заново.' : 'Аккаунту не выдан доступ к сканированию.' : 'Не удалось проверить доступность. Повторите проверку вручную.'));
         }
       }
       finally { if (current()) setEligibilityBusy(false); }
     }, 150);
     return () => { mounted = false; window.clearTimeout(timer); };
-  }, [eligibilityClient, subject, epoch, eligibilityReference, checkIdentity, eligibilityRefresh]);
+  }, [eligibilityClient, subject, epoch, eligibilityReference, checkIdentity, eligibilityRefresh, restoredAttempt]);
   useEffect(() => {
-    const refresh = () => { if (eligibilityClient?.focusAllowed()) setEligibilityRefresh(value => value + 1); };
+    const refresh = () => { if (!restoredAttempt && eligibilityClient?.focusAllowed()) setEligibilityRefresh(value => value + 1); };
     window.addEventListener('focus', refresh);
     return () => window.removeEventListener('focus', refresh);
-  }, [eligibilityClient]);
+  }, [eligibilityClient, restoredAttempt]);
   useEffect(() => {
-    const query = search.trim().toLowerCase().replace(/ +/g, ' ');
+    const query = repository === null ? search.trim().replace(/ +/g, ' ') : tagFilter;
     const generation = ++searchGeneration.current;
     const activation = activatedControl.current;
     activatedControl.current = null;
     const identity = sessionIdentity;
     if (discovery.current.identity !== identity) {
       ++submissionVersion.current;
+      setRepository(null); setTagFilter(''); setSearch('');
       setConfirmed(false); attempt.current = null; selectedTarget.current = null;
-      // Preserve only this subject's saved reference, never persisted eligibility.
-      const saved = subject ? sessionStorage.getItem(`scan-target-v1:${subject}`) : null;
-      if (saved && /^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(saved)) {
+      const pending = !demo ? readPendingCreateIntent({ subject, generation: epoch }) : null;
+      setRestoredAttempt(!!pending);
+      setLocalEligibility(null);
+      // Restore only the same revalidated owner's intent, never consent or eligibility.
+      const saved = subject ? readSavedTarget(`scan-target-v1:${subject}`) : null;
+      if (pending) {
+        setEligibilityBusy(false);
+        attempt.current = pending;
+        setValue('imageReference', pending.target);
+        setValue('checks', scanChecks.filter(check => pending.checks.split(',').includes(check)));
+      } else if (saved && /^registry-1\.docker\.io\/library\/nginx@sha256:[a-f0-9]{64}$/.test(saved)) {
         selectedTarget.current = { label: 'Сохранённая закреплённая цель', reference: saved, scannable: false };
         setValue('imageReference', saved);
       } else setValue('imageReference', '');
     }
-    const append = pageRequest > 0 && discovery.current.cursor !== null && discovery.current.identity === identity && discovery.current.query === query;
-    const restart = restarting.current && discovery.current.identity === identity && discovery.current.query === query;
+    const sameSearch = discovery.current.identity === identity && discovery.current.query === query && discovery.current.repository === repository;
+    const append = pageRequest > 0 && discovery.current.cursor !== null && sameSearch;
+    const restart = restarting.current && sameSearch;
     restarting.current = false;
     if (!append) {
-      discovery.current = { generation: restart ? discovery.current.generation : crypto.randomUUID(), cursor: null, identity, query, pages: 0 };
+      discovery.current = { generation: restart ? discovery.current.generation : crypto.randomUUID(), cursor: null, identity, query, repository, pages: 0 };
       loadedSuggestions.current = [];
       if (!restart) { setSuggestions([]); setRetainedResults(false); }
       setNextCursor(null); setPageState(null);
     }
-    if (demo || !subject || query.length < 2 || query.length > 64 || !/^[a-zA-Z0-9_./: -]+$/.test(query) || query.includes('..') || query.includes('//') || query.includes('://')) {
+    if (demo || !subject || !validDiscoveryQuery(query, repository)) {
       setSuggestions([]);
       setSearchState('idle');
       activation?.stop();
@@ -217,7 +287,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     const timer = window.setTimeout(async () => {
       if (!current()) return;
       try {
-        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}&generation=${encodeURIComponent(serverGeneration)}${cursor ? `&cursor=${cursor}` : ''}`, {
+        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}${repository ? `&repository=${encodeURIComponent(repository)}` : ''}&generation=${encodeURIComponent(serverGeneration)}${cursor ? `&cursor=${cursor}` : ''}`, {
           credentials: 'same-origin', signal: controller.signal, headers: { accept: 'application/json' },
         });
         if (!response.ok) {
@@ -232,6 +302,9 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         }
         const data: unknown = await response.json();
         const page = searchPageSchema.parse(data);
+        if (page.items.some(item => !repositoryFromReference(item.reference) || repository !== null &&
+          (item.kind !== 'tag' || !item.tagConfirmed || tagFromReference(item.reference) === null || repositoryFromReference(item.reference) !== repository)))
+          throw new Error('Discovery repository mismatch');
         if (!current()) return;
         const merged = [...new Map([...(append ? loadedSuggestions.current : []), ...page.items].map(item => [item.reference, item])).values()];
         if (page.pages !== (append ? discovery.current.pages + 1 : 1) || page.loaded !== merged.length || (page.state === 'more-available' && page.pages >= 5)) throw new Error('Invalid page sequence');
@@ -252,7 +325,12 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       }
     }, append ? 0 : 350);
     return () => { controller.abort(); window.clearTimeout(timer); activation?.stop(); };
-  }, [search, demo, subject, epoch, sessionIdentity, pageRequest, setValue]);
+  }, [search, repository, tagFilter, demo, subject, epoch, sessionIdentity, pageRequest, setValue]);
+  useLayoutEffect(() => {
+    if (!focusPicker.current) return;
+    focusPicker.current = false;
+    pickerInput.current?.focus();
+  }, [repository]);
   useLayoutEffect(() => {
     const pending = focusHandoff.current;
     if (!pending) return;
@@ -302,27 +380,66 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
     setRetainedResults(true); setNextCursor(null); setPageState(null);
     setPageRequest(value => value + 1);
   }
-  const matches = alpineTargets.filter(target => `${target.label} ${target.reference}`.toLowerCase().includes(search.trim().toLowerCase()));
-  const localSelected = imageReference?.includes('/nginx@') && localEligibility?.eligibility !== 'isolated-exact-profile' && localEligibility?.eligibility !== 'public-hub-profile';
-  const localCheckSets = localEligibility?.eligibility === 'qualified-exact-profile' ? localEligibility.allowedCheckSets : [];
-  const retainedTarget = imageReference?.includes('/nginx@') ? { ...pinnedExample, reference: imageReference } : pinnedExample;
-  const localCard: ImageSuggestion = { ...retainedTarget, scannable: localEligibility?.imageReference === retainedTarget.reference && localEligibility.eligible === true,
-    eligibility: localEligibility?.eligibility, allowedCheckSets: localEligibility?.allowedCheckSets, qualificationId: localEligibility?.qualificationId,
-    reason: eligibilityWaiting ? 'Сервер просит подождать перед проверкой допуска' : eligibilityError || (eligibilityBusy ? 'Проверяем актуальный серверный допуск…' : localEligibility?.eligible ? 'Серверный допуск подтверждён; новый запуск проверяется повторно' : 'Локальный профиль недоступен для выбранных проверок') };
-  const visible: ImageSuggestion[] = [
-    localCard,
-    ...matches.map(target => ({ ...target, scannable: true })),
-    ...suggestions.filter(target => target.reference !== localCard.reference && !matches.some(item => item.reference === target.reference)),
-  ].map(target => target.reference.includes('/nginx@') && localEligibility?.imageReference === target.reference ?
-    { ...target, scannable: localEligibility.eligible, eligibility: localEligibility.eligibility, allowedCheckSets: localEligibility.allowedCheckSets } : target);
+  function changeDiscovery(nextRepository: string | null, nextQuery: string, navigateStep = false) {
+    if (busy || submitting.current) return;
+    ++searchGeneration.current;
+    discovery.current.cursor = null;
+    restarting.current = false;
+    setSuggestions([]); setNextCursor(null); setPageState(null); setPageRequest(0); setSearchState('idle'); setRetainedResults(false);
+    setRepository(nextRepository);
+    if (nextRepository === null) setSearch(nextQuery); else setTagFilter(nextQuery);
+    if (navigateStep) {
+      ++submissionVersion.current;
+      setConfirmed(false);
+      focusPicker.current = true;
+    }
+  }
+  function selectTarget(target: ImageSuggestion) {
+    if (busy || submitting.current || !publicImageReference.safeParse(target.reference).success) return;
+    ++submissionVersion.current;
+    selectedTarget.current = target;
+    if (target.reference.includes('/nginx@') && live) writeSavedTarget(`scan-target-v1:${live.scope[2]}`, target.reference);
+    setValue('imageReference', target.reference, { shouldValidate: true });
+    setConfirmed(false);
+    if (imageReference !== target.reference) attempt.current = null;
+    setError('');
+  }
+  function normalizeManualReference(showError: boolean) {
+    if (busy || submitting.current) return;
+    const raw = getValues('imageReference');
+    const normalized = normalizeDockerHubReference(raw);
+    if (!normalized) {
+      if (showError) setError('Укажите публичный образ Docker Hub с тегом, например nginx:1.24 или owner/name:Tag. URL, другие реестры и учётные данные не принимаются.');
+      return;
+    }
+    if (normalized !== raw) selectTarget({ label: 'Введённый адрес', reference: normalized, scannable: false });
+  }
+  const repositories = [...new Set(suggestions.flatMap(target => {
+    const name = repositoryFromReference(target.reference);
+    return name ? [name] : [];
+  }))];
+  const localSelected = localEligibility?.imageReference === imageReference && localEligibility.eligibility === 'qualified-exact-profile';
+  const localCheckSets = localSelected ? localEligibility.allowedCheckSets : [];
+  const selectionEligible = !eligibilityBusy && localEligibility?.imageReference === imageReference && localEligibility.eligible &&
+    localEligibility.allowedCheckSets.some(set => set.join(',') === checkIdentity);
+  const samePendingAttempt = attempt.current?.target === imageReference && attempt.current?.checks === checkIdentity;
+
+  const recoveryEligible = !restoredAttempt || recoveryApproval === JSON.stringify([epoch, imageReference, checkIdentity]) &&
+    !eligibilityBusy && localEligibility?.imageReference === imageReference && localEligibility.eligible &&
+    localEligibility.allowedCheckSets.some(set => set.join(',') === checkIdentity);
 
   async function create(values: FormValues) {
-    if (demo || !live || !confirmed || busy) return;
-    const eligible = alpineTargets.some(target => target.reference === values.imageReference) ||
-      localEligibility?.imageReference === values.imageReference && localEligibility.eligible ||
-      selectedTarget.current?.reference === values.imageReference && selectedTarget.current.scannable === true &&
-        (selectedTarget.current.eligibility === 'isolated-exact-profile' || selectedTarget.current.eligibility === 'alpine-only' &&
-          values.imageReference.startsWith('registry-1.docker.io/library/alpine:'));
+    if (demo || !live || !confirmed || busy || submitting.current || eligibilityAccessError !== null || !recoveryEligible) return;
+    const retained = readPendingCreateIntent({ subject, generation: epoch }, {
+      target: values.imageReference, checks: scanChecks.filter(check => values.checks.includes(check)).join(','),
+    });
+    if (retained && retained.key !== attempt.current?.key) {
+      attempt.current = retained;
+      setRestoredAttempt(true); setConfirmed(false); setLocalEligibility(null);
+      setError('Для этой цели сохранён неподтверждённый запуск. Проверьте допуск вручную и подтвердите повтор с прежним ключом.');
+      return;
+    }
+    const eligible = selectionEligible && localEligibility?.imageReference === values.imageReference;
     const sameAttempt = attempt.current?.target === values.imageReference && attempt.current?.checks === scanChecks.filter(check => values.checks.includes(check)).join(',');
     if (admissionWaiting || eligibilityWaiting && !sameAttempt) return;
     if (!eligible && !sameAttempt) { setConfirmed(false); setError('Выберите цель с подтверждённым серверным допуском.'); return; }
@@ -334,25 +451,38 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         getValues('imageReference') === values.imageReference && scanChecks.filter(check => getValues('checks').includes(check)).join(',') === selected.join(',');
     };
     if (!current()) return;
+    submitting.current = true;
     setBusy(true);
     setError('');
     try {
-      if (attempt.current?.target !== values.imageReference || attempt.current?.checks !== selected.join(',')) {
-        if (values.imageReference.includes('/nginx@') || localEligibility?.eligibility === 'public-hub-profile' ||
-            !alpineTargets.some(target => target.reference === values.imageReference) && selectedTarget.current?.reference !== values.imageReference) {
-          const result = eligibilityClient ? eligibilitySchema.parse(await eligibilityClient.request(values.imageReference, selected, true, current)) : null;
-          if (!current()) return;
-          if (!result?.eligible || result.imageReference !== values.imageReference ||
-            !result.allowedCheckSets.some(set => set.join(',') === selected.join(','))) { setConfirmed(false); setError('Актуальный серверный допуск недоступен. Скан не создан.'); return; }
+      if (!sameAttempt || restoredAttempt) {
+        const result = eligibilityClient ? eligibilitySchema.parse(await eligibilityClient.request(values.imageReference, selected, true, current)) : null;
+        if (!current()) return;
+        if (!result?.eligible || result.imageReference !== values.imageReference ||
+          !result.allowedCheckSets.some(set => set.join(',') === selected.join(','))) {
+          setConfirmed(false);
+          setError(result?.failureDetail ? `${failureDetailMessage(result.failureDetail)} Новый запрос запуска не отправлен.` : 'Сервер пока не разрешает запуск. Новый запрос запуска не отправлен.');
+          return;
         }
-        attempt.current = { target: values.imageReference, checks: selected.join(','), key: crypto.randomUUID() };
+        if (!sameAttempt) attempt.current = { target: values.imageReference, checks: selected.join(','), key: crypto.randomUUID() };
       }
-      if (!current()) return;
-      const receipt = await live.transport.create({ imageReference: values.imageReference, scope: 'image', checks: selected, idempotencyKey: attempt.current.key });
-      if (current()) navigate(`/scans/${encodeURIComponent(receipt.scanId)}`);
+      if (!current() || !attempt.current) return;
+      const sentIntent = attempt.current;
+      const sentSession = { subject, generation: epoch };
+      if (!rememberPendingCreateIntent(sentSession, sentIntent)) {
+        setError('Не удалось сохранить безопасный повтор: слишком много неподтверждённых запусков или сессия изменилась. Проверьте список сканов; новый запрос не отправлен.');
+        return;
+      }
+      const receipt = await live.transport.create({ imageReference: values.imageReference, scope: 'image', checks: selected, idempotencyKey: sentIntent.key });
+      if (current()) {
+        acknowledgePendingCreateIntent(sentSession, sentIntent.key);
+        navigate(`/scans/${encodeURIComponent(receipt.scanId)}`);
+      }
     } catch (reason) {
       if (!current()) return;
       if (reason instanceof ScanAccessError) {
+        setEligibilityAccessError(reason.status);
+        setLocalEligibility(previous => previous ? { ...previous, eligible: false } : null);
         setError(reason.status === 403 ? 'Аккаунту не выдан доступ к сканированию. Проверьте разрешение на странице аккаунта.' : 'Сессия недействительна. Войдите заново.');
       } else if (reason instanceof ScanHttpError && reason.status === 400) {
         setError('Сервер отклонил цель или параметры сканирования. Скан не создан.');
@@ -362,211 +492,238 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
           setError('Сервер пока не принимает новый запуск. Скан не создан; повтор возможен вручную после ожидания.');
         } else setError('Сервер ограничил проверку допуска. Цель и проверки сохранены; повтор возможен вручную после ожидания.');
       } else if (reason instanceof ScanHttpError && reason.status === 503) {
-        setError(values.checks.includes('vuln') ? 'Проверка CVE недоступна: база уязвимостей не настроена или недоступна. Запуск не подтверждён; обратитесь к администратору и проверьте список перед повтором.' : 'Сканер или registry сейчас недоступны. Запуск не подтверждён; проверьте список перед повтором.');
+        setError('Сервис проверки или хранилище образов сейчас недоступны. Запуск не подтверждён; проверьте список перед повтором.');
       } else if (reason instanceof ScanHttpError && reason.code === 'IDEMPOTENCY_CONFLICT') {
         setError('Параметры повторного запуска изменились. Обновите страницу перед новой попыткой.');
       } else {
         setError('Не удалось подтвердить запуск. Проверьте список перед повтором: результат запроса неизвестен.');
       }
+      const failureMessage = imageFailureMessage(reason);
+      if (failureMessage) setError(`${failureMessage} Запуск не подтверждён: перед повтором проверьте список проверок.`);
     } finally {
+      submitting.current = false;
       if (scanSession().subject === subject && scanSession().generation === epoch) setBusy(false);
     }
   }
   return (
-    <ScanShell demo={demo}>
-      <section className="min-w-0 space-y-8 pb-8" aria-labelledby="new-scan">
+    <ScanShell demo={demo} compact>
+      <section className="scan-create-page min-w-0 space-y-8 pb-8" aria-labelledby="new-scan">
         <div className="scan-a1__chapter">
-          <span>ГЛАВА 02 / НОВАЯ ПРОВЕРКА</span>
+          <span>НОВАЯ ПРОВЕРКА</span>
           <Link className="scan-a1__link" to={demo ? '/demo/scans' : '/scans'}>
             <ArrowLeft size={16} aria-hidden="true" /> К списку
           </Link>
         </div>
         <div className="scan-a1__create-hero">
           <div className="min-w-0">
-            <span className="scan-a1__folio">СИГНАЛ / 02 — ГРАНИЦА ДОВЕРИЯ</span>
+            <span className="scan-a1__folio">ВЫБЕРИТЕ ОБРАЗ И ПРОВЕРКИ</span>
             <h2 id="new-scan" className="scan-a1__heading">
-              Задайте <em>границы.</em>
+              Проверьте <em>свой образ.</em>
             </h2>
             <p className="scan-a1__muted mt-6 max-w-xl text-lg">
-              Ищите образы Docker Hub или введите canonical reference вручную. Поиск не подтверждает возможность сканирования. Допуск определяет сервер: ограниченный legacy-профиль либо отдельный public-профиль. Запуск требует действующей сессии и разрешения сервера.
+              Выберите публичный образ Docker Hub и его версию, затем нужные проверки.
+                            Поддерживается Linux (amd64). Приватные образы и другие реестры не принимаются.
             </p>
           </div>
-          <ScanScene variant="create" />
+
         </div>
 
         <div className="scan-a1__form-grid scan-a1__form-grid--story">
-          <form className="scan-a1__form" aria-label="Параметры скана" onSubmit={handleSubmit(create)}>
-            <div>
-              <label htmlFor="image-reference">Canonical reference Docker Hub</label>
-              <input id="image-reference" {...register('imageReference', { onChange: () => {
-                ++submissionVersion.current; selectedTarget.current = null; setConfirmed(false); attempt.current = null; setError('');
-              } })} placeholder="registry-1.docker.io/namespace/image:tag" autoComplete="off" spellCheck={false} />
-              <p className="scan-a1__muted">Только registry-1.docker.io/library/name:tag или registry-1.docker.io/namespace/name:tag (либо @sha256:…). Не docker.io, URL, приватный registry, локальный файл или upload. Ручной ввод не обходит политику сервера.</p>
-              {imageReference && localEligibility?.imageReference === imageReference ? <p role="status">
-                {localEligibility.eligible && !eligibilityBusy ? 'Серверный допуск подтверждён; перед новым запуском проверяется повторно.' : `Допуск не подтверждён: ${localEligibility.reason}.`}
-              </p> : imageReference ? <p role="status">Серверный допуск выбранной цели ещё не подтверждён.</p> : null}
-              <label htmlFor="image-search">Поиск по доступным образам</label>
+          <form className="scan-a1__form" aria-label="Параметры скана" aria-busy={busy} onSubmit={handleSubmit(create)}>
+            {restoredAttempt ? <p role="status">Предыдущий запуск не подтверждён. Сначала <Link to="/scans">проверьте список</Link>. Если нужен повтор, нажмите «Проверить допуск снова» и заново подтвердите цель. Повтор использует прежний запрос; автоматического запуска нет.</p> : null}
+            <div className="scan-image-selection">
+              <h3>{repository ? '2. Выберите версию' : '1. Найдите репозиторий'}</h3>
+              {repository ? <div className="scan-image-selection__step">
+                <button type="button" disabled={busy} onClick={() => changeDiscovery(null, search, true)}>Назад к репозиториям</button>
+                <strong>{repository}</strong>
+              </div> : <p>Найдите семейство образов, затем выберите один из его тегов. Выбор сам по себе не запускает проверку.</p>}
+              {demo ? <p>В демо поиск отключён. Можно выбрать пример ниже или попробовать ручной адрес — без запросов и запуска.</p> : null}
+              <label htmlFor="image-search">{repository ? 'Фильтр тегов' : 'Репозиторий Docker Hub'}</label>
               <input
                 id="image-search"
+                ref={pickerInput}
+                disabled={busy || demo}
                 type="search"
-                value={search}
-                onChange={event => {
-                  ++searchGeneration.current;
-                  discovery.current.cursor = null;
-                  setSuggestions([]); setNextCursor(null); setPageState(null); setPageRequest(0);
-                  setSearch(event.target.value);
-                }}
-                placeholder="Alpine 3.16, nginx, postgres…"
+                value={repository ? tagFilter : search}
+                onChange={event => changeDiscovery(repository, event.target.value)}
+                onKeyDown={event => { if (event.key === 'Enter') event.preventDefault(); }}
+                placeholder={repository ? 'Например, 1.24 или Alpine — регистр важен' : 'nginx, node, owner/name…'}
+                maxLength={64}
+                aria-invalid={repository !== null && !validDiscoveryQuery(tagFilter, repository)}
+                aria-describedby="image-search-help"
+                spellCheck={false}
                 autoComplete="off"
               />
-              <div className="scan-a1__targets" role="group" aria-label="Выбор образа" aria-describedby={errors.imageReference ? 'image-reference-error' : undefined}>
-                {visible.map(target => (
-                  <button
-                    key={target.reference}
-                    type="button"
-                    className="scan-a1__target"
-                    aria-pressed={imageReference === target.reference}
-                    disabled={!target.scannable && target.eligibility !== 'public-hub-profile'}
-                    onClick={() => {
-                      ++submissionVersion.current;
-                      selectedTarget.current = target;
-                      if (target.reference.includes('/nginx@') && live) sessionStorage.setItem(`scan-target-v1:${live.scope[2]}`, target.reference);
-                      setValue('imageReference', target.reference, { shouldValidate: true });
-                      setConfirmed(false);
-                      if (imageReference !== target.reference) attempt.current = null;
-                      setError('');
-                    }}
-                  >
-                    <strong>{target.label}</strong>
-                    <span>{target.reference}{target.reason ? ` · ${target.reason}` : ''}{target.reference.includes('@sha256:') ? ' · закреплённый digest, не latest' : target.tagConfirmed === false ? ' · latest — предлагаемая цель, наличие тега и платформы не подтверждено' : ''}{alpineTargets.some(saved => saved.reference === target.reference) || target.reference === localCard.reference ? ' · сохранённая закреплённая цель' : ' · найдено в Docker Hub'}</span>
+              <p id="image-search-help">{repository ? !validDiscoveryQuery(tagFilter, repository)
+                              ? 'В фильтре допустимы латинские буквы, цифры, точка, дефис и подчёркивание, без пробелов; до 64 символов.'
+                              : 'Пустой фильтр покажет список тегов. Наличие тега не подтверждает возможность сканирования.'
+                              : 'Введите минимум два символа. Каталог содержит только публичные репозитории.'}</p>
+              <div className="scan-a1__targets" role="group" aria-label={repository ? 'Выбор версии образа' : 'Выбор репозитория'}>
+                {repository ? suggestions.map(target => (
+                  <button key={target.reference} type="button" className="scan-a1__target"
+                    aria-pressed={imageReference === target.reference} disabled={busy}
+                    onClick={() => selectTarget(target)}>
+                    <strong>{tagFromReference(target.reference)}</strong>
+                    <span>{repository} · проверить доступность этой версии</span>
+                  </button>
+                )) : repositories.map(name => (
+                  <button key={name} type="button" className="scan-a1__target" disabled={busy}
+                    onClick={() => changeDiscovery(name, '', true)}>
+                    <strong>{name}</strong><span>Выбрать версию →</span>
                   </button>
                 ))}
                 <p ref={discoveryStatus} role="status" tabIndex={-1} aria-label="Состояние поиска Docker Hub">
-                  {searchState === 'expired' ? 'Поиск истёк. Начните новый поиск; загруженные результаты неполные, выбранная цель сохранена.' :
-                    searchState === 'error' ? 'Поиск Docker Hub сейчас недоступен; загруженные результаты неполные. Сохранённые цели остаются доступны.' :
-                    searchState === 'loading' ? `Ищем в Docker Hub…${retainedResults ? ' Предыдущие результаты сохранены как неполные.' : ''}` :
-                    pageState === 'quota-exhausted' ? 'Достигнут лимит поиска; результаты неполные (не более 5 страниц / 60 образов).' :
-                    searchState === 'ready' && pageState === 'terminal' ? suggestions.length ? 'Поиск завершён.' : 'Ничего не найдено в Docker Hub.' : ''}
+                  {searchState === 'expired' ? 'Поиск истёк. Повторите вручную; выбранная версия сохранена.' :
+                    searchState === 'error' ? 'Каталог недоступен. Загруженные результаты могут быть неполными; повторите вручную.' :
+                    searchState === 'loading' ? `Загружаем ${repository ? 'теги' : 'репозитории'}…${retainedResults ? ' Предыдущие результаты неполные.' : ''}` :
+                    pageState === 'quota-exhausted' ? 'Достигнут предел поиска: до 5 страниц / 60 записей. Уточните запрос; список неполный.' :
+                    searchState === 'ready' && pageState === 'terminal' ? suggestions.length ? 'Список загружен.' : repository ? 'Тегов по этому фильтру нет. Измените фильтр или вернитесь к репозиториям.' : 'Репозитории не найдены. Попробуйте другое название.' : ''}
                 </p>
-                {nextCursor ? <button type="button" disabled={searchState === 'loading'} onClick={event => {
+                {nextCursor ? <button type="button" disabled={busy || searchState === 'loading'} onClick={event => {
                   captureActivation(event.currentTarget, event.detail === 0);
                   setPageRequest(value => value + 1);
                 }}>Показать ещё</button> : null}
-                {searchState === 'error' || searchState === 'expired' ? <button ref={restartButton} type="button" onClick={event => restartSearch(event.currentTarget)}>Начать новый поиск</button> : null}
-                {imageReference ? <p className="scan-a1__muted">Выбранная цель (сохраняется отдельно от поиска): {imageReference}</p> : null}
+                {searchState === 'error' || searchState === 'expired' ? <button ref={restartButton} type="button" disabled={busy} onClick={event => restartSearch(event.currentTarget)}>Начать новый поиск</button> : null}
               </div>
-              {imageReference === alpineTargets[3].reference ? <p className="scan-a1__muted">Архивный образ: при проверке закреплённого digest 04.10.2026 локальная DB нашла 4 CVE. Результат нового запуска зависит от актуальной DB и доступности scanner; этот образ не используйте для рабочих нагрузок.</p> : null}
-              <p className="scan-a1__muted">Закреплённый nginx — исторический пример с большим числом OS CVE (72 APK в доказательстве 06.10.2026). Число находок нового скана определяется текущей DB; это не гарантия результата и не рекомендация для рабочих нагрузок.</p>
-              {errors.imageReference ? <p id="image-reference-error" role="alert">{errors.imageReference.message}</p> : null}
+              <fieldset className="scan-image-selection__presets" disabled={busy}>
+                <legend>Быстрый выбор · старые версии</legend>
+                <p>Первый пример — устаревшая сборка Node.js сентября 2023 года для изучения уязвимостей. Используйте её только для тестирования, не для рабочих приложений. Число находок определяется проверкой; остальные примеры тоже не являются рекомендацией для работы.</p>
+                <div className="scan-a1__targets">
+                  {OLDER_IMAGE_PRESETS.map(target => <button key={target.reference} type="button" className="scan-a1__target"
+                    aria-pressed={imageReference === target.reference} onClick={() => selectTarget({ ...target, scannable: false })}>
+                    <strong>{target.label}</strong><span>Выбрать и проверить доступность</span>
+                  </button>)}
+                </div>
+              </fieldset>
+              <details className="scan-image-selection__manual">
+                <summary>Указать адрес вручную</summary>
+                <label htmlFor="image-reference">Адрес образа в Docker Hub</label>
+                <input id="image-reference" disabled={busy} {...register('imageReference', {
+                  onChange: () => { ++submissionVersion.current; selectedTarget.current = null; setConfirmed(false); attempt.current = null; setError(''); },
+                  onBlur: () => normalizeManualReference(false),
+                })} placeholder="nginx:1.24 или owner/name:Tag" autoComplete="off" spellCheck={false}
+                  onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); normalizeManualReference(true); } }}
+                  aria-invalid={!!errors.imageReference} aria-describedby="image-reference-help image-reference-error" />
+                <p id="image-reference-error" role={errors.imageReference ? 'alert' : undefined}>{errors.imageReference ? 'Укажите публичный образ Docker Hub с версией, например nginx:1.24. Ссылки на сайты и другие реестры не подходят.' : null}</p>
+                <p id="image-reference-help">Например: nginx:1.24 или owner/name:Tag. Адрес дополним после ввода, регистр версии сохраним. Не вводите пароли, токены или ссылки на сайты.</p>
+                                <details><summary>Полный адрес и точная сборка</summary><p>Также принимаются docker.io/… и registry-1.docker.io/… с явным тегом или @sha256:… для точной сборки. Другие реестры не поддерживаются.</p></details>
+                <button type="button" disabled={busy} onClick={() => normalizeManualReference(true)}>Использовать адрес</button>
+                <details><summary>Сохранённый пример для прежнего профиля</summary>
+                  <button type="button" disabled={busy} onClick={() => selectTarget(pinnedExample)}>Выбрать закреплённый nginx</button>
+                  <p>Совместимость с прежним профилем тоже требует актуального допуска сервера.</p>
+                </details>
+              </details>
+              {imageReference ? <div className="scan-image-selection__chosen" role="status">
+                <strong>Выбранный адрес</strong><p>{imageReference}</p>
+                <p>{localEligibility?.imageReference === imageReference && localEligibility.eligible && !eligibilityBusy
+                  ? 'Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.'
+                  : localEligibility?.imageReference === imageReference && !eligibilityBusy
+                    ? localEligibility.failureDetail ? failureDetailMessage(localEligibility.failureDetail)
+                      : `Запуск недоступен: ${{ READY: 'проверяем доступность', UNSUPPORTED_SCAN: 'образ или набор проверок не поддерживается', SCANNER_UNAVAILABLE: 'сканер недоступен', DB_UNAVAILABLE: 'база уязвимостей недоступна' }[localEligibility.reason]}.`
+                    : eligibilityBusy ? 'Проверяем доступность выбранной версии…' : 'Доступность этой версии пока не подтверждена.'}</p>
+              </div> : null}
+              {eligibilityError ? <p role="alert">{eligibilityError}</p> : null}
+              {eligibilityAccessError === 401 ? <Link to="/login" state={{ returnTo: '/scans/new' }}>Войдите заново</Link> : null}
             </div>
-            <fieldset>
-              <legend>Проверки · одновременно, область registry IMAGE</legend>
+            <fieldset id="scan-checks" disabled={busy} aria-invalid={!!errors.checks}
+              aria-describedby={errors.checks ? 'scan-checks-error' : undefined}
+              aria-errormessage={errors.checks ? 'scan-checks-error' : undefined}>
+              <legend>3. Что проверить в образе</legend>
               {localSelected ? <div role="group" aria-label="Доказанные наборы локального профиля">
                 {localCheckSets.map(set => <label key={set.join(',')}><input type="radio" name="local-check-set"
                   checked={JSON.stringify(canonicalSelected) === JSON.stringify(set)} onChange={() => { ++submissionVersion.current; setValue('checks', [...set]); setConfirmed(false); attempt.current = null; setError(''); }} />
-                  <span>{set.length === 1 ? set[0] : 'Secrets + SBOM + CVE'}</span></label>)}
-                <p>Image config и недоказанные сочетания для этого профиля недоступны.</p>
+                  <span>{set.map(check => scanCheckLabels[check]).join(' + ')}</span></label>)}
+                <p>Для этого образа доступны только показанные наборы проверок. Проверка настроек образа недоступна.</p>
               </div> : <>
               <label>
                 <input type="checkbox" value="secret" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                <span>Secrets · проверка образа</span>
+                <span>Возможные секреты · поиск ключей и паролей</span>
               </label>
               <label>
                 <input type="checkbox" value="sbom" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                <span>SBOM · перечень пакетов, не проверка уязвимостей</span>
+                <span>Состав образа · список пакетов и версий</span>
               </label>
               <label>
                 <input type="checkbox" value="vuln" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                <span>CVE · доступно только при настроенной сервером базе уязвимостей</span>
+                <span>Уязвимости · сравнение пакетов с базой известных проблем</span>
               </label>
               <label>
                 <input type="checkbox" value="config" {...register('checks', { onChange: () => { ++submissionVersion.current; setConfirmed(false); attempt.current = null; setError(''); } })} />
-                <span>Image config · OCI User metadata, не runtime / Dockerfile</span>
+                <span>Настройки · от какого пользователя запускается образ</span>
               </label>
               </>}
-              <label>
-                <input type="checkbox" disabled />
-                <span>Host · отдельный opt-in не подключён; runtime evidence — в отдельной панели ниже</span>
-              </label>
-              {errors.checks ? <p role="alert">{errors.checks.message}</p> : null}
+              <p>Проверяем сам образ, не работающий контейнер и не сервер. Список пакетов не заменяет проверку уязвимостей.</p>
+              {errors.checks ? <p id="scan-checks-error" role="alert">{errors.checks.message}</p> : null}
             </fieldset>
             <label>
               <input
                 type="checkbox"
                 checked={confirmed}
+                disabled={busy}
                 onChange={(event) => { ++submissionVersion.current; setConfirmed(event.target.checked); }}
               />
               <span>
                 Подтверждаю выбранную цель и область:{' '}
-                <strong className="[overflow-wrap:anywhere]">{imageReference || 'цель не указана'} · {scanChecks.filter(item => checks.includes(item)).join(', ') || 'проверки не выбраны'}</strong>
+                <strong className="[overflow-wrap:anywhere]">{imageReference || 'цель не указана'} · {scanChecks.filter(item => checks.includes(item)).map(check => scanCheckLabels[check]).join(', ') || 'проверки не выбраны'}</strong>
               </span>
             </label>
             {wait ? <p role="status" aria-label="Ожидание сервера">
               {wait.reason === 'admission' ? 'Ожидание допуска запуска' : wait.reason === 'capacity' ? 'Сервер проверки допуска заполнен' : wait.reason === 'concurrency' ? 'Проверка допуска уже выполняется' : 'Лимит частоты проверки допуска'}:
               {waitSeconds > 0 ? ` повтор не раньше чем через ${waitSeconds} с.` : ' можно повторить вручную.'} Это не гарантия доступности; автоматического запуска нет.
             </p> : null}
-            {!demo && live ? <button type="button" disabled={eligibilityBusy || eligibilityWaiting || admissionWaiting}
-              onClick={() => { setEligibilityWait(null); setAdmissionWait(null); setEligibilityRefresh(value => value + 1); }}>Проверить допуск снова</button> : null}
+            {!demo && live ? <button type="button" disabled={busy || eligibilityBusy || eligibilityWaiting || admissionWaiting || eligibilityAccessError === 401}
+              onClick={() => {
+                if (submitting.current || eligibilityBusy || eligibilityWaiting || admissionWaiting || eligibilityAccessError === 401) return;
+                manualEligibilityRefresh.current = true;
+                setEligibilityBusy(true);
+                setLocalEligibility(previous => previous ? { ...previous, eligible: false } : null);
+                setConfirmed(false);
+                setError('');
+                setEligibilityWait(null); setAdmissionWait(null); setEligibilityRefresh(value => value + 1);
+              }}>Проверить допуск снова</button> : null}
             <button
               className="scan-a1__disabled"
               type="submit"
-              disabled={demo || !live || !confirmed || !checks.length || busy || admissionWaiting || (eligibilityWaiting && !attempt.current) ||
-                              ((imageReference?.includes('/nginx@') || localEligibility?.eligibility === 'public-hub-profile' || selectedTarget.current?.eligibility === 'public-hub-profile' ||
-                                                              !alpineTargets.some(target => target.reference === imageReference) && selectedTarget.current?.reference !== imageReference) &&
-                                                              !attempt.current && (eligibilityBusy || localEligibility?.imageReference !== imageReference || !localEligibility?.eligible))}
+              disabled={demo || !live || !confirmed || !checks.length || busy || eligibilityAccessError !== null || !recoveryEligible || admissionWaiting ||
+                (eligibilityWaiting && !samePendingAttempt) || (!samePendingAttempt && !selectionEligible)}
               title={demo ? 'Демо не запускает реальные сканы' : undefined}
             >
               <LockKeyhole size={17} className="mr-2 inline" aria-hidden="true" />
-              {demo || !live ? 'Запуск недоступен' : busy ? 'Запускаем…' : 'Запустить скан'}
+              {demo || !live ? 'Запуск недоступен' : busy ? 'Запускаем…' : 'Запустить проверку'}
             </button>
-            {error ? <p role="alert">{error}</p> : null}
+            {error ? <div className="scan-create-page__error" role="alert"><p>{error}</p><Link to={demo ? '/demo/scans' : '/scans'}>Проверить список перед повтором</Link></div> : null}
             <p className="text-sm">
               {confirmed
                 ? demo ? 'Демо не отправляет запросы.' : 'Цель подтверждена; разрешение проверяет сервер.'
-                : 'До запуска подтвердите цель и scope.'}{' '}
-              Даже после квитанции POST digest/platform остаются неподтверждёнными до авторизованного GET
-              status.
+                : 'До запуска подтвердите образ и выбранные проверки.'}{' '}
+              Точная проверенная сборка появится в отчёте после подтверждения сервером.
             </p>
             {demo ? (
               <Link className="scan-a1__link" to="/demo/scans/partial-demo">
-                Посмотреть отдельный образец отчёта · другая фикстура
+                Посмотреть пример отчёта
               </Link>
             ) : null}
           </form>
-          {!demo && subject ? (
-            <RuntimeScanPanel key={sessionIdentity} subject={subject} generation={epoch} />
-          ) : null}
           <aside className="scan-a1__trust-note">
-            <span className="scan-a1__folio">ГРАНИЦА / 01—03</span>
-            <strong>Область доверия</strong>
+            <span className="scan-a1__folio">ПЕРЕД ЗАПУСКОМ</span>
+            <strong>Что вы получите</strong>
             <p>
-              Один запрос запускает выбранные Secrets, SBOM и CVE для registry IMAGE. SBOM — инвентарь, не оценка CVE. CVE требует настроенной сервером базы; host и running container не поддерживаются.
+              Отчёт по выбранным проверкам: находки, версии пакетов и следующие шаги. Проверяем публичные образы Docker Hub для Linux (amd64); большие или неподдерживаемые образы могут быть отклонены.
             </p>
-            <p>POST 202 — квитанция, не подтверждение закреплённого digest/platform.</p>
-            <p>Public-профиль {PUBLIC_IMAGE_PROFILE}: только IMAGE, Docker Hub, linux/amd64; не любой registry и не любая платформа. {PUBLIC_IMAGE_RESOURCE_POLICY}: до 64 слоёв, до 128 MiB на сжатый слой / 512 MiB суммарно, до 1 GiB распаковки и 2 GiB scratch; config до 1 MB. Дополнительно ограничены manifest, время и число запросов. Неподдерживаемый формат или превышение лимита отклоняется; крупные образы могут быть недоступны.</p>
-            <p>Secrets и SBOM не гарантируют полноту и безопасность; CVE зависит от поддерживаемой экосистемы и подписанной актуальной DB. Image config проверяет только OCI User metadata; History, Dockerfile и IaC не реализованы. Runtime/host и LLM не входят в image-only public API; отдельная панель runtime не расширяет его возможности.</p>
-            <GuideTabs defaultValue="target" className="scan-a1__guide">
-              <GuideTabsList aria-label="Памятка о подготовке скана">
-                <GuideTabsTrigger value="target">01 / Цель</GuideTabsTrigger>
-                <GuideTabsTrigger value="limits">02 / Границы</GuideTabsTrigger>
-              </GuideTabsList>
-              <GuideTabsContent value="target">
-                <span className="scan-a1__guide-kicker">ПЕРЕД ПРОВЕРКОЙ</span>
-                <h3>Начните с точного адреса.</h3>
-                <p>
-                  Выберите кандидата или введите явный Docker Hub reference и дождитесь серверного допуска. Legacy API по-прежнему допускает только Alpine и свои точные профили; public API — только публичные official/namespaced образы linux/amd64. Tag сам по себе не доказывает digest.
-                </p>
-              </GuideTabsContent>
-              <GuideTabsContent value="limits">
-                <span className="scan-a1__guide-kicker">ПОСЛЕ КВИТАНЦИИ</span>
-                <h3>Доверяйте только статусу.</h3>
-                <p>
-                  Закреплённые digest/platform подтверждает авторизованный GET status. Демо показывает только
-                  вымышленные записи; live-статус возвращает сервер.
-                </p>
-              </GuideTabsContent>
-            </GuideTabs>
+            <p>Отсутствие находок не гарантирует безопасность. В отчёте будет видно, какие проверки завершены и где остались пробелы.</p>
+            <details><summary>Подробности · ограничения проверки</summary>
+            <p>Ограничены размер образа и отдельных файлов, число слоёв, время обработки и временное место на диске. Найденная в каталоге версия может не пройти эти ограничения; выберите меньшую сборку, если сервер сообщает о превышении.</p>
+            <p>Проверка уязвимостей зависит от доступной базы и поддерживаемых пакетов. Проверка настроек читает пользователя запуска из образа, но не исследует Dockerfile, права работающего контейнера или сервер.</p>
+            <p>ИИ-объяснение необязательно и включается отдельно в отчёте. Данные передаются внешнему провайдеру, запрос может быть платным. Условия и согласие показываются перед отправкой.</p>
+            </details>
+            <Link className="scan-a1__link" to="/demo/scans/partial-demo">Посмотреть пример отчёта без запуска</Link>
           </aside>
+          {!demo && subject ? (
+            <details className="scan-create-page__advanced"><summary>Отдельная проверка работающего контейнера</summary>
+              <p>Это другой сценарий со своими разрешениями. Для проверки образа выше он не нужен.</p>
+              <RuntimeScanPanel key={sessionIdentity} subject={subject} generation={epoch} />
+            </details>
+          ) : null}
         </div>
         <div className="scan-a1__trust-path" aria-label="Этапы настройки">
           <div>

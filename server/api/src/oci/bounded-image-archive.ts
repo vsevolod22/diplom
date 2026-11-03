@@ -11,6 +11,9 @@ import { inspectPublicImage } from './public-image-inspection.js';
 import { PUBLIC_IMAGE_PROFILE, PUBLIC_IMAGE_RESOURCE_POLICY, PUBLIC_IMAGE_CHECKS_VERSION, validPublicTarget,
   type PublicImageTarget } from './public-image-policy.js';
 import { ArchiveAttemptBudget } from './archive-budget.js';
+import { decodePublicLayer } from './public-layer-decoder.js';
+import { publicLayerEncoding } from './public-image-policy.js';
+import { imageFailureDetail } from './image-failure.js';
 
 export const NGINX_ARCHIVE_TARGET = Object.freeze({ registry: 'registry-1.docker.io', repository: 'library/nginx',
   digest: 'sha256:b17b00f7ef0038aeb11362157f49006a130628ee711cefcced871405d046f114',
@@ -135,7 +138,8 @@ export async function prepareBoundedImageArchive(signal: AbortSignal | undefined
   const reserve = async (bytes: number) => {
     budget.reserve(bytes);
     const filesystem = await statfs(directory);
-    if (filesystem.bavail * filesystem.bsize < bytes + 16 * 1024 ** 2) fail();
+    if (filesystem.bavail * filesystem.bsize < bytes + 16 * 1024 ** 2)
+          throw new ArchiveRejected(undefined, { reason: 'RESOURCE_LIMIT', stage: 'archive', resource: 'scratch_bytes' });
   };
   const fetch = dockerHubManifestFetch({ host: 'egress', port: 8080 }, target.repository, async (gateway, url, headers, maximum) => {
     if (stickyFailure || signal?.aborted) fail();
@@ -161,7 +165,7 @@ export async function prepareBoundedImageArchive(signal: AbortSignal | undefined
       if ([301, 302, 303, 307, 308].includes(response.status) && url.hostname === target.registry &&
           !url.pathname.startsWith(`/v2/${target.repository}/blobs/`)) fail();
       return { ...response, body: Buffer.concat(chunks) };
-    } catch { stickyFailure = true; throw new ArchiveRejected(); }
+    } catch (error) { stickyFailure = true; throw new ArchiveRejected(undefined, imageFailureDetail(error)); }
   });
   try {
 
@@ -188,12 +192,17 @@ export async function prepareBoundedImageArchive(signal: AbortSignal | undefined
       active = { digest: layer.digest, handle, hash: createHash('sha256'), bytes: 0, size: layer.size };
       try {
         await fetch(target.registry, `/v2/${target.repository}/blobs/${layer.digest}`);
-        if (active.bytes !== layer.size || `sha256:${active.hash.digest('hex')}` !== layer.digest) fail();
+        if (active.bytes !== layer.size || `sha256:${active.hash.digest('hex')}` !== layer.digest)
+                  throw new ArchiveRejected(undefined, { reason: 'INTEGRITY_FAILED', stage: 'download' });
       } finally { await handle.close(); }
       active = undefined;
-      const validated = await inflateLayer(compressed, expanded, tarBudget, signal, profile);
+      const encoding = profile === PUBLIC_IMAGE_PROFILE ? publicLayerEncoding(layer.mediaType) : 'gzip';
+            if (!encoding) throw new ArchiveRejected(undefined, { reason: 'FORMAT_UNSUPPORTED', stage: 'decode' });
+            const validated = encoding === 'gzip' ? await inflateLayer(compressed, expanded, tarBudget, signal, profile) :
+              await decodePublicLayer(compressed, expanded, tarBudget, encoding, signal);
       budget.remaining();
-      if (validated.diffId !== (diffIds as string[])[index]) fail();
+      if (validated.diffId !== (diffIds as string[])[index])
+              throw new ArchiveRejected(undefined, { reason: 'INTEGRITY_FAILED', stage: 'decode' });
       await rm(compressed); budget.release(layer.size + L.expandedLayer - validated.bytes);
       layers.push({ path: expanded, size: validated.bytes, name: `${index}/layer.tar` });
     }
@@ -248,5 +257,5 @@ export async function prepareBoundedImageArchive(signal: AbortSignal | undefined
     return { archivePath, directory, receipt: Object.freeze(receipt), cleanup,
       metrics: { wireBytes: budget.wireBytes, requests: budget.requests, compressedBytes: budget.compressedBytes,
               expandedBytes: tarBudget.bytes, entries: tarBudget.entries, archiveBytes, reservationPeak: budget.reservationPeak } };
-  } catch (error) { await cleanup(); throw error instanceof ArchiveRejected ? error : new ArchiveRejected(); }
+  } catch (error) { await cleanup(); throw error instanceof ArchiveRejected ? error : new ArchiveRejected(undefined, imageFailureDetail(error)); }
 }

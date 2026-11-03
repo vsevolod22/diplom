@@ -8,16 +8,21 @@ import {
   AdvisoryTranslationPanel,
   AdvisoryTranslationScope,
 } from '@/features/scans/AdvisoryTranslationPanel';
+import { ReportPreferencesPanel } from '@/features/auth/ReportPreferencesPanel';
 import { VulnAdvisoryCard } from '@/pages/scans/VulnAdvisoryCard';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
-import { readReportPreferences, saveReportPreferences } from '@/shared/api/preferences/reportPreferences';
+import {
+  readReportPreferences,
+  REPORT_AUTOMATION_REVISION,
+  saveReportPreferences,
+} from '@/shared/api/preferences/reportPreferences';
 import { createAdvisoryTranslationClient } from '@/shared/api/scans/advisoryTranslationClient';
-import type { TranslationContext } from '@/shared/api/scans/advisoryTranslationContract';
+import { translationReadinessSchema, type TranslationContext } from '@/shared/api/scans/advisoryTranslationContract';
 import type { VulnFinding } from '@/shared/api/scans/scanTransport';
 import { reportAutomationKey, runReportAutomation } from '@/shared/api/scans/reportAutomation';
-import { finding, replyFor, status, translationApi } from './advisoryTranslationFixtures';
+import { finding, replyFor, status, translationApi, translationReadinessWire } from './advisoryTranslationFixtures';
 import { json } from './llmChatFixtures';
-import { readinessWire } from './publicLlmFixtures';
+
 
 beforeEach(() => {
   vi.stubGlobal('crypto', webcrypto);
@@ -77,7 +82,7 @@ it.each(['before-post', 'before-publication'] as const)(
         'report-preferences:v1:alice',
         JSON.stringify({
           version: 1,
-          automationRevision: 'report-automation-v1',
+          automationRevision: REPORT_AUTOMATION_REVISION,
           language: 'original',
           autoSummary: false,
         }),
@@ -108,6 +113,27 @@ it.each(['before-post', 'before-publication'] as const)(
   },
 );
 
+it('only original advisory text translates after explicit existing account consent is saved as ru', async () => {
+  saveReportPreferences({ language: 'original', autoSummary: false });
+  const api = translationApi(), original = JSON.stringify(finding);
+  mount(api);
+  render(<ReportPreferencesPanel subject="alice" />);
+  await act(async () => {});
+  expect(api.requests).toHaveLength(0);
+  fireEvent.change(screen.getByRole('combobox', { name: 'Язык исходных описаний уязвимостей' }), { target: { value: 'ru' } });
+  expect(readReportPreferences().language).toBe('original');
+  expect(api.requests).toHaveLength(0);
+  fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки отчётов' }));
+  await translated();
+  expect(posts(api)).toHaveLength(1);
+  expect(api.requests.every(request => /\/llm\/translation(?:\/(?:context|usage|readiness))?(?:\?|$)/.test(request.path))).toBe(true);
+  expect(JSON.parse(String(posts(api)[0].init.body)).consent).toEqual({ accepted: true, policyVersion: api.context.policyVersion });
+  expect(JSON.stringify(finding)).toBe(original);
+  fireEvent.click(screen.getByRole('button', { name: 'Оригинал' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Перевод' }));
+  expect(posts(api)).toHaveLength(1);
+});
+
 it('fresh flags block a translation even before the storage notification reaches React', async () => {
   const api = translationApi();
   const client = createAdvisoryTranslationClient(scanSession(), api.fetcher);
@@ -120,7 +146,7 @@ it('fresh flags block a translation even before the storage notification reaches
         'report-preferences:v1:alice',
         JSON.stringify({
           version: 1,
-          automationRevision: 'report-automation-v1',
+          automationRevision: REPORT_AUTOMATION_REVISION,
           language: 'original',
           autoSummary: false,
         }),
@@ -137,8 +163,11 @@ it('fresh flags block a translation even before the storage notification reaches
 
 it.each([
   { model: 'other/model:free' },
-  { providers: ['phala', 'other'] },
-  { retention: 'no-training' },
+  { providers: ['atlas-cloud/fp8', 'other'] },
+    { model: 'nvidia/nemotron-3.5-super-vl:free', providers: ['nvidia'], retention: 'no-training' },
+  { providers: ['phala'] },
+  { model: 'xingchen-agi/xing4.0-29b-a4b:free', providers: ['phala'], retention: 'no-storage' },
+  { retention: 'no-storage' },
   { requestBudgetUsd: 0.1 },
   { data: 'Entire report and history.' },
   { freeOnly: false },
@@ -151,17 +180,26 @@ it.each([
     disclosure: { ...api.context.disclosure, ...change },
   } as unknown as TranslationContext;
   vi.spyOn(client, 'context').mockResolvedValue(unsafe);
-  vi.spyOn(client, 'readiness').mockResolvedValue({
+  const forgedReadiness = {
     ...api.ready,
     provider: {
       ...api.ready.provider,
       model: unsafe.disclosure!.model,
       endpoint: unsafe.disclosure!.providers[0],
     },
-  } as Awaited<ReturnType<typeof client.readiness>>);
+  };
+  vi.spyOn(client, 'readiness').mockResolvedValue(forgedReadiness as Awaited<ReturnType<typeof client.readiness>>);
   const translate = vi.spyOn(client, 'translate');
   render(direct(client));
-  expect(await screen.findByRole('alert')).toHaveTextContent('не совпадают с разрешением аккаунта');
+  const readyProvider = api.ready.provider;
+  if (readyProvider.status !== 'catalog-listed-unprobed') throw new Error('Expected approved translation fixture');
+  const providerChanged = unsafe.disclosure!.model !== readyProvider.model ||
+    unsafe.disclosure!.providers[0] !== readyProvider.endpoint;
+  if (providerChanged) {
+    // The dedicated decoder now rejects this forged profile before consent evaluation.
+    expect(translationReadinessSchema.safeParse(forgedReadiness).success).toBe(false);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось безопасно получить перевод. Оригинал не изменён; автоматического повтора нет. Обновите условия перед новым запросом.');
+  } else expect(await screen.findByRole('alert')).toHaveTextContent('не совпадают с разрешением аккаунта');
   expect(translate).not.toHaveBeenCalled();
 });
 
@@ -293,6 +331,29 @@ it.each(['unsaved', 'original', 'anonymous'] as const)(
   },
 );
 
+it.each(['report-automation-v1', 'report-automation-v2-nvidia-no-training'])(
+  'old account consent %s never authorizes Dots translation metadata or a POST', async (automationRevision) => {
+  localStorage.setItem(
+    'report-preferences:v1:alice',
+    JSON.stringify({
+      version: 1,
+      automationRevision,
+      language: 'ru',
+      autoSummary: true,
+    }),
+  );
+  const api = translationApi();
+  mount(api);
+  await act(async () => {});
+  expect(readReportPreferences().authorized).toBe(false);
+  expect(api.requests).toHaveLength(0);
+  expect(await screen.findByRole('link', { name: 'настройках аккаунта' })).toHaveAttribute(
+    'href',
+    '/account',
+  );
+  expect(screen.getByText('The package contains a vulnerability.')).toBeVisible();
+});
+
 it('automatic translation keeps exact per-POST consent, provenance and original text/toggle without rewriting findings', async () => {
   const api = translationApi();
   const original = JSON.stringify(finding);
@@ -308,6 +369,9 @@ it('automatic translation keeps exact per-POST consent, provenance and original 
     consent: { accepted: true, policyVersion: api.context.policyVersion },
   });
   expect(screen.queryByRole('checkbox')).toBeNull();
+  expect(document.body.textContent).toContain('Без обучения (no-training)');
+  expect(document.body.textContent).toContain('отсутствие хранения не заявлено, это не ZDR');
+  expect(document.body.textContent).not.toContain('Без хранения и обучения');
   expect(screen.getByText(/Машинный перевод на русский · не официальный текст/)).toBeVisible();
   expect(screen.getByText('The package contains a vulnerability.')).toBeVisible();
   expect(screen.getByText(/Язык источника: en/)).toBeVisible();
@@ -380,7 +444,7 @@ it('a failed attempt remains failed on focus and remount; retry requires an expl
 
 it('missing-key readiness blocks translation without claiming provider success', async () => {
   const api = translationApi();
-  api.ready = readinessWire('missing');
+  api.ready = translationReadinessWire('missing');
   mount(api);
   await screen.findByText(/Серверный ключ не настроен или отсутствует/);
   expect(posts(api)).toHaveLength(0);
@@ -397,7 +461,7 @@ it.each(['policy', 'source', 'report', 'readiness'] as const)(
         if (changed === 'policy') api.context = { ...api.context, policyVersion: 'f'.repeat(64) };
         if (changed === 'source') api.context = { ...api.context, sourceVersion: 'f'.repeat(64) };
         if (changed === 'report') api.context = { ...api.context, reportVersion: 'f'.repeat(64) };
-        if (changed === 'readiness') api.ready = readinessWire('missing');
+        if (changed === 'readiness') api.ready = translationReadinessWire('missing');
       }
       return response;
     };
@@ -473,7 +537,7 @@ it('noncooperative metadata read times out at 45 seconds and cannot continue aft
   expect(posts(api)).toHaveLength(0);
 });
 
-it('noncooperative translation times out at 45 seconds; late completion is never published', async () => {
+it('noncooperative translation times out at 120 seconds; late completion is never published', async () => {
   const api = translationApi();
   const client = createAdvisoryTranslationClient(scanSession(), api.fetcher);
   let finish!: () => void;
@@ -483,13 +547,18 @@ it('noncooperative translation times out at 45 seconds; late completion is never
         finish = () => resolve({ ...replyFor(), machineTranslated: true, provider: 'OpenRouter' });
       }),
   );
-  const timers = vi.spyOn(globalThis, 'setTimeout');
+  vi.useFakeTimers();
+
   render(direct(client));
-  await waitFor(() => expect(translate).toHaveBeenCalledTimes(1));
-  const deadline = timers.mock.calls.filter(([, delay]) => delay === 45_000).at(-1)![0] as () => void;
   await act(async () => {
-    deadline();
+    await vi.waitFor(() => expect(translate).toHaveBeenCalledTimes(1));
   });
+  await act(async () => vi.advanceTimersByTimeAsync(45_001));
+  expect(translate.mock.calls[0][2].aborted).toBe(false);
+  expect(screen.queryByRole('alert')).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(translate.mock.calls[0][2].aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(15_000));
   expect(screen.getByRole('alert')).toBeTruthy();
   expect(translate.mock.calls[0][2].aborted).toBe(true);
   await act(async () => finish());

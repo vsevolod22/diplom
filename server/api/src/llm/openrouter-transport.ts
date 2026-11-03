@@ -1,7 +1,7 @@
 import { request as httpRequest } from 'node:http';
 import { Agent, request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
-import { CEILINGS } from './policy.js';
+import { CEILINGS, PUBLIC_FREE_TIMEOUT_MS, publicFreePolicy, type LlmPolicy } from './policy.js';
 import { carryDiagnostic, diagnose, stoppedDiagnostic, type FailurePhase, type FailureReason } from './provider-diagnostic.js';
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
@@ -42,7 +42,12 @@ export type GuardedTransport = typeof fetch & { sendGuarded(input: string, init:
 
 // The injectable gateway is a test seam, not a runtime/environment endpoint override.
 // Production never uses fetch, ambient proxies, remote DNS or a direct-connect fallback.
-export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: number }>): GuardedTransport {
+export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: number }>, policy?: LlmPolicy | null): GuardedTransport {
+  const publicProfile = publicFreePolicy(policy);
+  const timeoutMs = publicProfile ? PUBLIC_FREE_TIMEOUT_MS : CEILINGS.timeoutMs;
+  // Non-streaming generation may be silent until the entire response is ready.
+  // The absolute deadline wins; these idle timers must not reintroduce a 10s public cutoff.
+  const responseIdleMs = publicProfile ? 95_000 : 10_000;
   const transport = async (input: unknown, init?: RequestInit, guard?: BodySendGuard): Promise<Response> => {
     const headers = new Headers(init?.headers);
     if (input !== ENDPOINT || init?.method !== 'POST' || init.redirect !== 'error' ||
@@ -58,8 +63,9 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
       const resources: Array<{ destroy(): void }> = [];
       // eslint-disable-next-line prefer-const -- A pre-aborted signal calls cleanup before the deadline is initialized.
       let deadline: ReturnType<typeof setTimeout> | undefined;
+      let phaseDeadline: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
-        clearTimeout(deadline); signal?.removeEventListener('abort', abort);
+        clearTimeout(deadline); clearTimeout(phaseDeadline); signal?.removeEventListener('abort', abort);
         // A guard can reject inside TLSWrap's secureConnect/read callback. Destroying
         // its underlying CONNECT socket there can re-enter SSL_read (Node 23).
         // Settle immediately, but release sockets after that native callback unwinds.
@@ -76,7 +82,8 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
       const abort = () => { const error = new Error('OpenRouter transport unavailable'); stoppedDiagnostic(signal!, error); fail(error); };
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
-      deadline = setTimeout(() => fail(undefined, 'timeout', 'deadline'), CEILINGS.timeoutMs);
+      deadline = setTimeout(() => fail(undefined, 'timeout', 'deadline'), timeoutMs);
+      phaseDeadline = setTimeout(() => fail(undefined, 'timeout', 'connect'), 5000);
       const tunnel = httpRequest({ hostname: gateway.host, port: gateway.port, method: 'CONNECT',
         path: `${HOST}:443`, headers: { host: `${HOST}:443` }, timeout: 5000 });
       resources.push(tunnel);
@@ -87,12 +94,17 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
         socket.on('error', fail);
         if (settled) { socket.destroy(); return; }
         if (response.statusCode !== 200 || head.length) { fail(undefined, 'rejected', 'connect'); return; }
+        clearTimeout(phaseDeadline);
+        socket.setTimeout(0);
         phase = 'tls';
+        phaseDeadline = setTimeout(() => fail(undefined, 'timeout', 'tls'), 10_000);
         const secure = tlsConnect({ socket, servername: HOST, rejectUnauthorized: true });
         resources.push(secure);
         secure.on('error', fail); secure.setTimeout(10_000, () => fail(undefined, 'timeout'));
         secure.once('secureConnect', () => {
           if (settled) return;
+          clearTimeout(phaseDeadline);
+          secure.setTimeout(responseIdleMs);
           phase = 'dispatch_guard';
           const send = () => {
             if (signal?.aborted || settled) throw unavailable();
@@ -102,7 +114,7 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
             agent.createConnection = () => secure;
             phase = 'headers';
             const request = httpsRequest({ hostname: HOST, path: PATH, method: 'POST', agent,
-              headers: { ...Object.fromEntries(headers), 'content-length': String(Buffer.byteLength(body)) }, timeout: 10_000 }, result => {
+              headers: { ...Object.fromEntries(headers), 'content-length': String(Buffer.byteLength(body)) }, timeout: responseIdleMs }, result => {
               resources.push(result);
               const length = result.headers['content-length'];
               if (settled) { result.destroy(); return; }
@@ -148,4 +160,10 @@ export function makeOpenRouterTransport(gateway: Readonly<{ host: string; port: 
   return Object.assign(fetchTransport, { sendGuarded: (input: string, init: RequestInit, guard: BodySendGuard) => transport(input, init, guard) });
 }
 
-export const openRouterTransport = makeOpenRouterTransport(Object.freeze({ host: 'llm-egress', port: 8080 }));
+const GATEWAY = Object.freeze({ host: 'llm-egress', port: 8080 });
+export const openRouterTransport = makeOpenRouterTransport(GATEWAY);
+// Called only by the public composition with its validated server-side policy.
+// No browser field, HTTP header, body model or ambient proxy can select this path.
+export function openRouterTransportForPolicy(policy: LlmPolicy): GuardedTransport {
+  return publicFreePolicy(policy) ? makeOpenRouterTransport(GATEWAY, policy) : openRouterTransport;
+}

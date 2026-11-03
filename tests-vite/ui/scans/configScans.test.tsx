@@ -62,9 +62,9 @@ it.each([true, false])('cancelled config checkpoint saved=%s remains independent
   const client = mount(`/scans/${id}`);
   await screen.findByText(saved ? /Сканирование отменено\. Сохранены результаты/ : /Сканирование отменено\. Сохранённых результатов/);
   if (saved) {
-    expect(screen.getByRole('heading', { name: /Image config · только/ })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Конфигурация образа' }).closest('details')).toBeNull();
     expect(screen.getByText(/Правила: выполнено/).textContent).toContain('1 /');
-  } else expect(screen.queryByRole('heading', { name: /Image config · только/ })).toBeNull();
+  } else expect(screen.queryByRole('heading', { name: 'Конфигурация образа' })).toBeNull();
   expect(screen.getByText(/Secrets: завершённый результат не сохранён/)).toBeTruthy();
   expect(vi.mocked(fetch).mock.calls.some(([path]) => /\/(results|sbom|vuln)\?/.test(String(path)))).toBe(false);
   cleanup(); client.clear();
@@ -112,11 +112,16 @@ for (const [outcome, reason] of [['checked', undefined], ['failed', 'INVALID_CON
       return json(wire(configReport(outcome, reason), outcome !== 'skipped'));
     }));
     const client = mount(`/scans/${id}`);
-    await screen.findByRole('heading', { name: /Image config · только/ });
+    const heading = await screen.findByRole('heading', { name: 'Конфигурация образа' });
+    expect(heading.closest('details')).toBeNull();
+    const metadata = screen.getByText('Технические данные · Image config');
+    expect(metadata.closest('details')?.open).toBe(false);
+    fireEvent.click(metadata);
+    expect(metadata.closest('details')?.open).toBe(true);
     expect(screen.getByText(/Правила: выполнено/).textContent).toContain(outcome === 'checked' ? '1 /' : '0 /');
     expect(screen.getAllByText(/image-config-user-v1/).length).toBeGreaterThan(0);
     expect(screen.getByText(/History: RULE_NOT_IMPLEMENTED/).textContent).toContain('Dockerfile: SOURCE_NOT_PROVIDED');
-    expect(screen.getByText(/Numeric UID без находки/)).toBeTruthy();
+    expect(screen.getByText(/Проверка метаданных не подтверждает пользователя при запуске контейнера/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('CANARY');
     if (outcome !== 'skipped') expect(requests).not.toContain(`/api/v1/browser/scans/${id}/results?limit=50`);
     act(() => transitionScanSession('bob', client));

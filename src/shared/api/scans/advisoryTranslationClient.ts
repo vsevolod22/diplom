@@ -1,6 +1,6 @@
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { BROWSER_SCANS_PATH } from './scanTransport';
-import { ChatError, createChatClient } from './llmChatClient';
+
 import { chatBindingSchema } from './llmChatContract';
 import { assertPlainWire } from './vulnAdvisory';
 import {
@@ -13,6 +13,7 @@ import {
 import {
   sameTranslationBinding,
   translationContextSchema,
+  translationReadinessSchema,
   translationReplySchema,
   translationRequestSchema,
   translationSelectionSchema,
@@ -67,8 +68,10 @@ export function translationErrorMessage(error: unknown) {
 }
 
 export function createAdvisoryTranslationClient(session = scanSession(), fetcher: typeof fetch = fetch) {
-  const chat = createChatClient(session, fetcher);
-  const current = chat.current;
+  const current = () => {
+    const now = scanSession();
+    return !!session.subject && now.subject === session.subject && now.generation === session.generation;
+  };
   async function request(
     scanId: string,
     endpoint: string,
@@ -84,10 +87,13 @@ export function createAdvisoryTranslationClient(session = scanSession(), fetcher
     const unsubscribe = subscribeScanSession(abort);
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
-    const timer = setTimeout(() => {
-      timedOut = true;
-      abort();
-    }, 40_000);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        abort();
+      },
+      body ? 105_000 : 40_000,
+    );
     const stopped = new Promise<never>((_, reject) => {
       const stop = () => {
         void reader?.cancel().catch(() => {});
@@ -110,10 +116,18 @@ export function createAdvisoryTranslationClient(session = scanSession(), fetcher
       if (!current() || controller.signal.aborted || [401, 403, 404].includes(response.status)) {
         void response.body?.cancel().catch(() => {});
         throw new TranslationError(
-          !current() || response.status === 401 ? 'SESSION' : response.status === 403 ? 'ACCESS' : 'STALE',
+          !current() || response.status === 401
+            ? 'SESSION'
+            : controller.signal.aborted
+              ? 'ABORTED'
+              : response.status === 403
+                ? 'ACCESS'
+                : endpoint === 'translation/readiness'
+                  ? 'REPORT_UNAVAILABLE'
+                  : 'STALE',
         );
       }
-      const limit = response.ok ? 65536 : 8192;
+      const limit = response.ok && endpoint !== 'translation/readiness' ? 65536 : 8192;
       const length = response.headers.get('content-length');
       if (
         response.redirected ||
@@ -169,14 +183,13 @@ export function createAdvisoryTranslationClient(session = scanSession(), fetcher
     current,
     async readiness(scanId: string, signal: AbortSignal) {
       try {
-        const value = await chat.readiness(scanId, signal);
-        // Retain the base OpenRouter readiness contract; paid readiness is not translation authority.
-        if (value.setupAction !== 'operator-public-file-configuration') throw new TranslationError('INVALID');
+        const value = translationReadinessSchema.parse(
+          await request(scanId, 'translation/readiness', signal),
+        );
+        if (value.scanId !== scanId) throw new TranslationError('STALE');
         return value;
       } catch (error) {
-        throw error instanceof TranslationError ? error : error instanceof ChatError
-          ? new TranslationError(error.code, error.providerFailure)
-          : new TranslationError('INVALID');
+        throw error instanceof TranslationError ? error : new TranslationError('INVALID');
       }
     },
     async context(scanId: string, selection: TranslationSelection, signal: AbortSignal) {

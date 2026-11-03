@@ -18,13 +18,15 @@ const findingId = `vuln-${'a'.repeat(64)}`;
 const binding = { scanId, digest: `sha256:${'b'.repeat(64)}`, platform: 'linux/amd64', reportVersion: 'c'.repeat(64) };
 const disclosure = {
   provider: 'OpenRouter', model: MODEL, providers: [ENDPOINT], freeOnly: true, requestBudgetUsd: 0,
-  region: 'global', retention: 'no-storage', maxPrice: { prompt: 0, completion: 0, request: 0 },
+  region: 'global', retention: 'no-training', maxPrice: { prompt: 0, completion: 0, request: 0 },
   operatorApprovedRouting: true, providerComplianceNotProvenByDeclaration: true,
 };
 const context = { ...binding, epoch: '12345678-1234-4234-8234-123456789abd', revision: 0, enabled: true,
   policyVersion: 'd'.repeat(64), disclosure, findingId, assessmentIndex: 0, sourceVersion: 'e'.repeat(64), targetLanguage: 'ru' };
-const ready = { ...binding, localReady: true, credential: 'metadata-valid', blockers: [], requiresConsent: true,
-  acceptsCredentials: false, generationVerified: false, provider: { model: MODEL, endpoint: ENDPOINT, liveVerified: false } };
+const ready = { ...binding, status: 'locally-configured', localReady: true, credential: 'metadata-valid', blockers: [], requiresConsent: true,
+  quota: 'available', history: 'available', setupAction: 'operator-public-file-configuration',
+  acceptsCredentials: false, generationVerified: false, provider: { status: 'catalog-listed-unprobed', checkedOn: '2026-10-29',
+    model: MODEL, endpoint: ENDPOINT, liveVerified: false, zdrListed: false, retention: 'no-training' } };
 const question = 'Краткий синтетический вопрос';
 const body = () => ({ epoch: context.epoch, revision: context.revision, mutationId: scanId, reportVersion: context.reportVersion,
   question, consent: { accepted: true, policyVersion: context.policyVersion } });
@@ -124,10 +126,13 @@ test('browser GET fence rejects port 8080, credentials, other scans, arbitrary A
   assert.equal(allowedApiGet(selected, []), false);
 });
 
-test('only the fixed OpenRouter phala free/no-storage/zero-price policy is authorized', () => {
+test('only the fixed OpenRouter Dots/Atlas free/no-training/zero-price policy is authorized', () => {
   assertFixedPolicy(context); assertReady(ready, context);
-  for (const change of [{ model: 'other/free' }, { providers: ['other'] }, { providers: ['phala', 'fallback'] },
-    { freeOnly: false }, { requestBudgetUsd: 0.001 }, { retention: 'no-training' },
+  for (const change of [{ model: 'other/free' }, { providers: ['other'] }, { providers: [ENDPOINT, 'fallback'] },
+      { model: 'nvidia/nemotron-3.5-super-vl:free', providers: ['nvidia'], retention: 'no-training' },
+    { model: 'xingchen-agi/xing4.0-29b-a4b:free', providers: ['phala'], retention: 'no-storage' },
+    { providers: ['phala'] }, { providers: ['atlas-cloud'] }, { model: 'dots-studio/dots-3-note-preview' },
+    { freeOnly: false }, { requestBudgetUsd: 0.001 }, { retention: 'no-storage' },
     { maxPrice: { prompt: 0, completion: 1, request: 0 } }, { operatorApprovedRouting: false }])
     assert.throws(() => assertFixedPolicy({ ...context, disclosure: { ...disclosure, ...change } }));
   for (const change of [{ credential: 'missing' }, { localReady: false }, { reportVersion: 'f'.repeat(64) },
@@ -148,6 +153,27 @@ test('only the fixed OpenRouter phala free/no-storage/zero-price policy is autho
     { ...initial, user: { ...initial.user, used: { input: 0, output: 0 } } },
     { ...initial, scan: { ...initial.scan, held: { input: 0, output: 0, costMicros: 0, extra: 0 } } }])
     assert.throws(() => assertInitialUsage(malformed, context));
+});
+
+test('catalog-listed Dots/Atlas readiness matches the strict frontend decoder and rejects stale catalog, privacy and unknown-profile claims', async () => {
+  const { chat } = await loadTranslationContracts();
+  assert.equal(MODEL, 'dots-studio/dots-3-note-preview:free'); assert.equal(ENDPOINT, 'atlas-cloud/fp8');
+  assert.deepEqual(chat.chatReadinessSchema.parse(ready), ready);
+  for (const change of [{ status: 'unverified-profile' }, { status: 'operator-approved-unprobed' }, { checkedOn: null },
+    { model: 'unknown/model:free' }, { endpoint: 'phala' }, { endpoint: 'nvidia', model: 'nvidia/nemotron-3.5-super-vl:free' }, { checkedOn: '2026-10-21' },
+    { zdrListed: true }, { retention: 'no-storage' }, { retention: undefined }, { liveVerified: true }, { extra: true }]) {
+    const wire = { ...ready, provider: { ...ready.provider, ...change } };
+    assert.throws(() => assertReady(wire, context));
+    assert.equal(chat.chatReadinessSchema.safeParse(wire).success, false);
+  }
+  const unknown = { ...ready, status: 'setup-required', localReady: false,
+    blockers: ['configuration-required', 'provider-profile-unavailable'],
+    provider: { status: 'unverified-profile', checkedOn: '2026-10-21', liveVerified: false, zdrListed: false } };
+  assert.deepEqual(chat.chatReadinessSchema.parse(unknown), unknown);
+  assert.throws(() => assertReady(unknown, context));
+  for (const blockers of [[], ['configuration-required'], ['provider-profile-unavailable']])
+    assert.equal(chat.chatReadinessSchema.safeParse({ ...unknown, blockers }).success, false);
+  assert.equal(chat.chatReadinessSchema.safeParse({ ...unknown, status: 'locally-configured', localReady: true, blockers: [] }).success, false);
 });
 
 test('chat permits require exact CAS/body/question and explicit per-send consent, never arbitrary copied text or credentials', () => {

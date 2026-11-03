@@ -1,5 +1,6 @@
+import '@testing-library/jest-dom/vitest';
 import { afterEach, expect, it } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { VulnAdvisoryCard } from '@/pages/scans/VulnAdvisoryCard';
 import { parseCurrentVuln } from '@/shared/api/scans/scanTransport';
 import { parseVulnFindings } from '../../../server/api/src/worker/vuln-findings';
@@ -22,6 +23,41 @@ function normalized(items = [raw()]) {
     findings, nextCursor: null });
 }
 afterEach(cleanup);
+function openSourceDetails() {
+  const summary = screen.getByText('Подробности · описание уязвимости и источники', { selector: 'summary' });
+  expect(summary.closest('details')).not.toHaveAttribute('open');
+  fireEvent.click(summary);
+  expect(summary.closest('details')).toHaveAttribute('open');
+}
+
+it('B2 same-source assessments keep ordinal, exact title/description/fix association and visible CVE identity', () => {
+  const first = raw({ Title: 'First assessment', Description: 'First description', FixedVersion: '1.3', VendorSeverity: undefined });
+  const second = raw({ Title: 'Second assessment', Description: 'Second description', FixedVersion: '1.9', VendorSeverity: undefined });
+  const finding = normalized([first, second]).findings[0];
+  expect(normalized([second, first]).findings[0]).toEqual(finding);
+  render(<VulnAdvisoryCard finding={finding} />);
+  expect(screen.getByText('CVE-2026-1234', { exact: true })).toBeVisible();
+  openSourceDetails();
+  const rows = screen.getAllByLabelText('Источник alpine'); expect(rows).toHaveLength(finding.advisory!.assessments.length);
+  expect(finding.advisory!.assessments.filter(item => item.title.value)).toHaveLength(2);
+  finding.advisory!.assessments.forEach((assessment, index) => {
+    const row = within(rows[index]);
+    expect(row.getByText(new RegExp(`Оценка источника №${index + 1}`))).toBeVisible();
+    if (assessment.title.value) expect(row.getByText(new RegExp(assessment.title.value))).toBeVisible();
+    if (assessment.description.value) expect(row.getByText(new RegExp(assessment.description.value))).toBeVisible();
+    if (assessment.fixedVersion) expect(row.getByText(new RegExp(`исправление источника: ${assessment.fixedVersion}`))).toBeVisible();
+    for (const other of finding.advisory!.assessments.filter(item => item !== assessment)) {
+      if (other.title.value) expect(row.queryByText(new RegExp(other.title.value))).toBeNull();
+      if (other.description.value) expect(row.queryByText(new RegExp(other.description.value))).toBeNull();
+    }
+  });
+});
+
+it('B2 distinguishes temporary Debian advisory identity visibly without claiming CVE', () => {
+  const finding = { ...normalized().findings[0], cveId: 'TEMP-1234567-ABCDEF' };
+  render(<VulnAdvisoryCard finding={finding} />);
+  expect(screen.getByText('TEMP-1234567-ABCDEF · уведомление Debian (не CVE)')).toBeVisible();
+});
 
 it('labels the source union as contributors, not origins of LOW, and preserves separate source assessments', () => {
   const page = normalized();
@@ -30,9 +66,10 @@ it('labels the source union as contributors, not origins of LOW, and preserves s
   expect(finding.severity).toBe('LOW');
   expect(finding.severitySources).toEqual(['alpine', 'nvd']);
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText(/Источники отдельных оценок: alpine, nvd/)).toBeTruthy();
+  expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
+  openSourceDetails();
+  expect(screen.getByText(/Оценка сканера: LOW\. Источники: alpine, nvd/)).toBeVisible();
   expect(screen.queryByText(/Источник severity: alpine, nvd/)).toBeNull();
-  expect(screen.getByText(/Совместимое значение severity, не авторитетная оценка источника/)).toBeTruthy();
   const nvd = screen.getAllByLabelText('Источник nvd');
   expect(nvd.some(row => within(row).queryByText(/Severity источника: CRITICAL/))).toBe(true);
   expect(nvd.some(row => within(row).queryByText(/Severity источника: LOW/))).toBe(false);
@@ -51,9 +88,10 @@ it('marks merged conflicting severity and fix as non-authoritative compatibility
   expect(finding.severity).toBe('HIGH');
   expect(finding.fixedVersion).toBe('1.3');
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText(/Совместимое значение severity, не авторитетная оценка источника/)).toBeTruthy();
-  expect(screen.getByText(/Совместимое значение исправления, не авторитетная оценка источника/)).toBeTruthy();
-  expect(screen.getByText(/Источники расходятся: severity, fixedVersion/)).toBeTruthy();
+  expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
+  expect(screen.getByText(/Указанная версия исправления не является согласованной рекомендацией всех источников/)).toBeVisible();
+  openSourceDetails();
+  expect(screen.getByText(/Поля с расхождениями: severity, fixedVersion/)).toBeVisible();
   expect(screen.getAllByText(/исправление источника: 1\.[34]/)).toHaveLength(2);
 });
 
@@ -68,9 +106,11 @@ it('shows known conflicts as well as incomplete assessment warning at the real c
   expect(finding.advisory?.conflictState).toBe('unknown');
   expect(finding.advisory?.limitations).toContain('assessment_limit');
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText(/Источники расходятся: severity/)).toBeTruthy();
-  expect(screen.getByText(/Согласованность источников неизвестна/)).toBeTruthy();
-  expect(screen.getByText(/Совместимое значение severity, не авторитетная оценка источника/)).toBeTruthy();
+  expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
+  expect(screen.getByText(/Указанная версия исправления не является согласованной рекомендацией всех источников/)).toBeVisible();
+  openSourceDetails();
+  expect(screen.getByText(/Поля с расхождениями: severity/)).toBeVisible();
+  expect(screen.getByText(/Ограничения источника: assessment_limit/)).toBeVisible();
 });
 
 it('renders normalized optional text without Basic payloads or residual nested Markdown', () => {
@@ -96,8 +136,9 @@ it('does not invent a headline authority for legacy or omitted advisory metadata
     conflictState: 'unknown' as const, limitations: ['scan_budget' as const] } }]) {
     const view = render(<VulnAdvisoryCard finding={finding} />);
     expect(screen.queryByText(/Источник severity:/)).toBeNull();
-    expect(screen.getByText(/Совместимое значение severity, не авторитетная оценка источника/)).toBeTruthy();
-    expect(screen.getByText(/Совместимое значение исправления, не авторитетная оценка источника/)).toBeTruthy();
+    expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
+    expect(screen.getByText(/Указанная версия исправления не является согласованной рекомендацией всех источников/)).toBeVisible();
+    expect(screen.getByText('Подробности · описание уязвимости и источники', { selector: 'summary' }).closest('details')).not.toHaveAttribute('open');
     view.unmount();
   }
 });

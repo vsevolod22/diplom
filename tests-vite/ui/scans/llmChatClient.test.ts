@@ -7,6 +7,7 @@ import {
   chatContextSchema,
   chatHistorySchema,
   chatReplySchema,
+  chatReceiptSchema,
   validChatText,
   verifiedChatSources,
 } from '@/shared/api/scans/llmChatContract';
@@ -90,7 +91,7 @@ it('accepts actual unavailable usage without inventing zero counters or admissio
   );
   expect(await client.usage(binding, signal())).toMatchObject({ available: false, reason: 'unavailable' });
 });
-it('rejects counter arithmetic, paid/changed profile, receipt output >2048 and nonzero cost', async () => {
+it('rejects counter arithmetic, paid/changed profile, receipt output >4096 and nonzero cost', async () => {
   const client = createChatClient(
     scanSession(),
     vi.fn(async () =>
@@ -108,7 +109,7 @@ it('rejects counter arithmetic, paid/changed profile, receipt output >2048 and n
     expect(
       chatContextSchema.safeParse({ ...context, disclosure: { ...context.disclosure, ...patch } }).success,
     ).toBe(false);
-  for (const patch of [{ output: 2049 }, { costMicros: 1 }]) {
+  for (const patch of [{ output: 4097 }, { costMicros: 1 }]) {
     const invalid = createChatClient(
       scanSession(),
       vi.fn(async () =>
@@ -132,6 +133,13 @@ it('rejects counter arithmetic, paid/changed profile, receipt output >2048 and n
     await expect(invalid.chat(context, 'Вопрос', crypto.randomUUID(), signal())).rejects.toThrow();
   }
 });
+it.each([2048, 2049, 4096])(
+  'accepts bounded output receipt %i without raising question/source limits',
+  (output) => {
+    expect(chatReceiptSchema.safeParse({ ...receipt, output }).success).toBe(true);
+    expect(validChatText('я'.repeat(1025))).toBe(false);
+  },
+);
 it('matches server UTF8/control/URL/credential input boundaries and sends zero on invalid text', async () => {
   expect(validChatText('я'.repeat(1024))).toBe(true);
   expect(validChatText('я'.repeat(1025))).toBe(false);
@@ -428,7 +436,7 @@ it.each([
   if (bad === 'version') frames[0].v = 2;
   if (bad === 'native') frames[0].nativeProviderStream = true;
   if (bad === 'receipt-cost') frames[0].usage = { ...receipt, costMicros: 1 };
-  if (bad === 'receipt-output') frames[0].usage = { ...receipt, output: 2049 };
+  if (bad === 'receipt-output') frames[0].usage = { ...receipt, output: 4097 };
   if (bad === 'source-url') frames[1].source = { ...source, url: 'javascript:evil' };
   if (bad === 'source-tuple') frames[1].source = { ...source, reportVersion: 'e'.repeat(64) };
   if (bad === 'order') frames.reverse();
@@ -526,8 +534,11 @@ it('framed stalled EOF remains bounded, cancelled and session-fenced after valid
       code: mode === 'timeout' ? 'TIMEOUT' : mode === 'session' ? 'SESSION' : 'ABORTED',
     });
     await vi.advanceTimersByTimeAsync(1);
-    if (mode === 'timeout') await vi.advanceTimersByTimeAsync(40001);
-    else if (mode === 'session') transitionScanSession('alice', new QueryClient(), true);
+    if (mode === 'timeout') {
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+    } else if (mode === 'session') transitionScanSession('alice', new QueryClient(), true);
     else controller.abort();
     await assertion;
     expect(cancel).toHaveBeenCalled();

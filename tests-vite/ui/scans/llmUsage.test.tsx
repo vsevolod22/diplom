@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LlmUsagePanel } from '@/features/scans/LlmUsagePanel';
 import { ScanSummaryPanel } from '@/features/scans/ScanSummaryPanel';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
-import { createUsageClient, type UsageBinding } from '@/shared/api/scans/llmUsageClient';
+import { createUsageClient, usageSchema, type UsageBinding } from '@/shared/api/scans/llmUsageClient';
 import { contextFence, type SummaryContext, type SummaryClient } from '@/shared/api/scans/llmSummaryClient';
 import type { ScanTransport, ScanStatus } from '@/shared/api/scans/scanTransport';
 
@@ -44,6 +44,37 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
+
+it.each([2048, 2049, 4096])(
+  'admits output reserve %i and rejects 4097 without changing quota arithmetic',
+  async (output) => {
+    const ample = {
+      limits: vector(65536, 16384),
+      used: vector(0, 0),
+      held: vector(0, 0),
+      carried: vector(0, 0),
+      remaining: vector(65536, 16384),
+      warning: false,
+      exhausted: false,
+    };
+    const payload = {
+      ...usage,
+      reason: 'ready',
+      user: ample,
+      scan: ample,
+      admission: { status: 'fits', reserve: vector(2048, output), signals: [] },
+    };
+    const fetcher = vi.fn(async () => json(payload));
+    await expect(
+      createUsageClient(scanSession(), fetcher).get(binding, new AbortController().signal),
+    ).resolves.toMatchObject({ admission: { status: 'fits', reserve: { output } } });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(
+      usageSchema.safeParse({ ...payload, admission: { ...payload.admission, reserve: vector(2048, 4097) } })
+        .success,
+    ).toBe(false);
+  },
+);
 
 it('real usage GET is bounded owner/session-bound, no-store, separate from consent context; remaining/warning are actual DOM', async () => {
   const fetcher = vi.fn(async () => json(usage));
@@ -266,7 +297,7 @@ it('deadline bounds a noncooperative transport and prevents stale counts', async
   await rejected;
 });
 
-it('explicit usage GET and focus revalidation never grant generation intent or enable a server-disabled summary without a consent checkbox', async () => {
+it('standalone usage GET and focus revalidation never grant generation intent; summary has no usage panel', async () => {
   const context: SummaryContext = { ...binding, enabled: false, disclosure: null, policyVersion: null };
   const fence = contextFence(context);
   const summaryClient: SummaryClient = {
@@ -284,6 +315,7 @@ it('explicit usage GET and focus revalidation never grant generation intent or e
         transport={{} as ScanTransport}
         client={summaryClient}
       />
+      <LlmUsagePanel binding={binding} refreshVersion={0} />
     </>,
   );
   await waitFor(() =>
@@ -291,6 +323,7 @@ it('explicit usage GET and focus revalidation never grant generation intent or e
       false,
     ),
   );
+  expect(screen.getByRole('region', { name: 'ИИ-отчёт' }).textContent).not.toMatch(/Остаток|токен|бюджет/i);
   expect(screen.queryByRole('checkbox')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
   expect(screen.getByRole('link', { name: 'настройках аккаунта' })).toBeTruthy();

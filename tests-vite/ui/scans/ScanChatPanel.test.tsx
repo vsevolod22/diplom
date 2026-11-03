@@ -1,9 +1,15 @@
+import '@testing-library/jest-dom/vitest';
+import userEvent from '@testing-library/user-event';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ScanChatPanel } from '@/features/scans/ScanChatPanel';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
-import { readReportPreferences, saveReportPreferences } from '@/shared/api/preferences/reportPreferences';
+import {
+  readReportPreferences,
+  REPORT_AUTOMATION_REVISION,
+  saveReportPreferences,
+} from '@/shared/api/preferences/reportPreferences';
 import { createChatClient } from '@/shared/api/scans/llmChatClient';
 import type { ChatContext, ChatHistory } from '@/shared/api/scans/llmChatContract';
 import {
@@ -47,15 +53,52 @@ function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher) {
 }
 async function open() {
   await waitFor(() =>
-    expect(
-      (screen.getByRole('button', { name: 'Обновить историю и условия чата' }) as HTMLButtonElement).disabled,
-    ).toBe(false),
+    expect((screen.getByRole('button', { name: 'Обновить историю' }) as HTMLButtonElement).disabled).toBe(
+      false,
+    ),
   );
 }
 function send(question = 'Что проверить?') {
   fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: question } });
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
 }
+it.each(['partial', 'failed', 'cancelled'] as const)('B2 %s explains summary/translation limitation without claiming unchecked results are safe', async state => {
+  const api = chatApi();
+  render(<ScanChatPanel status={{ ...status, state }} transport={sourceTransport()} client={createChatClient(scanSession(), api.fetcher)} />);
+  await open();
+  expect(screen.getByText(/Авторазбор и отдельный перевод описаний доступны только/)).toBeVisible();
+  expect(screen.getByText(/непроверенное не означает отсутствие проблем/)).toBeVisible();
+  expect(screen.getByRole('textbox', { name: 'Вопрос чату' })).toBeVisible();
+  expect(api.requests.filter(request => request.init.method === 'POST')).toHaveLength(0);
+});
+
+it.each([
+  ['я'.repeat(1025), 'Текст слишком длинный: 2050 из 2048 байт UTF-8'],
+  ['Ссылка https://example.test', 'Уберите ссылки'],
+  ['<script>пример</script>', 'Уберите угловые скобки'],
+  ['token=synthetic', 'Уберите конструкции с паролями'],
+  ['A'.repeat(40), 'Уберите длинные непрерывные последовательности'],
+  ['CANARY', 'Уберите служебный маркер'],
+  ['Вопрос\u202e', 'Уберите управляющие символы'],
+])('B2 invalid question/decision explains rejection, keeps draft and sends no POST: %s', async (draft, message) => {
+  const { api } = mount(); await open();
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование', { selector: 'summary' }));
+  for (const label of ['Вопрос чату', 'Текст решения']) {
+    const input = screen.getByLabelText(label);
+    fireEvent.change(input, { target: { value: draft } });
+    expect(input).toHaveValue(draft); expect(input).toHaveAttribute('aria-invalid', 'true');
+    const descriptionIds = input.getAttribute('aria-describedby')!.split(' ');
+    expect(descriptionIds.every(id => document.getElementById(id))).toBe(true);
+    expect(document.getElementById(label === 'Вопрос чату' ? 'scan-chat-input-error' : 'scan-chat-decision-error')).toHaveTextContent(message);
+  }
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Сохранить решение' })).toBeDisabled();
+  expect(api.requests.filter(request => request.init.method === 'POST')).toHaveLength(0);
+  fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: 'я'.repeat(1024) } });
+  expect(screen.getByLabelText('Вопрос чату')).toHaveAttribute('aria-invalid', 'false');
+  expect(document.getElementById('scan-chat-input-count')).toHaveTextContent('2048 / 2048 байт UTF-8');
+});
+
 it('cross-tab preference replacement aborts an explicit POST preflight synchronously, not only during React cleanup', async () => {
   saveReportPreferences({ language: 'ru', autoSummary: true });
   const { client, api } = mount();
@@ -69,7 +112,7 @@ it('cross-tab preference replacement aborts an explicit POST preflight synchrono
       'report-preferences:v1:alice',
       JSON.stringify({
         version: 1,
-        automationRevision: 'report-automation-v1',
+        automationRevision: REPORT_AUTOMATION_REVISION,
         language: 'original',
         autoSummary: false,
       }),
@@ -96,8 +139,19 @@ it('opens history and composer automatically, exposes disclosure and never dispa
   expect(screen.queryByRole('button', { name: 'Открыть чат' })).toBeNull();
   await open();
   expect(api.requests.every((r) => r.init.method === 'GET')).toBe(true);
-  expect(document.body.textContent).toContain('Провайдер возвращает полный ответ, а не поток токенов');
-  expect(document.body.textContent).toContain('совпадения с сохранённой историей');
+  expect(screen.getByRole('heading', { name: 'Задать вопрос по отчёту' })).toBeVisible();
+  expect(screen.getByText('Подробности · история решений, условия и использование').closest('details')).not.toHaveAttribute('open');
+  expect(screen.getByText(/apodex\/apodex-1.1-mini:free/)).not.toBeVisible();
+  expect(screen.getByLabelText('Текст решения')).not.toBeVisible();
+  for (const usage of screen.getAllByText(/остаток входных токенов 9850/)) expect(usage).not.toBeVisible();
+  expect(screen.getByText(new RegExp(binding.scanId))).not.toBeVisible();
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toBeVisible();
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toHaveTextContent(
+    'внешнему ИИ вопрос и контекст отчёта',
+  );
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toHaveTextContent(
+    'Запрет обучения не гарантирует отсутствие хранения',
+  );
   expect(document.body.textContent).toContain('apodex/apodex-1.1-mini:free');
   expect(document.body.textContent).toContain('novita/bf16');
   expect(document.body.textContent).toContain('остаток входных токенов 9850, выходных токенов 9940');
@@ -106,6 +160,30 @@ it('opens history and composer automatically, exposes disclosure and never dispa
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
 });
+it('supports a labelled keyboard composer without sending on typing, and disables send while waiting', async () => {
+  const user = userEvent.setup();
+  const { client, api } = mount();
+  await open();
+  const chat = vi.spyOn(client, 'chat').mockImplementation(() => new Promise(() => {}));
+  const input = screen.getByRole('textbox', { name: 'Вопрос чату' });
+  await user.click(input);
+  await user.type(input, 'Что проверить?{Enter}');
+  expect(chat).not.toHaveBeenCalled();
+  expect(api.requests.every((request) => request.init.method === 'GET')).toBe(true);
+  await user.tab();
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toHaveFocus();
+  await user.keyboard('{Enter}');
+  await waitFor(() => expect(chat).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
+  expect(input).toBeDisabled();
+  expect(screen.getByRole('status', { name: 'Состояние подключения чата' })).toHaveTextContent(
+    'Ожидаем ответ',
+  );
+  await user.click(screen.getByRole('button', { name: 'Отменить ожидание чата' }));
+  expect(screen.getByRole('alert')).toHaveTextContent('Ожидание остановлено');
+  expect(chat).toHaveBeenCalledTimes(1);
+});
+
 it('uses the current question without a consent checkbox, submits once, verifies late-page citations and rereads durable completion', async () => {
   const { api, transport } = mount();
   await open();
@@ -116,11 +194,23 @@ it('uses the current question without a consent checkbox, submits once, verifies
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByText(/Последний ответ: входных токенов 100/);
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
-  expect(document.body.textContent).toContain('secret-0-1');
-  const link = screen.getByRole('link', { name: 'Находка secret-0-1' });
-  expect(document.getElementById(link.getAttribute('href')!.slice(1))?.textContent).toContain(
-    'Источник текущего отчёта',
-  );
+  expect(screen.getByText('Источники (1)').closest('details')).not.toHaveAttribute('open');
+  expect(screen.getByText(/Источник текущего отчёта/)).not.toBeVisible();
+  fireEvent.click(screen.getByText('Источники (1)'));
+  const details = screen.getByText('Источники (1)').closest('details')!;
+  const row = document.getElementById(`chat-${turnId}-${source.finding.findingId}`)!;
+  expect(details.open).toBe(true);
+  expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+  expect(details.contains(row)).toBe(true);
+  expect(row).toBeVisible();
+  if (source.finding.check !== 'secret') throw new Error('Expected secret source fixture');
+  expect([...row.querySelectorAll('code')].map(code => code.textContent)).toEqual([
+    source.finding.ruleId, source.finding.evidenceRef,
+  ]);
+  expect(row).toHaveTextContent(`Строка: ${source.finding.line}`);
+  expect(screen.getByText(/Источник текущего отчёта/)).toBeVisible();
+  expect(screen.getByText(/Последний ответ: входных токенов 100/)).not.toBeVisible();
+  expect(row).toHaveTextContent('Источник текущего отчёта');
   expect(transport.results).toHaveBeenCalledTimes(4);
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect(api.head.turns).toHaveLength(1);
@@ -140,8 +230,8 @@ it('does not resend after an error or refreshed context; a new send builds fresh
   await open();
   send('Что подтверждено отчётом?');
   const alert = await screen.findByRole('alert');
-  expect(alert.textContent).toContain('Провайдер недоступен');
-  expect(screen.queryByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeNull();
+  expect(alert.textContent).toContain('Сервис ответов недоступен');
+  expect(screen.queryByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeNull();
   const postBodies = () =>
     fetcher.mock.calls
       .filter(([, init]) => init?.method === 'POST')
@@ -152,22 +242,31 @@ it('does not resend after an error or refreshed context; a new send builds fresh
   fireEvent(window, new Event('online'));
   await act(async () => {});
   expect(postBodies()).toHaveLength(1);
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
   await open();
-  expect(screen.getByRole('alert')).toBe(alert);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByLabelText('Вопрос чату')).toHaveValue('Что подтверждено отчётом?');
   expect(postBodies()).toHaveLength(1);
   const sendButton = screen.getByRole('button', { name: 'Отправить вопрос' });
-  expect(sendButton.getAttribute('aria-describedby')).toBe('scan-chat-send-help');
-  expect(screen.getByText(/Нажимая «Отправить вопрос»/).textContent).toContain('OpenRouter');
-  expect(screen.getByText(/Нажимая «Отправить вопрос»/).textContent).toContain('Только бесплатный');
+  expect(sendButton.getAttribute('aria-describedby')?.split(/\s+/)).toEqual([
+      'scan-chat-send-help',
+      'scan-chat-input-help',
+      'scan-chat-input-count',
+      'scan-chat-connection',
+    ]);
+    for (const id of sendButton.getAttribute('aria-describedby')!.split(/\s+/)) {
+      expect(document.getElementById(id)).toBeInTheDocument();
+    }
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/).textContent).toContain('внешнему ИИ');
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/).textContent).toContain('отсутствие хранения');
   fireEvent.click(sendButton);
   fireEvent.click(sendButton);
-  await screen.findByRole('heading', { name: 'Ответ ИИ · требует проверки' });
+  await screen.findByRole('heading', { name: 'Ответ · проверьте по источникам' });
   expect(postBodies()).toHaveLength(2);
   expect(postBodies()[1].consent).toEqual({ accepted: true, policyVersion: api.policy.policyVersion });
   expect(postBodies()[1].mutationId).not.toBe(postBodies()[0].mutationId);
   expect(screen.getByRole('heading', { name: 'Вопрос · ответ сохранён' })).toBeTruthy();
-  expect(screen.getByText(/Находки и покрытие — результаты сканирования/)).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Задать вопрос по отчёту' })).toBeVisible();
 });
 
 it('keeps historical English answers verbatim under Russian UI labels without pretending to translate or generating again', async () => {
@@ -190,8 +289,8 @@ it('keeps historical English answers verbatim under Russian UI labels without pr
   mount(api);
   await open();
   expect(screen.getByText(text).textContent).toBe(text);
-  expect(screen.getByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeTruthy();
-  expect(screen.getByText(/Основания ответа\/решения:/)).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeTruthy();
+  expect(screen.getByText('Источники (1)')).toBeVisible();
   expect(screen.queryByText(/Гипотеза ·/)).toBeNull();
   expect(api.requests.every((request) => request.init.method === 'GET')).toBe(true);
 });
@@ -215,6 +314,8 @@ it('allows provider-disabled history and an explicit user decision with current 
   api.policy = { ...context, enabled: false, disclosure: null, policyVersion: null };
   mount(api);
   await open();
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
+  fireEvent.click(screen.getByText('Основания решения'));
   fireEvent.change(screen.getByLabelText('Текст решения'), {
     target: { value: 'Сначала проверить конфигурацию' },
   });
@@ -331,11 +432,9 @@ it.each([429, 503, 401])(
     await open();
     send();
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain(auth ? 'Провайдер отклонил серверный ключ' : 'Провайдер занят');
-    expect(alert.textContent).toContain(`HTTP ${providerStatus}`);
-    expect(alert.textContent).toContain('возврат квоты не гарантирован');
-    if (!auth) expect(alert.textContent).toContain('0 с');
-    expect(screen.queryByText('Ответ ИИ · требует проверки')).toBeNull();
+    expect(alert.textContent).toContain(auth ? 'Чат временно недоступен' : 'Сервис ответов занят');
+    expect(alert.textContent).not.toMatch(/HTTP|LLM_|квот|receipt|0 с/);
+    expect(screen.queryByText('Ответ · проверьте по источникам')).toBeNull();
     expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
       true,
     );
@@ -345,7 +444,7 @@ it.each([429, 503, 401])(
     });
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
     vi.useRealTimers();
-    fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
     await screen.findByText('Вопрос · ошибка');
     expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
     expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
@@ -378,7 +477,10 @@ it('discard invalid current-report citation; historical sources are marked unres
   };
   const { view, transport, client } = mount(api);
   await open();
-  await screen.findByText(/Исторический источник/);
+  await screen.findByText('Источники (1)');
+  expect(screen.getByText(/Исторический источник/)).not.toBeVisible();
+  fireEvent.click(screen.getByText('Источники (1)'));
+  expect(screen.getByText(/Исторический источник/)).toBeVisible();
   view.unmount();
   api.head = {
     ...history,
@@ -413,7 +515,7 @@ it('cancel suppresses a late response, requires history refresh and never resend
   send();
   await waitFor(() => expect(resolve).toBeTypeOf('function'));
   fireEvent.click(screen.getByRole('button', { name: 'Отменить ожидание чата' }));
-  await screen.findByText(/Передача уже могла начаться/);
+  await screen.findByText(/Ответ ещё может сохраниться/);
   resolve(
     json({
       ...binding,
@@ -430,22 +532,73 @@ it('cancel suppresses a late response, requires history refresh and never resend
   expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
 });
-it('timeout is bounded and does not imply a refund or deletion of possibly committed history', async () => {
-  const api = chatApi();
-  const fetcher: typeof fetch = vi.fn((input, init) =>
-    init?.method === 'POST' ? new Promise<Response>(() => {}) : api.fetcher(input, init),
-  );
-  mount(api, fetcher);
+it('whole chat operation is bounded at 120 seconds even when an injected client ignores abort', async () => {
+  const { client } = mount();
   await open();
+  const chat = vi.spyOn(client, 'chat').mockImplementation(() => new Promise(() => {}));
   vi.useFakeTimers();
   send();
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(45001);
-  });
-  expect(screen.getByRole('alert').textContent).toContain('автоматического повтора и возврата квоты нет');
+  await act(async () => vi.advanceTimersByTimeAsync(45_001));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(74_998));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(chat.mock.calls[0][3].aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(chat.mock.calls[0][3].aborted).toBe(true);
+  expect(chat).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('alert').textContent).toContain('Ожидание остановлено');
   expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
 });
+it('preflight and postflight reads share the same 120-second generation budget', async () => {
+  const { client } = mount();
+  await open();
+  const read = client.context;
+  const generate = client.chat;
+  let reads = 0;
+  let finish!: (value: ChatContext) => void;
+  vi.spyOn(client, 'context').mockImplementation(async (id, signal) => {
+    if (++reads > 1)
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    return read(id, signal);
+  });
+  const chat = vi.spyOn(client, 'chat').mockImplementation(async (...args) => {
+    await new Promise((resolve) => setTimeout(resolve, 100_000));
+    return generate(...args);
+  });
+  vi.useFakeTimers();
+  send();
+  await act(async () => vi.advanceTimersByTimeAsync(110_001));
+  expect(chat).toHaveBeenCalledTimes(1);
+  expect(reads).toBe(2);
+  expect(screen.queryByRole('alert')).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(9_998));
+  expect(chat.mock.calls[0][3].aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(chat.mock.calls[0][3].aborted).toBe(true);
+  expect(screen.getByRole('alert').textContent).toContain('обновите историю перед повтором');
+  await act(async () => finish({ ...context, revision: 2 }));
+  expect(screen.queryByText('**Проверьте** исходную находку')).toBeNull();
+  expect(chat).toHaveBeenCalledTimes(1);
+});
+
+it('passive chat refresh still stops at 45 seconds', async () => {
+  const { client } = mount();
+  await open();
+  const read = vi.spyOn(client, 'context').mockImplementation(() => new Promise(() => {}));
+  vi.useFakeTimers();
+  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
+  await act(async () => vi.advanceTimersByTimeAsync(44_999));
+  expect(read.mock.calls[0][1].aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(read.mock.calls[0][1].aborted).toBe(true);
+  expect(screen.getByRole('alert')).toBeTruthy();
+});
+
 it('scan A→B→A, owner switch and same-owner reauth never carry draft, consent or late answer', async () => {
   const api = chatApi();
   let resolve!: (value: Response) => void;
@@ -507,8 +660,8 @@ it('a cancelled noncooperative snapshot cannot overwrite a newer refresh generat
     return captured.epoch === next.epoch ? { ...history, epoch: next.epoch } : old;
   });
   render(<ScanChatPanel status={status} transport={sourceTransport()} client={client} />);
-  fireEvent.click(screen.getByRole('button', { name: 'Отменить ожидание чата' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Отменить обновление истории' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
   await open();
   resolve(context);
   await act(async () => {});
@@ -536,6 +689,7 @@ it('public pending state prevents overlapping chat/decision and is reread manual
   await open();
   expect(screen.getByText('Чужая вкладка')).toBeTruthy();
   expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByText('Подробности · история решений, условия и использование'));
   expect((screen.getByRole('button', { name: 'Сохранить решение' }) as HTMLButtonElement).disabled).toBe(
     true,
   );
@@ -556,9 +710,9 @@ it('policy change after completion withholds publication but recovers committed 
   send();
   await screen.findByRole('alert');
   expect(api.head.turns).toHaveLength(1);
-  expect(screen.queryByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю и условия чата' }));
-  await screen.findByRole('heading', { name: 'Ответ ИИ · требует проверки' });
+  expect(screen.queryByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
+  await screen.findByRole('heading', { name: 'Ответ · проверьте по источникам' });
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
 });
 
@@ -603,13 +757,13 @@ it('framed panel keeps partial nested fence inert/unpublished until done, EOF an
   send();
   await waitFor(() => expect(writer).toBeTruthy());
   await act(async () => {});
-  expect(screen.queryByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeNull();
   expect(screen.queryByText(/Последний ответ/)).toBeNull();
   expect(view.container.querySelector('pre')).toBeNull();
   await act(async () => {
     writer.enqueue(new TextEncoder().encode(done));
   });
-  expect(screen.queryByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeNull();
   await act(async () => writer.close());
   await screen.findByText(/Последний ответ: входных токенов 100/);
   expect(view.container.querySelector('pre')?.textContent).toBe(text);
@@ -651,7 +805,7 @@ it.each(['reply', 'source', 'question', 'revision'])(
     await open();
     send();
     await screen.findByRole('alert');
-    expect(screen.queryByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeNull();
     expect(screen.queryByText(/Последний ответ/)).toBeNull();
     expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
     expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
@@ -716,8 +870,8 @@ it.each(['cancel', 'scan', 'session', 'error'])(
     await act(async () => {});
     if (mode === 'scan') {
       // Returning to the report automatically recovers independently validated durable history.
-      await screen.findByRole('heading', { name: 'Ответ ИИ · требует проверки' });
-    } else expect(screen.queryByRole('heading', { name: 'Ответ ИИ · требует проверки' })).toBeNull();
+      await screen.findByRole('heading', { name: 'Ответ · проверьте по источникам' });
+    } else expect(screen.queryByRole('heading', { name: 'Ответ · проверьте по источникам' })).toBeNull();
     expect(screen.queryByText(/Последний ответ/)).toBeNull();
     expect(api.head.turns).toHaveLength(1);
     expect(api.head.turns[0].state).toBe('completed');

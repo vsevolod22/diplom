@@ -1,5 +1,8 @@
+import '@testing-library/jest-dom/vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render as renderUi, screen, waitFor, within } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CursorReportPager } from '@/pages/scans/CursorReportPager';
@@ -9,6 +12,7 @@ import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { ScanReportSections } from '@/pages/scans/ScanReportSections';
 import { LiveScanContext } from '@/features/scans/liveScanContext';
 import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
+import { transitionScanSession } from '@/shared/api/auth/scanSession';
 import { unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
 import { parseCurrentVuln } from '@/shared/api/scans/scanTransport';
 import type { ReportKind, ReportPages } from '@/shared/api/scans/reportView';
@@ -29,18 +33,33 @@ class Observer {
   unobserve() {}
   disconnect() {}
 }
-beforeEach(() => vi.stubGlobal('IntersectionObserver', Observer));
+let queryClient: QueryClient;
+beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  vi.stubGlobal('IntersectionObserver', Observer);
+});
+function render(ui: ReactNode) {
+  const view = renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+  // Integration scenarios inspect the inventory: take the same explicit disclosure action as a user.
+  const inventory = screen.queryByLabelText('Пакеты SBOM');
+  if (inventory instanceof HTMLDetailsElement && !inventory.open)
+    fireEvent.click(within(inventory).getByText('Состав образа · найти пакет и его версию', { selector: 'summary' }));
+  return view;
+}
 afterEach(() => {
   cleanup();
+  queryClient.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 type TestPage = {
   rows: string[];
@@ -67,11 +86,13 @@ const rows = (page: TestPage) => (
 function pager(
   load: (cursor: string | undefined, signal: AbortSignal) => Promise<TestPage>,
   reportKey = 'alice:1:scan:report',
+  queryKey: readonly unknown[] = ['live-scans', 1, 'alice', 'report-page', 'scan', 'vuln', null, reportKey],
 ) {
   return (
     <CursorReportPager
       label="CVE"
       reportKey={reportKey}
+      queryKey={queryKey}
       enabled
       waiting="Ожидание"
       load={load}
@@ -113,6 +134,88 @@ it('atomically confirms three sequential pages, repeats stored cursors on back, 
   ]);
   expect(screen.queryByText(/из 3 страниц/)).toBeNull();
 });
+it('uses the existing client but never reuses even freshly primed pages or retries/refetches implicitly', async () => {
+  const key = ['live-scans', 1, 'alice', 'report-page', 'scan', 'vuln', null, 'report-1'];
+  queryClient.setQueryDefaults(['live-scans'], { staleTime: Infinity, gcTime: Infinity, retry: 3 });
+  queryClient.setQueryData([...key, null], { rows: ['cached-private'], next: null, total: 1 });
+  const fetchQuery = vi.spyOn(queryClient, 'fetchQuery');
+  const load = vi.fn().mockResolvedValueOnce({ rows: ['first'], next: 'next', total: 2 })
+    .mockResolvedValueOnce({ rows: ['second'], next: null, total: 2 })
+    .mockResolvedValueOnce({ rows: ['changed-first'], next: 'next', total: 2 });
+  render(pager(load, 'report-1', key));
+  await screen.findByText('first');
+  expect(screen.queryByText('cached-private')).toBeNull();
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+  await screen.findByText('second');
+  fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
+  await screen.findByText(/Прежние данные скрыты; повторите загрузку с первой страницы/);
+  expect(fetchQuery.mock.calls.map(([options]) => options.queryKey)).toEqual([
+    [...key, null], [...key, 'next'], [...key, null],
+  ]);
+  for (const [options] of fetchQuery.mock.calls) {
+    expect(options).toMatchObject({ staleTime: 0, gcTime: 0, retry: false, networkMode: 'always' });
+  }
+  await act(async () => { await queryClient.invalidateQueries(); });
+  fireEvent.focus(window);
+  fireEvent.online(window);
+  expect(load).toHaveBeenCalledTimes(3);
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+});
+
+it.each(['unmount', 'auth'] as const)('cancels the QueryClient request on %s, ignores a transport that resolves after abort, and removes private cache data', async (reason) => {
+  const slow = deferred<TestPage>();
+  const load = vi.fn<(cursor: string | undefined, signal: AbortSignal) => Promise<TestPage>>().mockReturnValue(slow.promise);
+  const cancel = vi.spyOn(queryClient, 'cancelQueries');
+  const view = render(pager(load));
+  const signal = load.mock.calls[0][1];
+  const active = queryClient.getQueryCache().getAll();
+  expect(active).toHaveLength(1);
+  expect(active[0].state.fetchStatus).toBe('fetching');
+  if (reason === 'unmount') view.unmount();
+  else await act(async () => { transitionScanSession(null, queryClient, true); });
+  expect(cancel).toHaveBeenCalledWith(reason === 'unmount'
+    ? { queryKey: active[0].queryKey, exact: true }
+    : { queryKey: ['live-scans'] });
+  expect(signal.aborted).toBe(true);
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+  await act(async () => { slow.resolve({ rows: ['late-private'], next: null, total: 1 }); });
+  expect(screen.queryByText('late-private')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
+it('cancels a changed normalized query even with the same report key and ignores a late aborted rejection', async () => {
+  const slow = deferred<TestPage>();
+  const load = vi.fn().mockImplementationOnce(() => slow.promise)
+    .mockResolvedValueOnce({ rows: ['filtered-first'], next: null, total: 1 });
+  const key = ['live-scans', 1, 'alice', 'report-page', 'scan', 'vuln'];
+  const cancel = vi.spyOn(queryClient, 'cancelQueries');
+  const view = render(pager(load, 'report-1', [...key, { severity: null }, 'identity']));
+  const signal = load.mock.calls[0][1] as AbortSignal;
+  const oldKey = queryClient.getQueryCache().getAll()[0].queryKey;
+  view.rerender(pager(load, 'report-1', [...key, { severity: ['HIGH'] }, 'identity']));
+  expect(signal.aborted).toBe(true);
+  expect(cancel).toHaveBeenCalledWith({ queryKey: oldKey, exact: true });
+  await screen.findByText('filtered-first');
+  await act(async () => { slow.reject(new Error('ignored aborted transport')); });
+  expect(screen.getByText('filtered-first')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(load.mock.calls.map(call => call[0])).toEqual([undefined, undefined]);
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+});
+
+it('a failed query does not inherit client retries or refetch on invalidation', async () => {
+  queryClient.setQueryDefaults(['live-scans'], { retry: 3, retryDelay: 0 });
+  const load = vi.fn().mockRejectedValue(new Error('offline'));
+  render(pager(load));
+  await screen.findByRole('alert');
+  await act(async () => { await queryClient.invalidateQueries(); });
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
+});
+
 it('keeps confirmed rows/range during pending and errors; duplicate click cannot double request; retry targets failed cursor', async () => {
   const slow = deferred<TestPage>();
   const load = vi
@@ -156,7 +259,7 @@ it.each(['version', 'total'])(
     render(pager(load));
     await screen.findByText('private-old');
     fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
-    await screen.findByText(/Прежние данные и cursors сброшены/);
+    await screen.findByText(/Прежние данные скрыты; повторите загрузку с первой страницы/);
     expect(screen.queryByText('private-old')).toBeNull();
     expect(screen.queryByText('untrusted-new')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку CVE' }));
@@ -343,44 +446,139 @@ function sections(
     />
   );
 }
+function batch4ControlTransport() {
+  const transport = fixtureTransport();
+  const { vuln, sbom, results } = transport;
+  transport.vuln = vi.fn(async (...args: Parameters<ScanTransport['vuln']>): Promise<ScanVuln> => {
+    const page = await vuln(...args);
+    return { ...page, page: { ...page.page!, sort: args[3]?.sort ?? 'severity:desc', filters: { severity: args[3]?.severity ?? null } } };
+  });
+  transport.results = vi.fn(async (...args: Parameters<ScanTransport['results']>): Promise<ScanResults> => {
+    const page = await results(...args);
+    return { ...page, page: { ...page.page!, sort: args[3]?.sort ?? 'ruleId:asc', filters: { ruleId: args[3]?.ruleId ?? null, linePresence: args[3]?.linePresence ?? null } } };
+  });
+  transport.sbom = vi.fn(async (...args: Parameters<ScanTransport['sbom']>): Promise<ScanSbom> => {
+    const page = await sbom(...args);
+    if (page.outcome !== 'checked') throw new Error('Expected checked SBOM fixture');
+    return { ...page, ...(args[3]?.name ? { components: page.components.map((row, index) => ({ ...row, name: `${args[3]!.name}-${index}` })) } : {}),
+      page: { ...page.page!, sort: args[3]?.sort ?? 'name:asc', filters: { ecosystem: args[3]?.ecosystem ?? null, name: args[3]?.name ?? null } } };
+  });
+  return transport;
+}
+
+async function openBatch4Controls(user: ReturnType<typeof userEvent.setup>, label: 'CVE' | 'Secrets' | 'SBOM') {
+  const pageLabel = label === 'CVE' ? 'Уязвимости' : label === 'Secrets' ? 'Возможные секреты' : 'Пакеты';
+  const region = label === 'SBOM' ? screen.getByLabelText('Пакеты SBOM')
+    : screen.getByRole('region', { name: label === 'CVE' ? 'Результаты Уязвимости' : 'Возможные секреты' });
+  if (region instanceof HTMLDetailsElement && !region.open)
+    await user.click(within(region).getByText('Состав образа · найти пакет и его версию', { selector: 'summary' }));
+  const summary = within(region).getByText(`Фильтры и сортировка · ${pageLabel}`, { selector: 'summary' });
+  if (!summary.closest('details')?.open) await user.click(summary);
+  return { region, pageLabel };
+}
+
+it.each(['CVE', 'Secrets', 'SBOM'] as const)('batch4 regression: %s sort query reset keeps the exact focused control while resetting pager to first cursor', async label => {
+  const user = userEvent.setup();
+  const transport = batch4ControlTransport();
+  render(sections(transport));
+  const { region, pageLabel } = await openBatch4Controls(user, label);
+  const load = label === 'CVE' ? transport.vuln : label === 'Secrets' ? transport.results : transport.sbom;
+  await within(region).findByText('Страница 1');
+  await user.click(within(region).getByRole('button', { name: `Далее · ${pageLabel}` }));
+  await within(region).findByText('Страница 2');
+  const select = within(region).getByRole('combobox', { name: `Сортировка · ${pageLabel}` });
+  await user.selectOptions(select, label === 'CVE' ? 'severity:asc' : label === 'Secrets' ? 'ruleId:desc' : 'name:desc');
+  expect(within(region).getByRole('combobox', { name: `Сортировка · ${pageLabel}` })).toBe(select);
+  expect(document.activeElement).toBe(select);
+  await within(region).findByText('Страница 1');
+  expect(vi.mocked(load).mock.calls.map(call => call[1])).toEqual([undefined, 'paging:25/+==', undefined]);
+  expect(within(region).getByRole('button', { name: `Назад · ${pageLabel}` })).toBeDisabled();
+  expect(queryClient.getQueryCache().getAll().some(query => query.queryKey.includes('report-page'))).toBe(false);
+});
+
+it('batch4 regression: SBOM unapplied draft survives sort/query reset without implicit apply, but not owner-scope replacement', async () => {
+  const user = userEvent.setup();
+  const transport = batch4ControlTransport();
+  const view = render(sections(transport));
+  const { region } = await openBatch4Controls(user, 'SBOM');
+  await within(region).findByText('Страница 1');
+  const input = within(region).getByRole('textbox', { name: 'Название пакета' });
+  await user.type(input, 'unapplied-package');
+  expect(transport.sbom).toHaveBeenCalledTimes(1);
+  const select = within(region).getByRole('combobox', { name: 'Сортировка · Пакеты' });
+  await user.selectOptions(select, 'name:desc');
+  await waitFor(() => expect(transport.sbom).toHaveBeenCalledTimes(2));
+  await within(region).findByText('Страница 1');
+  expect(within(region).getByRole('textbox', { name: 'Название пакета' })).toBe(input);
+  expect(input).toHaveValue('unapplied-package');
+  expect(document.activeElement).toBe(select);
+  expect(vi.mocked(transport.sbom).mock.calls[1][1]).toBeUndefined();
+  expect(vi.mocked(transport.sbom).mock.calls[1][3]).toMatchObject({ sort: 'name:desc', name: null });
+  await user.click(within(region).getByRole('button', { name: 'Найти пакет' }));
+  await waitFor(() => expect(transport.sbom).toHaveBeenCalledTimes(3));
+  expect(vi.mocked(transport.sbom).mock.calls[2][3]).toMatchObject({ sort: 'name:desc', name: 'unapplied-package' });
+  await within(region).findByText('Страница 1');
+  view.rerender(sections(transport, status, ['live-scans', 2, 'other-owner']));
+  const { region: freshRegion } = await openBatch4Controls(user, 'SBOM');
+  const fresh = within(freshRegion).getByRole('textbox', { name: 'Название пакета' });
+  expect(fresh).not.toBe(input); expect(fresh).toHaveValue('');
+});
+
 it('CVE/Secrets/SBOM paginate independently and category visibility preserves each cursor without extra GET', async () => {
   const transport = fixtureTransport();
+  const fetchQuery = vi.spyOn(queryClient, 'fetchQuery');
   const view = render(sections(transport));
   await screen.findByText('CVE-2026-1234');
   await screen.findByText('ID: secret-first');
   await screen.findByText('sbom-first');
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
   await screen.findByText('CVE-2026-1235');
   expect(
-    within(screen.getByRole('region', { name: 'Результаты Secrets' })).getByText('Страница 1'),
+    within(screen.getByRole('region', { name: 'Возможные секреты' })).getByText('Страница 1'),
   ).toBeTruthy();
-  expect(within(screen.getByRole('region', { name: 'Пакеты SBOM' })).getByText('Страница 1')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets' }));
+  expect(within(screen.getByLabelText('Пакеты SBOM')).getByText('Страница 1')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Возможные секреты' }));
   await screen.findByText('ID: secret-second');
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · SBOM' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Пакеты' }));
   await screen.findByText('sbom-second');
   view.rerender(sections(transport, status, ['live-scans', 1, 'alice'], 'secret'));
-  expect(screen.queryByRole('region', { name: 'Результаты CVE' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Результаты Уязвимости' })).toBeNull();
   view.rerender(sections(transport));
   expect(screen.getByText('CVE-2026-1235')).toBeTruthy();
   expect(transport.vuln).toHaveBeenCalledTimes(2);
-  for (const label of ['CVE', 'Secrets', 'SBOM']) {
+  for (const label of ['Уязвимости', 'Возможные секреты', 'Пакеты']) {
     expect(screen.getByText(`Совпадений во всём отчёте ${label}: ${reportTotal}`)).toBeTruthy();
-    expect(screen.getByText(`Полный итог ${label}: ${reportTotal}`)).toBeTruthy();
+    expect(screen.queryByText(`Полный итог ${label}: ${reportTotal}`)).toBeNull();
   }
   for (const method of [transport.vuln, transport.results, transport.sbom]) {
     expect(vi.mocked(method).mock.calls.map(call => call[1])).toEqual([undefined, 'paging:25/+==']);
     expect(vi.mocked(method).mock.calls[0][3]).toMatchObject({ view: 'report-v1', limit: 25 });
   }
+  const identity = JSON.stringify([false, ['live-scans', 1, 'alice'], status.scanId, status.state,
+    status.digest, status.platform, status.imageReference, status.updatedAt, status.checks, status.perCheck]);
+  const normalized = {
+    vuln: { view: 'report-v1', limit: 25, sort: 'severity:desc', filters: { severity: null } },
+    sbom: { view: 'report-v1', limit: 25, sort: 'name:asc', filters: { ecosystem: null, name: null } },
+    secret: { view: 'report-v1', limit: 25, sort: 'ruleId:asc', filters: { ruleId: null, linePresence: null } },
+  };
+  for (const dataset of ['vuln', 'secret', 'sbom'] as const) {
+    expect(fetchQuery.mock.calls.map(([options]) => options.queryKey).filter(key => key[5] === dataset)).toEqual([
+      ...[null, 'paging:25/+=='].map(cursor => ['live-scans', 1, 'alice', 'report-page', status.scanId,
+        dataset, normalized[dataset], `${identity}:${dataset}`, cursor]),
+    ]);
+  }
+  expect(queryClient.getQueryCache().getAll()).toEqual([]);
 });
 it.each(['digest', 'platform', 'checkedAt', 'scope', 'scanId', 'count'])(
   'actual report sections reset paging immediately on %s change',
   async (field) => {
     const transport = fixtureTransport();
+    const fetchQuery = vi.spyOn(queryClient, 'fetchQuery');
     const view = render(sections(transport));
     await screen.findByText('CVE-2026-1234');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
     await screen.findByText('CVE-2026-1235');
+    const previousKey = fetchQuery.mock.calls[0][0].queryKey;
     const slow = deferred<ScanVuln>();
     vi.mocked(transport.vuln).mockImplementationOnce(() => slow.promise);
     const updated = {
@@ -411,6 +609,13 @@ it.each(['digest', 'platform', 'checkedAt', 'scope', 'scanId', 'count'])(
     );
     expect(screen.queryByText('CVE-2026-1235')).toBeNull();
     expect(vi.mocked(transport.vuln).mock.calls[2][1]).toBeUndefined();
+    const currentKey = queryClient.getQueryCache().getAll().find(query => query.state.fetchStatus === 'fetching')!.queryKey;
+    expect(currentKey.slice(0, 3)).toEqual(field === 'scope' ? ['live-scans', 2, 'bob'] : ['live-scans', 1, 'alice']);
+    expect(currentKey[4]).toBe(updated.scanId);
+    expect(currentKey[5]).toBe('vuln');
+    expect(currentKey[6]).toEqual(previousKey[6]);
+    expect(currentKey[7]).not.toEqual(previousKey[7]);
+    expect(currentKey[8]).toBeNull();
   },
 );
 it.each(['image', 'platform', 'checkedAt', 'findingCount'])(
@@ -423,10 +628,10 @@ it.each(['image', 'platform', 'checkedAt', 'findingCount'])(
       return { ...page, [field]: field === 'findingCount' ? 99 : 'wrong' } as ScanVuln;
     };
     render(sections(transport));
-    const cve = within(screen.getByRole('region', { name: 'Результаты CVE' }));
-    await cve.findByText(/Идентичность или версия отчёта изменилась/);
+    const cve = within(screen.getByRole('region', { name: 'Результаты Уязвимости' }));
+    await cve.findByText(/Не удалось подтвердить, что ответ относится к текущему отчёту/);
     expect(cve.queryByText('CVE-2026-1234')).toBeNull();
-    expect(cve.queryByText(`Полный итог CVE: ${reportTotal}`)).toBeNull();
+    expect(cve.queryByText(`Полный итог Уязвимости: ${reportTotal}`)).toBeNull();
     expect(cve.queryByRole('navigation')).toBeNull();
   },
 );
@@ -449,11 +654,11 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
     page: reportPage('sbom', 0, 0, null),
   });
   render(sections(transport));
-  await screen.findByText(/CVE не поддерживаются/);
-  await screen.findByText(/SBOM не проверен/);
+  await screen.findByText(/Проверка не поддерживается:/);
+  await screen.findByText(/Состав образа не проверен/);
   expect(screen.queryByText(/(Совпадений во всём отчёте|Полный итог) (CVE|SBOM): 0/)).toBeNull();
-  expect(screen.getByText('Число CVE неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
-  expect(screen.getByText('Число SBOM неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
+  expect(screen.getByText('Число Уязвимости неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
+  expect(screen.getByText('Число Пакеты неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
   cleanup();
   const zero = fixtureTransport();
   zero.vuln = async () => ({
@@ -474,14 +679,15 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
       perCheck: { ...status.perCheck, vuln: { ...status.perCheck!.vuln!, findingCount: 0 } },
     }),
   );
-  await screen.findByText('Совпадений во всём отчёте CVE: 0');
-  expect(screen.getByText('Полный итог CVE: 0')).toBeTruthy();
-  expect(screen.getByText(/0 CVE в выполненной проверенной области/)).toBeTruthy();
+  await screen.findByText('Совпадений во всём отчёте Уязвимости: 0');
+  expect(screen.getByText('Совпадений во всём отчёте Уязвимости: 0')).toBeTruthy();
+  expect(screen.getByText(/Находок в проверенной области: 0/)).toBeTruthy();
 });
 it('ScanDetail scope remount aborts a late private page and never stores report rows in QueryCache', async () => {
   const transport = fixtureTransport();
   const slow = deferred<ScanVuln>();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cancel = vi.spyOn(client, 'cancelQueries');
   const renderPage = (subject: string) => (
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[`/scans/${status.scanId}`]}>
@@ -496,10 +702,15 @@ it('ScanDetail scope remount aborts a late private page and never stores report 
   const view = render(renderPage('alice'));
   await screen.findByText('CVE-2026-1234');
   vi.mocked(transport.vuln).mockImplementationOnce(() => slow.promise);
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
   const signal = vi.mocked(transport.vuln).mock.calls[1][2]!;
+  const oldKey = client.getQueryCache().getAll().find(query => query.queryKey.includes('report-page'))!.queryKey;
+  expect(oldKey.slice(0, 6)).toEqual(['live-scans', 1, 'alice', 'report-page', status.scanId, 'vuln']);
+  expect(oldKey.at(-1)).toBe('paging:25/+==');
   view.rerender(renderPage('bob'));
   expect(signal.aborted).toBe(true);
+  expect(cancel).toHaveBeenCalledWith({ queryKey: oldKey, exact: true });
+  expect(client.getQueryState(oldKey)).toBeUndefined();
   expect(screen.queryByText('CVE-2026-1234')).toBeNull();
   await waitFor(() => expect(transport.vuln).toHaveBeenCalledTimes(3));
   expect(
@@ -518,6 +729,7 @@ it('ScanDetail scope remount aborts a late private page and never stores report 
     }),
   );
   await screen.findByText('CVE-2026-1234');
+  expect(client.getQueryCache().getAll().some(query => query.queryKey.includes('report-page'))).toBe(false);
 });
 
 it.each(['Скан недоступен', 'Сессия изменилась: ответ отклонён'])(
@@ -545,7 +757,7 @@ it('rejects changed row identity on a freshly reloaded previous page', async () 
   fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
   await screen.findByText('second');
   fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
-  await screen.findByText(/Прежние данные и cursors сброшены/);
+  await screen.findByText(/Прежние данные скрыты; повторите загрузку с первой страницы/);
   expect(screen.queryByText('second')).toBeNull();
   expect(screen.queryByText('changed-first')).toBeNull();
 });
@@ -572,7 +784,7 @@ it.each(['row IDs', 'continuation'] as const)(
     fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
     await screen.findByText('first');
     fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
-    await screen.findByText(/Прежние данные и cursors сброшены/);
+    await screen.findByText(/Прежние данные скрыты; повторите загрузку с первой страницы/);
     expect(screen.queryByText('first')).toBeNull();
     expect(screen.queryByText('second')).toBeNull();
     expect(screen.queryByText('changed-second')).toBeNull();
@@ -680,10 +892,10 @@ it('rejects initial Secrets scanner mismatch against confirmed status, retry sta
     .mockResolvedValueOnce(secretPage('0.69.2'))
     .mockResolvedValueOnce(secretPage('0.69.3'));
   render(sections(transport, secretStatus('0.69.3')));
-  await screen.findByText(/Прежние данные и cursors сброшены/);
+  await screen.findByText(/Прежние данные скрыты; повторите загрузку с первой страницы/);
   expect(screen.queryByText('ID: scanner-0.69.2')).toBeNull();
-  expect(screen.queryByText('Полный итог Secrets: 1')).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Secrets' }));
+  expect(screen.queryByText('Полный итог Возможные секреты: 1')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Возможные секреты' }));
   await screen.findByText('ID: scanner-0.69.3');
   expect(vi.mocked(transport.results).mock.calls.map((call) => call[1])).toEqual([undefined, undefined]);
 });
@@ -698,10 +910,10 @@ it('rejects stale Secrets scanner after status-key reset and never republishes o
   await screen.findByText('ID: scanner-0.69.2');
   view.rerender(sections(transport, secretStatus('0.69.3')));
   expect(screen.queryByText('ID: scanner-0.69.2')).toBeNull();
-  await screen.findByText(/Прежние данные и cursors сброшены/);
+  await screen.findByText(/Прежние данные скрыты; повторите загрузку с первой страницы/);
   expect(screen.queryByText('ID: scanner-0.69.2')).toBeNull();
-  expect(screen.queryByText('Полный итог Secrets: 1')).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Secrets' }));
+  expect(screen.queryByText('Полный итог Возможные секреты: 1')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Возможные секреты' }));
   await screen.findByText('ID: scanner-0.69.3');
   expect(vi.mocked(transport.results).mock.calls.map((call) => call[1])).toEqual([
     undefined,
@@ -740,15 +952,15 @@ it.each([undefined, null, 0])(
       />,
     );
     if (findingCount === 0) {
-      await screen.findByText('Подтверждённый итог Secrets: 0');
-      expect(screen.getByText(/0 находок в выполненной проверенной области Secrets/)).toBeTruthy();
-      expect(screen.queryByText('Итог Secrets неизвестен')).toBeNull();
-      expect(screen.queryByText(/это не подтверждает нулевой итог/)).toBeNull();
+      await screen.findByText('Подтверждённый итог Возможные секреты: 0');
+      expect(screen.getByText(/В выполненной проверке секретов находок нет/)).toBeTruthy();
+      expect(screen.queryByText('Итог Возможные секреты неизвестен')).toBeNull();
+      expect(screen.queryByText(/это не значит, что их нет во всём отчёте/)).toBeNull();
     } else {
-      await screen.findByText('Итог Secrets неизвестен');
-      expect(screen.getByText(/это не подтверждает нулевой итог/)).toBeTruthy();
+      await screen.findByText('Итог Возможные секреты неизвестен');
+      expect(screen.getByText(/это не значит, что их нет во всём отчёте/)).toBeTruthy();
       expect(screen.queryByText(/0 находок в выполненной проверенной области/)).toBeNull();
-      expect(screen.queryByText('Подтверждённый итог Secrets: 0')).toBeNull();
+      expect(screen.queryByText('Подтверждённый итог Возможные секреты: 0')).toBeNull();
     }
   },
 );
@@ -893,33 +1105,33 @@ it.each(['Back', 'forward'] as const)(
         .mockResolvedValueOnce(first);
       const view = render(sections(transport, { ...status, checks: ['vuln'] }));
       await screen.findByText('c4-package-0');
-      fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
       await screen.findByText('c4-package-1');
       if (direction === 'forward') {
-        fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Назад · Уязвимости' }));
         await screen.findByText('c4-package-0');
       }
       const retainedIndex = direction === 'Back' ? 1 : 0;
       const retainedRow = c4Page(retainedIndex).findings[0];
-      const before = screen.getByRole('list', { name: 'Находки CVE' }).textContent;
+      const before = screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent;
       fireEvent.click(
-        screen.getByRole('button', { name: direction === 'Back' ? 'Назад · CVE' : 'Далее · CVE' }),
+        screen.getByRole('button', { name: direction === 'Back' ? 'Назад · Уязвимости' : 'Далее · Уязвимости' }),
       );
-      await screen.findByText(/Содержимое посещённой страницы изменилось/);
-      expect(screen.getByRole('list', { name: 'Находки CVE' }).textContent, field).toBe(before);
+      await screen.findByText(/Содержимое отчёта изменилось/);
+      expect(screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent, field).toBe(before);
       expect(screen.getByText(retainedRow.packageName), field).toBeTruthy();
       expect(screen.getByText(retainedIndex === 0 ? 'Строки 1–25' : 'Строки 26–26'), field).toBeTruthy();
       expect(screen.getByText(`Страница ${retainedIndex + 1}`), field).toBeTruthy();
-      expect(screen.getByText(/История cursors сброшена/), field).toBeTruthy();
+      expect(screen.getByText(/Сохранён прежний подтверждённый снимок/), field).toBeTruthy();
       expect(screen.queryByText('LOW', { exact: true }), field).toBeNull();
       expect(screen.queryByText('1.1', { exact: true }), field).toBeNull();
-      expect(screen.getByRole('button', { name: 'Назад · CVE' }).hasAttribute('disabled')).toBe(true);
-      expect(screen.getByRole('button', { name: 'Далее · CVE' }).hasAttribute('disabled')).toBe(true);
-      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку CVE' }));
-      await screen.findByText(/Не удалось подтвердить страницу CVE/);
+      expect(screen.getByRole('button', { name: 'Назад · Уязвимости' }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('button', { name: 'Далее · Уязвимости' }).hasAttribute('disabled')).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
+      await screen.findByText(/Не удалось подтвердить страницу Уязвимости/);
       expect(screen.getByText(/Показана предыдущая подтверждённая страница/)).toBeTruthy();
-      expect(screen.getByRole('list', { name: 'Находки CVE' }).textContent).toBe(before);
-      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку CVE' }));
+      expect(screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent).toBe(before);
+      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
       await screen.findByText('Страница 1');
       await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
       expect(
@@ -928,7 +1140,7 @@ it.each(['Back', 'forward'] as const)(
           .mock.calls.slice(-2)
           .map((call) => call[1]),
       ).toEqual([undefined, undefined]);
-      expect(screen.getByRole('button', { name: 'Далее · CVE' }).hasAttribute('disabled')).toBe(false);
+      expect(screen.getByRole('button', { name: 'Далее · Уязвимости' }).hasAttribute('disabled')).toBe(false);
       view.unmount();
     }
   },
@@ -949,14 +1161,14 @@ it('C4 accepts benign stable normalized content on Back and forward replay with 
     .mockResolvedValueOnce(reorderedSecond);
   render(sections(transport, { ...status, checks: ['vuln'] }));
   await screen.findByText('c4-package-0');
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
   await screen.findByText('c4-package-1');
-  fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Назад · Уязвимости' }));
   await screen.findByText('Строки 1–25');
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
   await screen.findByText('Строки 26–26');
   expect(screen.queryByRole('alert')).toBeNull();
-  expect(screen.getByText('CRITICAL', { exact: true })).toBeTruthy();
+  expect(screen.getByText('Критическая оценка', { exact: true })).toBeTruthy();
   expect(screen.getByText('9.0', { exact: true })).toBeTruthy();
   expect(vi.mocked(transport.vuln).mock.calls.map((call) => call[1])).toEqual([
     undefined,
@@ -1023,23 +1235,23 @@ it.each(['Back', 'forward'] as const)(
       vi.mocked(transport.results).mockResolvedValueOnce(first);
       const view = render(sections(transport, { ...status, checks: ['secret'] }));
       await screen.findByText('ID: same-first');
-      fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Далее · Возможные секреты' }));
       await screen.findByText('ID: same-second');
       if (direction === 'forward') {
-        fireEvent.click(screen.getByRole('button', { name: 'Назад · Secrets' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Назад · Возможные секреты' }));
         await screen.findByText('ID: same-first');
       }
       fireEvent.click(
-        screen.getByRole('button', { name: direction === 'Back' ? 'Назад · Secrets' : 'Далее · Secrets' }),
+        screen.getByRole('button', { name: direction === 'Back' ? 'Назад · Возможные секреты' : 'Далее · Возможные секреты' }),
       );
-      await screen.findByText(/Содержимое посещённой страницы изменилось/);
+      await screen.findByText(/Содержимое отчёта изменилось/);
       expect(screen.queryByText(/changed-content/), field).toBeNull();
       expect(screen.queryByText('Строка 123'), field).toBeNull();
       expect(
         screen.getByText(direction === 'Back' ? 'ID: same-second' : 'ID: same-first'),
         field,
       ).toBeTruthy();
-      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Secrets' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Возможные секреты' }));
       await screen.findByText('Страница 1');
       await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
       expect(vi.mocked(transport.results).mock.calls.at(-1)?.[1]).toBeUndefined();
@@ -1062,16 +1274,16 @@ it.each(['access loss', 'scope reset'] as const)(
       .mockResolvedValueOnce(changed);
     const view = render(sections(transport, { ...status, checks: ['vuln'] }));
     await screen.findByText('c4-package-0');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
     await screen.findByText('c4-package-1');
-    fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE' }));
-    await screen.findByText(/Содержимое посещённой страницы изменилось/);
+    fireEvent.click(screen.getByRole('button', { name: 'Назад · Уязвимости' }));
+    await screen.findByText(/Содержимое отчёта изменилось/);
     expect(screen.getByText('c4-package-1')).toBeTruthy();
     if (boundary === 'access loss') {
       vi.mocked(transport.vuln).mockRejectedValueOnce(new ScanAccessError(403));
-      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку CVE' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
       await screen.findByText(/Доступ к отчёту утрачен/);
-      expect(screen.queryByRole('button', { name: 'Повторить загрузку CVE' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Повторить загрузку Уязвимости' })).toBeNull();
     } else {
       vi.mocked(transport.vuln).mockImplementationOnce(() => deferred<ScanVuln>().promise);
       view.rerender(sections(transport, { ...status, checks: ['vuln'] }, ['live-scans', 2, 'bob']));
@@ -1092,10 +1304,9 @@ it.each(['sbom', 'results'] as const)(
       .mockRejectedValueOnce(new Error('offline'))
       .mockImplementation(original);
     render(sections(transport));
-    const label = kind === 'sbom' ? 'SBOM' : 'Secrets';
-    const region = screen.getByRole('region', {
-      name: kind === 'sbom' ? 'Пакеты SBOM' : 'Результаты Secrets',
-    });
+    const label = kind === 'sbom' ? 'Пакеты' : 'Возможные секреты';
+    const region = kind === 'sbom' ? screen.getByLabelText('Пакеты SBOM')
+      : screen.getByRole('region', { name: 'Возможные секреты' });
     await within(region).findByText('Строки 1–25');
     fireEvent.click(within(region).getByRole('button', { name: 'Далее · ' + label }));
     await within(region).findByRole('alert');

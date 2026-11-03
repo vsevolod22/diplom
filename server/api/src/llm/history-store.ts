@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, lstatSync, openSync, realpathSync, statfsSync } from 'node:fs';
+import { closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, realpathSync, statfsSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { HttpException } from '@nestjs/common';
@@ -11,9 +11,12 @@ import { SUMMARY_STORAGE, decodeSummaryRecord, summaryRecordHash, summaryRecordM
   type SummaryRow } from './summary-record.js';
 import type { SummaryResponse } from './summary-result-cache.js';
 import { HISTORY_OWNER_CAPACITY, assertOwnerCapacity, historyOccupancy } from './history-capacity.js';
+import { SUMMARY_RESERVATION_MAX_MS, decodeSummarySlot, padSummary, summaryReservationContent } from './summary-reservation.js';
 
 const APPLICATION = 1145655602;
-export const HISTORY_SCHEMA_VERSION = 4;
+export const HISTORY_SCHEMA_VERSION = 5;
+const ORDINARY_SUMMARY_SCHEMA_VERSION = 4;
+export type SummaryReservationMigrationConfig = Readonly<{ path: string }>;
 const summarySchema = `CREATE TABLE llm_summary(
   scope TEXT PRIMARY KEY CHECK(length(scope)=64),
   content TEXT NOT NULL CHECK(length(CAST(content AS BLOB))<=${SUMMARY_STORAGE.entryBytes}),
@@ -39,10 +42,12 @@ export class HistoryStore {
     this.db = new Database(this.path, { timeout: HISTORY.busyMs, fileMustExist: true });
     try {
       const application = this.db.pragma('application_id', { simple: true }), version = this.db.pragma('user_version', { simple: true });
-      if (initialize ? application !== 0 || version !== 0 : application !== APPLICATION || version !== 3 && version !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
-      this.db.pragma('page_size = 4096');
-      if (this.db.pragma('page_size', { simple: true }) !== 4096) return historyUnavailable();
-      this.db.pragma('journal_mode = DELETE'); this.db.pragma('synchronous = FULL'); this.db.pragma('journal_size_limit = 0');
+      if (initialize ? application !== 0 || version !== 0 : application !== APPLICATION ||
+                version !== 3 && version !== ORDINARY_SUMMARY_SCHEMA_VERSION && version !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
+      if (initialize) { this.db.pragma('page_size = 4096'); this.db.pragma('journal_mode = DELETE'); }
+      if (this.db.pragma('page_size', { simple: true }) !== 4096 ||
+          this.db.pragma('journal_mode', { simple: true }) !== 'delete') return historyUnavailable();
+      this.db.pragma('synchronous = FULL'); this.db.pragma('journal_size_limit = 0');
       this.db.pragma('temp_store = MEMORY'); this.db.pragma('cache_size = -1024'); this.db.pragma('foreign_keys = ON');
       this.db.pragma(`max_page_count = ${HISTORY.dbBytes / 4096}`);
       if (initialize) this.db.transaction(() => this.db.exec(`
@@ -63,8 +68,7 @@ export class HistoryStore {
             const spaces = (this.db.prepare('SELECT count(*) AS n FROM history_completion_space').get() as { n: number }).n;
             const pending = (this.db.prepare("SELECT count(*) AS n FROM history_head WHERE json_extract(content,'$.pending') IS NOT NULL").get() as { n: number }).n;
             if (spaces !== pending) return historyUnavailable();
-      if (this.schemaVersion() === HISTORY_SCHEMA_VERSION)
-        for (const row of this.db.prepare('SELECT scope,content,content_hash FROM llm_summary').all() as SummaryRow[]) decodeSummaryRecord(row);
+      if (this.schemaVersion() !== 3) this.validateSummaryRows();
     } catch (error) { this.db.close(); if (error instanceof HttpException) throw error; return historyUnavailable(); }
   }
   close() { this.db.close(); }
@@ -85,11 +89,12 @@ export class HistoryStore {
   }
   private schemaVersion(): number {
     const version = this.db.pragma('user_version', { simple: true });
-    if (this.db.pragma('application_id', { simple: true }) !== APPLICATION || version !== 3 && version !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
+    if (this.db.pragma('application_id', { simple: true }) !== APPLICATION ||
+            version !== 3 && version !== ORDINARY_SUMMARY_SCHEMA_VERSION && version !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
     return version as number;
   }
   private summarySafety() {
-    if (this.schemaVersion() !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
+    if (this.schemaVersion() === 3) return historyUnavailable();
     const totals = this.db.prepare('SELECT count(*) AS entries,coalesce(sum(length(CAST(content AS BLOB))),0) AS bytes FROM llm_summary')
       .get() as { entries: number; bytes: number };
     if (!Number.isSafeInteger(totals.entries) || !Number.isSafeInteger(totals.bytes) ||
@@ -98,7 +103,7 @@ export class HistoryStore {
   }
   private safety() {
     this.fileSafety();
-    if (this.schemaVersion() === HISTORY_SCHEMA_VERSION) this.summarySafety();
+    if (this.schemaVersion() !== 3) this.summarySafety();
     const pages = this.db.pragma('page_count', { simple: true }) as number;
     const heads = (this.db.prepare('SELECT count(*) AS n FROM history_head').get() as { n: number }).n;
     if (!Number.isSafeInteger(pages) || pages * 4096 > HISTORY.dbBytes || heads > HISTORY.heads) return historyCapacity();
@@ -125,21 +130,91 @@ export class HistoryStore {
   // epoch/revision or incarnation is rewritten. DDL and version commit together.
   migrateSummarySchema(): void {
     this.transaction(() => {
-      if (this.schemaVersion() === HISTORY_SCHEMA_VERSION) { this.summarySafety(); return; }
+      const version = this.schemaVersion();
+      if (version === ORDINARY_SUMMARY_SCHEMA_VERSION) { this.validateSummaryRows(); return; }
+      if (version !== 3) return historyUnavailable();
       this.db.exec(summarySchema);
-      this.db.pragma(`user_version = ${HISTORY_SCHEMA_VERSION}`);
+      this.db.pragma(`user_version = ${ORDINARY_SUMMARY_SCHEMA_VERSION}`);
       this.summarySafety();
     });
   }
-  requireSummarySchema(): void { this.transaction(() => { this.summarySafety(); }); }
+  // Explicit quiesced operator action. Never invoked by constructors or runtime.
+  static migrateSummaryReservations(config: SummaryReservationMigrationConfig): void {
+    if (!config || typeof config.path !== 'string' || Object.keys(config).length !== 1) return historyUnavailable();
+    const store = new HistoryStore(config.path);
+    try {
+      store.transaction(() => {
+        store.validateReservationMigration();
+        if (store.schemaVersion() === ORDINARY_SUMMARY_SCHEMA_VERSION)
+          store.db.pragma(`user_version = ${HISTORY_SCHEMA_VERSION}`);
+        store.validateReservationMigration();
+      });
+      store.transaction(() => store.validateReservationMigration());
+      for (const path of [store.path, dirname(store.path)]) {
+        store.fileSafety();
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try { fsyncSync(fd); } finally { closeSync(fd); }
+      }
+    } finally { store.close(); }
+  }
+  private validateReservationMigration(): void {
+    const foreignKeys = this.db.pragma('foreign_key_check');
+    if (this.schemaVersion() === 3 || this.db.pragma('integrity_check', { simple: true }) !== 'ok' ||
+        !Array.isArray(foreignKeys) || foreignKeys.length !== 0) return historyUnavailable();
+    const expected = new Map([
+      ['history_meta', 'CREATE TABLE history_meta(id INTEGER PRIMARY KEY CHECK(id=1),incarnation TEXT NOT NULL) STRICT'],
+      ['history_head', 'CREATE TABLE history_head(scope TEXT PRIMARY KEY,epoch TEXT NOT NULL,revision INTEGER NOT NULL,content TEXT NOT NULL CHECK(length(CAST(content AS BLOB))<=524288),content_hash TEXT NOT NULL) STRICT'],
+      ['history_completion_space', 'CREATE TABLE history_completion_space(scope TEXT PRIMARY KEY REFERENCES history_head(scope),padding BLOB NOT NULL CHECK(length(padding)=102400)) STRICT'],
+      ['llm_summary', summarySchema],
+    ]);
+    const normalize = (sql: string) => sql.replace(/\s+/g, '').replace(/;$/, '').toLowerCase();
+    const objects = this.db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_master').all() as
+      { type: string; name: string; tbl_name: string; sql: string | null }[];
+    if (objects.length !== 7) return historyUnavailable();
+    for (const [name, sql] of expected) {
+      const table = objects.find(row => row.type === 'table' && row.name === name && row.tbl_name === name);
+      if (!table?.sql || normalize(table.sql) !== normalize(sql)) return historyUnavailable();
+      if (name !== 'history_meta' && !objects.some(row => row.type === 'index' && row.name === `sqlite_autoindex_${name}_1` &&
+          row.tbl_name === name && row.sql === null)) return historyUnavailable();
+    }
+    if ((this.db.prepare('SELECT count(*) AS n FROM history_meta').get() as { n: number }).n !== 1) return historyUnavailable();
+    this.validateHistoryRows();
+    this.validateSummaryRows();
+  }
+  private decodeSummary(row: SummaryRow): ReturnType<typeof decodeSummarySlot> {
+    if (this.schemaVersion() === HISTORY_SCHEMA_VERSION) return decodeSummarySlot(row);
+    const record = decodeSummaryRecord(row);
+    return { scanId: record.value.scanId, record };
+  }
+  private validateSummaryRows(): void {
+    this.summarySafety();
+    for (const row of this.db.prepare('SELECT scope,content,content_hash FROM llm_summary').all() as SummaryRow[]) this.decodeSummary(row);
+  }
+  private validateHistoryRows(): void {
+    let pending = 0;
+    for (const row of this.db.prepare('SELECT scope FROM history_head').all() as { scope: string }[]) {
+      if (!/^[a-f0-9]{64}$/.test(row.scope)) return historyUnavailable();
+      if (this.read(row.scope).pending) pending++;
+    }
+    if ((this.db.prepare('SELECT count(*) AS n FROM history_completion_space').get() as { n: number }).n !== pending)
+      return historyUnavailable();
+  }
+  requireSummarySchema(): void { this.transaction(() => this.validateSummaryRows()); }
+  private reservationSafety(): void {
+    if (this.schemaVersion() !== HISTORY_SCHEMA_VERSION) return historyUnavailable();
+    this.summarySafety();
+  }
+  requireSummaryReservationSchema(): void {
+    this.transaction(() => { this.reservationSafety(); this.validateSummaryRows(); });
+  }
   private summaryCapacity(owner: string, scope: string, size: number) {
     const totals = this.summarySafety();
     const old = this.db.prepare('SELECT scope,content,content_hash FROM llm_summary WHERE scope=?').get(scope) as SummaryRow | undefined;
-    if (old) decodeSummaryRecord(old);
+    if (old) this.decodeSummary(old);
     if (size > SUMMARY_STORAGE.entryBytes || !old && totals.entries >= SUMMARY_STORAGE.entries ||
         totals.bytes - (old ? Buffer.byteLength(old.content) : 0) + size > SUMMARY_STORAGE.bytes) return historyCapacity();
     const rows = (this.db.prepare('SELECT scope,content,content_hash FROM llm_summary').all() as SummaryRow[])
-      .map(row => ({ scope: row.scope, scanId: decodeSummaryRecord(row).value.scanId, bytes: Buffer.byteLength(row.content) }));
+      .map(row => ({ scope: row.scope, scanId: this.decodeSummary(row).scanId, bytes: Buffer.byteLength(row.content) }));
     assertOwnerCapacity(owner, scope, size, rows,
       { entries: HISTORY_OWNER_CAPACITY.summaries, bytes: HISTORY_OWNER_CAPACITY.summaryBytes });
   }
@@ -148,13 +223,65 @@ export class HistoryStore {
       ON CONFLICT(scope) DO UPDATE SET content=excluded.content,content_hash=excluded.content_hash`)
       .run(scope, content, summaryRecordHash(scope, content));
   }
+  private summaryRow(scope: string): SummaryRow | undefined {
+    return this.db.prepare('SELECT scope,content,content_hash FROM llm_summary WHERE scope=?').get(scope) as SummaryRow | undefined;
+  }
+  private restoreSummary(scope: string, previous: string | null): void {
+    if (previous === null) this.db.prepare('DELETE FROM llm_summary WHERE scope=?').run(scope);
+    else this.upsertSummary(scope, previous);
+  }
+  // This is a capacity hold, not a quota/receipt. Only explicit same-scope
+  // acquisition may reclaim an expired hold; GET/startup never perform recovery.
+  reserveSummary(owner: string, scanId: string, deadline: number): string {
+    return this.transaction(() => {
+      this.reservationSafety();
+      const now = Date.now();
+      if (!Number.isSafeInteger(deadline) || deadline <= now || deadline > now + SUMMARY_RESERVATION_MAX_MS) return historyConflict();
+      const scope = this.key(owner, scanId);
+      let old = this.summaryRow(scope);
+      const reservation = old && this.decodeSummary(old).reservation;
+      if (reservation) {
+        if (reservation.deadline > now) return historyConflict();
+        this.restoreSummary(scope, reservation.previous);
+        old = this.summaryRow(scope);
+      }
+      this.summaryCapacity(owner, scope, SUMMARY_STORAGE.entryBytes);
+      const id = randomUUID();
+      this.upsertSummary(scope, summaryReservationContent(id, scanId, deadline, old?.content ?? null));
+      this.requireSummaryReservation(scope, scanId, id);
+      return id;
+    });
+  }
+  private requireSummaryReservation(scope: string, scanId: string, id: string): void {
+    this.reservationSafety();
+    const row = this.summaryRow(scope), reservation = row && this.decodeSummary(row).reservation;
+    if (!isId(id) || !reservation || reservation.scanId !== scanId || reservation.id !== id || reservation.deadline <= Date.now()) return historyConflict();
+  }
+  guardSummaryReservation(owner: string, scanId: string, id: string, action: () => void): void {
+    this.transaction(() => {
+      this.requireSummaryReservation(this.key(owner, scanId), scanId, id);
+      const result: unknown = action();
+      if (result !== undefined) return historyUnavailable();
+    });
+  }
+  releaseSummary(owner: string, scanId: string, id: string): void {
+    this.transaction(() => {
+      this.reservationSafety();
+      const scope = this.key(owner, scanId), row = this.summaryRow(scope);
+      const reservation = row && this.decodeSummary(row).reservation;
+      // Late cleanup cannot erase a committed result or somebody else's token.
+      if (reservation?.id === id && reservation.scanId === scanId) this.restoreSummary(scope, reservation.previous);
+    });
+  }
   // Exercise the real main-DB allocation, including row/index/overflow pages,
   // while chat completion padding remains allocated. The opaque probe MUST roll
   // back, restoring any existing summary. This is not a reservation: concurrent
   // history writes can still fill the DB before the final commit.
   assertSummaryWritable(owner: string, scanId: string): void {
     this.transaction(() => {
-      const scope = this.key(owner, scanId);
+      this.reservationSafety();
+      const scope = this.key(owner, scanId), old = this.summaryRow(scope);
+      if (old && this.decodeSummary(old).reservation) return historyConflict();
       this.summaryCapacity(owner, scope, SUMMARY_STORAGE.entryBytes);
       this.upsertSummary(scope, ' '.repeat(SUMMARY_STORAGE.entryBytes));
     }, 'rollback');
@@ -165,20 +292,45 @@ export class HistoryStore {
       const scope = this.key(owner, report.scanId);
       const row = this.db.prepare('SELECT scope,content,content_hash FROM llm_summary WHERE scope=?').get(scope) as SummaryRow | undefined;
       if (!row) return undefined;
-      const record = decodeSummaryRecord(row);
-      if (!summaryRecordMatches(record, report, policy)) return undefined;
+      const record = this.decodeSummary(row).record;
+      if (!record || !summaryRecordMatches(record, report, policy)) return undefined;
       return validateStoredSummary(record.value, report, policy);
     });
   }
-  writeSummary(owner: string, report: ReportContext, policy: SummaryValidationPolicy, value: unknown): SummaryResponse {
+  writeSummary(owner: string, report: ReportContext, policy: SummaryValidationPolicy, value: unknown, reservationId?: string): SummaryResponse {
     const validated = validateStoredSummary(value, report, policy);
     const scope = this.key(owner, report.scanId);
     const content = JSON.stringify({ version: SUMMARY_STORAGE.version, policyVersion: policy.version, value: validated });
-    return this.transaction(() => {
-      this.summaryCapacity(owner, scope, Buffer.byteLength(content));
-      this.upsertSummary(scope, content);
-      return validated;
+    const stored = reservationId === undefined ? content : padSummary(content);
+    this.transaction(() => {
+      this.reservationSafety();
+      if (reservationId !== undefined) {
+        this.requireSummaryReservation(scope, report.scanId, reservationId);
+        const row = this.summaryRow(scope)!;
+        const deadline = this.decodeSummary(row).reservation!.deadline;
+        // Consume only the already admitted equal-size row. No second capacity
+        // admission or insert may compete with the reserved completion space.
+        this.db.prepare('UPDATE llm_summary SET content=?,content_hash=? WHERE scope=?')
+          .run(stored, summaryRecordHash(scope, stored), scope);
+        if (deadline <= Date.now()) return historyConflict();
+      } else {
+        const old = this.summaryRow(scope);
+        if (old && this.decodeSummary(old).reservation) return historyConflict();
+        this.summaryCapacity(owner, scope, Buffer.byteLength(stored));
+        this.upsertSummary(scope, stored);
+      }
     });
+    if (reservationId !== undefined) {
+      // FULL commit has completed before optional compaction. A page-split or
+      // shrink failure leaves a readable padded ordinary result, not a lost hold.
+      try {
+        this.transaction(() => {
+          this.reservationSafety();
+          if (this.summaryRow(scope)?.content === stored) this.upsertSummary(scope, content);
+        });
+      } catch { /* Keep the durable equal-size result, including across reopen. */ }
+    }
+    return validated;
   }
   private key(owner: string, scanId: string) {
     if (!/^[a-f0-9]{32}$/.test(owner) || !isId(scanId)) return historyUnavailable();
@@ -307,7 +459,8 @@ export class HistoryStore {
   // The transaction bounds the read to the existing <=128 heads / <=8MiB DB.
   assertHealthy(): void {
     this.transaction(() => {
-      for (const row of this.db.prepare('SELECT epoch,revision,content,content_hash FROM history_head').all() as Row[]) this.decode(row);
+      this.validateHistoryRows();
+      if (this.schemaVersion() !== 3) this.validateSummaryRows();
     });
   }
   // Only expired pending operations are recovered online. A live second connection

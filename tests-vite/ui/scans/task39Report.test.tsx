@@ -1,3 +1,4 @@
+import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CursorReportPager } from '@/pages/scans/CursorReportPager';
@@ -77,11 +78,16 @@ function mountV2(patch: Record<string, unknown> = {}, multiple = false) {
 }
 it('shows warnings/saved clocks visibly and publication vs usableUntil in metadata without current-clock inference', async () => {
   mountV2();
-  await screen.findByText(/DB_DATA_OLDER_THAN_24H:/);
-  expect(screen.getByText(/DB_PUBLICATION_OVERDUE:/)).toBeTruthy();
-  expect(screen.getByText(/47 полных ч/)).toBeTruthy();
-  expect(screen.getByText(/usableUntil · предел политики/)).toBeTruthy();
-  expect(screen.getByText(/NextUpdate · ожидаемая публикация/)).toBeTruthy();
+  expect(await screen.findByText('Данные базы старше 24 часов на момент проверки.')).toBeVisible();
+  expect(screen.getByText('Ожидаемое обновление базы не вышло к моменту проверки.')).toBeVisible();
+  expect(screen.getByText(/47 полных ч/)).toBeVisible();
+  expect(screen.queryByText(/DB_DATA_OLDER_THAN_24H|DB_PUBLICATION_OVERDUE/)).toBeNull();
+  const metadata = screen.getByText('Сведения о базе уязвимостей').closest('details')!;
+  expect(metadata).not.toHaveAttribute('open');
+  expect(screen.getByText(/usableUntil · предел политики/)).not.toBeVisible();
+  fireEvent.click(screen.getByText('Сведения о базе уязвимостей'));
+  expect(screen.getByText(/usableUntil · предел политики/)).toBeVisible();
+  expect(screen.getByText(/NextUpdate · ожидаемая публикация/)).toBeVisible();
 });
 it('fails closed when page receipt differs from confirmed status, including valid independently evaluated metadata', async () => {
   mountV2({ dbPolicy: { ...metadata.dbPolicy, evaluatedAt: clock + 1 } });
@@ -243,7 +249,7 @@ it.each(['503', '403', 'session'] as const)('P2 C4 historical recovery control p
 });
 it('P2 all-copy fully stripped checked archive is legacy-equivalent with explicit unconfirmed policy', async () => {
   await mountAuthorized(cursor => { const page = wirePage(cursor); for (const key of ['resultContractVersion', 'dbPolicy', 'usableUntil', 'workerCheckedAt']) delete page[key]; return response(page); }, true);
-  expect(screen.getByText(/Legacy CVE: versioned policy evidence не предоставлено/)).toBeTruthy();
+  expect(screen.getByText('Актуальность базы на момент проверки не подтверждена.')).toBeVisible();
   expect(screen.queryByText(/DB_DATA_OLDER_THAN_24H:/)).toBeNull(); expect(screen.queryByText(/usableUntil · предел политики/)).toBeNull();
   next(); await screen.findByText('CVE-2026-1231'); expect(screen.queryByRole('alert')).toBeNull();
 });

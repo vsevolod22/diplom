@@ -20,8 +20,8 @@ import {
 
 export { ORIGIN, WORKER_MS, allowedApiGet, runtimeProbeRead, assertRuntimeOffReply };
 export const GLOBAL_MS = 20 * 60_000;
-export const MODEL = 'xingchen-agi/xing4.0-29b-a4b:free';
-export const ENDPOINT = 'phala';
+export const MODEL = 'dots-studio/dots-3-note-preview:free';
+export const ENDPOINT = 'atlas-cloud/fp8';
 export const CASES = Object.freeze(['tooling', 'owner_registration', 'native_scan', 'report', 'deployed_ui',
   'readiness', 'chat_1', 'chat_2', 'history_reload', 'fresh_login', 'history_fresh_login',
   'foreign_registration', 'foreign_denial', 'translation_context', 'translation', 'translation_toggle', 'preservation', 'safety']);
@@ -282,16 +282,18 @@ export function assertFixedPolicy(context) {
   const d = context?.disclosure;
   assert.ok(context?.enabled === true && HASH.test(context.policyVersion));
   assert.ok(d?.provider === 'OpenRouter' && d.model === MODEL && isDeepStrictEqual(d.providers, [ENDPOINT]));
-  assert.ok(d.freeOnly === true && d.requestBudgetUsd === 0 && d.retention === 'no-storage' && d.region === 'global');
+  assert.ok(d.freeOnly === true && d.requestBudgetUsd === 0 && d.retention === 'no-training' && d.region === 'global');
   assert.ok(d.maxPrice?.prompt === 0 && d.maxPrice.completion === 0 && d.maxPrice.request === 0);
   assert.ok(d.operatorApprovedRouting === true && d.providerComplianceNotProvenByDeclaration === true);
 }
 export function assertReady(ready, context) {
   assertFixedPolicy(context);
   for (const key of ['scanId', 'digest', 'platform', 'reportVersion']) assert.equal(ready[key], context[key]);
-  assert.ok(ready.localReady === true && ready.credential === 'metadata-valid' && ready.blockers.length === 0);
+  assert.ok(ready.status === 'locally-configured' && ready.localReady === true && ready.credential === 'metadata-valid' && Array.isArray(ready.blockers) && ready.blockers.length === 0);
+  assert.ok(ready.quota === 'available' && ready.history === 'available' && ready.setupAction === 'operator-public-file-configuration');
   assert.ok(ready.requiresConsent === true && ready.acceptsCredentials === false && ready.generationVerified === false);
-  assert.ok(ready.provider.model === MODEL && ready.provider.endpoint === ENDPOINT && ready.provider.liveVerified === false);
+  assert.deepEqual(ready.provider, { status: 'catalog-listed-unprobed', checkedOn: '2026-10-29',
+    model: MODEL, endpoint: ENDPOINT, liveVerified: false, zdrListed: false, retention: 'no-training' });
 }
 export function chatBodyMatches(body, context, question) {
   return exact(body, ['epoch', 'revision', 'mutationId', 'reportVersion', 'question', 'consent']) &&

@@ -1,8 +1,9 @@
-import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { ServiceUnavailableException } from '@nestjs/common';
 import type { LedgerStore } from '../ledger/ledger-store.js';
+import { AdmissionLimited } from '../ledger/ledger.js';
 import type { OciResolver } from '../oci/oci-resolver.js';
 import { inspectPublicImage } from '../oci/public-image-archive.js';
-import { PUBLIC_IMAGE_LIMITS, PUBLIC_IMAGE_PROFILE, isPublicReceipt } from '../oci/public-image-policy.js';
+import { PUBLIC_IMAGE_LIMITS, PUBLIC_IMAGE_PROFILE, isPublicReceipt, publicLayerEncoding } from '../oci/public-image-policy.js';
 import { NGINX_ARCHIVE_CANDIDATES } from '../oci/bounded-image-archive.js';
 export { PUBLIC_IMAGE_PROFILE, PUBLIC_IMAGE_RESOURCE_POLICY } from '../oci/public-image-policy.js';
 import { PRODUCTION_DB_TRUST_ANCHOR, type DbTrustAnchor } from '../worker/vuln-db-trust.js';
@@ -24,6 +25,15 @@ const repository = /^[a-z0-9]+(?:[._-][a-z0-9]+)*\/[a-z0-9]+(?:[._-][a-z0-9]+)*$
 /** Explicit composition only: no user parameter or environment flag broadens AppModule. */
 export class PublicImageScansService extends ScansService {
   private readonly anchor: DbTrustAnchor;
+    // Process-wide, at most two entries; not a replacement for durable admission or auth limits.
+    private static readonly creating = new Set<string>();
+    protected override imageFailureDetailsEnabled(): boolean { return true; }
+    protected override acquireCreatePermit(subject: string): () => void {
+      const active = PublicImageScansService.creating;
+      if (active.size >= 2 || active.has(subject)) throw new AdmissionLimited();
+      active.add(subject);
+      return () => { active.delete(subject); };
+    }
   constructor(private readonly publicLedger: LedgerStore, resolver: OciResolver,
     private readonly inspect: PublicImageInspector = inspectPublicImage, anchor: DbTrustAnchor = PRODUCTION_DB_TRUST_ANCHOR) {
     super(publicLedger, resolver);
@@ -52,7 +62,7 @@ export class PublicImageScansService extends ScansService {
     if (!this.acceptsReference(ref) || !this.acceptsPinned(target) || target.registry !== ref.registry || target.repository !== ref.repository ||
       !digest.test(target.configDigest) || !Array.isArray(target.layers) || target.layers.length < 1 || target.layers.length > PUBLIC_IMAGE_LIMITS.maxLayers ||
       target.layers.some(layer => !digest.test(layer.digest) || !Number.isSafeInteger(layer.size) || layer.size <= 0 ||
-        layer.size > PUBLIC_IMAGE_LIMITS.compressedLayer || !['application/vnd.oci.image.layer.v1.tar+gzip', 'application/vnd.docker.image.rootfs.diff.tar.gzip'].includes(layer.mediaType)) ||
+        layer.size > PUBLIC_IMAGE_LIMITS.compressedLayer || !publicLayerEncoding(layer.mediaType)) ||
       target.layers.reduce((total, layer) => total + layer.size, 0) > PUBLIC_IMAGE_LIMITS.compressedTotal) {
       throw new ServiceUnavailableException({ errorCode: 'SCANNER_UNAVAILABLE' });
     }
@@ -84,7 +94,7 @@ export class PublicImageScansService extends ScansService {
   }
   override status(identity: Identity, scanId: string) {
     const ledger = this.publicLedger.ledger;
-    if (!ledger) throw new NotFoundException();
+    if (!ledger) throw new ServiceUnavailableException({ errorCode: 'SCANNER_UNAVAILABLE' });
     return ledger.readReportSnapshot(() => {
       const status = super.status(identity, scanId);
       const target = ledger.pinnedTarget(scanId, identity.subject);

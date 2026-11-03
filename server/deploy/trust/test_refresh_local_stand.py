@@ -175,6 +175,8 @@ class PublisherTests(unittest.TestCase):
         self.assertTrue(any('sign-offline-db.mjs' in ' '.join(map(str, args)) for args in calls))
         self.assertTrue(any('offline_vuln_db_proof.py' in ' '.join(map(str, args)) for args in calls))
         self.assertFalse((root / '.trivy-refresh.lock').exists())
+        self.assertFalse(candidate.exists())
+        self.assertEqual((root / 'trivy-db-releases' / manifest[7:] / 'db/trivy.db').read_bytes(), b'fixture')
 
     def test_discovery_outage_keeps_verified_active_usable_but_update_error_visible(self):
         root = Path(self.tmp.name)
@@ -315,6 +317,173 @@ class PublisherTests(unittest.TestCase):
             self.env.symlink_to(Path(self.tmp.name) / 'other')
             with self.assertRaises(ValueError):
                 module.atomic_env(self.updated)
+
+
+class CandidateStorageTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.candidates = self.root / 'trivy-db-candidates'; self.candidates.mkdir()
+        self.releases = self.root / 'trivy-db-releases'; self.releases.mkdir()
+        trust = self.root / 'trust'; trust.mkdir()
+        key = trust / 'db-signing-key.pem'; key.write_text('synthetic non-key'); key.chmod(0o600)
+        self.layer = b'synthetic compressed input'
+        self.layer_hash = 'sha256:' + hashlib.sha256(self.layer).hexdigest()
+        self.manifest_bytes = json.dumps({'layers': [{'mediaType': 'application/vnd.aquasec.trivy.db.layer.v1.tar+gzip',
+            'size': len(self.layer), 'digest': self.layer_hash}]}).encode()
+        self.manifest = 'sha256:' + hashlib.sha256(self.manifest_bytes).hexdigest()
+        self.candidate = self.candidates / self.manifest
+        self.env = self.root / 'stand.env'
+        self.original = ('SCAN_JWT_SECRET=synthetic\nSCAN_VULN_RELEASE_HOST_DIR=/old\n'
+                         'SCAN_VULN_MANIFEST_DIGEST=sha256:' + 'a' * 64 + '\nSCAN_VULN_ARTIFACT_SHA256=' + 'b' * 64 + '\n')
+        self.env.write_text(self.original); self.env.chmod(0o600)
+        for name, value in [('ROOT', self.root), ('TRUST', trust), ('ENV', self.env)]:
+            p = patch.object(module, name, value); p.start(); self.addCleanup(p.stop)
+        p = patch.object(module, 'run', side_effect=self.fake_run)
+        self.run = p.start(); self.addCleanup(p.stop)
+
+    def download(self):
+        self.candidate.mkdir()
+        (self.candidate / 'manifest.json').write_bytes(self.manifest_bytes)
+        (self.candidate / 'layer.tar.gz').write_bytes(self.layer)
+
+    def fake_run(self, *args, **kwargs):
+        if args[-1] == 'discover':
+            return 'Review upstream tag :2, then download by digest: ' + self.manifest + '\n'
+        if args[0] == 'node' and args[2] == self.manifest:
+            self.download(); return ''
+        if args[0] == 'python3' and str(args[1]).endswith('prepare-db-release.py'):
+            release = self.releases / self.manifest[7:]; (release / 'db').mkdir(parents=True)
+            for name in ('bundle.bin', 'descriptor.json', 'descriptor.sig', 'db/trivy.db', 'db/metadata.json'):
+                (release / name).write_bytes(b'synthetic signed asset')
+            return json.dumps({'manifest': self.manifest, 'layer': self.layer_hash, 'bundle': 'd' * 64, 'db': 'e' * 64}) + '\n'
+        if any(str(a).endswith(name) for a in args for name in
+               ('sign-offline-db.mjs', 'verify-vuln-db-release.ts', 'offline_vuln_db_proof.py')):
+            return ''
+        self.fail('unexpected subprocess; no native execution permitted')
+
+    def test_cap_counts_unsigned_and_complete_release_directories_before_any_fetch(self):
+        for name in ('current', 'previous', 'unsigned-partial'):
+            (self.releases / name).mkdir()
+        with self.assertRaisesRegex(ValueError, '3 total releases including incoming'):
+            module.prepare_candidate(self.candidates, self.releases, self.manifest)
+        self.run.assert_not_called()
+        self.assertEqual(len(list(self.releases.iterdir())), 3)
+        self.assertFalse(self.candidate.exists())
+
+    def test_pending_other_digest_or_multiple_entries_refuses_before_fetch(self):
+        other = self.candidates / ('sha256:' + 'f' * 64); other.mkdir()
+        with self.assertRaisesRegex(ValueError, '1 pending digest'):
+            module.prepare_candidate(self.candidates, self.releases, self.manifest)
+        self.download()
+        with self.assertRaisesRegex(ValueError, '1 pending digest'):
+            module.prepare_candidate(self.candidates, self.releases, self.manifest)
+        self.run.assert_not_called()
+        self.assertTrue(other.is_dir()); self.assertTrue(self.candidate.is_dir())
+
+    def test_same_verified_candidate_reused_at_two_releases_without_duplicate_fetch(self):
+        for name in ('current', 'previous'): (self.releases / name).mkdir()
+        self.download()
+        release, _ = module.prepare_candidate(self.candidates, self.releases, self.manifest)
+        self.assertEqual(len(list(self.releases.iterdir())), 3)
+        self.assertTrue(self.candidate.exists()); self.assertTrue(release.exists())
+        self.assertFalse(any(call.args[0] == 'node' and call.args[2] == self.manifest for call in self.run.call_args_list))
+
+    def test_existing_partial_release_refuses_before_fetch(self):
+        (self.releases / self.manifest[7:]).mkdir()
+        with self.assertRaises(ValueError): module.prepare_candidate(self.candidates, self.releases, self.manifest)
+        self.run.assert_not_called()
+
+    def test_corrupt_same_candidate_is_not_reused_or_replaced(self):
+        self.download(); (self.candidate / 'layer.tar.gz').write_bytes(b'corrupt')
+        with self.assertRaises(ValueError): module.prepare_candidate(self.candidates, self.releases, self.manifest)
+        self.run.assert_not_called(); self.assertTrue(self.candidate.exists())
+
+    def test_successful_switch_only_cleans_its_exact_download_not_signed_release(self):
+        with patch.object(module, 'switch') as switch:
+            module.refresh_selected()
+        switch.assert_called_once()
+        self.assertFalse(self.candidate.exists())
+        release = self.releases / self.manifest[7:]
+        self.assertEqual((release / 'bundle.bin').read_bytes(), b'synthetic signed asset')
+        self.assertEqual((release / 'bundle.bin').stat().st_mode & 0o777, 0o444)
+        self.assertEqual(release.stat().st_mode & 0o777, 0o555)
+
+    def test_switch_failure_or_existing_hold_never_deletes_candidate(self):
+        self.download()
+        with patch.object(module, 'switch', side_effect=ValueError('synthetic switch failure')):
+            with self.assertRaisesRegex(ValueError, 'synthetic switch failure'): module.refresh_selected()
+        self.assertEqual((self.candidate / 'layer.tar.gz').read_bytes(), self.layer)
+        self.run.reset_mock(); (self.root / '.trivy-refresh.lock').mkdir()
+        with self.assertRaises(FileExistsError): module.refresh()
+        self.run.assert_not_called(); self.assertTrue(self.candidate.exists())
+
+    def test_cleanup_failure_is_separate_finite_warning_without_retry_or_unchanged_claim(self):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(module, 'switch') as switch, patch.object(module, 'verify_active') as active, \
+             patch.object(module.os, 'unlink', side_effect=OSError('untrusted diagnostic')), \
+             patch.object(module.sys, 'stdout', out), patch.object(module.sys, 'stderr', err):
+            module.refresh_selected()
+        switch.assert_called_once(); active.assert_not_called(); self.assertTrue(self.candidate.exists())
+        self.assertIn('DB release activated;', out.getvalue())
+        self.assertEqual(err.getvalue(), 'DB download cleanup deferred after successful activation; operator review required; no retry or rollback\n')
+
+    def test_partial_cleanup_failure_retains_remaining_download_without_re_switch_or_retry(self):
+        unlink = module.os.unlink
+        calls = []
+
+        def fail_second(name, **kwargs):
+            calls.append(name)
+            if len(calls) == 2: raise OSError('synthetic second unlink failure')
+            return unlink(name, **kwargs)
+
+        err = io.StringIO()
+        with patch.object(module, 'switch') as switch, patch.object(module, 'verify_active') as active, \
+             patch.object(module.os, 'unlink', side_effect=fail_second), patch.object(module.sys, 'stderr', err):
+            module.refresh_selected()
+        self.assertEqual(calls, ['manifest.json', 'layer.tar.gz'])
+        switch.assert_called_once(); active.assert_not_called()
+        self.assertFalse((self.candidate / 'manifest.json').exists())
+        self.assertEqual((self.candidate / 'layer.tar.gz').read_bytes(), self.layer)
+        self.assertIn('cleanup deferred after successful activation', err.getvalue())
+        self.assertTrue((self.releases / self.manifest[7:] / 'bundle.bin').exists())
+
+    def test_source_drift_during_successful_switch_defers_cleanup_without_deleting_anything(self):
+        def drift(*_args):
+            (self.candidate / 'layer.tar.gz').write_bytes(b'foreign replacement bytes')
+
+        err = io.StringIO()
+        with patch.object(module, 'switch', side_effect=drift) as switch, \
+             patch.object(module.os, 'unlink') as unlink, patch.object(module.sys, 'stderr', err):
+            module.refresh_selected()
+        switch.assert_called_once(); unlink.assert_not_called()
+        self.assertTrue((self.candidate / 'manifest.json').exists())
+        self.assertEqual((self.candidate / 'layer.tar.gz').read_bytes(), b'foreign replacement bytes')
+        self.assertIn('cleanup deferred after successful activation', err.getvalue())
+
+    def test_cleanup_refuses_changed_stamps_links_extra_files_and_replaced_directory_without_unlink(self):
+        self.download()
+        proof = module.candidate_snapshot(self.candidate)
+        layer = self.candidate / 'layer.tar.gz'; original = layer.read_bytes()
+        for fault in ('bytes', 'hardlink', 'symlink', 'extra', 'directory'):
+            with self.subTest(fault=fault):
+                if fault == 'bytes': layer.write_bytes(original + b'changed')
+                elif fault == 'hardlink': (self.root / 'hardlink').hardlink_to(layer)
+                elif fault == 'symlink': layer.unlink(); layer.symlink_to(self.root / 'unrelated')
+                elif fault == 'extra': (self.candidate / 'extra').write_bytes(b'do not delete')
+                else:
+                    self.candidate.rename(self.candidates / 'original-retained')
+                    self.download()
+                with patch.object(module.os, 'unlink') as unlink:
+                    with self.assertRaises((OSError, ValueError)): module.cleanup_completed_candidate(self.candidate, proof)
+                unlink.assert_not_called()
+                # Each later fault uses a freshly fenced candidate, never repairs production state.
+                if fault == 'hardlink': (self.root / 'hardlink').unlink()
+                if fault == 'symlink': layer.unlink(); layer.write_bytes(original)
+                if fault == 'extra': (self.candidate / 'extra').unlink()
+                if fault == 'bytes': layer.write_bytes(original)
+                proof = module.candidate_snapshot(self.candidate)
 
 
 if __name__ == '__main__':

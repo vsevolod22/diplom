@@ -28,6 +28,7 @@ import { SafeMarkdown } from './safeMarkdown';
 import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient };
+type Operation = 'read' | 'chat' | 'decision';
 type Snapshot = {
   context: ChatContext;
   history: ChatHistory;
@@ -44,18 +45,25 @@ const readinessMessages = {
   'history-store-unavailable': 'История временно недоступна. Попробуйте позже.',
   'provider-profile-unavailable': 'Сервис ответов недоступен. Обратитесь к оператору.',
 };
-function chatErrorMessage(error: unknown) {
+function chatErrorMessage(error: unknown, operation: Operation = 'chat') {
   const code = error instanceof ChatError ? error.code : '';
   if (code === 'SESSION') return 'Сессия изменилась или истекла. Войдите заново.';
   if (code === 'ACCESS') return 'Доступ к чату этого отчёта не подтверждён. Проверьте аккаунт.';
   if (['STALE', 'LLM_STALE_REPORT', 'LLM_STALE_POLICY', 'LLM_HISTORY_CONFLICT'].includes(code))
     return 'Данные отчёта или условия чата изменились. Обновите историю перед отправкой.';
+  if (operation === 'read') {
+    if (['TIMEOUT', 'ABORTED', 'LLM_REQUEST_ABORTED'].includes(code))
+      return 'Обновление истории остановлено. Это было только чтение: новый вопрос не отправлялся. Данные скрыты до успешной проверки; обновите историю вручную.';
+    return 'Не удалось проверить сохранённую историю. Данные скрыты до успешной проверки; обновите историю вручную. Новый вопрос не отправлялся.';
+  }
   if (['TIMEOUT', 'ABORTED', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
     return 'Ожидание остановлено. Ответ ещё может сохраниться — обновите историю перед повтором.';
   if (['LLM_QUOTA_EXCEEDED', 'LLM_BUDGET_EXCEEDED', 'LLM_CAPACITY'].includes(code))
     return 'Достигнут лимит запросов. Попробуйте позже.';
-  if (['LLM_CONTEXT_LIMIT', 'LLM_HISTORY_CAPACITY'].includes(code))
-    return 'В чате слишком много данных для нового ответа. История сохранена.';
+  if (code === 'LLM_HISTORY_CAPACITY')
+    return 'Недостаточно доступной ёмкости хранилища истории. Это может быть общий лимит сервиса, а не размер этого чата. Обратитесь к оператору; автоматического повтора нет.';
+  if (code === 'LLM_CONTEXT_LIMIT')
+    return 'Обязательный контекст не помещается в новый запрос. История не удаляется; автоматического повтора нет.';
   if (code === 'LLM_CONFIGURATION_UNAVAILABLE') return 'Чат не настроен. Обратитесь к оператору.';
   if (code === 'LLM_PROVIDER_RATE_LIMITED') return 'Сервис ответов занят. Обновите историю перед повтором.';
   if (code === 'LLM_PROVIDER_AUTH_FAILED') return 'Чат временно недоступен. Обратитесь к оператору.';
@@ -216,7 +224,7 @@ function ChatScope({
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
   const questionInput = useRef<HTMLTextAreaElement | null>(null);
-  const [operation, setOperation] = useState<'read' | 'chat' | 'decision'>('read');
+  const [operation, setOperation] = useState<Operation>('read');
 
   function invalidate() {
     generation.current++;
@@ -230,7 +238,7 @@ function ChatScope({
     setReceipt(null);
     setSelectedIds([]);
     setReadiness(null);
-    setMessage(chatErrorMessage(new ChatError('ABORTED')));
+    setMessage(chatErrorMessage(new ChatError('ABORTED'), operation));
   }
   function checkStatus(context: ChatContext) {
     if (
@@ -268,9 +276,13 @@ function ChatScope({
       return null;
     }
   }
-  async function readSnapshot(signal: AbortSignal): Promise<Snapshot> {
+  async function readSnapshot(
+    signal: AbortSignal,
+    observeContext?: (context: ChatContext) => void,
+  ): Promise<Snapshot> {
     const context = await client.context(status.scanId, signal);
     checkStatus(context);
+    observeContext?.(context);
     const [history, usage, sources] = await Promise.all([
       client.history(context, signal),
       client.usage(context, signal).catch((error) => {
@@ -311,10 +323,12 @@ function ChatScope({
         throw new ChatError('INVALID');
     }
     const after = await client.context(status.scanId, signal);
+    observeContext?.(after);
     if (chatContextFence(after) !== chatContextFence(context)) throw new ChatError('STALE');
     return { context, history, usage, sources };
   }
   async function operate(
+    kind: Operation,
     timeoutMs: number,
     action: (signal: AbortSignal, publish: (action: () => void) => void) => Promise<void>,
   ) {
@@ -322,6 +336,7 @@ function ChatScope({
     const controller = new AbortController();
     request.current = controller;
     const version = ++generation.current;
+    setOperation(kind);
     setPending(true);
     setReceipt(null);
     let timedOut = false;
@@ -346,8 +361,21 @@ function ChatScope({
     } catch (error) {
       if (generation.current === version && current()) {
         setSnapshot(null);
+        // A known history outage may retain setup blockers, never a generation permission.
+        setReadiness((value) =>
+          kind === 'read' && error instanceof ChatError && error.code === 'LLM_HISTORY_UNAVAILABLE' && !value?.localReady
+            ? value
+            : null,
+        );
         setSelectedIds([]);
-        setMessage(chatErrorMessage(error));
+        if (
+          error instanceof ChatError &&
+          ['SESSION', 'ACCESS', 'REPORT_UNAVAILABLE', 'LLM_REPORT_UNAVAILABLE'].includes(error.code)
+        ) {
+          setQuestion('');
+          setDecision('');
+        }
+        setMessage(chatErrorMessage(error, kind));
       }
     } finally {
       clearTimeout(timer);
@@ -361,16 +389,29 @@ function ChatScope({
 
   function refresh() {
     if (request.current || !current()) return;
-    setOperation('read');
     setReadiness(null);
-
-    setSnapshot(null);
+    setMessage('');
     setSelectedIds([]);
-    void operate(45_000, async (signal, publish) => {
+    // Keep only this mounted session/report's last confirmed view while reading.
+    // Any contradictory context or failed read clears it; it never authorizes a mutation.
+    const previous = snapshot;
+    void operate('read', 45_000, async (signal, publish) => {
+      const discardPrevious = () => publish(() => setSnapshot(null));
+      const observeContext = (value: ChatContext) => {
+        if (
+          previous &&
+          (policyFence(value) !== policyFence(previous.context) ||
+            value.epoch !== previous.context.epoch ||
+            value.revision < previous.context.revision)
+        )
+          discardPrevious();
+      };
       // Keep setup diagnostics available even if the history-backed context cannot be read.
       let ready = publicReport ? await readReadiness(signal) : null;
       publish(() => setReadiness(ready));
-      const next = await readSnapshot(signal);
+      if (publicReport && (!ready || (previous && !readinessMatchesContext(ready, previous.context))))
+        discardPrevious();
+      const next = await readSnapshot(signal, observeContext);
       if (!publicReport && next.context.disclosure?.provider === 'OpenAI') {
         ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
@@ -401,6 +442,8 @@ function ChatScope({
       setReadiness(null);
       setReceipt(null);
       setSelectedIds([]);
+      setQuestion('');
+      setDecision('');
       setPending(false);
     });
     refresh();
@@ -431,11 +474,10 @@ function ChatScope({
       return;
     }
     if (request.current) return;
-    setOperation(kind);
     setMessage('');
     const mutationId = crypto.randomUUID();
     const ids = [...selectedIds];
-    void operate(kind === 'chat' ? 120_000 : 45_000, async (signal, publish) => {
+    void operate(kind, kind === 'chat' ? 120_000 : 45_000, async (signal, publish) => {
       if (kind === 'chat' && (publicReport || accepted.context.disclosure?.provider === 'OpenAI')) {
         const ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
@@ -502,7 +544,7 @@ function ChatScope({
   const generationAllowed = !!context?.enabled && (!needsReadiness || readiness?.localReady === true);
   const connection = pending
     ? operation === 'read'
-      ? 'Загружаем историю…'
+      ? 'Читаем сохранённую историю… Новый вопрос не отправляется.'
       : operation === 'chat'
         ? 'Ожидаем ответ…'
         : 'Сохраняем решение…'
@@ -544,11 +586,21 @@ function ChatScope({
       </Button>
       {pending ? (
         <>
-          <p>Отмена остановит ожидание, но запрос ещё может завершиться.</p>
+          <p>
+            {operation === 'read'
+              ? 'Можно остановить чтение и обновить историю позже. Это не отменяет ранее отправленные запросы.'
+              : 'Отмена остановит ожидание, но запрос ещё может завершиться.'}
+          </p>
           <Button type="button" variant="secondary" onClick={cancel}>
-            Отменить ожидание чата
+            {operation === 'read' ? 'Отменить обновление истории' : 'Отменить ожидание чата'}
           </Button>
         </>
+      ) : null}
+      {snapshot && pending && operation === 'read' ? (
+        <Alert tone="warning">
+          Показана предыдущая подтверждённая история. Данные могут быть устаревшими: обновление ещё не
+          завершено. Отправка вопроса, подготовка повтора и сохранение решения недоступны до проверки.
+        </Alert>
       ) : null}
       {message ? (
         <Alert role="alert" tone="warning">
@@ -583,7 +635,26 @@ function ChatScope({
                 </>
               ) : (
                 <>
-                  <p>Ответ пока не получен.</p>
+                  <p>
+                    {
+                      {
+                        pending:
+                          'По сохранённому статусу запрос ожидает ответа. Обновите историю позже; повторно он не отправляется.',
+                        failed:
+                          'Попытка завершилась с ошибкой. Подтверждённого ответа нет; причина в сохранённой истории не указана.',
+                        cancelled: 'Попытка отменена. Подтверждённого ответа в истории нет.',
+                        interrupted:
+                          'Попытка прервана. Подтверждённого ответа нет; причина прерывания в сохранённой истории не указана.',
+                      }[turn.state]
+                    }
+                  </p>
+                  {turn.state !== 'pending' ? (
+                    <p>
+                      Автоматического повтора нет. Подготовка повтора только скопирует вопрос в черновик;
+                      новая отправка требует отдельного нажатия и может быть платной. Статус не определяет
+                      фактическую стоимость попытки.
+                    </p>
+                  ) : null}
                   {turn.state !== 'pending' ? (
                     <Button
                       type="button"

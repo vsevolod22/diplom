@@ -354,7 +354,7 @@ function metadata() {
   checkpoint('metadata_schema'); const db = new Database('/auth/llm-history.sqlite', { readonly: true, fileMustExist: true });
   try {
     assert.equal(db.pragma('application_id', { simple: true }), 1145655602);
-    assert.equal(db.pragma('user_version', { simple: true }), 3);
+    assert.equal(db.pragma('user_version', { simple: true }), 4);
     assert.equal(db.pragma('page_size', { simple: true }), 4096);
     assert.equal(db.pragma('journal_mode', { simple: true }), 'delete');
     checkpoint('metadata_counts'); assert.equal((db.prepare('SELECT count(*) n FROM history_completion_space').get() as { n: number }).n, 0);

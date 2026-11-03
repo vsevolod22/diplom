@@ -104,7 +104,11 @@ test('HTTP vulnerability admission fails closed; combined status and vuln pages 
     assert.equal(resolutions, 1);
     assert.equal((await post('alice', request(['secret', 'vuln'], 'combined-vuln-key'))).status, 409);
     delete process.env.SCAN_VULN_ENABLED;
-    assert.equal((await post('alice', request(['secret', 'sbom', 'vuln'], 'combined-vuln-key'))).status, 503);
+    // Disabling fresh CVE admission does not invalidate an already committed receipt.
+    const replayDisabled = await post('alice', request(['secret', 'sbom', 'vuln'], 'combined-vuln-key'));
+    assert.equal(replayDisabled.status, 202);
+    assert.equal((await replayDisabled.json() as { scanId: string }).scanId, scanId);
+    assert.equal(resolutions, 1);
     process.env.SCAN_VULN_ENABLED = 'true';
     const queued = await (await fetch(`${path}/${scanId}`, { headers: auth('alice') })).json() as Record<string, unknown>;
     assert.deepEqual(queued.checks, ['secret', 'sbom', 'vuln']);

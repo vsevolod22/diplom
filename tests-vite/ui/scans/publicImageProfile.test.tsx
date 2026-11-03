@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, act } from '@testing-libra
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LiveScanSession } from '@/features/scans/LiveScanSession';
+import { transitionScanSession } from '@/shared/api/auth/scanSession';
 import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
 import { SbomReportControls } from '@/pages/scans/ReportViewControls';
 import { parseCurrentSbom, parseCurrentStatus, parseCurrentVuln } from '@/shared/api/scans/scanTransport';
@@ -19,7 +20,7 @@ const eligible = (imageReference: string, checks: string[], ready = true) => ({ 
 const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
 class Observer { observe() {} unobserve() {} disconnect() {} }
 beforeEach(() => { vi.stubGlobal('IntersectionObserver', Observer); sessionStorage.clear(); });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear(); });
+afterEach(() => { cleanup(); transitionScanSession(null, new QueryClient(), true); vi.restoreAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear(); });
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/scans/new']}><Routes>
@@ -119,6 +120,9 @@ it('manual canonical entry works without discovery, needs current server eligibi
   expect(screen.getByRole('button', { name: 'Запустить скан' }).hasAttribute('disabled')).toBe(true); expect(posts).toHaveLength(0);
   available = true;
   fireEvent.click(screen.getByRole('button', { name: 'Проверить допуск снова' }));
+  const consent = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement;
+  expect(consent.checked).toBe(false);
+  fireEvent.click(consent);
   const submit = screen.getByRole('button', { name: 'Запустить скан' });
   await waitFor(() => expect(submit.hasAttribute('disabled')).toBe(false));
   const before = preflights.length;

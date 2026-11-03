@@ -1000,6 +1000,138 @@ export function validateCurrentPublicLlmHelper(c, name, image, purpose, state) {
   validateBackupHelper(copy, name, image, 'backup', state);
 }
 
+// Separate v5 exports: never alter historical serialized helper/function bytes.
+export function reservationHistorySchema(db) {
+  const version = String(db.pragma('user_version', { simple: true }));
+  safe(String(db.pragma('application_id', { simple: true })) === '1145655602' && ['4', '5'].includes(version));
+  const objects = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='llm_summary' OR name IN ('llm_summary','sqlite_autoindex_llm_summary_1') ORDER BY type,name,tbl_name,sql").raw().all();
+  const sql = 'CREATE TABLE llm_summary(\n  scope TEXT PRIMARY KEY CHECK(length(scope)=64),\n  content TEXT NOT NULL CHECK(length(CAST(content AS BLOB))<=69632),\n  content_hash TEXT NOT NULL CHECK(length(content_hash)=64)) STRICT';
+  safe(equal(objects, [['index', 'sqlite_autoindex_llm_summary_1', 'llm_summary', null], ['table', 'llm_summary', 'llm_summary', sql]]));
+  const totals = db.prepare('SELECT count(*) n,coalesce(sum(length(CAST(content AS BLOB))),0) bytes,coalesce(max(length(CAST(content AS BLOB))),0) largest FROM llm_summary').get();
+  safe(BigInt(totals.n) <= 64n && BigInt(totals.bytes) <= 2097152n && BigInt(totals.largest) <= 69632n);
+  return Number(version);
+}
+function reservationFingerprint(DB, io, crypto, path, kind) {
+  safe(['history', 'quota', 'auth', 'ledger'].includes(kind));
+  const db = new DB(path, { readonly: true, fileMustExist: true, timeout: 2000 });
+  try {
+    db.defaultSafeIntegers(true); db.pragma('query_only=ON'); db.exec('BEGIN');
+    safe(db.pragma('integrity_check', { simple: true }) === 'ok' && db.pragma('foreign_key_check').length === 0);
+    const versions = [db.pragma('application_id', { simple: true }), db.pragma('user_version', { simple: true })];
+    if (kind === 'auth' || kind === 'ledger') safe(String(versions[1]) === (kind === 'auth' ? '0' : '15'));
+    else if (kind === 'history') reservationHistorySchema(db);
+    else safe(equal(versions.map(String), ['1145655601', '1']));
+    const schema = db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name,tbl_name,sql').raw().all();
+    safe(schema.length > 0 && schema.length <= 512 && !schema.some(row => /^CREATE\s+VIRTUAL\s+TABLE/i.test(row[3] ?? '')));
+    const h = crypto.createHash('sha256'); h.update(sqliteTypedRow(versions)); h.update(sqliteTypedRow(schema.flat()));
+    let bytes = 0, rows = 0;
+    for (const entry of schema.filter(r => r[0] === 'table')) {
+      const table = entry[1]; safe(/^[a-z_][a-z0-9_]*$/.test(table)); h.update(table);
+      for (const row of db.prepare(`SELECT rowid,* FROM "${table}" ORDER BY rowid`).safeIntegers(true).raw().iterate()) {
+        const text = sqliteTypedRow(row); bytes += Buffer.byteLength(text); safe(bytes <= 256 * 1024 ** 2 && ++rows <= 250000); h.update(text); h.update('\n');
+      }
+    }
+    if (kind === 'history') safe(db.prepare("SELECT count(*) n FROM history_head WHERE json_extract(content,'$.pending') IS NOT NULL").get().n === 0n);
+    db.exec('ROLLBACK'); return h.digest('hex');
+  } finally { db.close(); }
+}
+export function reservationLlmFingerprint(DB, io, crypto, path, kind) {
+  return reservationFingerprint(sealedSnapshotDatabase(DB), io, crypto, path, kind);
+}
+export function reservationHistoryHeader(io) {
+  const need = v => { if (!v) throw Error('HISTORY_HEADER_REFUSED'); };
+  const path = '/auth/llm-history.sqlite';
+  const exists = p => io.lstatSync(p, { throwIfNoEntry: false }) !== undefined;
+  need(exists(path) && exists('/auth/llm-usage.sqlite'));
+  for (const suffix of ['-journal', '-wal', '-shm']) need(!exists(path + suffix));
+  const stamp = s => [s.dev, s.ino, s.uid, s.mode, s.nlink, s.size, s.mtimeMs, s.ctimeMs];
+  const before = io.lstatSync(path);
+  need(before.isFile() && !before.isSymbolicLink() && before.uid === process.getuid() && before.nlink === 1 &&
+    (before.mode & 0o7777) === 0o600 && before.size >= 4096 && before.size <= 8388608);
+  const fd = io.openSync(path, io.constants.O_RDONLY | io.constants.O_NOFOLLOW | io.constants.O_NONBLOCK);
+  try {
+    const b = Buffer.alloc(100); need(io.readSync(fd, b, 0, b.length, 0) === b.length);
+    need(b.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')) && b.readUInt16BE(16) === 4096 && b.readUInt32BE(68) === 1145655602);
+    const version = b.readUInt32BE(60); need([4, 5].includes(version));
+    need(JSON.stringify(stamp(before)) === JSON.stringify(stamp(io.fstatSync(fd))) && JSON.stringify(stamp(before)) === JSON.stringify(stamp(io.lstatSync(path))));
+    for (const suffix of ['-journal', '-wal', '-shm']) need(!exists(path + suffix));
+    return { ready: true, historyVersion: version };
+  } finally { io.closeSync(fd); }
+}
+export const PUBLIC_LLM_RESERVATION_HEADER_PROGRAM = "const io=require('node:fs');const header=" + reservationHistoryHeader.toString() + ";try{process.stdout.write(JSON.stringify(header(io)));}catch{process.exitCode=70;}";
+const reservationNativeSource = currentNativeSource
+  .replace('const currentHistorySchema=' + currentHistorySchema.toString(), 'const reservationHistorySchema=' + reservationHistorySchema.toString())
+  .replace('const llmFingerprint=' + currentLlmFingerprint.toString(), 'const llmFingerprint=' + reservationFingerprint.toString());
+export const PUBLIC_LLM_RESERVATION_BACKUP_PROGRAM = PUBLIC_LLM_BACKUP_PROGRAM.replace(nativeSource, reservationNativeSource);
+export const PUBLIC_LLM_RESERVATION_MIGRATE_PROGRAM = helperImports + safeSource +
+  'const header=' + reservationHistoryHeader.toString() + ';const reservationHistorySchema=' + reservationHistorySchema.toString() +
+  ";const timer=setTimeout(()=>process.exit(71),120000);try{process.umask(0o077);safe(header(io).historyVersion===4);const {HistoryStore}=await import('./src/llm/history-store.ts');HistoryStore.migrateSummaryReservations({path:'/auth/llm-history.sqlite'});safe(header(io).historyVersion===5);const db=new DB('/auth/llm-history.sqlite',{readonly:true,fileMustExist:true});try{safe(reservationHistorySchema(db)===5);safe(db.pragma('integrity_check',{simple:true})==='ok'&&db.pragma('foreign_key_check').length===0);}finally{db.close();}for(const path of ['/auth/llm-history.sqlite','/auth']){const fd=io.openSync(path,io.constants.O_RDONLY|io.constants.O_NOFOLLOW);try{io.fsyncSync(fd);}finally{io.closeSync(fd);}}" +
+  writeReady + "save('/backup/ready.json',{ready:true,migration:'history-reservations-v4-to-v5',from:4,to:5});clearTimeout(timer);" + keeper + "}catch{process.exit(70);}";
+function reservationHelperProgram(name, purpose) {
+  const match = new RegExp(`^${PROJECT}-llm-[a-f0-9]{32}-(fenced|post-migration|before-api|after-api|migrate-history-v4-to-v5)$`).exec(name);
+  safe(match && (purpose === 'backup' ? match[1] !== 'migrate-history-v4-to-v5' : purpose === 'migrate-history-v4-to-v5' && match[1] === purpose));
+  return purpose === 'backup' ? PUBLIC_LLM_RESERVATION_BACKUP_PROGRAM : PUBLIC_LLM_RESERVATION_MIGRATE_PROGRAM;
+}
+export function reservationPublicLlmHelperArguments(name, image, purpose = 'backup') {
+  const program = reservationHelperProgram(name, purpose); safe(imageId(image));
+  const args = backupArguments(name, image); args[args.length - 1] = program;
+  args.splice(args.indexOf(image) + 1, 0, '--import', 'tsx');
+  args.splice(args.indexOf('--workdir'), 0, '--env', 'TMPDIR=/backup');
+  if (purpose === 'migrate-history-v4-to-v5') {
+    const label = args.indexOf('org.diplom.recovery-purpose=backup'); safe(label > 0 && args[label - 1] === '--label');
+    args[label] = 'org.diplom.recovery-purpose=' + purpose;
+    const at = args.indexOf(`type=volume,src=${PROJECT}_auth_accounts,dst=/auth,readonly,volume-nocopy`); safe(at >= 0);
+    args[at] = `type=volume,src=${PROJECT}_auth_accounts,dst=/auth,volume-nocopy`;
+  }
+  return args;
+}
+export function validateReservationPublicLlmHelper(c, name, image, purpose, state) {
+  const program = reservationHelperProgram(name, purpose);
+  safe(c.Config?.Labels?.['org.diplom.recovery-purpose'] === purpose);
+  safe(c.RestartCount === 0 && c.State?.Paused !== true && equal(c.Config.Cmd, ['--import', 'tsx', '--input-type=module', '-e', program]) && equal(c.Args, c.Config.Cmd));
+  const copy = structuredClone(c); copy.Config.Cmd = ['--input-type=module', '-e', RECOVERY_BACKUP]; copy.Args = copy.Config.Cmd;
+  safe(equal(envMap(copy.Config.Env), { ...envMap(image.Config.Env), TMPDIR: '/backup' })); copy.Config.Env = image.Config.Env;
+  if (purpose === 'migrate-history-v4-to-v5') {
+    const m = copy.HostConfig.Mounts.filter(m => m.Target === '/auth'), o = copy.Mounts.filter(m => m.Destination === '/auth');
+    safe(m.length === 1 && o.length === 1 && (!Object.hasOwn(m[0], 'ReadOnly') || m[0].ReadOnly === false) && o[0].RW === true);
+    m[0].ReadOnly = true; o[0].RW = false;
+    // Project only the already-authorized migration identity into the historical backup validator.
+    copy.Config.Labels['org.diplom.recovery-purpose'] = 'backup';
+  }
+  validateBackupHelper(copy, name, image, 'backup', state);
+}
+// Independent preservation oracle: no candidate constructor/decoder is trusted here.
+export function verifyHistoryReservationMigration({ DB, beforePath, afterPath }) {
+  const SnapshotDB = sealedSnapshotDatabase(DB);
+  const before = reservationFingerprint(SnapshotDB, fs, crypto, beforePath, 'history');
+  const after = reservationFingerprint(SnapshotDB, fs, crypto, afterPath, 'history');
+  const stores = [];
+  try {
+    for (const path of [beforePath, afterPath]) {
+      const db = new SnapshotDB(path, { readonly: true, fileMustExist: true, timeout: 2000 }); stores.push(db);
+      db.defaultSafeIntegers(true); db.pragma('query_only=ON'); db.exec('BEGIN');
+    }
+    const [old, next] = stores; safe(reservationHistorySchema(old) === 4 && reservationHistorySchema(next) === 5);
+    const sql = 'SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name,tbl_name,sql';
+    const schema = old.prepare(sql).raw().all(); safe(equal(schema, next.prepare(sql).raw().all()));
+    let bytes = 0, rows = 0;
+    for (const [, table] of schema.filter(r => r[0] === 'table')) {
+      safe(/^[a-z_][a-z0-9_]*$/.test(table)); const query = `SELECT rowid,* FROM "${table}" ORDER BY rowid`;
+      const a = old.prepare(query).raw().iterate(), b = next.prepare(query).raw().iterate();
+      try {
+        for (;;) {
+          const x = a.next(), y = b.next(); safe(x.done === y.done); if (x.done) break;
+          const row = sqliteTypedRow(x.value); bytes += Buffer.byteLength(row); safe(bytes <= 256 * 1024 ** 2 && ++rows <= 250000);
+          safe(row === sqliteTypedRow(y.value));
+        }
+      } finally { a.return?.(); b.return?.(); }
+    }
+    for (const db of stores) db.exec('ROLLBACK');
+  } finally { stores.forEach(db => db.close()); }
+  safe(reservationFingerprint(SnapshotDB, fs, crypto, beforePath, 'history') === before && reservationFingerprint(SnapshotDB, fs, crypto, afterPath, 'history') === after);
+  return Object.freeze({ version: 1, migration: 'history-reservations-v4-to-v5', from: 4, to: 5, before, after, allRowsPreserved: true });
+}
+
 // The orchestrator has no weak/no-op production defaults. Concrete authority,
 // snapshots and probes are assembled below; injected operations are offline test seams.
 const admissionContexts = new WeakSet();

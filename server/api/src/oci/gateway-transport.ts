@@ -1,13 +1,22 @@
 import { request as httpRequest } from 'node:http';
+import { imageFailureDetail, registryFailureDetail, type ImageFailureDetail } from './image-failure.js';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import { ResolutionRejected, type ManifestFetch, type ManifestResponse } from './registry-resolver.js';
 
 export type HubSearchResponse = { results: Array<{ repo_name?: unknown; name?: unknown }>; next?: string | null; count?: number; bytes?: number };
 
-export function hubSearchUrl(kind: 'tags' | 'repositories', query: string, page: number): URL {
+// Discovery accepts exactly the existing public profile's namespace/name grammar.
+export function isHubSearchRepository(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 255 && value === value.trim() &&
+    /^[a-z0-9]+(?:[._-][a-z0-9]+)*\/[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(value) &&
+    value.split('/').every(part => part.length <= 128);
+}
+
+export function hubSearchUrl(kind: 'tags' | 'repositories', query: string, page: number, repository = 'library/alpine'): URL {
   if (!Number.isInteger(page) || page < 1 || page > 6) throw new ResolutionRejected('Invalid search page');
-  const url = new URL(kind === 'tags' ? 'https://hub.docker.com/v2/repositories/library/alpine/tags/' : 'https://hub.docker.com/v2/search/repositories/');
+  if (!isHubSearchRepository(repository)) throw new ResolutionRejected('Invalid search repository');
+  const url = new URL(kind === 'tags' ? `https://hub.docker.com/v2/repositories/${repository}/tags/` : 'https://hub.docker.com/v2/search/repositories/');
   url.searchParams.set('page_size', '12');
   url.searchParams.set(kind === 'tags' ? 'name' : 'query', query);
   url.searchParams.set('page', String(page));
@@ -15,8 +24,8 @@ export function hubSearchUrl(kind: 'tags' | 'repositories', query: string, page:
 }
 
 export async function dockerHubSearch(kind: 'tags' | 'repositories', query: string, page = 1,
-  request = gatewayGet): Promise<HubSearchResponse> {
-  const result = await request({ host: 'egress', port: 8080 }, hubSearchUrl(kind, query, page), { accept: 'application/json' }, 128_000, 5000);
+  request = gatewayGet, repository = 'library/alpine'): Promise<HubSearchResponse> {
+  const result = await request({ host: 'egress', port: 8080 }, hubSearchUrl(kind, query, page, repository), { accept: 'application/json' }, 128_000, 5000);
   if (result.body.length > 128_000) throw new ResolutionRejected('Image search size limit');
   if (result.status !== 200 || !String(result.headers['content-type'] ?? '').startsWith('application/json'))
     throw new ResolutionRejected('Image search unavailable');
@@ -56,11 +65,14 @@ export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<str
     const resources: Array<{ destroy: () => void }> = [];
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => { clearTimeout(deadline); signal?.removeEventListener('abort', abort); for (const resource of resources) resource.destroy(); };
-    const fail = (stage: string) => { if (!settled) { settled = true; cleanup(); reject(new ResolutionRejected(`Registry ${stage} failed`)); } };
+    const fail = (stage: string, detail: ImageFailureDetail = { reason: 'REGISTRY_UNAVAILABLE', stage: 'download' }) => {
+          if (!settled) { settled = true; cleanup(); reject(new ResolutionRejected(`Registry ${stage} failed`, detail)); }
+        };
+        const timedOut = () => fail('timeout', { reason: 'DEADLINE_EXCEEDED', stage: 'download' });
     const abort = () => fail('cancelled');
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });
-    if (deadlineMs !== undefined) deadline = setTimeout(() => fail('absolute deadline'), deadlineMs);
+    if (deadlineMs !== undefined) deadline = setTimeout(timedOut, deadlineMs);
     const connect = httpRequest({ hostname: gateway.host, port: gateway.port, method: 'CONNECT', path: `${url.hostname}:443`, headers: { host: `${url.hostname}:443` }, timeout: 5000 });
     resources.push(connect);
     connect.on('connect', (response, socket, head) => {
@@ -69,7 +81,7 @@ export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<str
       if (response.statusCode !== 200 || head.length) { socket.destroy(); fail(`CONNECT status ${response.statusCode ?? 0}`); return; }
       const secure = tlsConnect({ socket, servername: url.hostname, rejectUnauthorized: true });
       resources.push(secure);
-      secure.setTimeout(10_000, () => { secure.destroy(); fail('TLS timeout'); });
+      secure.setTimeout(10_000, () => { secure.destroy(); timedOut(); });
       secure.on('error', () => fail('TLS')); 
       secure.once('secureConnect', () => {
         if (settled) return;
@@ -87,7 +99,7 @@ export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<str
                 if (settled) return;
                 const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
                 size += bytes.length;
-                if (size > maxBytes) { fail('size limit'); return; }
+                if (size > maxBytes) { fail('size limit', { reason: 'RESOURCE_LIMIT', stage: 'download', resource: 'download_bytes' }); return; }
                 if (sink) await sink(bytes, result.statusCode || 0);
                 else chunks.push(bytes);
               }
@@ -96,17 +108,17 @@ export async function gatewayGet(gateway: Gateway, url: URL, headers: Record<str
                 resolve({ status: result.statusCode || 0, headers: result.headers, body: Buffer.concat(chunks) });
                 cleanup();
               }
-            } catch { fail('response'); }
+            } catch (error) { fail('response', imageFailureDetail(error)); }
           })();
           result.on('error', () => fail('response')); 
         });
         resources.push(request);
         request.on('error', () => fail('request'));
-        request.on('timeout', () => { request.destroy(); fail('request timeout'); });
+        request.on('timeout', () => { request.destroy(); timedOut(); });
         request.end();
       });
     });
-    connect.on('timeout', () => { connect.destroy(); fail('CONNECT timeout'); });
+    connect.on('timeout', () => { connect.destroy(); timedOut(); });
     connect.on('error', () => fail('CONNECT socket'));
     connect.end();
   });
@@ -139,9 +151,11 @@ export function dockerHubManifestFetch(gateway: Gateway, repository: string,
     }
     let result = await registryRequest();
     if (result.status === 401 && !token) {
-      const realm = bearerChallenge(result.headers['www-authenticate'], repository, DOCKER_HUB_HOSTS.token);
+      let realm: URL;
+      try { realm = bearerChallenge(result.headers['www-authenticate'], repository, DOCKER_HUB_HOSTS.token); }
+      catch { throw new ResolutionRejected('Unsupported auth challenge', registryFailureDetail(401, 'download')); }
       const response = await request(gateway, realm, { accept: 'application/json' }, 32_768);
-      if (response.status !== 200) throw new ResolutionRejected('Token unavailable');
+      if (response.status !== 200) throw new ResolutionRejected('Token unavailable', registryFailureDetail(response.status, 'download'));
       let data: unknown;
       try { data = JSON.parse(response.body.toString('utf8')); } catch { throw new ResolutionRejected('Invalid token response'); }
       const candidate = (data as { token?: unknown } | null)?.token;
@@ -159,7 +173,7 @@ export function dockerHubManifestFetch(gateway: Gateway, repository: string,
       if (redirect.hostname === host) throw new ResolutionRejected('Redirect refused');
       result = await request(gateway, redirect, { accept: 'application/octet-stream' });
     }
-    if (result.status !== 200) throw new ResolutionRejected('OCI object unavailable');
+    if (result.status !== 200) throw new ResolutionRejected('OCI object unavailable', registryFailureDetail(result.status, 'download'));
     return result;
   };
 }

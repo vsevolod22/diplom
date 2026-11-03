@@ -26,9 +26,9 @@ import { FixtureQuotaLedger, quotaPolicy } from './quota-fixtures.js';
 import { fixtureEnv, fakeKey } from './fixtures.js';
 
 type Context = TranslationBinding & { source: TranslationSource; targetLanguage: 'ru'; enabled: boolean; policyVersion: string; disclosure: unknown };
-const policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'xingchen-agi/xing4.0-29b-a4b:free',
-  LLM_PROVIDER_ALLOWLIST: 'phala', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
-  LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0' })!;
+const policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM_MODEL: 'dots-studio/dots-3-note-preview:free',
+  LLM_PROVIDER_ALLOWLIST: 'atlas-cloud/fp8', LLM_RETENTION: 'no-training', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
+  LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0', LLM_TIMEOUT_MS: '90000' })!;
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
 
 test('public translation cookie HTTP + saved report + real adapter with SYNTHETIC guarded transport only (no live provider)', { timeout: 30000 }, async t => {
@@ -190,8 +190,8 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
       assert.equal(result.provider, 'OpenRouter'); assert.match(String(result.generatedAt), /^\d{4}-\d\d-\d\dT/);
       const wire = JSON.parse(lastWire); assert.deepEqual(JSON.parse(wire.messages[1].content), {
         title: 'Memory handling flaw', description: `An attacker can corrupt memory in ${scan.finding.cveId}.` });
-      assert.equal(wire.model, policy.model); assert.deepEqual(wire.provider.only, ['phala']); assert.equal(wire.provider.allow_fallbacks, false);
-      assert.deepEqual(wire.provider.max_price, { prompt: 0, completion: 0, request: 0 }); assert.equal(wire.provider.zdr, true);
+      assert.equal(wire.model, policy.model); assert.deepEqual(wire.provider.only, ['atlas-cloud/fp8']); assert.equal(wire.provider.allow_fallbacks, false);
+      assert.deepEqual(wire.provider.max_price, { prompt: 0, completion: 0, request: 0 }); assert.equal(Object.hasOwn(wire.provider, 'zdr'), false); assert.equal(wire.provider.data_collection, 'deny');
       assert.equal(quota.snapshot(owner.id, scan.id).scan.used.input, before.scan.used.input + 500);
       assert.deepEqual(ledger.archiveResult(scan.id, owner.id), original);
       assert.doesNotMatch(JSON.stringify(reader.read({ subject: owner.id, scope: ['scan:read'] }, scan.id)), /Memory handling|An attacker|description/);
@@ -317,6 +317,26 @@ test('public translation cookie HTTP + saved report + real adapter with SYNTHETI
         }
         assert.equal((await post(request(initial))).status, 200, 'capacity released even when final write is refused: ' + reason);
       }
+    });
+
+    await t.test('translation fake clock keeps public generation beyond 30s but cancels at 90s and releases capacity', async regression => {
+      for (const outcome of ['success', 'deadline'] as const) {
+        const reached = deferred(), resume = deferred(), before = sends;
+        afterSend = async () => { reached.resolve(); await resume.promise; };
+        regression.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+        try {
+          const pending = post(request(initial)); await reached.promise;
+          regression.mock.timers.tick(30_001);
+          assert.equal(sends, before + 1);
+          assert.equal((await post(request(initial))).status, 429, 'owner slot remains held beyond old 30s');
+          regression.mock.timers.tick(59_998);
+          if (outcome === 'success') resume.resolve(); else regression.mock.timers.tick(1);
+          const response = await pending;
+          assert.equal(response.status, outcome === 'success' ? 200 : 502, await response.clone().text());
+          await response.text(); assert.equal(sends, before + 1);
+        } finally { resume.resolve(); afterSend = undefined; regression.mock.timers.reset(); }
+      }
+      assert.equal((await post(request(initial))).status, 200, 'deadline cleanup released shared capacity');
     });
 
     await t.test('public-only registration and exact nginx routes; no legacy translation path', async () => {

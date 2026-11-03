@@ -11,10 +11,36 @@ import { createRequire, isBuiltin } from 'node:module';
 import ts from 'typescript';
 import { PROJECT, STATE, LABEL, CONFIG_SECRET, readProfile, runIsolatedDocker, copyStableSqlite, recoverySqlite, validateExportManifest } from './public-image-stand.mjs';
 import { dockerEnvironment } from './local-stand.mjs';
-import { capturePublicLlmSource, readPublicLlmBinding, loadPublicLlmSettings, expectedPublicLlmConfig, publicLlmEnvironmentOverlay, publicLlmComposeArguments, validatePublicLlmConfig, validatePublicLlmImage, validatePublicLlmContainer, validatePublicLlmKeyVolume, llmFingerprint, publicLlmStand } from './public-llm-stand.mjs';
+import { capturePublicLlmSource, readPublicLlmBinding, loadPublicLlmSettings, expectedPublicLlmConfig, publicLlmEnvironmentOverlay, publicLlmComposeArguments, validatePublicLlmConfig, validatePublicLlmImage, validatePublicLlmContainer, validatePublicLlmKeyVolume, llmFingerprint, publicLlmStand, validatePublicLlmExistingBuildSelection, currentLlmFingerprint } from './public-llm-stand.mjs';
 import { privateFile, byteFile, directoryIdentity, capturePublicLlmExecutionClosure, PUBLIC_LLM_EXECUTION_MODULES, publicLlmSecretlessControl } from './public-llm-build-continuation.mjs';
 
 export const EXISTING_BUILD_HOLD = Object.freeze({ audit: 'deploy-2c9ed08b8269264b09bf14eb6189a649', phase: 'build-submit-worker' });
+export const CURRENT_BUILD_TIMEOUT_HOLD = Object.freeze({ audit: 'deploy-1cb54172f8cd83708f64067371069fa5', phase: 'build-submit-worker', category: 'timeout' });
+// New owner authority: these missing originals are retire-only, never helper
+// or application execution images. No gateway restart/blob exception is granted.
+export const CURRENT_BUILD_RETIRE_ONLY_IMAGES = Object.freeze({
+  api: 'sha256:4ddfab8a19dfb15478588a1236f6c386ee75c04d72ea0cf118555df2ad4015da',
+  worker: 'sha256:515c65c09b82f0808d45e61edd3c0042c3614555e07061280533cc11646a55b3',
+});
+// Separate pre-migration authority. These observed IDs are not inferred from a
+// mutable tag or from the unavailable originals' persisted Config.
+export const SUMMARY_BUILD_HOLD = Object.freeze({
+  audit: 'deploy-76eb7a61e0da2e108210bc773b964d35', phase: 'build-retained-images',
+  checkpointSha256: '755950abb00599c500e4d70c764b3337c533f799d42230c2b87cd67eec81c745',
+  original: Object.freeze({
+    api: 'sha256:b01ba0c4c8308bf2306f5de6f4dd1e3e4d076bbf154b4ecf82ce8337a175a7b0',
+    worker: 'sha256:30c459e3b62d9e3fca718b44279da474bc391aeea0d420e968bd4bea4cd48c70',
+    web: 'sha256:c24f7a295395f7c47aa46aad986b2853b81947b3877b35ffd8a3b5ac4589d200',
+    'llm-egress': 'sha256:62adc991c61dd56ed23b243d1dacd4fbeba92bb30279dfcfcaf0ce2307e66e09',
+  }),
+  candidate: Object.freeze({
+    api: 'sha256:ffc01a919e30f4d005be1212e713fd4e3d05866ae4ee8274bdab0a3969906053',
+    worker: 'sha256:24915a5ff02a339ee47e9744358e5c8a9c89aef2461aa03155b5cf7f7c393514',
+    web: 'sha256:a03f7901346ae4730c180c6b7e64322ded0f5b80ff39557897556a1980254665',
+    'llm-egress': 'sha256:a7b4abf3e9159534409f893659b8683e58aa324001ccb9ac45fb6dc1f334f7cc',
+  }),
+});
+const supportedAudit = audit => audit === EXISTING_BUILD_HOLD.audit || audit === CURRENT_BUILD_TIMEOUT_HOLD.audit || audit === SUMMARY_BUILD_HOLD.audit;
 const SELF = 'scripts/public-llm-existing-build-continuation.mjs';
 const requireApi = createRequire(new URL('../server/api/package.json', import.meta.url));
 const canonical = v => Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical(v[k])])) : v;
@@ -43,16 +69,17 @@ export const EXISTING_BUILD_GATEWAY_RESTART = Object.freeze({
 });
 
 // Pure tuple check: no IO, no mutable policy argument and no restart-time window.
-// Other peers retain exact original epochs; gateways require the fixed new epoch.
+// Only the historical audit admits its fixed restart pair. The current timeout
+// audit requires every peer, including both gateways, to match its own checkpoint.
 export function validateExistingBuildPeerEpoch(audit, original, current) {
   const fields = ['control', 'epoch', 'id', 'image', 'name'];
-  need(audit === EXISTING_BUILD_HOLD.audit && original && current && roles.includes(original.name) &&
+  need(supportedAudit(audit) && original && current && roles.includes(original.name) &&
     equal(Object.keys(original).sort(), fields) && equal(Object.keys(current).sort(), fields) &&
     current.name === original.name && current.id === original.id && current.image === original.image && current.control === original.control &&
     /^[a-f0-9]{64}$/.test(original.id) && /^sha256:[a-f0-9]{64}$/.test(original.image) && /^[a-f0-9]{64}$/.test(original.control) &&
     Array.isArray(original.epoch) && Array.isArray(current.epoch) && original.epoch.length === 9 && current.epoch.length === 9 &&
     original.epoch[0] === original.id && current.epoch[0] === current.id);
-  if (Object.hasOwn(EXISTING_BUILD_GATEWAY_RESTART.gateways, original.name)) {
+  if (audit === EXISTING_BUILD_HOLD.audit && Object.hasOwn(EXISTING_BUILD_GATEWAY_RESTART.gateways, original.name)) {
     const fixed = EXISTING_BUILD_GATEWAY_RESTART.gateways[original.name];
     need(equal(original, fixed.original) && equal(current.epoch, fixed.currentEpoch));
   } else need(equal(current.epoch, original.epoch));
@@ -101,7 +128,8 @@ export function captureExistingBuildExecution(root) {
 
 // Only exported, fenced backup COPIES are opened. The original four-store
 // checkpoint is authoritative even when a retag removed an original image ID.
-async function storedBaseline(path, Database, recorded) {
+async function storedBaseline(path, Database, recorded, summaryRecovery = false) {
+  const fingerprint = summaryRecovery ? currentLlmFingerprint : llmFingerprint;
   const files = [], dirs = [directoryIdentity(path)], listing = names(path);
   need(equal(listing, ['core', 'llm']));
   const scratch = fs.mkdtempSync(join(tmpdir(), 'public-existing-build-')), copies = {}, baseline = { core: {}, llm: {}, empty: false };
@@ -119,13 +147,22 @@ async function storedBaseline(path, Database, recorded) {
       }
       if (group === 'core') {
         const restored = await recoverySqlite(Database, fs, crypto, paths, null);
-        for (const r of ['auth', 'ledger']) { need(restored[r].logicalSha256 === manifest.receipt[r].logicalSha256); baseline.core[r] = { logicalSha256: llmFingerprint(Database, fs, crypto, paths[r], r) }; }
+        for (const r of ['auth', 'ledger']) { need(restored[r].logicalSha256 === manifest.receipt[r].logicalSha256); baseline.core[r] = { logicalSha256: fingerprint(Database, fs, crypto, paths[r], r) }; }
       } else for (const [r, kind] of [['auth', 'history'], ['ledger', 'quota']]) {
-        baseline.llm[kind] = llmFingerprint(Database, fs, crypto, paths[r], kind);
+        baseline.llm[kind] = fingerprint(Database, fs, crypto, paths[r], kind);
         need(baseline.llm[kind] === manifest.receipt[r].logicalSha256);
-        let empty = true; try { llmFingerprint(Database, fs, crypto, paths[r], kind, true); } catch { empty = false; }
-        need(!empty); // Neither store may be relabelled as first-enable/empty.
+        if (!summaryRecovery) {
+          let empty = true; try { fingerprint(Database, fs, crypto, paths[r], kind, true); } catch { empty = false; }
+          need(!empty); // Historical first-enable exclusion remains unchanged.
+        }
+        // Current migration requires existing files + exact recorded fingerprints,
+        // not a nonempty chat table. An empty existing store is never reinitialized.
       }
+    }
+    if (summaryRecovery) {
+      const db = new Database(copies['llm-auth'].path, { readonly: true, fileMustExist: true });
+      try { need(db.pragma('user_version', { simple: true }) === 3); } finally { db.close(); }
+      baseline.historyVersion = 3;
     }
     need(equal(baseline, recorded)); for (const c of Object.values(copies)) c.verify();
   } finally { for (const c of Object.values(copies)) c.cleanup(); fs.rmSync(scratch, { recursive: true, force: true }); }
@@ -133,8 +170,8 @@ async function storedBaseline(path, Database, recorded) {
   verify(); return { files, baseline, verify };
 }
 
-function metadataReader(run, options, pins, helper, keyVolume) {
-  const ids = new Set(), imageIds = new Set(Object.values(pins.services).map(p => p.image));
+function metadataReader(run, options, pins, helper, keyVolume, summaryRecovery = false) {
+  const ids = new Set(), imageIds = new Set([...Object.values(pins.services).map(p => p.image), ...(summaryRecovery ? Object.values(SUMMARY_BUILD_HOLD.candidate) : [])]);
   const end = Date.now() + 120000; let calls = 0;
   return async args => {
     need(++calls <= 240 && Date.now() < end); const [kind, op, ref] = args;
@@ -160,6 +197,28 @@ function metadataReader(run, options, pins, helper, keyVolume) {
 }
 
 const ownValue = (error, key) => error && (typeof error === 'object' || typeof error === 'function') ? Object.getOwnPropertyDescriptor(error, key)?.value : undefined;
+// Broad Docker category=image is not proof of NoSuchImage (it also covers pull,
+// resolution and blob errors). Admit only the complete canonical daemon reply.
+export function classifyCurrentBuildMissingImage(image, error, stdout = '', stderr = '') {
+  return Object.values(CURRENT_BUILD_RETIRE_ONLY_IMAGES).includes(image) && ownValue(error, 'code') === 1 &&
+    !ownValue(error, 'killed') && !ownValue(error, 'signal') && typeof stdout === 'string' && typeof stderr === 'string' &&
+    Buffer.byteLength(stdout) <= 65536 && Buffer.byteLength(stderr) <= 65536 && ['', '[]'].includes(stdout.trim()) &&
+    stderr.trim() === 'Error response from daemon: No such image: ' + image;
+}
+export function classifySummaryBuildMissingImage(image, error, stdout = '', stderr = '') {
+  return Object.values(SUMMARY_BUILD_HOLD.original).includes(image) && ownValue(error, 'code') === 1 &&
+    !ownValue(error, 'killed') && !ownValue(error, 'signal') && typeof stdout === 'string' && typeof stderr === 'string' &&
+    Buffer.byteLength(stdout) <= 65536 && Buffer.byteLength(stderr) <= 65536 && ['', '[]'].includes(stdout.trim()) &&
+    stderr.trim() === 'Error response from daemon: No such image: ' + image;
+}
+export function canRetireSummaryBuildImage(audit, name, image, error) {
+  return audit === SUMMARY_BUILD_HOLD.audit && Object.hasOwn(SUMMARY_BUILD_HOLD.original, name) &&
+    SUMMARY_BUILD_HOLD.original[name] === image && ownValue(error, 'category') === 'image' && ownValue(error, 'noSuchImage') === image;
+}
+export function canRetireCurrentBuildImage(audit, name, image, error) {
+  return audit === CURRENT_BUILD_TIMEOUT_HOLD.audit && Object.hasOwn(CURRENT_BUILD_RETIRE_ONLY_IMAGES, name) &&
+    CURRENT_BUILD_RETIRE_ONLY_IMAGES[name] === image && ownValue(error, 'category') === 'image' && ownValue(error, 'noSuchImage') === image;
+}
 const metadataCategories = ['image', 'timeout', 'docker_unavailable', 'network_pool', 'resources', 'runtime_health', 'unclassified', 'storage_io', 'worker_output_blob_not_found', 'guard'];
 // Exact observed broken mutable output, NOT a missing/certified execution image.
 // Failed census cannot prove absence of extra own-prefix tags: review that loss.
@@ -214,6 +273,7 @@ export async function inspectExistingBuildPriorImage(query, name, image) {
     const category = ownValue(error, 'category'), failure = Error('PUBLIC LLM prior image inspection refused; details withheld.');
     failure.boundary = 'prior-image-inspect-' + name;
     failure.category = metadataCategories.includes(category) ? category : 'guard';
+    if (category === 'image' && (CURRENT_BUILD_RETIRE_ONLY_IMAGES[name] === image || SUMMARY_BUILD_HOLD.original[name] === image) && ownValue(error, 'noSuchImage') === image) failure.noSuchImage = image;
     // No raw error/cause/output/reference is carried across this boundary.
     throw failure;
   }
@@ -282,26 +342,36 @@ export async function inspectExistingBuildOwnTags(query, audit, missingPriorMeta
   return { images, taggedImages };
 }
 
-export async function preparePublicLlmExistingBuildContinuation({ root, home = homedir(), audit, run = runExistingBuildDocker, ambient = process.env, Database = requireApi('better-sqlite3') }) {
-  need(audit === EXISTING_BUILD_HOLD.audit && resolve(root) === root && fs.realpathSync(root) === root && !resolve(home, '.local/state/diplom-public-images/llm').startsWith(root + '/'));
+export async function preparePublicLlmExistingBuildContinuation({ root, home = homedir(), audit, run, ambient = process.env, Database = requireApi('better-sqlite3') }) {
+  need(supportedAudit(audit) && resolve(root) === root && fs.realpathSync(root) === root && !resolve(home, '.local/state/diplom-public-images/llm').startsWith(root + '/'));
+  const summaryRecovery = audit === SUMMARY_BUILD_HOLD.audit;
+  run ??= summaryRecovery ? runSummaryBuildDocker : runExistingBuildDocker;
   const state = join(root, STATE), lockPath = join(state, '.operation.lock'), auditPath = join(state, 'llm-deployments', audit), stage = join(lockPath, 'llm-candidate');
   const dirs = [state, lockPath, join(state, 'llm-deployments'), auditPath, stage].map(directoryIdentity);
   const checkPrefix = () => {
     dirs.forEach(v => v());
-    need(equal(names(lockPath), ['build-checkpoint.json', 'build-failure.json', 'helper-fenced.json', 'llm-candidate', 'mutation.json']));
-    need(equal(names(auditPath), ['fenced']) && equal(names(stage), ['compose.cve.json', 'compose.llm-env.json']));
-    const audits = names(join(state, 'llm-deployments')); need(audits.length <= 16 && audits.every(n => /^deploy-[a-f0-9]{32}$/.test(n)));
+    need(equal(names(lockPath), summaryRecovery ? ['build-checkpoint.json', 'helper-fenced-submission.json', 'helper-fenced.json', 'llm-candidate', 'mutation.json'] : ['build-checkpoint.json', 'build-failure.json', 'helper-fenced.json', 'llm-candidate', 'mutation.json']));
+    need(equal(names(auditPath), summaryRecovery ? ['fenced', 'history-schema-preflight.json'] : ['fenced']) && equal(names(stage), ['compose.cve.json', 'compose.llm-env.json']));
+    const audits = names(join(state, 'llm-deployments')); need(audits.length <= (summaryRecovery ? 32 : 16) && audits.every(n => /^deploy-[a-f0-9]{32}$/.test(n)));
     need(equal(audits.filter(n => !has(join(state, 'llm-deployments', n, 'complete.json'))), [audit]));
     need(!names(state).some(n => n.startsWith('.llm-pending-') || n.endsWith('.lock') && n !== '.operation.lock'));
   };
   checkPrefix(); const disk = fs.statfsSync(state); need(disk.bavail * disk.bsize >= 4 * 1024 ** 3);
   const execution = captureExistingBuildExecution(root), source = capturePublicLlmSource(root), settings = loadPublicLlmSettings(home), priorSelection = readPublicLlmBinding(root);
-  need(priorSelection?.keyVolume && equal(priorSelection, settings.selection));
+  validatePublicLlmExistingBuildSelection(audit, priorSelection, settings.selection);
   const stateFiles = ['profile.json', 'scan-jwt', 'compose.images.json', 'compose.cve.json', 'llm-profile.json', 'compose.llm-env.json'].map(n => privateFile(join(state, n)));
-  const originalFiles = ['mutation.json', 'build-checkpoint.json', 'build-failure.json', 'helper-fenced.json'].map(n => privateFile(join(lockPath, n), 16 * 1024 ** 2));
+  const originalFiles = ['mutation.json', 'build-checkpoint.json', summaryRecovery ? 'helper-fenced-submission.json' : 'build-failure.json', 'helper-fenced.json'].map(n => privateFile(join(lockPath, n), 16 * 1024 ** 2));
   const [mutation, build, failure, helper] = originalFiles.map(f => JSON.parse(f.bytes));
+  const preflight = summaryRecovery ? privateFile(join(auditPath, 'history-schema-preflight.json'), 4096) : null;
+  if (summaryRecovery) {
+    need(hash(originalFiles[1].bytes) === SUMMARY_BUILD_HOLD.checkpointSha256);
+    need(equal(JSON.parse(preflight.bytes), { version: 1, historyVersion: 3, migrateSummary: true }));
+    need(equal(build.source, source.manifest) && build.baseline.historyVersion === 3);
+    need(equal(failure, { version: 1, name: `${PROJECT}-llm-${audit.slice(7)}-fenced`, image: SUMMARY_BUILD_HOLD.original.api, purpose: 'backup' }));
+    for (const [name, id] of Object.entries(SUMMARY_BUILD_HOLD.original)) need(build.imageMetadata[name]?.Id === id);
+  }
   need(equal(mutation, { version: 1, project: PROJECT, command: 'public-llm-up', phase: 'fence-web', endpoint: mutation.endpoint }));
-  need(equal(failure, { version: 1, phase: EXISTING_BUILD_HOLD.phase, role: 'worker', category: 'unclassified' }));
+  if (!summaryRecovery) need(equal(failure, { version: 1, phase: EXISTING_BUILD_HOLD.phase, role: 'worker', category: audit === CURRENT_BUILD_TIMEOUT_HOLD.audit ? CURRENT_BUILD_TIMEOUT_HOLD.category : 'unclassified' }));
   need(equal(Object.keys(helper).sort(), ['id', 'image', 'purpose']) && helper.purpose === 'backup' && /^[a-f0-9]{64}$/.test(helper.id));
   const profile = readProfile(root), pins = JSON.parse(stateFiles.find(f => f.path.endsWith('/compose.images.json')).bytes);
   need(profile?.version === 2 && profile.cve && equal(Object.keys(pins), ['services']) && equal(Object.keys(pins.services).sort(), roles));
@@ -313,14 +383,14 @@ export async function preparePublicLlmExistingBuildContinuation({ root, home = h
   need(/^[a-f0-9]{96}$/.test(jwtFile.bytes));
     need(equal(Object.fromEntries(Object.entries(jwtFile.identity).filter(([k]) => ['dev', 'ino', 'mode', 'uid', 'size', 'mtime', 'ctime'].includes(k))), build.jwtIdentity));
   const candidateFiles = ['compose.cve.json', 'compose.llm-env.json'].map(n => privateFile(join(stage, n)));
-  need(candidateFiles[0].bytes === stateFiles.find(f => f.path.endsWith('/compose.cve.json')).bytes && equal(JSON.parse(candidateFiles[1].bytes), publicLlmEnvironmentOverlay(priorSelection)));
-  const stored = await storedBaseline(join(auditPath, 'fenced'), Database, build.baseline);
+  need(candidateFiles[0].bytes === stateFiles.find(f => f.path.endsWith('/compose.cve.json')).bytes && equal(JSON.parse(candidateFiles[1].bytes), publicLlmEnvironmentOverlay(settings.selection)));
+  const stored = await storedBaseline(join(auditPath, 'fenced'), Database, build.baseline, summaryRecovery);
   const env = dockerEnvironment(ambient), endpoint = env.DOCKER_HOST && !env.DOCKER_CONTEXT ? env.DOCKER_HOST : JSON.parse(await run(['context', 'inspect', ...(env.DOCKER_CONTEXT ? [env.DOCKER_CONTEXT] : []), '--format', '{{json .Endpoints.docker.Host}}'], { root, env, timeout: 10000 }));
   need(typeof endpoint === 'string' && /^unix:\/\/\/[^\s\0]+$/.test(endpoint) && endpoint === mutation.endpoint);
   env.DOCKER_HOST = endpoint; env.COMPOSE_DISABLE_ENV_FILE = '1'; for (const k of ['DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH']) delete env[k];
   const options = { root, env }, model = expectedPublicLlmConfig(root, profile.cve, priorSelection);
   const images = {}, missing = [], taggedImages = {};
-  const query = metadataReader(run, options, pins, helper, priorSelection.keyVolume);
+  const query = metadataReader(run, options, pins, helper, priorSelection.keyVolume, summaryRecovery);
   for (const name of roles) {
     const saved = build.imageMetadata[name]; need(equal(Object.keys(saved).sort(), ['Config', 'Id', 'Os']) && saved.Id === pins.services[name].image);
     // Validate persisted defaults as historical policy evidence, NOT as proof
@@ -328,15 +398,19 @@ export async function preparePublicLlmExistingBuildContinuation({ root, home = h
     if (replaceable.includes(name)) validatePublicLlmImage(saved, name);
     let rows;
     try { rows = JSON.parse(await inspectExistingBuildPriorImage(query, name, saved.Id)); }
-    catch (error) { if (!replaceable.includes(name) || error?.category !== 'image') throw error; missing.push(name); continue; }
+    catch (error) {
+          if (!(audit === EXISTING_BUILD_HOLD.audit && replaceable.includes(name) && error?.category === 'image') && !canRetireCurrentBuildImage(audit, name, saved.Id, error) && !canRetireSummaryBuildImage(audit, name, saved.Id, error)) throw error;
+          missing.push(name); continue;
+        }
     need(rows.length === 1 && equal({ Id: rows[0].Id, Os: rows[0].Os, Config: rows[0].Config }, saved)); validatePublicLlmImage(rows[0], name); images[name] = rows[0];
   }
-  // Retained services MUST have live metadata; missing deployable peers are only
-  // compared with the durable pre-build record, never selected for execution.
+  // Missing originals remain checkpoint-only validation evidence, never
+  // execution authority. The current audit allows only its two exact NoSuchImage pairs.
   const validateOriginalPeer = (c, name) => {
     const saved = build.peers.find(p => p.name === name), command = [...(c.Config.Entrypoint ?? []), ...c.Config.Cmd];
     need(saved && role(c) === name && c.Name === `/${PROJECT}-${name}-1` && owned(c.Config.Labels) && /^[a-f0-9]{64}$/.test(c.Id) && c.Config.Image === pins.services[name].image && saved.id === c.Id && saved.image === c.Image && saved.control === control(c) && c.Path === command[0] && equal(c.Args, command.slice(1)));
     validateExistingBuildPeerEpoch(audit, saved, { name, id: c.Id, image: c.Image, control: control(c), epoch: epoch(c) });
+    if (audit === CURRENT_BUILD_TIMEOUT_HOLD.audit || summaryRecovery) need(c.State.ExitCode === 0 && c.State.Running === ['egress', 'llm-egress'].includes(name));
     if (['api', 'worker', 'web'].includes(name) || name.endsWith('volume-init') || !c.State.Running) stopped(c);
     else need(['egress', 'llm-egress'].includes(name) && c.State.Status === 'running' && Number.isSafeInteger(c.State.Pid) && c.State.Pid > 0 && c.RestartCount === 0 && !c.State.Paused && !c.State.OOMKilled && !c.State.Restarting && !c.State.Dead && !c.State.Error);
     // Reapply independent runtime policy using actual persisted defaults when
@@ -381,34 +455,76 @@ export async function preparePublicLlmExistingBuildContinuation({ root, home = h
   };
   const inventory = await inspectRuntime(query), backupImage = images.api ?? taggedImages.api;
   need(backupImage); validatePublicLlmImage(backupImage, 'api');
+  const summaryCandidates = {};
+  if (summaryRecovery) {
+    need(equal([...missing].sort(), Object.keys(SUMMARY_BUILD_HOLD.original).sort()));
+    need(equal(Object.keys(taggedImages).sort(), ['api', 'egress', 'llm-egress', 'web', 'worker']));
+    for (const name of roles) {
+      const image = replaceable.includes(name) ? taggedImages[name] : images[name];
+      need(image && image.Id === (SUMMARY_BUILD_HOLD.candidate[name] ?? pins.services[name].image));
+      validatePublicLlmImage(image, name); summaryCandidates[name] = image;
+      if (replaceable.includes(name)) need(equal(image.RepoTags, [`${PROJECT}-${name}:local`]));
+    }
+    need(backupImage.Id === SUMMARY_BUILD_HOLD.candidate.api);
+  }
+    if (audit === CURRENT_BUILD_TIMEOUT_HOLD.audit && missing.includes('api')) need(backupImage === taggedImages.api &&
+      backupImage.RepoTags?.includes(`${PROJECT}-api:local`) && !Object.values(CURRENT_BUILD_RETIRE_ONLY_IMAGES).includes(backupImage.Id));
   // Config rendering is inert, uses a dummy JWT and disables dotenv explicitly.
   const rendered = JSON.parse(await run(publicLlmComposeArguments(root, ['config', '--format', 'json'], { cve: true, directory: stage, pinned: false }), { ...options, env: { ...env, SCAN_JWT_SECRET: CONFIG_SECRET }, timeout: 15000 }));
-  validatePublicLlmConfig(rendered, root, profile.cve, priorSelection);
-  const proofs = [...execution.directoryProofs, ...execution.programs, ...originalFiles, ...stored.files];
-  const verifyStable = () => { dirs.forEach(v => v()); execution.verify(); source.verify(); settings.verify(); originalFiles.forEach(f => f.verify()); candidateFiles.forEach(f => f.verify()); stored.verify(); };
+  validatePublicLlmConfig(rendered, root, profile.cve, settings.selection);
+  const proofs = [...execution.directoryProofs, ...execution.programs, ...originalFiles, ...stored.files, ...(preflight ? [preflight] : [])];
+  const verifyStable = () => { dirs.forEach(v => v()); execution.verify(); source.verify(); settings.verify(); originalFiles.forEach(f => f.verify()); preflight?.verify(); candidateFiles.forEach(f => f.verify()); stored.verify(); };
   const verify = () => { verifyStable(); stateFiles.forEach(f => f.verify()); };
   const runtimeEvidence = v => ({ ...v, containers: v.containers.map(publicLlmSecretlessControl) });
   const runtime = runtimeEvidence(inventory);
   const revalidate = async () => {
-    verify(); checkPrefix(); const q = metadataReader(run, options, pins, helper, priorSelection.keyVolume);
+    verify(); checkPrefix(); const q = metadataReader(run, options, pins, helper, priorSelection.keyVolume, summaryRecovery);
     for (const name of roles) {
       let rows; try { rows = JSON.parse(await inspectExistingBuildPriorImage(q, name, pins.services[name].image)); }
-      catch (error) { if (missing.includes(name) && error?.category === 'image') continue; throw error; }
+      catch (error) {
+              if (missing.includes(name) && (audit === EXISTING_BUILD_HOLD.audit && error?.category === 'image' || canRetireCurrentBuildImage(audit, name, pins.services[name].image, error) || canRetireSummaryBuildImage(audit, name, pins.services[name].image, error))) continue;
+              throw error;
+            }
       need(!missing.includes(name) && rows.length === 1 && equal({ Id: rows[0].Id, Os: rows[0].Os, Config: rows[0].Config }, build.imageMetadata[name])); validatePublicLlmImage(rows[0], name);
     }
     need(equal(runtimeEvidence(await inspectRuntime(q)), runtime)); verify(); checkPrefix();
   };
   verify(); checkPrefix();
   const proofEvidence = f => ({ path: f.path.slice(root.length + 1), identity: f.identity, ...(f.sha256 ? { sha256: f.sha256 } : f.bytes !== undefined && !f.path.endsWith('/scan-jwt') ? { sha256: hash(f.bytes) } : {}) });
-  const reviewEvidence = { version: 1, audit, continuation: 'exact-existing-llm-normal-build-worker-hold', gatewayRestartAuthorization: EXISTING_BUILD_GATEWAY_RESTART, endpoint, source: source.manifest, executionClosure: execution.manifest, settings: settings.selection, priorSelection, baseline: stored.baseline,
+  const reviewEvidence = { version: 1, audit, continuation: summaryRecovery ? 'exact-summary-pre-migration-retained-images-hold' : 'exact-existing-llm-normal-build-worker-hold', gatewayRestartAuthorization: audit === EXISTING_BUILD_HOLD.audit ? EXISTING_BUILD_GATEWAY_RESTART : null, endpoint, source: source.manifest, executionClosure: execution.manifest, settings: settings.selection, priorSelection, baseline: stored.baseline,
     original: proofs.map(proofEvidence), state: stateFiles.map(proofEvidence), candidate: candidateFiles.map(proofEvidence), runtime,
     workerOutputRetirement: inventory.workerOutputRetirement ?? null,
+        ...(audit === CURRENT_BUILD_TIMEOUT_HOLD.audit ? { currentImageRetirementAuthorization: CURRENT_BUILD_RETIRE_ONLY_IMAGES } : {}),
     missingPriorMetadata: missing.sort(), retirementPolicy: missing.map(name => ({ name, image: pins.services[name].image, basis: 'durable-pre-build-checkpoint-controls-and-epoch', executeOriginal: false })),
+    ...(summaryRecovery ? { summaryRecoveryAuthority: SUMMARY_BUILD_HOLD, candidateImages: Object.fromEntries(Object.entries(summaryCandidates).map(([name, im]) => [name, { Id: im.Id, Os: im.Os, Config: im.Config }])), migration: 'history-summary-v3-to-v4', sourceBasis: 'unchanged-original-build-checkpoint' } : {}),
     priorImageMetadata: Object.fromEntries(Object.entries(images).map(([n, im]) => [n, { Id: im.Id, Os: im.Os, Config: im.Config }])), backupHelper: { Id: backupImage.Id, Os: backupImage.Os, Config: backupImage.Config }, initialization: 'forbidden-existing-four-stores' };
   const review = hash(reviewEvidence);
   return { root, auditName: audit, nonce: audit.slice(7), auditPath, lockPath, stage, options, endpoint, profile, priorSelection, selection: settings.selection, pins, images, inventory, backupImage, keyVolumeAuthority: inventory.volumes.find(v => v.Name === priorSelection.keyVolume), baseline: stored.baseline,
-    existingBuildOnly: true, review, reviewEvidence, originalFiles, stateFiles, candidateFiles, proofs, verify, verifyStable, verifyExecution: execution.verify, checkPrefix, revalidate, validateOriginalPeer,
-    summary: { audit, review, command: 'check-existing-build', lifecycle: false, services: 7, exactGatewayRestartException: true, workerOutputRebuildRequired: Boolean(inventory.workerOutputRetirement), ownPrefixTagCensusProven: !inventory.workerOutputRetirement, additionalOwnPrefixTagsAbsentProven: !inventory.workerOutputRetirement, missingPriorMetadata: missing, baselineBasis: 'durable-pre-build-checkpoint-and-original-fenced-four-stores', requiresCurrentBuild: true, requiresInitialization: false, keyVolumeApiOnlyReadonly: true, executionModules: execution.programs.length, liveStoresCompared: false, mandatoryPreBuildNetworkNoneComparison: true } };
+    existingBuildOnly: true, summaryRecovery, summaryCandidates, verifySummaryImages: async query => {
+      need(summaryRecovery); verifyStable();
+      for (const [name, image] of Object.entries(SUMMARY_BUILD_HOLD.original)) {
+        let missing = false;
+        try { await query(['image', 'inspect', image]); }
+        catch (error) { need(canRetireSummaryBuildImage(audit, name, image, error)); missing = true; }
+        need(missing);
+      }
+      for (const name of roles) {
+        const im = summaryCandidates[name], rows = JSON.parse(await query(['image', 'inspect', im.Id]));
+        need(rows.length === 1 && equal({ Id: rows[0].Id, Os: rows[0].Os, Config: rows[0].Config }, { Id: im.Id, Os: im.Os, Config: im.Config }));
+        validatePublicLlmImage(rows[0], name);
+      }
+    },
+    verifySummaryHelperSource: async (id, query, check) => {
+      need(summaryRecovery); verifyStable(); await check();
+      const files = source.manifest.files.filter(f => f.path.startsWith('server/api/src/') || f.path.startsWith('server/runtime/src/') || ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'server/api/package.json', 'server/api/tsconfig.json', 'server/deploy/trust/db-signing-key.pub.pem'].includes(f.path));
+      need(files.length > 0 && files.length < 512);
+      const program = `const fs=require('node:fs'),crypto=require('node:crypto');const files=${JSON.stringify(files.map(f => ({ path: '/app/' + f.path, size: f.size, digest: f.digest })))};const need=v=>{if(!v)process.exit(70);};for(const path of ['/app','/app/server','/app/server/api','/app/server/runtime','/app/server/deploy','/app/server/deploy/trust']){const s=fs.lstatSync(path);need(s.isDirectory()&&!s.isSymbolicLink());}const actual=[];let visited=0;const walk=(path,depth=0)=>{need(++visited<=1024&&depth<=32);const s=fs.lstatSync(path);need(!s.isSymbolicLink());if(s.isDirectory())for(const name of fs.readdirSync(path))walk(path+'/'+name,depth+1);else{need(s.isFile());actual.push(path);}};for(const root of ['/app/server/api/src','/app/server/runtime/src'])walk(root);const expected=files.filter(f=>f.path.startsWith('/app/server/api/src/')||f.path.startsWith('/app/server/runtime/src/')).map(f=>f.path);need(JSON.stringify(actual.sort())===JSON.stringify(expected.sort()));for(const f of files){const s=fs.lstatSync(f.path);need(s.isFile()&&!s.isSymbolicLink()&&s.size===f.size&&crypto.createHash('sha256').update(fs.readFileSync(f.path)).digest('hex')===f.digest);}console.log('{"sourceVerified":true}');`;
+      need(Buffer.byteLength(program) <= 131072);
+      need(equal(JSON.parse(await query(['container', 'exec', id, 'node', '-e', program])), { sourceVerified: true }));
+      await check(); verifyStable();
+    },
+    review, reviewEvidence, originalFiles, stateFiles, candidateFiles, proofs, verify, verifyStable, verifyExecution: execution.verify, checkPrefix, revalidate, validateOriginalPeer,
+    summary: { audit, review, command: summaryRecovery ? 'check-summary-build' : 'check-existing-build', lifecycle: false, ...(summaryRecovery ? { phase: SUMMARY_BUILD_HOLD.phase, candidatePins: SUMMARY_BUILD_HOLD.candidate, historyVersion: 3, candidateHelperSourceCompared: false, mandatoryHelperSourceComparison: true, mandatoryPreMigrationNetworkNoneComparison: true, backupHelperBasis: 'fixed-reviewed-candidate-api-readonly-network-none', backupImageId: backupImage.Id } : {}), services: 7, exactGatewayRestartException: audit === EXISTING_BUILD_HOLD.audit, workerOutputRebuildRequired: Boolean(inventory.workerOutputRetirement), ownPrefixTagCensusProven: !inventory.workerOutputRetirement, additionalOwnPrefixTagsAbsentProven: !inventory.workerOutputRetirement, missingPriorMetadata: missing, ...(audit === CURRENT_BUILD_TIMEOUT_HOLD.audit && missing.includes('api') ? { backupHelperBasis: 'validated-current-tagged-api-readonly-network-none', backupImageId: backupImage.Id } : {}), baselineBasis: 'durable-pre-build-checkpoint-and-original-fenced-four-stores', requiresCurrentBuild: !summaryRecovery, ...(summaryRecovery ? { requiresSummaryMigration: true } : {}), requiresInitialization: false, keyVolumeApiOnlyReadonly: true, executionModules: execution.programs.length, liveStoresCompared: false, mandatoryPreBuildNetworkNoneComparison: true } };
 }
 
 // Raw Docker failure output never leaves this adapter. Finite hints are NOT
@@ -433,23 +549,25 @@ export function runExistingBuildDocker(args, options, execute = execFile) {
     const ownCensus = equal(args, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}', '--filter', `reference=${PROJECT}-*`]);
     const workerOutput = equal(args, ['image', 'inspect', `${PROJECT}-worker:local`]);
     if (!(args.length === 3 && args[0] === 'image' && args[1] === 'inspect') && !ownCensus) return runIsolatedDocker(args, options, execute);
-    let storageIo = false, outputFailure = null;
+    let storageIo = false, outputFailure = null, noSuchImage = false;
     // Keep the existing metadata adapter's categories, especially image vs
     // unclassified. Observe IO locally without a second dispatch or fallback.
     const observe = (program, received, settings, done) => {
       try { return execute(program, received, settings, (error, stdout, stderr) => {
         storageIo = Boolean(error) && classifyExistingBuildCause(error, stdout, stderr) === 'storage_io';
         if (error && (workerOutput || ownCensus)) outputFailure = classifyExistingWorkerOutputFailure(error, stdout, stderr);
+                noSuchImage = !ownCensus && classifyCurrentBuildMissingImage(args[2], error, stdout, stderr);
         done(error, stdout, stderr);
       }); } catch (error) { storageIo = classifyExistingBuildCause(error) === 'storage_io'; throw error; }
     };
     return runIsolatedDocker(args, options, observe).catch(error => {
-      if (!storageIo && !outputFailure && !ownCensus) throw error;
+      if (!storageIo && !outputFailure && !ownCensus && !noSuchImage) throw error;
       const failure = Error('PUBLIC LLM Docker metadata failure; output withheld.');
       failure.category = storageIo ? 'storage_io' : outputFailure ? 'worker_output_blob_not_found' : metadataCategories.includes(ownValue(error, 'category')) ? ownValue(error, 'category') : 'guard';
       if (ownCensus) failure.boundary = 'own-image-tag-census';
       else if (workerOutput) failure.boundary = 'own-worker-output-inspect';
       if (outputFailure) failure.workerOutputFailure = outputFailure;
+      if (noSuchImage && !storageIo && failure.category === 'image') failure.noSuchImage = args[2];
       throw failure;
     });
   }
@@ -460,12 +578,30 @@ export function runExistingBuildDocker(args, options, execute = execFile) {
   });
 }
 
+// A separate adapter does not broaden any historical raw-error exception.
+export function runSummaryBuildDocker(args, options, execute = execFile) {
+  if (!(args.length === 3 && args[0] === 'image' && args[1] === 'inspect' && Object.values(SUMMARY_BUILD_HOLD.original).includes(args[2]))) return runIsolatedDocker(args, options, execute);
+  let missing = false;
+  const observe = (program, received, settings, done) => execute(program, received, settings, (error, stdout, stderr) => {
+    missing = classifySummaryBuildMissingImage(args[2], error, stdout, stderr); done(error, stdout, stderr);
+  });
+  return runIsolatedDocker(args, options, observe).catch(error => {
+    if (!missing || ownValue(error, 'category') !== 'image') throw error;
+    const failure = Error('PUBLIC LLM exact summary image absent; output withheld.');
+    failure.category = 'image'; failure.noSuchImage = args[2]; throw failure;
+  });
+}
+
 // Check/continue commands live here, so old launcher import scans are unchanged.
 // The normal launcher owns every lifecycle boundary; this module only prepares
 // read-only authority and passes it into that shared flow after exact-token review.
-export async function publicLlmExistingBuildStand(argv, { root = dirname(dirname(fileURLToPath(import.meta.url))), run = runExistingBuildDocker, log = console.log, ...options } = {}) {
-  const [command, ...flags] = argv, checking = command === 'check-existing-build';
-  need((checking || command === 'continue-existing-build') && flags[0] === '--audit' && flags[1] === EXISTING_BUILD_HOLD.audit && (checking ? flags.length === 2 : flags.length === 6 && flags[2] === '--review' && /^[a-f0-9]{64}$/.test(flags[3] ?? '') && flags[4] === '--ack-reviewed-current-source' && flags[5] === '--ack-retire-only-unavailable-peers'));
+export async function publicLlmExistingBuildStand(argv, { root = dirname(dirname(fileURLToPath(import.meta.url))), run, log = console.log, ...options } = {}) {
+  const [command, ...flags] = argv, summaryRecovery = ['check-summary-build', 'continue-summary-build'].includes(command);
+  const checking = command === 'check-existing-build' || command === 'check-summary-build';
+  need((checking || command === 'continue-existing-build' || command === 'continue-summary-build') && flags[0] === '--audit' &&
+    (summaryRecovery ? flags[1] === SUMMARY_BUILD_HOLD.audit : [EXISTING_BUILD_HOLD.audit, CURRENT_BUILD_TIMEOUT_HOLD.audit].includes(flags[1])) &&
+    (checking ? flags.length === 2 : flags.length === (summaryRecovery ? 7 : 6) && flags[2] === '--review' && /^[a-f0-9]{64}$/.test(flags[3] ?? '') && flags[4] === '--ack-reviewed-current-source' && flags[5] === '--ack-retire-only-unavailable-peers' && (!summaryRecovery || flags[6] === '--ack-history-summary-v3-to-v4')));
+  run ??= summaryRecovery ? runSummaryBuildDocker : runExistingBuildDocker;
   const context = await preparePublicLlmExistingBuildContinuation({ ...options, root, run, audit: flags[1] });
   if (checking) { log(JSON.stringify(context.summary)); return context.summary; }
   need(context.review === flags[3]);

@@ -136,11 +136,6 @@ export const chatContextSelectionSchema = z.strictObject({
 
 export const freeProfileSchema = z.union([
   z.strictObject({
-    model: z.literal('xingchen-agi/xing4.0-29b-a4b:free'),
-    providers: z.tuple([z.literal('phala')]),
-    retention: z.literal('no-storage'),
-  }),
-  z.strictObject({
     model: z.literal('apodex/apodex-1.1-mini:free'),
     providers: z.tuple([z.literal('novita/bf16')]),
     retention: z.literal('no-storage'),
@@ -222,13 +217,6 @@ export type OpenAiDisclosure = z.infer<typeof openAiDisclosureSchema>;
 const catalogBase = { checkedOn: z.literal('2026-10-21'), liveVerified: z.literal(false) };
 const catalog = z.union([
   z.strictObject({
-    ...catalogBase,
-    status: z.literal('catalog-listed-unprobed'),
-    model: z.literal('xingchen-agi/xing4.0-29b-a4b:free'),
-    endpoint: z.literal('phala'),
-    zdrListed: z.literal(true),
-  }),
-  z.strictObject({
     checkedOn: z.literal('2026-10-29'),
     liveVerified: z.literal(false),
     status: z.literal('catalog-listed-unprobed'),
@@ -272,7 +260,7 @@ export const publicReadinessShape = {
 };
 export function validPublicReadiness(value: z.infer<z.ZodObject<typeof publicReadinessShape>>) {
   const expected: z.infer<typeof readinessBlockerSchema>[] = [];
-  if (value.provider.status === 'unverified-profile') expected.push('configuration-required');
+  if (value.provider.status !== 'catalog-listed-unprobed') expected.push('configuration-required');
   if (value.credential !== 'metadata-valid')
     expected.push(value.credential === 'unsafe' ? 'public-key-unsafe' : 'public-key-required');
   if (value.quota !== 'available') expected.push('quota-store-unavailable');

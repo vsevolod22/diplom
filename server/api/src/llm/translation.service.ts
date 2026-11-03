@@ -11,12 +11,17 @@ import { prepareTranslation } from './prepared-request.js';
 import type { QuotaLedger } from './quota-ledger.js';
 import { quotaUnavailable } from './quota-policy.js';
 import type { LlmQuotaRuntime } from './quota-runtime.js';
+
+import { reportBinding } from './history-contract.js';
+import { publicCredentialStatus, translationReadiness, type PublicCredentialStatus } from './public-readiness.js';
+import type { TranslationReadiness } from './provider-browser-contract.js';
 import type { ReportReader } from './report-context.js';
 import { exact } from './response.js';
 import { TRANSLATION, translationBinding, translationDisclosure, translationEnabled, translationPolicy, translationQuery,
   translationRequest, validateTranslationReply, type TranslationSnapshot } from './translation-contract.js';
 
-type Runtime = { policy(): LlmPolicy | null; provider(): LlmProvider };
+type Runtime = { policy(): LlmPolicy | null; provider(): LlmProvider; translationCompatible?(): boolean;
+  credentialStatus?(): PublicCredentialStatus };
 type Access = { request: BrowserRequest; identity: Identity; session: SessionSnapshot };
 export type TranslationResult = { value: unknown; write(action: () => void): void; release?(): void };
 
@@ -26,6 +31,17 @@ export class TranslationService {
   constructor(private readonly auth: AuthStore, private readonly reports: ReportReader, private readonly runtime: Runtime,
     private readonly quotas: LlmQuotaRuntime, private readonly acquire: (owner: string) => () => void,
     private readonly localOrigin: BrowserScanLocalOrigin) {}
+  private policy(): LlmPolicy | null {
+    const policy = this.runtime.policy();
+    if (!translationEnabled(policy)) return null;
+    // Translation remains OpenRouter-only. The shared uncapped paid ledger is
+    // deliberately not a free reservation policy; never reset or split counters.
+    return this.compatible() ? policy : null;
+  }
+  private compatible(): boolean {
+    const mode = process.env.LLM_QUOTA_MONETARY_LIMIT;
+    return this.runtime.translationCompatible?.() ?? (mode === undefined || mode === 'capped');
+  }
   private access(request: BrowserRequest, mutation = false): Access {
     if (this.localOrigin !== 'http://127.0.0.1:8081') throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
     const identity = browserIdentity(this.auth, request, false, this.localOrigin);
@@ -51,7 +67,7 @@ export class TranslationService {
         const error = new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
         stoppedDiagnostic(signal, error); throw error;
       }
-      const fresh = this.runtime.policy();
+      const fresh = this.policy();
       if ((fresh?.version ?? null) !== (policy?.version ?? null) || !!fresh?.freeOnly !== !!policy?.freeOnly)
         throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
       return this.reports.withTranslation(access.identity, initial.scanId, initial.findingId, initial.assessmentIndex, snapshot => {
@@ -62,10 +78,34 @@ export class TranslationService {
       });
     });
   }
+  readiness(request: BrowserRequest, scanId: string): TranslationResult & { value: TranslationReadiness } {
+    const access = this.access(request);
+    // Owner/report authority precedes all operator setup metadata. Translation never
+    // uses the selected summary/chat provider or opens its credential on this GET.
+    const report = this.guard(access, () => this.reports.withSummaryReport(access.identity, scanId, report => report));
+    const policy = this.policy();
+    let quotaAvailable = false, quotaCompatible = this.compatible();
+    try {
+      const ledger = this.quotas.ledger();
+      ledger.snapshot(access.identity.subject, scanId);
+      quotaAvailable = true;
+      quotaCompatible = quotaCompatible && ledger.policy.monetaryLimit !== 'uncapped';
+    } catch { /* No raw quota diagnostics or initialization. */ }
+
+    const value: TranslationReadiness = { ...reportBinding(report), ...translationReadiness(policy,
+      this.runtime.credentialStatus?.() ?? publicCredentialStatus(), quotaAvailable, quotaCompatible) };
+    return { value, write: action => this.guard(access, () => this.reports.withSummaryReport(access.identity, scanId, fresh => {
+      if (JSON.stringify(reportBinding(fresh)) !== JSON.stringify(reportBinding(report)))
+        throw new ConflictException({ errorCode: 'LLM_STALE_REPORT' });
+      if ((this.policy()?.version ?? null) !== (policy?.version ?? null))
+        throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
+      action();
+    })) };
+  }
   context(request: BrowserRequest, scanId: string, query: unknown): TranslationResult {
     const access = this.access(request), selection = translationQuery(query);
     const snapshot = this.guard(access, () => this.reports.readTranslation(access.identity, scanId, selection.findingId, selection.assessmentIndex));
-    const policy = this.runtime.policy(), enabled = translationEnabled(policy);
+    const policy = this.policy(), enabled = translationEnabled(policy);
     return { value: { ...translationBinding(snapshot), targetLanguage: 'ru', source: snapshot.source,
       enabled, policyVersion: enabled ? translationPolicy(policy!) : null, disclosure: enabled ? translationDisclosure(policy!) : null },
       write: action => this.current(access, snapshot, policy, undefined, action) };
@@ -77,7 +117,7 @@ export class TranslationService {
     const snapshot = this.guard(access, () => this.reports.readTranslation(access.identity, scanId, input.findingId, input.assessmentIndex));
     if (input.reportVersion !== snapshot.reportVersion) throw new ConflictException({ errorCode: 'LLM_STALE_REPORT' });
     if (input.sourceVersion !== snapshot.sourceVersion) throw new ConflictException({ errorCode: 'LLM_STALE_SOURCE' });
-    const policy = this.runtime.policy();
+    const policy = this.policy();
     if (!translationEnabled(policy)) throw configError();
     if (input.consent.policyVersion !== translationPolicy(policy)) throw new ConflictException({ errorCode: 'LLM_STALE_POLICY' });
     const releaseCapacity = this.acquire(access.identity.subject);
@@ -92,6 +132,7 @@ export class TranslationService {
       this.current(access, snapshot, policy, controller.signal, () => undefined);
       const prepared = prepareTranslation(snapshot.text, policy);
       ledger = this.quotas.ledger();
+      if (ledger.policy.monetaryLimit === 'uncapped') throw configError();
       if (prepared.reserve.input > ledger.policy.requestInput) throw new ConflictException({ errorCode: 'LLM_CONTEXT_LIMIT' });
       const boundLedger = ledger;
       reservation = this.current(access, snapshot, policy, controller.signal, () => boundLedger.withBusyTimeout(

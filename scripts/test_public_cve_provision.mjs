@@ -6,8 +6,20 @@ import { createHash } from 'node:crypto';
 import { bridgeFixture } from './public-cve-bridge-fixtures.mjs';
 import { publicImageCveConfig } from './public-image-stand-profile.mjs';
 import { cveOverlay, readProfile, publicImageStand } from './public-image-stand.mjs';
-import { preparePublicCve, publicCveProvision, loadMigrationPlan } from './public-cve-provision.mjs';
+import { preparePublicCve, publicCveProvision, loadMigrationPlan, stream } from './public-cve-provision.mjs';
 const hash = (b) => createHash('sha256').update(b).digest('hex');
+const stamp = s => [s.dev, s.ino, s.uid, s.mode, s.nlink, s.size, s.mtimeMs, s.ctimeMs];
+function cloneFixture(t) {
+  const f = bridgeFixture(t), source = join(f.stand, f.current.release, 'bundle.bin'), destination = join(f.root, 'clone.bin');
+  const copies = [];
+  // Simulate the clone syscall with tiny fixture bytes; this is not native APFS qualification.
+  const io = { ...fs, copyFileSync: (s, d, flags) => {
+    copies.push(flags);
+    assert.equal(flags, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE_FORCE);
+    fs.copyFileSync(s, d, fs.constants.COPYFILE_EXCL);
+  } };
+  return { source, destination, copies, io };
+}
 function legacy(t) {
   const f = bridgeFixture(t),
     old = join(f.root, '.local-stand');
@@ -99,6 +111,101 @@ test('explicit prepared migration uses DEFAULT bridge and same signed bytes, the
     root: f.root,
     run: (args, options) => f.bridgeDocker(args, { ...options, timeout: options.timeout ?? 30000 }),
     log: () => {},
+  });
+});
+
+test('clone guard macOS uses force-clone/exclusive, exact bytes, separate single-link inode, immutable source and fsync', t => {
+  const f = cloneFixture(t), before = stamp(fs.lstatSync(f.source));
+  let synced = 0;
+  const result = stream(f.source, 1024 ** 2, f.destination, { platform: 'darwin', io: { ...f.io,
+    fsyncSync: fd => { synced++; fs.fsyncSync(fd); }, writeSync: () => { throw Error('no streaming fallback'); },
+  } });
+  assert.equal(result.sha256, hash(fs.readFileSync(f.destination)));
+  assert.deepEqual(fs.readFileSync(f.source), fs.readFileSync(f.destination));
+  assert.deepEqual(stamp(fs.lstatSync(f.source)), before);
+  assert.notEqual(fs.lstatSync(f.source).ino, fs.lstatSync(f.destination).ino);
+  assert.equal(fs.lstatSync(f.destination).nlink, 1);
+  assert.equal(fs.lstatSync(f.destination).mode & 0o777, 0o444);
+  assert.equal(f.copies.length, 1); assert.equal(synced, 1);
+});
+
+test('clone guard macOS clone refusal never falls back, overwrites or cleans retained evidence', async t => {
+  for (const code of ['ENOTSUP', 'EXDEV', 'ENOSPC']) await t.test(code, t => {
+    const f = cloneFixture(t), before = stamp(fs.lstatSync(f.source));
+    let copies = 0;
+    assert.throws(() => stream(f.source, 1024 ** 2, f.destination, { platform: 'darwin', io: { ...f.io,
+      copyFileSync: () => { copies++; throw Object.assign(Error('synthetic clone refusal'), { code }); },
+      writeSync: () => { throw Error('no fallback'); },
+    } }), { code });
+    assert.equal(copies, 1); assert(!fs.existsSync(f.destination));
+    assert.deepEqual(stamp(fs.lstatSync(f.source)), before);
+  });
+});
+
+test('clone guard rejects destination races and existing symlinks without touching their bytes', async t => {
+  for (const kind of ['race', 'symlink']) await t.test(kind, t => {
+    const f = cloneFixture(t), other = join(f.destination + '-other');
+    fs.writeFileSync(other, 'unrelated');
+    if (kind === 'symlink') fs.symlinkSync(other, f.destination);
+    assert.throws(() => stream(f.source, 1024 ** 2, f.destination, { platform: 'darwin', io: { ...f.io,
+      copyFileSync: (s, d, flags) => {
+        if (kind === 'race') fs.writeFileSync(d, 'racing owner', { flag: 'wx' });
+        f.io.copyFileSync(s, d, flags);
+      },
+    } }), { code: 'EEXIST' });
+    assert.equal(fs.readFileSync(other, 'utf8'), 'unrelated');
+    if (kind === 'race') assert.equal(fs.readFileSync(f.destination, 'utf8'), 'racing owner');
+    else assert(fs.lstatSync(f.destination).isSymbolicLink());
+  });
+});
+
+test('clone guard rejects corrupt clones, hardlinks, symlinks, source drift and late destination replacement', async t => {
+  for (const fault of ['corrupt', 'hardlink', 'symlink', 'source-drift', 'destination-replaced', 'wrong-mode']) await t.test(fault, t => {
+    const f = cloneFixture(t);
+    const io = { ...f.io, copyFileSync: (s, d, flags) => {
+      if (fault === 'hardlink') return fs.linkSync(s, d);
+      if (fault === 'symlink') return fs.symlinkSync(s, d);
+      f.io.copyFileSync(s, d, flags);
+      if (fault === 'corrupt') { fs.chmodSync(d, 0o600); fs.writeFileSync(d, Buffer.alloc(fs.statSync(d).size)); fs.chmodSync(d, 0o444); }
+      if (fault === 'wrong-mode') fs.chmodSync(d, 0o600);
+      if (fault === 'source-drift') { fs.chmodSync(s, 0o600); fs.chmodSync(s, 0o444); }
+    }, fsyncSync: fd => {
+      fs.fsyncSync(fd);
+      if (fault === 'destination-replaced') { fs.unlinkSync(f.destination); fs.writeFileSync(f.destination, 'replacement', { mode: 0o444 }); }
+    } };
+    assert.throws(() => stream(f.source, 1024 ** 2, f.destination, { platform: 'darwin', io }), /refused\/HOLD/);
+    assert(fs.lstatSync(f.destination)); // Never unlink an uncertain clone/foreign replacement.
+  });
+});
+
+test('clone guard rejects linked sources and preserves Linux exclusive streaming copy behavior', t => {
+  const f = cloneFixture(t);
+  const options = { platform: 'linux', io: { ...fs, copyFileSync: () => { throw Error('Linux must retain streaming copy'); } } };
+  stream(f.source, 1024 ** 2, f.destination, options);
+  assert.deepEqual(fs.readFileSync(f.source), fs.readFileSync(f.destination));
+  assert.equal(fs.statSync(f.destination).nlink, 1);
+  assert.equal(fs.statSync(f.destination).mode & 0o777, 0o444);
+  assert.throws(() => stream(f.source, 1024 ** 2, f.destination, options), { code: 'EEXIST' });
+  const link = f.destination + '-link'; fs.linkSync(f.source, link);
+  assert.throws(() => stream(f.source, 1024 ** 2, undefined, { platform: 'darwin' }), /refused\/HOLD/);
+  fs.unlinkSync(link);
+  fs.symlinkSync(f.source, link);
+  assert.throws(() => stream(link, 1024 ** 2, undefined, { platform: 'darwin' }), /refused\/HOLD/);
+});
+
+test('provision growth guard allows exact existing target at three releases but refuses a fourth allocation', async t => {
+  for (const existing of [true, false]) await t.test(String(existing), async t => {
+    const f = legacy(t), releases = join(f.stand, 'db-releases'), target = join(f.stand, f.current.release);
+    if (!existing) fs.renameSync(target, join(releases, 'retained'));
+    fs.mkdirSync(join(releases, 'previous')); fs.mkdirSync(join(releases, 'incoming'));
+    const original = f.read('profile.json');
+    if (existing) assert.equal((await preparePublicCve({ root: f.root, run: f.run, log: () => {} })).outcome, 'prepared');
+    else {
+      await assert.rejects(preparePublicCve({ root: f.root, run: f.run, log: () => {} }), /refused\/HOLD/);
+      assert(!fs.existsSync(target)); assert(fs.existsSync(join(f.stand, '.operation.lock', 'provision.json')));
+    }
+    assert.equal(fs.readdirSync(releases).length, 3); assert.equal(f.read('profile.json'), original);
+    assert(!f.calls.some(c => c.kind === 'docker'));
   });
 });
 

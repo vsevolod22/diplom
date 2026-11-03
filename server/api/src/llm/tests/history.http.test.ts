@@ -50,6 +50,7 @@ test('actual cookie Nest → durable history → current report/cache → real a
   const history = new HistoryStore(join(dir, 'llm-history.sqlite'), true), quota = new FixtureQuotaLedger(join(dir, 'llm-usage.sqlite'), quotaPolicy);
   const runtime = app.get(LlmRuntime), quotas = app.get(LlmQuotaRuntime), llm = app.get(LlmService);
   runtime.policy = () => freePolicy; quotas.ledger = () => quota; llm.history().runtime.store = () => history;
+  llm.history().runtime.readStore = () => history;
   let sends = 0, reads = 0, beforeSend: (() => Promise<void>) | undefined, afterSend: (() => Promise<void>) | undefined, badCitation = false;
   let lastWire = '', lastReserve = 0;
   // Explicit synthetic send boundary, not a production TLS or provider assertion.
@@ -242,6 +243,7 @@ test('actual cookie Nest → durable history → current report/cache → real a
     assert.deepEqual(quota.snapshot(owner.id, id).scan, beforeOverflow, 'mandatory overflow refuses before reserve');
     // Missing storage never recreates an empty conversation or calls the model.
     llm.history().runtime.store = () => { throw new Error('PRIVATE-SQL-PATH'); };
+    llm.history().runtime.readStore = () => { throw new Error('PRIVATE-SQL-PATH'); };
     assert.equal((await get('history')).status, 503);
     assert.equal((await post('chat', await request(s3))).status, 400); // unavailable context cannot form valid request
     assert.equal(sends, 5);
@@ -263,6 +265,7 @@ test('full HTTP history C/C+1 rollback, maximum completion, durable original rep
   const quota = new FixtureQuotaLedger(join(dir, 'llm-usage.sqlite'), quotaPolicy);
   const runtime = app.get(LlmRuntime), llm = app.get(LlmService);
   runtime.policy = () => freePolicy; app.get(LlmQuotaRuntime).ledger = () => quota; llm.history().runtime.store = () => history;
+  llm.history().runtime.readStore = () => history;
   let providerLookups = 0;
   runtime.provider = () => { providerLookups++; assert.fail('decision boundary must not request a provider'); };
   try {
@@ -481,6 +484,7 @@ test('TASK16 R4 real cookie/service/controller admitted failure frames preserve 
   const quota = new FixtureQuotaLedger(quotaPath, quotaPolicy), receiptDb = new Database(quotaPath, { readonly: true });
   const runtime = app.get(LlmRuntime), llm = app.get(LlmService), service = llm.history();
   runtime.policy = () => freePolicy; app.get(LlmQuotaRuntime).ledger = () => quota; service.runtime.store = () => history;
+  service.runtime.readStore = () => history;
   let sends = 0, invalid: false | 'script' | 'malformed' | 'missing-usage' = false, owner = '', scanId = '', afterWrite: ((n: number) => void) | undefined;
   let afterResult: (() => Promise<void>) | undefined;
   const synthetic = Object.assign((async () => assert.fail('no unguarded/provider network')) as typeof fetch, {
@@ -647,6 +651,7 @@ test('TASK16 R5 admitted unavailable receipt emits only guarded error; nonadmiss
     const quota = new FixtureQuotaLedger(quotaPath, { ...quotaPolicy, scan: { ...quotaPolicy.scan, input: 262144 } }), db = new Database(quotaPath, { readonly: true });
   const runtime = app.get(LlmRuntime), llm = app.get(LlmService), service = llm.history();
   runtime.policy = () => freePolicy; app.get(LlmQuotaRuntime).ledger = () => quota; service.runtime.store = () => history;
+  service.runtime.readStore = () => history;
   let mode: 'reject' | 'valid' | 'missing' | 'fault' | 'http429' | 'http503' | 'http401' = 'reject', sends = 0, owner = '', scanId = '', reservation = '', writes = 0;
   let afterWrite: ((n: number) => void) | undefined, beforeFailure: (() => void) | undefined;
   const synthetic = Object.assign((async () => assert.fail('no actual provider or unguarded transport')) as typeof fetch, {

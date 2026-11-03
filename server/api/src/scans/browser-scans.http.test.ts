@@ -48,7 +48,9 @@ test('browser scans fail closed for anonymous, unlisted users, foreign origins a
         assert.equal((await fetch(`${path}/images?q=nginx`, { headers: { cookie: alice.cookie } })).status, 400);
         assert.equal((await fetch(`${path}/images?q=https%3A%2F%2Fevil.example&generation=gen`, { headers: { cookie: alice.cookie } })).status, 400);
         const forged = await fetch(path, { method: 'POST', headers: { cookie: alice.cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...sample, imageReference: 'registry-1.docker.io/library/nginx:latest' }) });
-        assert.equal(forged.status, 400);
+        // Enrollment changed after AuthStore construction: captured access authority is stale.
+        assert.equal(forged.status, 503);
+        assert.deepEqual(await forged.json(), { errorCode: 'AUTH_UNAVAILABLE' });
     assert.equal((await fetch(path)).status, 401);
     assert.equal((await fetch(path, { headers: { cookie: bob.cookie } })).status, 403);
     assert.equal((await post(bob.cookie)).status, 403);

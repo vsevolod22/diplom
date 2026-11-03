@@ -37,6 +37,21 @@ export const sameChatBinding = (a: ChatBinding, b: ChatBinding) =>
   a.platform === b.platform &&
   a.reportVersion === b.reportVersion;
 
+// Mirror server/api/src/llm/chat-source-budget.ts: unchanged aggregate and wire
+// limits, full source objects. The largest fixed citation frame leaves this exact
+// byte budget for its source, including the terminating newline.
+const budgetUuid = '00000000-0000-0000-0000-000000000000';
+export const CHAT_SOURCE_BUDGET = Object.freeze({
+  revision: 'immutable-full-citations-aggregate-v2',
+  citationBytes: 8192 - (serializedBytes({
+    v: 1, deliveryMode: 'validated-completed-reply', nativeProviderStream: false,
+    scanId: budgetUuid, digest: `sha256:${'0'.repeat(64)}`, platform: 'linux/amd64', reportVersion: '0'.repeat(64),
+    epoch: budgetUuid, revision: Number.MAX_SAFE_INTEGER, mutationId: budgetUuid, turnId: budgetUuid,
+    type: 'citation', seq: 51, index: 31, source: null,
+  }) - 4 + 1),
+  sourcesBytes: 32 * 2048,
+});
+
 // Match the actual conservative server text boundary, including UTF-8 rather than JS length.
 export function validChatText(value: string, limit = 2048) {
   return (
@@ -58,10 +73,11 @@ export const chatSourceSchema = z
         ? f.identifierKind === undefined || f.identifierKind === 'cve'
         : f.identifierKind === vulnerabilityIdentifierKind(f.cveId) && f.ecosystem === 'deb'),
   )
-  .refine((v) => serializedBytes(v) <= 2048);
+  .refine((v) => serializedBytes(v) <= CHAT_SOURCE_BUDGET.citationBytes);
 const sources = z
   .array(chatSourceSchema)
   .max(32)
+  .refine((v) => v.reduce((sum, source) => sum + serializedBytes(source), 0) <= CHAT_SOURCE_BUDGET.sourcesBytes)
   .refine((v) => new Set(v.map((s) => s.finding.findingId)).size === v.length);
 export const chatReplySchema = z
   .strictObject({
@@ -327,6 +343,7 @@ export function createChatFrameParser(context: ChatContext, mutationId: string) 
   let seq = 0,
     deltaCount = 0,
     textBytes = 0,
+    sourcesBytes = 0,
     text = '';
   let usage: z.infer<typeof chatReceiptSchema> | undefined;
   const sources: ChatSource[] = [];
@@ -378,6 +395,8 @@ export function createChatFrameParser(context: ChatContext, mutationId: string) 
           sources.some((s) => s.finding.findingId === frame.source.finding.findingId)
         )
           invalid();
+        sourcesBytes += serializedBytes(frame.source);
+        if (sourcesBytes > CHAT_SOURCE_BUDGET.sourcesBytes) invalid();
         sources.push(frame.source);
       } else if (frame.type === 'delta') {
         if (!usage || !sources.length || frame.index !== deltaCount++) invalid();

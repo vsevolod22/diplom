@@ -4,7 +4,8 @@ import { request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import type { ImageReference } from '../scans/image-reference.js';
 
-export class ResolutionRejected extends Error {}
+import { ImageFailure } from './image-failure.js';
+export class ResolutionRejected extends ImageFailure {}
 export type ManifestResponse = { status: number; headers: Record<string, string | string[] | undefined>; body: Buffer };
 export type ManifestFetch = (host: string, path: string) => Promise<ManifestResponse>;
 const accept = 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json';
@@ -22,7 +23,7 @@ export async function resolveManifest(ref: ImageReference, platform: string, fet
     const header = response.headers['docker-content-digest'];
     if ((!blob && typeof header !== 'string') || (header !== undefined && header !== actual) ||
             (expected && expected !== actual))
-      throw new ResolutionRejected('Digest mismatch');
+      throw new ResolutionRejected('Digest mismatch', { reason: 'INTEGRITY_FAILED', stage: 'inspection' });
     const mediaType = String(response.headers['content-type'] || '').split(';')[0];
     return { body: response.body, actual, mediaType };
   }
@@ -56,7 +57,7 @@ export async function resolveManifest(ref: ImageReference, platform: string, fet
     // redirects); the verified descriptor hash and exact size still bind the bytes.
     if (blob.body.length !== config.size ||
         (blob.mediaType !== config.mediaType && blob.mediaType !== 'application/octet-stream'))
-    throw new ResolutionRejected('Config descriptor mismatch');
+    throw new ResolutionRejected('Config descriptor mismatch', { reason: 'INTEGRITY_FAILED', stage: 'inspection' });
   let details: { os?: string; architecture?: string; variant?: string };
   try { details = JSON.parse(blob.body.toString('utf8')); } catch { throw new ResolutionRejected('Invalid config'); }
   if ([details.os, details.architecture, details.variant].filter(Boolean).join('/') !== platform)

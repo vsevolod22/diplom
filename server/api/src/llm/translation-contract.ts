@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { normalizePlain, type AdvisoryAssessment, type AdvisoryV1 } from '../worker/vuln-advisory.js';
 import { cleanText } from './history-contract.js';
-import { disclosure, PUBLIC_FREE_MODEL, PUBLIC_FREE_PROVIDER, type LlmPolicy } from './policy.js';
+import { disclosure, publicFreePolicy, type LlmPolicy } from './policy.js';
 import { exact, invalidReply } from './response.js';
 import type { FailureReason } from './provider-diagnostic.js';
 import { russianHumanText, technicalIdentifiers, withoutPreservedIdentifiers, withoutRuntimeBrand } from './russian-text.js';
@@ -16,8 +16,7 @@ export type TranslationText = { title: string | null; description: string | null
 export type TranslationSnapshot = TranslationBinding & { source: TranslationSource; text: TranslationText };
 export const invalidTranslationRequest = (): never => { throw new BadRequestException({ errorCode: 'LLM_INVALID_REQUEST' }); };
 export const translationUnavailable = (): never => { throw new ConflictException({ errorCode: 'LLM_TRANSLATION_UNAVAILABLE' }); };
-export const translationEnabled = (policy: LlmPolicy | null): policy is LlmPolicy => !!policy?.freeOnly &&
-  policy.model === PUBLIC_FREE_MODEL && policy.providers.length === 1 && policy.providers[0] === PUBLIC_FREE_PROVIDER;
+export const translationEnabled = (policy: LlmPolicy | null): policy is LlmPolicy => publicFreePolicy(policy);
 export const translationPolicy = (policy: LlmPolicy): string => createHash('sha256')
   .update(JSON.stringify([TRANSLATION.revision, policy.version, 'selected-normalized-text-only', 'ru'])).digest('hex');
 export function translationDisclosure(policy: LlmPolicy) {

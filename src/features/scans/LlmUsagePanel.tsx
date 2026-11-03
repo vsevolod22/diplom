@@ -11,8 +11,8 @@ import { Button } from '@/shared/ui/scan-primitives';
 type Props = { binding: UsageBinding | null; refreshVersion: number; client?: UsageClient };
 const reasons = {
   ready: 'Полный резерв текущего запроса помещается; снимок не гарантирует допуск следующего запроса.',
-  warning: 'Предупреждение: использовано не менее 80% токенного лимита.',
-  exhausted: 'Токенная квота исчерпана.',
+  warning: 'Предупреждение: использовано не менее 80% установленного лимита.',
+  exhausted: 'Установленная квота исчерпана.',
   policy_fault: 'Учёт заблокирован из-за расхождения с политикой.',
   disabled: 'Продуктовые квоты выключены оператором.',
   unavailable: 'Счётчики временно недоступны; остаток неизвестен.',
@@ -98,7 +98,9 @@ export function LlmUsagePanel({ binding, refreshVersion, client: supplied }: Pro
     <section aria-label="Продуктовые квоты ИИ" aria-busy={pending}>
       <h4>Учёт ИИ: пользователь и этот скан</h4>
       <p>
-        Токены и стоимость сообщены провайдером и проверены сервером; оценка продукта, не подтверждённый счёт.
+        {usage?.available && usage.monetaryLimit
+          ? 'Платный OpenAI: стоимость оценена сервером по настроенным ставкам, не счёт провайдера.'
+          : 'Токены и стоимость сообщены провайдером и проверены сервером; оценка продукта, не подтверждённый счёт.'}
       </p>
       <Button
         type="button"
@@ -173,9 +175,11 @@ export function LlmUsagePanel({ binding, refreshVersion, client: supplied }: Pro
                               : 'Стоимость, микро-USD (1 USD = 1 000 000)'}
                         </dt>
                         <dd>
-                          Осталось {usage[scope].remaining[d]} из {usage[scope].limits[d]}; учтено{' '}
-                          {usage[scope].used[d]}; резерв {usage[scope].held[d]}; перенос неопределённого
-                          расхода {usage[scope].carried[d]}
+                          {usage[scope].limits[d] === null
+                            ? 'Без локального денежного лимита — платно, не бесплатно; остаток не ограничен'
+                            : `Осталось ${usage[scope].remaining[d]} из ${usage[scope].limits[d]}`}
+                          ; учтено {usage[scope].used[d]}; резерв {usage[scope].held[d]}; перенос
+                          неопределённого расхода {usage[scope].carried[d]}
                         </dd>
                       </div>
                     ))}

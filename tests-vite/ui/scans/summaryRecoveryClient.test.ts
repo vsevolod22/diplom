@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
 import {
   createSummaryClient,
+  summaryContextSchema,
+  SummaryError,
+  summaryErrorMessage,
   type SummaryClient,
   type SummaryContext,
   type SummaryReply,
@@ -22,10 +25,10 @@ const context: SummaryContext = {
   policyVersion: 'c'.repeat(64),
   disclosure: {
     provider: 'OpenRouter',
-    model: 'xingchen-agi/xing4.0-29b-a4b:free',
-    providers: ['phala'],
+    model: 'dots-studio/dots-3-note-preview:free',
+    providers: ['atlas-cloud/fp8'],
     region: 'global',
-    retention: 'no-storage',
+    retention: 'no-training',
     operatorApprovedRouting: true,
     providerComplianceNotProvenByDeclaration: true,
     requestBudgetUsd: 0,
@@ -34,6 +37,8 @@ const context: SummaryContext = {
     data: 'Sanitized scanner findings and coverage; no raw evidence or credentials.',
   },
 };
+const openRouterDisclosure = context.disclosure;
+if (openRouterDisclosure?.provider !== 'OpenRouter') throw new Error('Expected OpenRouter fixture');
 const reply: SummaryReply = {
   ...tuple,
   hypotheses: [{ kind: 'hypothesis', text: 'Проверьте исходную находку', citations: ['secret-0-1'] }],
@@ -220,6 +225,40 @@ describe('summary recovery client', () => {
   });
 });
 
+describe('legacy owner summary capabilities and unsupported report contract', () => {
+  const disabled = { ...context, enabled: false, policyVersion: null, disclosure: null };
+  it.each([true, false, undefined])('accepts optional boolean summaryResultRead=%s without requiring public metadata', capability => {
+    const value = { ...context, ...(capability === undefined ? {} : { summaryResultRead: capability }) };
+    expect(summaryContextSchema.parse(value)).toEqual(value);
+    expect(value).not.toHaveProperty('findingCount');
+  });
+  it('accepts only the exact unavailable reason with disabled/null policy/disclosure and no read capability', async () => {
+    const value = { ...disabled, summaryResultRead: false, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json(value));
+    expect(await createSummaryClient(scanSession(), fetcher).context(scanId, signal())).toEqual(value);
+    expect(summaryContextSchema.parse({ ...disabled, unavailableReason: value.unavailableReason })).toEqual({ ...disabled, unavailableReason: value.unavailableReason });
+  });
+  it.each([
+    { ...context, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' },
+    { ...disabled, policyVersion: context.policyVersion, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' },
+    { ...disabled, disclosure: context.disclosure, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' },
+    { ...disabled, summaryResultRead: true, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' },
+    { ...disabled, unavailableReason: 'unsupported' }, { ...disabled, unavailableReason: null },
+    { ...disabled, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT_EXTRA' },
+    { ...context, summaryResultRead: 'true' }, { ...context, summaryResultRead: 1 },
+  ])('rejects malformed capability/reason combinations %j', value => {
+    expect(summaryContextSchema.safeParse(value).success).toBe(false);
+  });
+  it('unsupported generation is refused locally while configuration failure keeps its neutral distinct message', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(createSummaryClient(scanSession(), fetcher).summary({ ...disabled, unavailableReason: 'LLM_SUMMARY_UNSUPPORTED_REPORT' }, signal()))
+      .rejects.toMatchObject({ code: 'LLM_SUMMARY_UNSUPPORTED_REPORT' });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(summaryErrorMessage(new SummaryError('LLM_SUMMARY_UNSUPPORTED_REPORT'))).toBe('ИИ-разбор недоступен для этого формата отчёта. Исходные результаты сканирования доступны ниже.');
+    expect(summaryErrorMessage(new SummaryError('LLM_CONFIGURATION_UNAVAILABLE'))).toBe('ИИ-разбор сейчас недоступен. Отчёт сканеров доступен.');
+  });
+});
+
 describe('exact summary disclosure decoding', () => {
   it('preserves the complete allowed disclosure and price DTO', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json(context));
@@ -229,7 +268,7 @@ describe('exact summary disclosure decoding', () => {
   it.each([
     { ...context.disclosure!, widenedEgress: 'raw report content' },
     { ...context.disclosure!, futureProviderRouting: true },
-    { ...context.disclosure!, maxPrice: { ...context.disclosure!.maxPrice, futureFee: 0 } },
+    { ...openRouterDisclosure, maxPrice: { ...openRouterDisclosure.maxPrice, futureFee: 0 } },
   ])('rejects rather than strips unknown disclosure or maxPrice keys', async (disclosure) => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json({ ...context, disclosure }));
     await expect(createSummaryClient(scanSession(), fetcher).context(scanId, signal())).rejects.toMatchObject(

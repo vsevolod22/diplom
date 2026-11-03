@@ -3,7 +3,7 @@ import type { ReportContext, SafeFinding } from './report-context.js';
 import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
 import { advisoryGroundingWitness, russianHumanText } from './russian-text.js';
 import { remediationGroundingRejection, publicReportLanguageFailure, withoutCitedPackageIdentifiers } from './remediation-identifiers.js';
-import { diagnose, diagnoseGrounding, diagnoseLanguage, type FailurePhase, type FailureReason, type GroundingPredicate } from './provider-diagnostic.js';
+import { diagnose, diagnoseChatContent, diagnoseGrounding, diagnoseLanguage, type ChatContentPredicate, type FailurePhase, type FailureReason, type GroundingPredicate } from './provider-diagnostic.js';
 import type { GroundingWitness } from './grounding-witness.js';
 import type { LanguageRejection } from './language-rejection.js';
 
@@ -13,6 +13,9 @@ export const exact = (v: unknown, keys: string[]): v is Record<string, unknown> 
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 export const invalidReply = (phase: FailurePhase = 'content', reason: FailureReason = 'invalid_content'): never => {
   throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), phase, reason);
+};
+export const invalidChatReply = (predicate: ChatContentPredicate): never => {
+  throw diagnoseChatContent(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), predicate);
 };
 export const invalidGroundingReply = (predicate: GroundingPredicate, index: number, witness?: GroundingWitness): never => {
   throw diagnoseGrounding(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), predicate, index, witness);

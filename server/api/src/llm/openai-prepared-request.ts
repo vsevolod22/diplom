@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
 import type { ReportContext } from './report-context.js';
 import type { HistoryContext } from './history-context.js';
-import { HISTORY, cleanText, isId, validateChatReply } from './history-contract.js';
+import { HISTORY, chatReportSourcesFit, cleanText, isId, validateChatReply } from './history-contract.js';
+import { chatSourcesWithinBudget } from './chat-source-budget.js';
 import { safeHistoryFinding } from './history-sources.js';
-import { exact, invalidReply, object, validateReply } from './response.js';
+import { exact, invalidChatReply, invalidReply, object, validateReply } from './response.js';
 import { checkedOpenAiPolicy, openAiConfigurationError, type OpenAiPolicy } from './openai-policy.js';
 import { openAiReserve, type OpenAiReserve } from './openai-usage.js';
 import { openAiNarrative, openAiResponseFormat, type OpenAiOperation } from './openai-response-contract.js';
@@ -91,7 +92,7 @@ function checkHistory(context: HistoryContext): void {
       JSON.stringify(omission.selectedFindingIds) !== JSON.stringify(context.report.findings.map(f => f.findingId)) ||
       omission.findings !== context.report.findingCount - context.report.findings.length) return fail();
   cleanText(context.question);
-  const sources = (value: unknown) => Array.isArray(value) && value.length <= HISTORY.citations && value.every(source =>
+  const sources = (value: unknown) => Array.isArray(value) && chatSourcesWithinBudget(value) && value.every(source =>
     exact(source, ['scanId', 'digest', 'platform', 'reportVersion', 'finding']) && binding(source) && safeHistoryFinding(source.finding));
   for (const entry of [...h.userTurns, ...h.decisions]) {
     const decision = h.decisions.includes(entry);
@@ -124,7 +125,10 @@ function prepare(operation: OpenAiOperation, input: ReportContext | HistoryConte
     const content = snapshot(input, policy.requestBytes);
     const report = operation === 'summary' ? content as ReportContext : (content as HistoryContext).report;
     checkReport(report, policy);
-    if (operation === 'chat') checkHistory(content as HistoryContext);
+    if (operation === 'chat') {
+          if (!chatReportSourcesFit(report, 3)) return fail();
+          checkHistory(content as HistoryContext);
+        }
     else if (report.profile === undefined && report.findings.length !== report.findingCount) return fail();
     const body = JSON.stringify({ model: policy.model, max_completion_tokens: policy.outputTokens,
       reasoning_effort: 'none', n: 1, stream: false, store: false, service_tier: 'default',
@@ -148,20 +152,30 @@ export function checkedOpenAiPrepared(request: OpenAiPrepared, policy: OpenAiPol
 export function validateOpenAiPreparedReply(request: OpenAiPrepared, policy: OpenAiPolicy, value: unknown) {
   checkedOpenAiPrepared(request, policy);
   const report = prepared.get(request)!.report;
+  if (request.operation === 'chat') {
+    // Preserve the wire-cap pass before shared safety/grounding/language passes.
+    // Name only the failed predicate, never a field value or an answer fragment.
+    if (!exact(value, ['scanId', 'digest', 'platform', 'reportVersion', 'text', 'citations']))
+      return invalidChatReply('chat_shape');
+    if (typeof value.text !== 'string') return invalidChatReply('chat_text');
+    if ([...value.text].length > 600) return invalidChatReply('chat_text_length');
+    if (!Array.isArray(value.citations) || value.citations.some(id => typeof id !== 'string'))
+      return invalidChatReply('chat_citation_type');
+    if (value.citations.length < 1 || value.citations.length > 3) return invalidChatReply('chat_citation_count');
+    const reply = validateChatReply(value, report, true);
+    if (!openAiNarrative(reply.text)) return invalidChatReply('chat_narrative');
+    return { operation: 'chat' as const, value: reply };
+  }
   const paragraph = (item: unknown, maxText: number, maxCitations: number) => object(item) &&
     typeof item.text === 'string' && [...item.text].length <= maxText &&
     Array.isArray(item.citations) && item.citations.length >= 1 && item.citations.length <= maxCitations;
   // Do not trust provider-side schema enforcement to honor the narrower wire caps.
-  if (!object(value) || (request.operation === 'summary'
-    ? !Array.isArray(value.hypotheses) || value.hypotheses.length < 1 || value.hypotheses.length > 6 ||
-      value.hypotheses.some(item => !paragraph(item, 320, 2))
-    : !paragraph(value, 600, 3))) return invalidReply();
-  const result = request.operation === 'summary'
-    ? { operation: 'summary' as const, value: validateReply(value, report, true) }
-    : { operation: 'chat' as const, value: validateChatReply(value, report, true) };
+  if (!object(value) || !Array.isArray(value.hypotheses) || value.hypotheses.length < 1 || value.hypotheses.length > 6 ||
+      value.hypotheses.some(item => !paragraph(item, 320, 2))) return invalidReply();
+  const result = { operation: 'summary' as const, value: validateReply(value, report, true) };
   // Keep all shared safety/grounding checks; additionally enforce the OpenAI wire
   // alphabet locally. Never strip, transliterate or otherwise repair model text.
-  const texts = result.operation === 'summary' ? result.value.hypotheses.map(item => item.text) : [result.value.text];
+  const texts = result.value.hypotheses.map(item => item.text);
   if (texts.some(text => !openAiNarrative(text))) return invalidReply();
   return result;
 }

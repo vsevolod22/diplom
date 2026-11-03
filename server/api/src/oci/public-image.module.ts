@@ -15,6 +15,7 @@ import { localDbTrustAnchorFromEnv } from '../worker/vuln-db-trust.js';
 import { BROWSER_SCAN_LOCAL_ORIGIN, BrowserIdentity } from '../llm/browser-identity.js';
 import { LlmController } from '../llm/llm.controller.js';
 import { LlmRuntime, LlmService } from '../llm/llm.service.js';
+import { HistoryRuntime } from '../llm/history-runtime.js';
 import { PUBLIC_LLM_REPORTS, ReportReader } from '../llm/report-context.js';
 import { LlmQuotaRuntime } from '../llm/quota-runtime.js';
 import { llmExceptionProvider } from '../llm/llm-exception.filter.js';
@@ -27,6 +28,7 @@ import { registerTranslationIngress } from '../llm/translation-ingress.js';
 @Module({ imports: [AuthModule, LedgerModule, SecurityModule, OciModule],
   controllers: [ScansController, BrowserScansController, LlmController, TranslationController],
   providers: [BrowserIdentity, ReportReader, LlmRuntime, LlmService, LlmQuotaRuntime, llmExceptionProvider,
+      { provide: HistoryRuntime, useFactory: () => new HistoryRuntime() },
       { provide: PUBLIC_LLM_REPORTS, useValue: true }, { provide: BROWSER_SCAN_LOCAL_ORIGIN, useValue: 'http://127.0.0.1:8081' },
       { provide: PUBLIC_IMAGE_INSPECTOR, useValue: inspectPublicImage },
     { provide: ScansService, inject: [LedgerStore, OciResolver, PUBLIC_IMAGE_INSPECTOR],

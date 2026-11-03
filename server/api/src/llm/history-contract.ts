@@ -1,16 +1,20 @@
 import { createHash } from 'node:crypto';
 import { BadRequestException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import type { ReportContext, SafeFinding } from './report-context.js';
-import { exact, invalidReply, object } from './response.js';
+import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
+import { exact, invalidChatReply, invalidGroundingReply, invalidLanguageReply, object } from './response.js';
 import { safeHistoryFinding } from './history-sources.js';
-import { groundedIdentifiers, russianHumanText } from './russian-text.js';
+import { advisoryGroundingWitness, russianHumanText } from './russian-text.js';
+import { remediationGroundingRejection, publicReportLanguageFailure } from './remediation-identifiers.js';
 import { diagnose } from './provider-diagnostic.js';
 import { BadGatewayException } from '@nestjs/common';
+import { CHAT_SOURCE_BUDGET, chatSourcesWithinBudget } from './chat-source-budget.js';
 
 export const HISTORY = Object.freeze({ version: 'owner-history-v1', questionBytes: 2048, bodyBytes: 8192,
   scopeBytes: 524288, turns: 256, decisions: 128, references: 4096, heads: 128,
   dbBytes: 8388608, sidecarBytes: 16777216, diskHeadroom: 134217728, busyMs: 100,
-  replyBytes: 16384, citations: 32, citationBytes: 2048, completionReserve: 102400,
+  replyBytes: 16384, citations: 32, citationBytes: CHAT_SOURCE_BUDGET.citationBytes,
+    sourcesBytes: CHAT_SOURCE_BUDGET.sourcesBytes, completionReserve: 102400,
   cacheEntries: 128, cacheBytes: 4194304, cacheMs: 60000 });
 export const historyUnavailable = (): never => { throw new ServiceUnavailableException({ errorCode: 'LLM_HISTORY_UNAVAILABLE' }); };
 export const historyConflict = (): never => { throw new ConflictException({ errorCode: 'LLM_HISTORY_CONFLICT' }); };
@@ -71,24 +75,44 @@ const budgetBinding: ReportBinding = Object.freeze({ scanId: '00000000-0000-0000
 export function historyProjection(head: HistoryHead, binding: ReportBinding = budgetBinding) {
   return { ...binding, ...publicHistory(head) };
 }
+// Every possible citation subset must fit before dispatch, not just the subset
+// the model eventually chooses. Keep mandatory findings intact on refusal.
+export function chatReportSourcesFit(report: ReportContext, maxCitations: number = HISTORY.citations): boolean {
+  if (!Number.isSafeInteger(maxCitations) || maxCitations < 1 || maxCitations > HISTORY.citations) return false;
+  const sizes = report.findings.map(finding => bytes({ ...reportBinding(report), finding }));
+  return sizes.every(size => size <= HISTORY.citationBytes) &&
+    sizes.sort((a, b) => b - a).slice(0, maxCitations).reduce((sum, size) => sum + size, 0) <= HISTORY.sourcesBytes;
+}
 export function validateChatReply(value: unknown, report: ReportContext, requireRussian = false): ChatReply {
-  if (!exact(value, ['scanId', 'digest', 'platform', 'reportVersion', 'text', 'citations']) ||
-    !Object.entries(reportBinding(report)).every(([key, entry]) => value[key] === entry) ||
-    !Array.isArray(value.citations) || value.citations.length < 1 || value.citations.length > HISTORY.citations ||
-    new Set(value.citations).size !== value.citations.length) return invalidReply();
+  if (!exact(value, ['scanId', 'digest', 'platform', 'reportVersion', 'text', 'citations']))
+    return invalidChatReply('chat_shape');
+  if (!Object.entries(reportBinding(report)).every(([key, entry]) => value[key] === entry))
+    return invalidChatReply('chat_binding');
+  if (!Array.isArray(value.citations) || value.citations.some(id => typeof id !== 'string'))
+    return invalidChatReply('chat_citation_type');
+  if (value.citations.length < 1 || value.citations.length > HISTORY.citations)
+    return invalidChatReply('chat_citation_count');
+  if (new Set(value.citations).size !== value.citations.length) return invalidChatReply('chat_citation_duplicate');
   let text: string;
-  try { text = cleanText(value.text, HISTORY.replyBytes); } catch { return invalidReply(); }
+  try { text = cleanText(value.text, HISTORY.replyBytes); } catch { return invalidChatReply('chat_text'); }
   const sources = value.citations.map(id => {
     const finding = report.findings.find(f => f.findingId === id);
-    if (!finding) return invalidReply();
+    if (!finding) return invalidChatReply('chat_citation_unknown');
     const source = { ...reportBinding(report), finding };
-    if (bytes(source) > HISTORY.citationBytes) return invalidReply();
+    if (bytes(source) > HISTORY.citationBytes) return invalidChatReply('chat_source_bytes');
     return source;
   });
+  if (!chatSourcesWithinBudget(sources)) return invalidChatReply('chat_sources_bytes');
   const evidence = sources.map(source => source.finding);
-  if (requireRussian && !groundedIdentifiers(text, evidence))
-    throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), 'grounding', 'unknown_identifier');
-  if (requireRussian && !russianHumanText(text, JSON.stringify(evidence)))
+  const isPublic = report.profile === PUBLIC_IMAGE_PROFILE;
+  const groundingFailure = isPublic ? remediationGroundingRejection(text, evidence) : undefined;
+  if (groundingFailure) return invalidGroundingReply(groundingFailure.predicate, 0, groundingFailure.witness);
+  const advisoryFailure = requireRussian ? advisoryGroundingWitness(text, evidence) : undefined;
+  if (advisoryFailure) return invalidGroundingReply('advisory_identifier', 0, advisoryFailure);
+  if (requireRussian && isPublic) {
+    const languageFailure = publicReportLanguageFailure(text, evidence);
+    if (languageFailure) return invalidLanguageReply(languageFailure, 0);
+  } else if (requireRussian && !russianHumanText(text, JSON.stringify(evidence)))
     throw diagnose(new BadGatewayException({ errorCode: 'LLM_INVALID_RESPONSE' }), 'language', 'not_russian');
   return { ...reportBinding(report), kind: 'hypothesis', text, sources };
 }
@@ -101,7 +125,7 @@ export function validateHead(value: unknown): asserts value is HistoryHead {
   const binding = (b: unknown) => object(b) && exact(b, ['scanId', 'digest', 'platform', 'reportVersion']) && isId(b.scanId) &&
     typeof b.digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(b.digest) && b.platform === 'linux/amd64' &&
     typeof b.reportVersion === 'string' && /^[a-f0-9]{64}$/.test(b.reportVersion);
-  const sources = (s: unknown, report: ReportBinding): boolean => Array.isArray(s) && s.length <= HISTORY.citations &&
+  const sources = (s: unknown, report: ReportBinding): boolean => Array.isArray(s) && chatSourcesWithinBudget(s) &&
       new Set(s.map(source => object(source) && object(source.finding) ? source.finding.findingId : null)).size === s.length && s.every(source => {
     refs++; return object(source) && exact(source, ['scanId', 'digest', 'platform', 'reportVersion', 'finding']) &&
       binding({ scanId: source.scanId, digest: source.digest, platform: source.platform, reportVersion: source.reportVersion }) &&

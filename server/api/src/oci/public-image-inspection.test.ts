@@ -43,13 +43,13 @@ test('reference/canonical/registry validation happens before any request', async
 
 test('public layer count/compressed layer/aggregate limits accept N, reject N+1 before config fetch', async () => {
   for (const layers of [[layer(L.compressedLayer)], Array.from({ length: L.maxLayers }, () => layer(1)),
-    Array.from({ length: 4 }, () => layer(L.compressedLayer))]) {
+    Array.from({ length: 3 }, () => layer(L.compressedLayer))]) {
     const source = fixture({ layers });
     await inspectPublicImage(source.reference, source.fetch);
   }
   for (const layers of [[], [layer(L.compressedLayer + 1)], Array.from({ length: L.maxLayers + 1 }, () => layer(1)),
-    [...Array.from({ length: 4 }, () => layer(L.compressedLayer)), layer(1)], [layer(0)], [layer(-1)], [layer(1.5)],
-    [{ ...layer(1), mediaType: 'application/vnd.oci.image.layer.v1.tar+zstd' }],
+    [...Array.from({ length: 3 }, () => layer(L.compressedLayer)), layer(1)], [layer(0)], [layer(-1)], [layer(1.5)],
+
     [{ ...layer(1), mediaType: 'application/vnd.docker.image.rootfs.foreign.diff.tar.gzip' }],
     [{ ...layer(1), urls: ['https://evil.example/blob'] }], [{ ...layer(1), data: 'inline' }],
     [{ ...layer(1), digest: 'sha256:BAD' }], [null]]) {

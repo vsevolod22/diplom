@@ -8,11 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { spawnSync, execFile } from 'node:child_process';
 import {
-  PUBLIC_LLM_ENV, parsePublicLlmConfig, validateLlmSelection, loadPublicLlmSettings, readPublicLlmBinding, publicLlmEnvironmentOverlay,
+  PUBLIC_LLM_ENV, PUBLIC_LLM_CURRENT_ENV, PUBLIC_LLM_NVIDIA_ENV, PUBLIC_LLM_NVIDIA_PROFILE, PUBLIC_LLM_DOTS_ENV, PUBLIC_LLM_DOTS_PROFILE, migratePublicLlmDots, PUBLIC_LLM_REPORT4K_ENV, PUBLIC_LLM_REPORT4K_PROFILE, migratePublicLlmReport4k, PUBLIC_LLM_TIMING, parsePublicLlmConfig, validateLlmSelection, validatePublicLlmTransition, loadPublicLlmSettings, readPublicLlmBinding, publicLlmEnvironmentOverlay,
   publicLlmStaticOverlay, expectedPublicLlmConfig, validatePublicLlmConfig, publicLlmComposeArguments,
   validatePublicLlmImage, validatePublicLlmContainer, inspectPublicLlmNamespace,
   PUBLIC_LLM_INITIALIZE_PROGRAM, PUBLIC_LLM_CHECK_PROGRAM, PUBLIC_LLM_BACKUP_PROGRAM,
-  publicLlmHelperArguments, llmFingerprint, backupLlmSqlite, executePublicLlmMaintenance, publicLlmStand, publicLlmDockerTimeout,
+    PUBLIC_LLM_CURRENT_BACKUP_PROGRAM, PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM, PUBLIC_LLM_SUMMARY_MIGRATE_PROGRAM,
+    PUBLIC_LLM_SUMMARY_MIGRATION_ACK, currentLlmFingerprint, verifyPublicLlmSummaryMigration,
+        PUBLIC_LLM_RETENTION_ROLES, publicLlmRetentionTag, capturePublicLlmRetentions,
+  publicLlmHelperArguments, llmFingerprint, backupLlmSqlite, executePublicLlmMaintenance, publicLlmStand, publicLlmDockerTimeout, validateAuditHistory,
 } from './public-llm-stand.mjs';
 import { PROJECT, STATE, LABEL, expectedConfig, acquireLock, recoverySqlite, backupExportOperation, publicImageStand, runIsolatedDocker } from './public-image-stand.mjs';
 import { fixture } from './public-refresh-cve-fixtures.mjs';
@@ -38,6 +41,28 @@ function settings(t, withReceipt = false) {
     uid: 65532, gid: 65532, fileMode: '0400', directoryMode: '0500', target: '/run/secrets/public_openrouter_key', initializerImage: 'sha256:' + 'f'.repeat(64) }), { mode: 0o600 });
   return { home, path };
 }
+
+test('AUDIT retention accepts 16 complete generations without deleting history and still bounds or rejects unsafe history', t => {
+  const root = temporary(t), parent = join(root, STATE, 'llm-deployments');
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const add = n => {
+    const path = join(parent, 'deploy-' + n.toString(16).padStart(32, '0'));
+    fs.mkdirSync(path, { mode: 0o700 });
+    fs.writeFileSync(join(path, 'complete.json'), JSON.stringify({ version: 1, project: PROJECT, preserved: true }), { mode: 0o600 });
+    return path;
+  };
+  for (let n = 0; n < 16; n++) add(n);
+  assert.doesNotThrow(() => validateAuditHistory(root));
+  const original = fs.readdirSync(parent);
+  for (let n = 16; n < 31; n++) add(n);
+  assert.doesNotThrow(() => validateAuditHistory(root));
+  assert.ok(original.every(name => fs.existsSync(join(parent, name, 'complete.json'))));
+  const last = add(31);
+  assert.throws(() => validateAuditHistory(root));
+  fs.rmSync(last, { recursive: true });
+  fs.writeFileSync(join(parent, original[0], 'complete.json'), JSON.stringify({ version: 1, project: PROJECT, preserved: false }), { mode: 0o600 });
+  assert.throws(() => validateAuditHistory(root));
+});
 
 test('TIMEOUT native execFile rejects fractional clock before dispatch; bounded floor is finite positive and never zero', async () => {
   let dispatched = 0;
@@ -69,9 +94,9 @@ test('CURRENT review mount order is stable without dropping mount authority or m
 
 test('external nonsecret allowlist exactly matches CONFIG; duplicate/unknown/key/expansion/paid values refuse', () => {
   const text = fs.readFileSync(join(ROOT, 'scripts/public-llm-config.py'), 'utf8').match(/CONFIG = """([\s\S]*?)"""/)[1];
-  assert.deepEqual(parsePublicLlmConfig(text), PUBLIC_LLM_ENV);
+  assert.deepEqual(parsePublicLlmConfig(text), PUBLIC_LLM_REPORT4K_ENV);
   for (const bad of [text + '\nOPENROUTER_API_KEY=synthetic', text + '\nLLM_ENABLED=true', text.replace('LLM_REQUEST_PRICE_USD=0', 'LLM_REQUEST_PRICE_USD=1'),
-    text.replace('LLM_PROVIDER_ALLOWLIST=phala', 'LLM_PROVIDER_ALLOWLIST=novita'), text + '\nNODE_OPTIONS=--inspect', text.replace('LLM_ENABLED=true', 'LLM_ENABLED=$ENABLED')])
+    text.replace('LLM_PROVIDER_ALLOWLIST=atlas-cloud/fp8', 'LLM_PROVIDER_ALLOWLIST=novita'), text + '\nNODE_OPTIONS=--inspect', text.replace('LLM_ENABLED=true', 'LLM_ENABLED=$ENABLED')])
     assert.throws(() => parsePublicLlmConfig(bad));
 });
 
@@ -199,6 +224,89 @@ test('runtime extension projection retains base env/capability/namespace checks,
   }
 });
 
+for (const version of [1, 2, 3, 4]) test(`TIMING gateway v${version} requires exact selected command but image/static defaults remain unflagged`, t => {
+  const selected = { version, keyVolume:keySelection.keyVolume, ...(version >= 2 ? {timing:PUBLIC_LLM_TIMING} : {}),
+      ...(version >= 3 ? {profile:version === 3 ? PUBLIC_LLM_NVIDIA_PROFILE : PUBLIC_LLM_DOTS_PROFILE} : {}) };
+  const f = extendedFixture(t, selected), command = ['python','-I','openrouter.py',...(version >= 2 ? ['--public-90s'] : [])];
+  const overlay = publicLlmEnvironmentOverlay(selected);
+  assert.deepEqual(overlay.services['llm-egress'], version >= 2 ? {command} : undefined);
+  assert.deepEqual(publicLlmStaticOverlay(f.root).services['llm-egress'].command,['python','-I','openrouter.py']);
+  assert.deepEqual(f.images['llm-egress'].Config.Cmd,['python','-I','openrouter.py']);
+  validatePublicLlmConfig(f.model,f.root,f.bound,selected);
+  const gateway = f.containers.find(c=>c.Name.endsWith('-llm-egress-1'));
+  const validate = c => validatePublicLlmContainer(c,'llm-egress',f.model.services['llm-egress'],f.images['llm-egress'],f.model,{images:f.images},selected);
+  const original = structuredClone(gateway); validate(gateway); assert.deepEqual(gateway,original);
+  for (const bad of [
+    ['python','-I','openrouter.py',...(version >= 2 ? [] : ['--public-90s'])],
+    ['python','-I','openrouter.py','--public-95s'],
+    [...command,'--public-90s'], ['sh','-c',command.join(' ')],
+  ]) {
+    const changed = structuredClone(gateway); changed.Config.Cmd=bad; assert.throws(()=>validate(changed));
+    const model = structuredClone(f.model); model.services['llm-egress'].command=bad;
+    assert.throws(()=>validatePublicLlmConfig(model,f.root,f.bound,selected));
+  }
+  const badImage = structuredClone(f.images['llm-egress']); badImage.Config.Cmd.push('--public-90s');
+  assert.throws(()=>validatePublicLlmImage(badImage,'llm-egress'));
+  for (const name of ['api','worker']) {
+    const model = structuredClone(f.model); model.services[name].command.push('--public-90s');
+    assert.throws(()=>validatePublicLlmConfig(model,f.root,f.bound,selected));
+  }
+  fs.writeFileSync(join(f.stand,'llm-profile.json'),JSON.stringify(selected),{mode:0o600});
+  fs.writeFileSync(join(f.stand,'compose.llm-env.json'),JSON.stringify(overlay),{mode:0o600});
+  assert.deepEqual(readPublicLlmBinding(f.root),selected);
+  const wrong = structuredClone(overlay);
+  if (version >= 2) delete wrong.services['llm-egress'];
+  else wrong.services['llm-egress']={command:['python','-I','openrouter.py','--public-90s']};
+  fs.writeFileSync(join(f.stand,'compose.llm-env.json'),JSON.stringify(wrong));
+  assert.throws(()=>readPublicLlmBinding(f.root));
+});
+
+for (const migration of ['nvidia','dots']) test(`${migration} migration CLI rejects missing, extra or unrelated acknowledgement before state/Docker access`, async t => {
+  const root=temporary(t), run=()=>assert.fail('no Docker');
+  const ack = migration === 'nvidia' ? '--ack-public-xing90-to-nvidia-non-zdr' : '--ack-public-nvidia90-to-dots-non-zdr';
+  for(const flags of [[],['--build'],['--ack-public-maintenance'],[ack,'--build'],[ack,ack],
+    [migration === 'nvidia' ? '--ack-public-nvidia90-to-dots-non-zdr' : '--ack-public-xing90-to-nvidia-non-zdr']])
+    await assert.rejects(publicLlmStand([`migrate-config-${migration}`,...flags],{root,run,log(){}}));
+  assert.deepEqual(fs.readdirSync(root),[]);
+});
+
+test('NVIDIA v3 exact profile, monotonic transitions and unchanged key/quota/history authority', t => {
+  const v2 = {version:2,keyVolume:null,timing:PUBLIC_LLM_TIMING};
+  const v3 = {version:3,keyVolume:null,timing:PUBLIC_LLM_TIMING,profile:PUBLIC_LLM_NVIDIA_PROFILE};
+  const changed = {LLM_MODEL:'nvidia/nemotron-3.5-super-vl:free',LLM_PROVIDER_ALLOWLIST:'nvidia',
+    LLM_POLICY_REVISION:'public-8081-nvidia-v1',LLM_RETENTION:'no-training'};
+  assert.deepEqual(PUBLIC_LLM_NVIDIA_ENV,{...PUBLIC_LLM_CURRENT_ENV,...changed});
+  for (const supplied of [null,keySelection.keyVolume]) {
+    const prior={...v2,keyVolume:supplied}, next={...v3,keyVolume:supplied};
+    validatePublicLlmTransition(prior,next); validatePublicLlmTransition(next,next);
+    assert.throws(()=>validatePublicLlmTransition(next,prior));
+    assert.throws(()=>validatePublicLlmTransition(next,{...selection,keyVolume:supplied}));
+    const oldModel=expectedPublicLlmConfig(ROOT,null,prior), newModel=expectedPublicLlmConfig(ROOT,null,next);
+    Object.assign(oldModel.services.api.environment,changed); assert.deepEqual(newModel,oldModel);
+    const f=settings(t,Boolean(supplied));
+    fs.writeFileSync(join(f.path,'llm.env'),Object.entries(PUBLIC_LLM_NVIDIA_ENV).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
+    assert.deepEqual(loadPublicLlmSettings(f.home).selection,next);
+  }
+  validatePublicLlmTransition(v3,{...v3,keyVolume:keySelection.keyVolume});
+  assert.throws(()=>validatePublicLlmTransition(v2,{...v3,keyVolume:keySelection.keyVolume}));
+  assert.throws(()=>validatePublicLlmTransition({...v3,keyVolume:keySelection.keyVolume},{...v3,keyVolume:null}));
+  assert.throws(()=>validatePublicLlmTransition({...v3,keyVolume:keySelection.keyVolume},{...v3,keyVolume:keySelection.keyVolume.replace(/a$/,'b')}));
+  for (const bad of [{...v3,profile:'arbitrary'}, {...v3,timing:'arbitrary'}, {...v2,version:3},
+    {...v3,version:2}, {...v3,timeout:90000}, {...v3,version:4}]) assert.throws(()=>validateLlmSelection(bad));
+  for (const [name,value] of Object.entries(PUBLIC_LLM_NVIDIA_ENV))
+    assert.throws(()=>parsePublicLlmConfig(Object.entries({...PUBLIC_LLM_NVIDIA_ENV,[name]:value+'changed'}).map(([k,v])=>`${k}=${v}`).join('\n')),name);
+});
+
+test('TIMING selected v2 differs only in API timeout and exact gateway command; no mounts/budgets/other commands drift', () => {
+  const prior = expectedPublicLlmConfig(ROOT,null,keySelection);
+  const next = expectedPublicLlmConfig(ROOT,null,{version:2,keyVolume:keySelection.keyVolume,timing:PUBLIC_LLM_TIMING});
+  assert.equal(next.services.api.environment.LLM_TIMEOUT_MS,'90000');
+  assert.deepEqual(next.services['llm-egress'].command,['python','-I','openrouter.py','--public-90s']);
+  next.services.api.environment.LLM_TIMEOUT_MS='30000';
+  next.services['llm-egress'].command=['python','-I','openrouter.py'];
+  assert.deepEqual(next,prior);
+});
+
 test('seven-service namespace inspector validates extension and delegates all original resources', async t => {
   const f=extendedFixture(t);
   const observed=await inspectPublicLlmNamespace(f.docker,{root:f.root,env:{DOCKER_HOST:f.endpoint},timeout:30000},f.root,f.bound,f.s,{images:f.images});
@@ -255,7 +363,7 @@ test('helper commands are UID65532/networknone, only new stores writable on init
 });
 
 function runNative(program, paths, env={...PUBLIC_LLM_ENV,TMPDIR:paths.backup}) {
-  let code=program.replaceAll('/auth/',paths.auth+'/').replaceAll('/data/',paths.data+'/').replaceAll('/backup',paths.backup)
+  let code=program.replaceAll('/auth/',paths.auth+'/').replaceAll("'/auth'",JSON.stringify(paths.auth)).replaceAll('/data/',paths.data+'/').replaceAll('/backup',paths.backup)
     .replace("process.on('SIGTERM',()=>process.exit(0));",'').replace('setTimeout(()=>process.exit(73),300000);','');
   return spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',code],{cwd:join(ROOT,'server/api'),env:{...env},encoding:'utf8',timeout:20000});
 }
@@ -360,8 +468,16 @@ function concreteFixture(t) {
     if(args[0]==='context')return JSON.stringify('unix:///fixture/docker.sock');
     if(args[0]==='compose'){
       const envFile=args.filter((_,i)=>args[i-1]==='-f').find(p=>p.endsWith('compose.llm-env.json'));
-      const selectedVolume=JSON.parse(fs.readFileSync(envFile)).volumes?.public_llm_key?.name;
-            const selected=selectedVolume?{version:1,keyVolume:selectedVolume}:selection;
+      const overlay=JSON.parse(fs.readFileSync(envFile)),selectedVolume=overlay.volumes?.public_llm_key?.name;
+      const selected=overlay.services.api.environment.LLM_POLICY_REVISION===PUBLIC_LLM_REPORT4K_PROFILE
+              ? {version:5,keyVolume:selectedVolume??null,timing:PUBLIC_LLM_TIMING,profile:PUBLIC_LLM_REPORT4K_PROFILE}
+              : overlay.services.api.environment.LLM_POLICY_REVISION===PUBLIC_LLM_DOTS_PROFILE
+        ? {version:4,keyVolume:selectedVolume??null,timing:PUBLIC_LLM_TIMING,profile:PUBLIC_LLM_DOTS_PROFILE}
+        : overlay.services.api.environment.LLM_POLICY_REVISION===PUBLIC_LLM_NVIDIA_PROFILE
+        ? {version:3,keyVolume:selectedVolume??null,timing:PUBLIC_LLM_TIMING,profile:PUBLIC_LLM_NVIDIA_PROFILE}
+        : overlay.services.api.environment.LLM_TIMEOUT_MS==='90000'
+          ? {version:2,keyVolume:selectedVolume??null,timing:PUBLIC_LLM_TIMING}
+          : {version:1,keyVolume:selectedVolume??null};
       const model=expectedPublicLlmConfig(f.root,cve,selected);
       if(args.includes('config')){
         const pins=args.filter((_,i)=>args[i-1]==='-f').find(p=>p.endsWith('compose.images.json'));
@@ -375,8 +491,14 @@ function concreteFixture(t) {
         for(const name of requested){
           const image=structuredClone(f.images[name==='llm-egress'?'egress':name]);
           if(name==='llm-egress')image.Config.Cmd=['python','-I','openrouter.py'];
-          image.Id='sha256:'+crypto.createHash('sha256').update('new-'+name).digest('hex');image.RepoTags=[`${PROJECT}-${name}:local`];
-          if(f.images[name])allImages.get(f.images[name].Id).RepoTags=[];
+          image.Id='sha256:'+crypto.createHash('sha256').update(f.distinctBuildIds?`current-build-${f.builds}-${name}`:'new-'+name).digest('hex');image.RepoTags=[`${PROJECT}-${name}:local`];
+          const previous=f.images[name]&&allImages.get(f.images[name].Id);
+          if(previous){
+            previous.RepoTags=previous.RepoTags.filter(tag=>tag!==`${PROJECT}-${name}:local`);
+            if(f.deleteLastNamedReference&&previous.RepoTags.length===0){allImages.delete(previous.Id);f.lastNamedReferenceLosses=(f.lastNamedReferenceLosses??0)+1;}
+          }
+          // Identical rebuilds may keep the immutable ID and existing retained refs.
+          image.RepoTags=[...new Set([...(allImages.get(image.Id)?.RepoTags??[]),...image.RepoTags])];
           f.images[name]=image;allImages.set(image.Id,structuredClone(image));
         }
         f.afterBuild?.(requested[0]); return '';
@@ -392,7 +514,19 @@ function concreteFixture(t) {
       throw Error('unexpected Compose');
     }
     if(args[0]==='image'){
-      if(args[1]==='ls')return [...new Set([...allImages.values()].flatMap(im=>im.RepoTags))].join('\n');
+      if(args[1]==='ls'){
+        const tags=[...new Set([...allImages.values()].flatMap(im=>im.RepoTags))],reference=args.find(arg=>arg.startsWith('reference='))?.slice('reference='.length);
+        return tags.filter(tag=>reference===undefined||tag===reference).join('\n');
+      }
+      if(args[1]==='tag'){
+        assert.equal(args.length,4);const image=allImages.get(args[2]);assert(image,'retention must use an available immutable ID');
+        const receiptAudit=fs.readdirSync(join(f.stand,'llm-deployments')).find(audit=>PUBLIC_LLM_RETENTION_ROLES.some(name=>publicLlmRetentionTag(audit,name)===args[3]));
+        assert(receiptAudit,'only exact audited retention tag mutations are supported');
+        const intent=JSON.parse(fs.readFileSync(join(f.stand,'llm-deployments',receiptAudit,'image-retention-intent.json')));
+        const row=Object.values(intent.images).find(row=>row.tag===args[3]);assert.equal(row?.image.Id,image.Id);
+        assert(![...allImages.values()].some(im=>im.RepoTags.includes(args[3])),'must never overwrite any existing tag');
+        image.RepoTags.push(args[3]);return '';
+      }
       const im=allImages.get(args[2])??[...allImages.values()].find(im=>im.RepoTags.includes(args[2]));if(!im){const e=Error('synthetic image unavailable');e.category='image';throw e;}return JSON.stringify([im]);
     }
     if(args[0]==='volume'){
@@ -411,7 +545,10 @@ function concreteFixture(t) {
       helper={...base,Id:crypto.createHash('sha256').update(name).digest('hex'),Name:'/'+name,Image:image.Id,Created:'2026-10-21T00:00:00Z',RestartCount:0,Path:'node',Args:args.slice(args.indexOf(image.Id)+1),
         Config:{...image.Config,Image:image.Id,Entrypoint:['node'],Cmd:args.slice(args.indexOf(image.Id)+1),Labels:{[LABEL]:'v1','com.docker.compose.project':PROJECT,'org.diplom.recovery-helper':'v1','org.diplom.recovery-purpose':'backup'}},
         State:{Status:'created',Running:false,Pid:0,ExitCode:0,StartedAt:'0001-01-01T00:00:00Z',Restarting:false,OOMKilled:false,Dead:false},NetworkSettings:{Networks:{},Ports:{}}};
-      const init=program!==PUBLIC_LLM_BACKUP_PROGRAM;
+      assert([PUBLIC_LLM_BACKUP_PROGRAM, PUBLIC_LLM_CURRENT_BACKUP_PROGRAM, PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM,
+              PUBLIC_LLM_INITIALIZE_PROGRAM, PUBLIC_LLM_CHECK_PROGRAM, PUBLIC_LLM_SUMMARY_MIGRATE_PROGRAM].includes(program), 'recognize exact historical/current helper program');
+            const init=[PUBLIC_LLM_INITIALIZE_PROGRAM, PUBLIC_LLM_CHECK_PROGRAM, PUBLIC_LLM_SUMMARY_MIGRATE_PROGRAM].includes(program);
+            const fault = program === PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM && !f.preflightFault ? null : f.llmFault;
       const supplied = args.filter((_,i)=>args[i-1]==='--env').map(s=>[s.slice(0,s.indexOf('=')),s.slice(s.indexOf('=')+1)]);
       helper.Config.Env=Object.entries({...Object.fromEntries(image.Config.Env.map(s=>[s.slice(0,s.indexOf('=')),s.slice(s.indexOf('=')+1)])),...Object.fromEntries(supplied)}).map(([k,v])=>`${k}=${v}`);
       if(f.initExitFixture && name.endsWith('-rebuild-current-initialize')) { helper.Id=INIT_EXIT_HOLD.id; }
@@ -421,11 +558,11 @@ function concreteFixture(t) {
       helper.Mounts=helper.HostConfig.Mounts.map(m=>({Type:'volume',Name:m.Source,Source:`/fixture/volumes/${m.Source}`,Driver:'local',Destination:m.Target,RW:!m.ReadOnly,Propagation:'rprivate'}));
       helper.HostConfig.OomKillDisable=null;
       helper.HostConfig.Mounts.forEach(m=>{m.VolumeOptions.DriverConfig={};});
-      if(f.llmFault==='unsafe-helper')helper.HostConfig.Mounts[0].ReadOnly=false;
-      if(f.llmFault==='helper-env')helper.Config.Env.push('NODE_OPTIONS=--inspect');
-      if(f.llmFault==='helper-source')helper.Mounts[0].Source='/foreign/source';
-      if(f.llmFault==='helper-args')helper.Args=[...helper.Args,'unexpected'];
-      if(f.llmFault==='helper-host')helper.HostConfig.CustomAuthority=true;
+      if(fault==='unsafe-helper')helper.HostConfig.Mounts[0].ReadOnly=false;
+      if(fault==='helper-env')helper.Config.Env.push('NODE_OPTIONS=--inspect');
+      if(fault==='helper-source')helper.Mounts[0].Source='/foreign/source';
+      if(fault==='helper-args')helper.Args=[...helper.Args,'unexpected'];
+      if(fault==='helper-host')helper.HostConfig.CustomAuthority=true;
       programs.set(helper.Id,{program,backup});f.containers.push(helper);return helper.Id+'\n';
     }
     if(args[0]==='container'){
@@ -455,7 +592,7 @@ function concreteFixture(t) {
         c.State={...c.State,Status:'running',Running:true,Pid:123,ExitCode:0,StartedAt:tick(),FinishedAt:'0001-01-01T00:00:00Z'};
         if(p){
           c.NetworkSettings.Networks={none:{}}; c.HostConfig.OomKillDisable=false;
-          if(f.llmFault==='helper-running-args')c.Args=[...c.Args,'unexpected'];
+          if(f.llmFault==='helper-running-args' && (p.program !== PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM || f.preflightFault))c.Args=[...c.Args,'unexpected'];
           if(f.initExitFixture && c.Id===INIT_EXIT_HOLD.id) { c.Config.Env=c.Config.Env.filter(s=>!s.startsWith('TMPDIR=')); c.State={...c.State,Status:'exited',Running:false,Pid:0,ExitCode:1,StartedAt:INIT_EXIT_HOLD.startedAt,FinishedAt:INIT_EXIT_HOLD.finishedAt}; attachments(); return ''; }
           const r=runNative(p.program,{...paths,backup:p.backup},{...Object.fromEntries(c.Config.Env.map(s=>[s.slice(0,s.indexOf('=')),s.slice(s.indexOf('=')+1)])),TMPDIR:p.backup});assert.equal(r.status,0,r.stderr);
         }else{
@@ -491,6 +628,10 @@ test('LOCAL execution closure includes transitive/static/dynamic edges and cycle
   fs.appendFileSync(path,'\nglobalThis.LOCAL_CLOSURE_MUST_NOT_EXECUTE = true;\n');
   const closure=capturePublicLlmExecutionClosure(x.f.root);closure.verify();
   assert.deepEqual(closure.manifest.modules,[...PUBLIC_LLM_EXECUTION_MODULES].sort());
+  assert.equal(closure.manifest.modules.length,19);
+  assert(closure.manifest.modules.includes('scripts/public-current-backup-transfer.mjs'));
+  assert(closure.manifest.modules.includes('scripts/public-llm-deployment-catalog.mjs'));
+  assert(!closure.manifest.modules.includes('scripts/public-llm-deployment-archive.mjs'));
   assert(closure.manifest.edges.includes('scripts/public-image-stand.mjs -> scripts/public-cve-bridge-runtime.mjs'));
   assert(closure.manifest.edges.includes('scripts/refresh-local-cve.mjs -> server/deploy/trust/fetch-db-layer.mjs'));
   assert(closure.manifest.edges.includes('scripts/public-cve-provision.mjs -> scripts/refresh-public-cve.mjs'));
@@ -499,6 +640,7 @@ test('LOCAL execution closure includes transitive/static/dynamic edges and cycle
 for(const [label,extra]of [
   ['outside-boundary',"\nimport '../.local-stand/private.mjs';\n"],
   ['unaudited-local',"\nexport * from './unreviewed-module.mjs';\n"],
+  ['archive-executor',"\nimport './public-llm-deployment-archive.mjs';\n"],
   ['nonliteral-import',"\nconst target='./local-stand.mjs'; import(target);\n"],
   ['nonliteral-require-alias',"\nconst load=require; const target='./local-stand.mjs'; load(target);\n"],
 ])test(`LOCAL execution closure rejects ${label} before arbitrary lookup/execution`,t=>{
@@ -687,17 +829,26 @@ async function normalRolloutFixture(t, hold = true) {
     fs.renameSync(join(parent, audit), join(parent, ROLLOUT_HOLD.audit));
     // Only receipts of removed helpers get exact historical identities; no live mutation.
     for (const [file, id] of [['helper-fenced.json', ROLLOUT_HOLD.backup], ['helper-check.json', ROLLOUT_HOLD.check]]) { const p = join(x.f.stand, '.operation.lock', file), value = JSON.parse(fs.readFileSync(p)); value.id = id; fs.writeFileSync(p, JSON.stringify(value)); }
-  } else assert.equal((await publicLlmStand(['up', '--build', '--ack-public-maintenance'], options)).outcome, 'ready');
+  } else await assert.rejects(publicLlmStand(['up', '--build', '--ack-public-maintenance'], options), /phase=build-retained-images;/);
   x.f.afterBuild = null;
   return { ...x, options, audit: ROLLOUT_HOLD.audit, at, oldPins };
 }
 const rolloutArgs = review => ['continue-current-rollout', '--audit', ROLLOUT_HOLD.audit, '--review', review, '--ack-reviewed-current-source', '--ack-retire-only-unavailable-api', '--ack-retire-only-unavailable-web'];
-test('ROLLOUT normal helper selection survives prior image deletion after rebuild and preserves nonempty history/quota', async t => {
+test('ROLLOUT normal prior image deletion after rebuild fails closed with four stores preserved and no reopening', async t => {
   const x = await normalRolloutFixture(t, false), actions = x.f.submissions.slice(x.at);
-  assert(!x.allImages.has(ROLLOUT_HOLD.api.image)); // The old !continuation predicate would choose this unavailable image.
+  assert(!x.allImages.has(ROLLOUT_HOLD.api.image)); // Current normal up must retain rollback image evidence.
   await assert.rejects(x.run(['image', 'inspect', ROLLOUT_HOLD.api.image], {}), e => e.category === 'image');
-  const helpers = actions.filter(a => a[0] === 'create' && a.at(-1) === PUBLIC_LLM_BACKUP_PROGRAM);
-  assert.equal(helpers.length, 3); assert(helpers[0].includes(ROLLOUT_HOLD.api.image)); assert(helpers.slice(1).every(a => a.includes(ROLLOUT_HOLD.api.candidate)));
+  const helpers = actions.filter(a => a[0] === 'create');
+  assert.deepEqual(helpers.map(a => a.at(-1)), [PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM, PUBLIC_LLM_CURRENT_BACKUP_PROGRAM]);
+  assert(helpers.every(a => a.includes(ROLLOUT_HOLD.api.image)));
+  assert(!actions.some(a => a[0] === 'compose' && a.includes('up')));
+  assert(fs.existsSync(join(x.f.stand,'.operation.lock/mutation.json')));
+  assert.equal(x.f.containers.find(c => c.Name.endsWith('-web-1')).State.Running,false);
+  const parent=join(x.f.stand,'llm-deployments'),audit=fs.readdirSync(parent).find(n=>!fs.existsSync(join(parent,n,'complete.json')));
+  assert(audit);assert(!fs.existsSync(join(parent,audit,'complete.json')));
+  for(const [kind,relative,live] of [['auth','core/auth.sqlite',join(x.paths.auth,'auth.sqlite')],['ledger','core/ledger.sqlite',join(x.paths.data,'ledger.sqlite')],
+    ['history','llm/auth.sqlite',join(x.paths.auth,'llm-history.sqlite')],['quota','llm/ledger.sqlite',join(x.paths.auth,'llm-usage.sqlite')]])
+    assert.equal(currentLlmFingerprint(DB,fs,crypto,live,kind),currentLlmFingerprint(DB,fs,crypto,join(parent,audit,'fenced',relative),kind));
   const db = new DB(join(x.paths.auth, 'llm-history.sqlite'), { readonly: true }); assert.equal(db.prepare('SELECT count(*) n FROM history_head').get().n, 1); db.close();
   const q = new DB(join(x.paths.auth, 'llm-usage.sqlite'), { readonly: true }); assert.equal(q.prepare('SELECT clock FROM quota_meta').get().clock, 17); q.close();
 });
@@ -1325,6 +1476,110 @@ for (const shape of ['omitted', 'false', 'true', 'null', 'string', 'observed-rea
   }
 });
 
+for (const supplied of [false, true]) test(`CONCRETE TIMING v1 Xing30 to v2 Xing90 to v3 NVIDIA preserves all four stores, archives and supplied-key authority (${supplied})`, async t => {
+  const x = concreteFixture(t), options = { root:x.f.root, home:x.state.home, run:x.run,
+    ambient:{PATH:process.env.PATH,HOME:x.state.home}, Database:DB, checkSource:sourceQualification,
+    request:async()=>new Response(null,{status:401}), sleep:async()=>{}, log(){} };
+  if (supplied) {
+    fs.writeFileSync(join(x.state.path,'key-volume.json'), JSON.stringify({version:1,volume:keySelection.keyVolume,uid:65532,gid:65532,fileMode:'0400',directoryMode:'0500',target:PUBLIC_LLM_ENV.OPENROUTER_API_KEY_FILE,initializerImage:'sha256:'+'f'.repeat(64)}), {mode:0o600});
+    x.f.volumes.push({Name:keySelection.keyVolume,Driver:'local',Scope:'local',Options:null,Labels:{'diplom.public-llm':'key-v1'},Mountpoint:`/fixture/volumes/${keySelection.keyVolume}`});
+  }
+  await publicLlmStand(['up','--build','--ack-public-maintenance'], options);
+  const paths = {auth:join(x.paths.auth,'auth.sqlite'),ledger:join(x.paths.data,'ledger.sqlite'),history:join(x.paths.auth,'llm-history.sqlite'),quota:join(x.paths.auth,'llm-usage.sqlite')};
+  for (const p of Object.values(paths)) { const db=new DB(p); db.exec("CREATE TABLE timing_opaque(n INTEGER,b BLOB);INSERT INTO timing_opaque VALUES(9007199254740993,X'000102')"); db.close(); }
+  const fingerprints = () => Object.fromEntries(Object.entries(paths).map(([kind,p])=>[kind,currentLlmFingerprint(DB,fs,crypto,p,kind)]));
+    const initialArchives=treeBytes(join(x.f.stand,'llm-deployments')),priorAudits=new Set(fs.readdirSync(join(x.f.stand,'llm-deployments')));
+  const initial = fingerprints(), jwt=fs.readFileSync(join(x.f.stand,'scan-jwt')),
+    volumes=structuredClone(x.f.volumes), at=x.f.submissions.length;
+  assert.equal(readPublicLlmBinding(x.f.root).version,1);
+  fs.writeFileSync(join(x.state.path,'llm.env'),Object.entries(PUBLIC_LLM_CURRENT_ENV).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
+  await assert.rejects(publicLlmStand(['up','--ack-public-maintenance'],options),/phase=preflight-binding;/);
+  assert.equal(x.f.submissions.length,at,'timing upgrade without a source build refuses before Docker or lifecycle');
+  assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],options)).outcome,'ready');
+  const next={version:2,keyVolume:supplied?keySelection.keyVolume:null,timing:PUBLIC_LLM_TIMING};
+  assert.deepEqual(readPublicLlmBinding(x.f.root),next);
+  assert.deepEqual(fingerprints(),initial); assert.deepEqual(fs.readFileSync(join(x.f.stand,'scan-jwt')),jwt);
+  assert.deepEqual(x.f.volumes,volumes); assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+  const api=x.f.containers.find(c=>c.Name.endsWith('-api-1'));
+  assert(api.Config.Env.includes('LLM_TIMEOUT_MS=90000'));
+  assert.deepEqual(x.f.containers.find(c=>c.Name.endsWith('-llm-egress-1')).Config.Cmd,['python','-I','openrouter.py','--public-90s']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(x.f.stand,'compose.llm-env.json'))).services['llm-egress'],{command:['python','-I','openrouter.py','--public-90s']});
+  assert.deepEqual(x.f.images['llm-egress'].Config.Cmd,['python','-I','openrouter.py']);
+  assert.equal(api.Mounts.some(m=>m.Destination==='/run/secrets'),supplied);
+  const actions=x.f.submissions.slice(at),firstBuild=actions.findIndex(a=>a[0]==='compose'&&a.includes('build'));
+  assert(firstBuild>0 && actions.slice(0,firstBuild).some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_CURRENT_BACKUP_PROGRAM));
+    for(const [path,bytes] of initialArchives)assert.deepEqual(fs.readFileSync(join(x.f.stand,'llm-deployments',path)),bytes);
+  for(const audit of fs.readdirSync(join(x.f.stand,'llm-deployments'))) {
+    if (priorAudits.has(audit)) continue;
+        assert(fs.existsSync(join(x.f.stand,'llm-deployments',audit,'fenced/llm/auth.sqlite')));
+    for(const phase of ['fenced','before-api','after-api']) for(const[kind,p]of Object.entries({auth:'core/auth.sqlite',ledger:'core/ledger.sqlite',history:'llm/auth.sqlite',quota:'llm/ledger.sqlite'}))
+      assert.equal(currentLlmFingerprint(DB,fs,crypto,join(x.f.stand,'llm-deployments',audit,phase,p),kind),initial[kind]);
+  }
+  const archives=treeBytes(join(x.f.stand,'llm-deployments')), beforeNvidia=x.f.submissions.length;
+  fs.writeFileSync(join(x.state.path,'llm.env'),'# Public image-only 8081 API settings; no credentials in this file.\n'+Object.entries(PUBLIC_LLM_NVIDIA_ENV).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
+  await assert.rejects(publicLlmStand(['up','--ack-public-maintenance'],options),/phase=preflight-binding;/);
+  assert.equal(x.f.submissions.length,beforeNvidia,'policy upgrade without build refuses before Docker/lifecycle');
+  assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],options)).outcome,'ready');
+  assert.deepEqual(readPublicLlmBinding(x.f.root),{...next,version:3,profile:PUBLIC_LLM_NVIDIA_PROFILE});
+  assert.deepEqual(fingerprints(),initial); assert.deepEqual(fs.readFileSync(join(x.f.stand,'scan-jwt')),jwt);
+  assert.deepEqual(x.f.volumes,volumes);
+  for(const [path,bytes] of archives) assert.deepEqual(fs.readFileSync(join(x.f.stand,'llm-deployments',path)),bytes);
+  const nvidiaApi=x.f.containers.find(c=>c.Name.endsWith('-api-1'));
+  for(const [k,v] of Object.entries(PUBLIC_LLM_NVIDIA_ENV)) assert(nvidiaApi.Config.Env.includes(`${k}=${v}`));
+  assert.equal(nvidiaApi.Mounts.some(m=>m.Destination==='/run/secrets'),supplied);
+  assert.deepEqual(x.f.containers.find(c=>c.Name.endsWith('-llm-egress-1')).Config.Cmd,['python','-I','openrouter.py','--public-90s']);
+  const nvidiaActions=x.f.submissions.slice(beforeNvidia), nvidiaBuild=nvidiaActions.findIndex(a=>a[0]==='compose'&&a.includes('build'));
+  assert(nvidiaBuild>0 && nvidiaActions.slice(0,nvidiaBuild).some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_CURRENT_BACKUP_PROGRAM));
+  assert(!nvidiaActions.some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_INITIALIZE_PROGRAM));
+});
+
+for (const report4k of [false,true]) for (const supplied of [false,true]) test(`CONCRETE ${report4k ? 'REPORT4K guarded v4 READY to v5' : 'DOTS guarded v3 READY to v4'} preserves four stores, recovery archives and key authority (${supplied})`, async t => {
+  let clock=0;
+  const x=concreteFixture(t),options={root:x.f.root,home:x.state.home,run:x.run,
+    ambient:{PATH:process.env.PATH,HOME:x.state.home},Database:DB,checkSource:sourceQualification,
+    request:async()=>new Response(null,{status:401}),now:()=>clock,sleep:async ms=>{clock+=ms;},log(){}};
+  if(supplied) {
+    fs.writeFileSync(join(x.state.path,'key-volume.json'),JSON.stringify({version:1,volume:keySelection.keyVolume,uid:65532,gid:65532,fileMode:'0400',directoryMode:'0500',target:PUBLIC_LLM_ENV.OPENROUTER_API_KEY_FILE,initializerImage:'sha256:'+'f'.repeat(64)}),{mode:0o600});
+    x.f.volumes.push({Name:keySelection.keyVolume,Driver:'local',Scope:'local',Options:null,Labels:{'diplom.public-llm':'key-v1'},Mountpoint:`/fixture/volumes/${keySelection.keyVolume}`});
+  }
+  fs.writeFileSync(join(x.state.path,'llm.env'),'# Public image-only 8081 API settings; no credentials in this file.\n'+Object.entries(report4k ? PUBLIC_LLM_DOTS_ENV : PUBLIC_LLM_NVIDIA_ENV).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],options)).outcome,'ready');
+  const paths={auth:join(x.paths.auth,'auth.sqlite'),ledger:join(x.paths.data,'ledger.sqlite'),history:join(x.paths.auth,'llm-history.sqlite'),quota:join(x.paths.auth,'llm-usage.sqlite')};
+  for(const p of Object.values(paths)) {const db=new DB(p);db.exec("CREATE TABLE dots_opaque(n INTEGER,b BLOB);INSERT INTO dots_opaque VALUES(9007199254740993,X'000102')");db.close();}
+  const fingerprints=()=>Object.fromEntries(Object.entries(paths).map(([kind,p])=>[kind,currentLlmFingerprint(DB,fs,crypto,p,kind)]));
+  const initial=fingerprints(),jwt=fs.readFileSync(join(x.f.stand,'scan-jwt')),volumes=structuredClone(x.f.volumes);
+  const next={version:report4k?4:3,keyVolume:supplied?keySelection.keyVolume:null,timing:PUBLIC_LLM_TIMING,profile:report4k?PUBLIC_LLM_DOTS_PROFILE:PUBLIC_LLM_NVIDIA_PROFILE};
+  assert.deepEqual(readPublicLlmBinding(x.f.root),next);
+  // Fully READY prior profile, no historical HOLD continuation: only the guarded config
+  // migration first, then the ordinary reviewed fake-engine build/deploy path.
+  assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+  fs.copyFileSync(join(ROOT,'scripts/public-llm-config.py'),join(x.f.root,'scripts/public-llm-config.py'));
+  const beforeDots=x.f.submissions.length, priorArchives=treeBytes(join(x.f.stand,'llm-deployments'));
+  const nvidiaConfig=fs.readFileSync(join(x.state.path,'llm.env'));
+  assert.deepEqual((report4k?migratePublicLlmReport4k:migratePublicLlmDots)({root:x.f.root,home:x.state.home,log(){}}),{configUpgraded:true,lifecycle:false});
+  assert.equal(x.f.submissions.length,beforeDots,'config migration never calls engine');
+  assert.deepEqual(fs.readFileSync(join(x.state.path,report4k?'llm.env.dots-2048-original-before-report4k-v1':'llm.env.nvidia-90-original-before-dots-v1')),nvidiaConfig);
+  assert.deepEqual(readPublicLlmBinding(x.f.root),next,'config migration never rewrites runtime binding');
+  assert.deepEqual(fingerprints(),initial);
+  await assert.rejects(publicLlmStand(['up','--ack-public-maintenance'],options),/phase=preflight-binding;/);
+  assert.equal(x.f.submissions.length,beforeDots);
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],options)).outcome,'ready');
+  assert.deepEqual(readPublicLlmBinding(x.f.root),{...next,version:report4k?5:4,profile:report4k?PUBLIC_LLM_REPORT4K_PROFILE:PUBLIC_LLM_DOTS_PROFILE});
+  assert.deepEqual(fingerprints(),initial);assert.deepEqual(x.f.volumes,volumes);
+  assert.deepEqual(fs.readFileSync(join(x.f.stand,'scan-jwt')),jwt);
+  for(const [path,bytes] of priorArchives) assert.deepEqual(fs.readFileSync(join(x.f.stand,'llm-deployments',path)),bytes);
+  const dotsApi=x.f.containers.find(c=>c.Name.endsWith('-api-1'));
+  for(const [k,v] of Object.entries(report4k?PUBLIC_LLM_REPORT4K_ENV:PUBLIC_LLM_DOTS_ENV)) assert(dotsApi.Config.Env.includes(`${k}=${v}`));
+  assert.equal(dotsApi.Mounts.some(m=>m.Destination==='/run/secrets'),supplied);
+  assert.deepEqual(x.f.containers.find(c=>c.Name.endsWith('-llm-egress-1')).Config.Cmd,['python','-I','openrouter.py','--public-90s']);
+  const dotsActions=x.f.submissions.slice(beforeDots),dotsBuild=dotsActions.findIndex(a=>a[0]==='compose'&&a.includes('build'));
+  assert(dotsBuild>0&&dotsActions.slice(0,dotsBuild).some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_CURRENT_BACKUP_PROGRAM));
+  assert(!dotsActions.some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_INITIALIZE_PROGRAM));
+  assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+});
+
 test('CONCRETE maintenance: real four-store export/restore plus strict fake engine validates missing-key deployment and single later key activation',async t=>{
   const x=concreteFixture(t),logs=[];
   const options={root:x.f.root,home:x.state.home,run:x.run,ambient:{PATH:process.env.PATH,HOME:x.state.home},Database:DB,checkSource:sourceQualification,request:async()=>new Response(null,{status:401}),sleep:async()=>{},log:v=>logs.push(v)};
@@ -1357,7 +1612,7 @@ for(const supplied of [false,true]) test(`CONCRETE actual main stop→up, key ${
   const auth=new DB(join(x.paths.auth,'auth.sqlite'));auth.exec("INSERT INTO users VALUES('same-owner','synthetic-password')");auth.close();
   const quota=new DB(join(x.paths.auth,'llm-usage.sqlite'));quota.exec('UPDATE quota_meta SET clock=123 WHERE id=1');quota.close();
   const stores={auth:join(x.paths.auth,'auth.sqlite'),ledger:join(x.paths.data,'ledger.sqlite'),history:join(x.paths.auth,'llm-history.sqlite'),quota:join(x.paths.auth,'llm-usage.sqlite')};
-  const fingerprints=()=>Object.fromEntries(Object.entries(stores).map(([kind,p])=>[kind,llmFingerprint(DB,fs,crypto,p,kind)]));
+  const fingerprints=()=>Object.fromEntries(Object.entries(stores).map(([kind,p])=>[kind,currentLlmFingerprint(DB,fs,crypto,p,kind)]));
   const initial=fingerprints(),pins=fs.readFileSync(join(x.f.stand,'compose.images.json'),'utf8'),jwt=fs.readFileSync(join(x.f.stand,'scan-jwt'),'utf8');
   const prior=x.f.containers.map(c=>structuredClone(c)),egress=prior.find(c=>c.Config.Labels['com.docker.compose.service']==='egress');
   const stopped=await publicImageStand(['stop'],options);assert.equal(stopped.containers?.length??stopped.length,7);
@@ -1370,15 +1625,140 @@ for(const supplied of [false,true]) test(`CONCRETE actual main stop→up, key ${
   assert.deepEqual(x.f.serviceStarts,[egress.Id]);
   const restarted=x.f.containers.find(c=>c.Id===egress.Id);assert(restarted?.State.Running);assert.equal(restarted.Image,egress.Image);assert.deepEqual(restarted.Config,egress.Config);assert.deepEqual(restarted.HostConfig,egress.HostConfig);
   const submitted=x.f.submissions.slice(at),start=submitted.findIndex(a=>a[0]==='container'&&a[1]==='start'&&a[2]===egress.Id);
-  assert(start>0);assert(submitted.slice(0,start).some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_BACKUP_PROGRAM));
+  assert(start>0);assert(submitted.slice(0,start).some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_CURRENT_BACKUP_PROGRAM));
   assert(submitted.slice(0,start).some(a=>a[1]==='exec'&&a.at(-1).includes('"group":"llm"')),'real four-store export must precede registry restart');
   assert(!submitted.some(a=>a[1]==='exec'&&prior.some(c=>c.Id===a[2])),'no exec on any stopped original service');
   assert.deepEqual(fingerprints(),initial);assert.equal(fs.readFileSync(join(x.f.stand,'compose.images.json'),'utf8'),pins);assert.equal(fs.readFileSync(join(x.f.stand,'scan-jwt'),'utf8'),jwt);
   const next=fs.readdirSync(join(x.f.stand,'llm-deployments')).filter(n=>!audits.has(n));assert.equal(next.length,1);
-  for(const phase of ['fenced','before-api','after-api'])for(const[kind,p]of Object.entries({auth:'core/auth.sqlite',ledger:'core/ledger.sqlite',history:'llm/auth.sqlite',quota:'llm/ledger.sqlite'}))assert.equal(llmFingerprint(DB,fs,crypto,join(x.f.stand,'llm-deployments',next[0],phase,p),kind),initial[kind]);
+  for(const phase of ['fenced','before-api','after-api'])for(const[kind,p]of Object.entries({auth:'core/auth.sqlite',ledger:'core/ledger.sqlite',history:'llm/auth.sqlite',quota:'llm/ledger.sqlite'}))assert.equal(currentLlmFingerprint(DB,fs,crypto,join(x.f.stand,'llm-deployments',next[0],phase,p),kind),initial[kind]);
   assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));assert.equal(x.f.containers.length,7);
   assert(x.f.containers.filter(c=>!c.Name.includes('volume-init')).every(c=>c.State.Running));
 });
+
+const CURRENT_RETAINED_SUMMARY=JSON.stringify({version:'durable-summary-v1',policyVersion:'d'.repeat(64),value:{
+  scanId:'00000000-0000-0000-0000-000000000001',digest:'sha256:'+'e'.repeat(64),platform:'linux/amd64',reportVersion:'f'.repeat(64)}});
+async function currentNormalFixture(t, historyVersion) {
+  const x=concreteFixture(t);
+  const options={root:x.f.root,home:x.state.home,run:x.run,ambient:{HOME:x.state.home,PATH:process.env.PATH},
+    Database:DB,checkSource:sourceQualification,sleep:async()=>{},request:async()=>new Response(null,{status:401}),log() {}};
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],options)).outcome,'ready');
+  const seeded=runNative("import {HistoryStore} from './src/llm/history-store.ts';const h=new HistoryStore('/auth/llm-history.sqlite');h.snapshot('a'.repeat(32),'00000000-0000-0000-0000-000000000001');h.close();",x.paths);
+  assert.equal(seeded.status,0,seeded.stderr);
+  const stores={auth:join(x.paths.auth,'auth.sqlite'),ledger:join(x.paths.data,'ledger.sqlite'),history:join(x.paths.auth,'llm-history.sqlite'),quota:join(x.paths.auth,'llm-usage.sqlite')};
+  for(const [kind,path] of Object.entries(stores)) {
+    const db=new DB(path);
+    try {
+      db.exec("CREATE TABLE current_opaque(n INTEGER,b BLOB);INSERT INTO current_opaque(rowid,n,b) VALUES(17,9007199254740993,X'00ff80')");
+      if(kind==='auth')db.exec("INSERT INTO users VALUES('same-owner','synthetic-password')");
+      if(kind==='quota')db.exec('UPDATE quota_meta SET clock=123 WHERE id=1');
+      if(kind==='history'&&historyVersion===3)db.exec('DROP TABLE llm_summary;PRAGMA user_version=3');
+            if(kind==='history'&&historyVersion===4)db.prepare('INSERT INTO llm_summary VALUES(?,?,?)').run('b'.repeat(64),CURRENT_RETAINED_SUMMARY,
+                    crypto.createHash('sha256').update(JSON.stringify(['b'.repeat(64),CURRENT_RETAINED_SUMMARY])).digest('hex'));
+    } finally {db.close();}
+  }
+  const fingerprint=dir=>Object.fromEntries(Object.entries(stores).map(([kind,path])=>[kind,currentLlmFingerprint(DB,fs,crypto,
+    dir?join(dir,{auth:'core/auth.sqlite',ledger:'core/ledger.sqlite',history:'llm/auth.sqlite',quota:'llm/ledger.sqlite'}[kind]):path,kind)]));
+  const initial=fingerprint(),audits=new Set(fs.readdirSync(join(x.f.stand,'llm-deployments')));
+  x.f.submissions.length=0;x.f.serviceStops.length=0;x.events.length=0;
+  return {...x,options,stores,fingerprint,initial,audits};
+}
+test('RETENTION NORMAL last-named-ref loss is prevented before build; second build, no-build and current status preserve verified refs',async t=>{
+  const x=await currentNormalFixture(t,4);assert.deepEqual(capturePublicLlmRetentions(x.f.root).tags,[],'first enable creates no retention tags');
+  const initial=x.fingerprint(),beforeIds=Object.fromEntries(PUBLIC_LLM_RETENTION_ROLES.map(name=>[name,x.f.images[name].Id]));
+  x.f.deleteLastNamedReference=true;x.f.distinctBuildIds=true;
+  x.f.beforeBuild=()=>{
+    const audit=fs.readdirSync(join(x.f.stand,'llm-deployments')).find(n=>!x.audits.has(n));assert(audit);
+    const receipt=JSON.parse(fs.readFileSync(join(x.f.stand,'llm-deployments',audit,'image-retention.json')));
+    for(const name of PUBLIC_LLM_RETENTION_ROLES){assert.equal(receipt.images[name].image.Id,beforeIds[name]);assert(x.allImages.get(beforeIds[name]).RepoTags.includes(publicLlmRetentionTag(audit,name)));}
+  };
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],x.options)).outcome,'ready');x.f.beforeBuild=null;
+  assert.equal(x.f.lastNamedReferenceLosses??0,0);assert.deepEqual(x.fingerprint(),initial);
+  const first=capturePublicLlmRetentions(x.f.root);assert.equal(first.tags.length,4);first.verify();
+  const actions=x.f.submissions,firstBuild=actions.findIndex(a=>a[0]==='compose'&&a.includes('build'));
+  assert.equal(actions.slice(0,firstBuild).filter(a=>a[0]==='image'&&a[1]==='tag').length,4);
+  for(const id of Object.values(beforeIds))assert(x.allImages.has(id),'retention prevents last-named-ref removal even though old containers remain');
+  const status=await publicImageStand(['status'],{...x.options,llmOptions:{home:x.state.home,Database:DB,checkSource:sourceQualification}});
+  assert.equal(status.containers?.length??status.length,7);
+  const at=x.f.submissions.length;
+  assert.equal((await publicLlmStand(['up','--ack-public-maintenance'],x.options)).outcome,'ready');
+  assert(!x.f.submissions.slice(at).some(a=>a[0]==='image'&&a[1]==='tag'),'no-build never tags');
+  assert.equal(capturePublicLlmRetentions(x.f.root).tags.length,4);
+  assert.equal((await publicLlmStand(['up','--build','--ack-public-maintenance'],x.options)).outcome,'ready');
+  assert.equal(capturePublicLlmRetentions(x.f.root).tags.length,8);assert.equal(x.f.lastNamedReferenceLosses??0,0);
+  assert.deepEqual(x.fingerprint(),initial);assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+});
+
+for(const [version,ack,allowed] of [[3,true,true],[4,false,true],[3,false,false],[4,true,false]])
+  test(`CURRENT NORMAL CLI schema${version} ${ack?'ack':'noack'} ${allowed?'qualified up':'denies before stop'}`,async t=>{
+    const x=await currentNormalFixture(t,version),jwt=fs.readFileSync(join(x.f.stand,'scan-jwt')),volumes=structuredClone(x.f.volumes);
+    const flags=['up','--build',...(ack?[PUBLIC_LLM_SUMMARY_MIGRATION_ACK]:[])];
+    let providers=0;
+    const options={...x.options,llmOptions:{home:x.state.home,Database:DB,checkSource:sourceQualification},run:async(args,opts)=>{
+      if(args[0]==='compose'&&args.includes('up')&&['llm-egress','api'].includes(args.at(-1))) {
+        providers++;
+        const db=new DB(x.stores.history);try{assert.equal(db.pragma('user_version',{simple:true}),4);}finally{db.close();}
+        if(ack) {
+          const audit=fs.readdirSync(join(x.f.stand,'llm-deployments')).find(n=>!x.audits.has(n));assert(audit);
+          assert(fs.existsSync(join(x.f.stand,'llm-deployments',audit,'history-migration-verified.json')),'exact relation must be verified before provider/API starts');
+        }
+      }
+      return x.run(args,opts);
+    }};
+    if(!allowed) {
+      // Direct CLI retains diagnostic phase; outer dispatcher intentionally redacts it.
+      await assert.rejects(publicLlmStand([...flags,'--ack-public-maintenance'],options),/phase=preflight-history-schema;/);
+      assert.deepEqual(x.f.serviceStops,[]);assert.equal(providers,0);assert.deepEqual(x.f.serviceStarts,[]);
+      assert(!x.f.submissions.some(a=>a[0]==='compose'&&a.includes('build')));
+      const helpers=x.f.submissions.filter(a=>a[0]==='create');assert.equal(helpers.length,1);
+      assert.equal(helpers[0].at(-1),PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM);
+      assert(helpers[0].includes(`type=volume,src=${PROJECT}_auth_accounts,dst=/auth,readonly,volume-nocopy`));
+      assert.deepEqual(x.fingerprint(),x.initial);assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));
+      return;
+    }
+    assert.equal((await publicImageStand(flags,options)).outcome,'ready');assert.equal(providers,2);
+    const next=fs.readdirSync(join(x.f.stand,'llm-deployments')).filter(n=>!x.audits.has(n));assert.equal(next.length,1);
+    const audit=join(x.f.stand,'llm-deployments',next[0]);
+    const b0=x.fingerprint(join(audit,'fenced')),b1=x.fingerprint(join(audit,ack?'post-migration':'fenced'));
+    assert.deepEqual(b0,x.initial);
+    for(const kind of ['auth','ledger','quota'])assert.equal(b1[kind],b0[kind]);
+    if(ack) {
+      const db=new DB(join(audit,'post-migration/llm/auth.sqlite'));try{assert.equal(db.prepare('SELECT count(*) n FROM llm_summary').get().n,0);}finally{db.close();}
+      assert.notEqual(b1.history,b0.history);
+      const receipt=(fingerprints,historyVersion)=>({historyVersion,core:{auth:{logicalSha256:fingerprints.auth},ledger:{logicalSha256:fingerprints.ledger}},llm:{history:fingerprints.history,quota:fingerprints.quota}});
+      assert.equal(verifyPublicLlmSummaryMigration({DB,before:receipt(b0,3),after:receipt(b1,4),beforeDirectory:join(audit,'fenced'),afterDirectory:join(audit,'post-migration')}).oldStoresPreserved,true);
+    } else {
+      assert.deepEqual(b1,b0);
+      const db=new DB(x.stores.history);try{assert.equal(db.prepare('SELECT content FROM llm_summary').get().content,CURRENT_RETAINED_SUMMARY);}finally{db.close();}
+    }
+    for(const phase of ['before-api','after-api'])assert.deepEqual(x.fingerprint(join(audit,phase)),b1,'all four full fingerprints equal B1');
+    assert.deepEqual(x.fingerprint(),b1);assert.deepEqual(x.f.volumes,volumes);assert.deepEqual(fs.readFileSync(join(x.f.stand,'scan-jwt')),jwt);
+    const creates=x.f.submissions.filter(a=>a[0]==='create');
+    const expected=[PUBLIC_LLM_SCHEMA_PREFLIGHT_PROGRAM,PUBLIC_LLM_CURRENT_BACKUP_PROGRAM,...(ack?[PUBLIC_LLM_SUMMARY_MIGRATE_PROGRAM,PUBLIC_LLM_CURRENT_BACKUP_PROGRAM]:[]),PUBLIC_LLM_CHECK_PROGRAM,PUBLIC_LLM_CURRENT_BACKUP_PROGRAM,PUBLIC_LLM_CURRENT_BACKUP_PROGRAM];
+    assert.deepEqual(creates.map(a=>a.at(-1)),expected);
+    assert(!creates.some(a=>a.at(-1)===PUBLIC_LLM_BACKUP_PROGRAM),'current normal path must not use historical backup');
+    const calls=x.f.submissions,preflight=calls.findIndex(a=>a[0]==='create'),stop=calls.findIndex(a=>a[0]==='container'&&a[1]==='stop');assert(preflight<stop);
+    const starts=calls.filter(a=>a[0]==='compose'&&a.includes('up')).map(a=>a.at(-1));assert.deepEqual(starts,['llm-egress','worker','api','web']);
+    assert(!fs.existsSync(join(x.f.stand,'.operation.lock')));assert.equal(x.f.containers.length,7);
+  });
+test('CURRENT candidate API image unsafe defaults refuse before initializer or provider startup',async t=>{
+  const x=concreteFixture(t);
+  x.f.afterBuild=name=>{if(name==='api')x.allImages.get(x.f.images.api.Id).Config.Env.push('NODE_OPTIONS=--inspect');};
+  await assert.rejects(publicLlmStand(['up','--build','--ack-public-maintenance'],{root:x.f.root,home:x.state.home,run:x.run,
+    ambient:{HOME:x.state.home,PATH:process.env.PATH},Database:DB,checkSource:sourceQualification,sleep:async()=>{},log() {}}),/phase=build-image-api;/);
+  assert.equal(x.f.builds,4);assert.equal(x.f.containers.find(c=>c.Name.endsWith('-web-1')).State.Running,false);
+  assert(!x.f.submissions.some(a=>a[0]==='compose'&&a.includes('up')));
+  assert(!x.f.submissions.some(a=>a[0]==='create'&&[PUBLIC_LLM_INITIALIZE_PROGRAM,PUBLIC_LLM_CHECK_PROGRAM].includes(a.at(-1))));
+  assert(fs.existsSync(join(x.f.stand,'.operation.lock/mutation.json')));
+});
+for(const fault of ['unsafe-helper','helper-env','helper-source','helper-args','helper-host','helper-running-args'])
+  test(`CURRENT PREFLIGHT ${fault} retains uncertain helper without service stop or retry`,async t=>{
+    const x=concreteFixture(t);x.f.llmFault=fault;x.f.preflightFault=true;
+    await assert.rejects(publicLlmStand(['up','--build','--ack-public-maintenance'],{root:x.f.root,home:x.state.home,run:x.run,
+      ambient:{HOME:x.state.home,PATH:process.env.PATH},Database:DB,checkSource:sourceQualification,sleep:async()=>{},log() {}}),/phase=preflight-history-schema;/);
+    assert.deepEqual(x.f.serviceStops,[]);assert.deepEqual(x.f.serviceStarts,[]);assert.equal(x.f.builds,0);
+    assert.equal(x.f.submissions.filter(a=>a[0]==='create').length,1);assert(!x.f.submissions.some(a=>a[0]==='container'&&a[1]==='rm'));
+    assert(fs.existsSync(join(x.f.stand,'.operation.lock')));assert(!fs.existsSync(join(x.f.stand,'.operation.lock/mutation.json')));
+  });
 
 function stoppedFixture(t){
   const x=concreteFixture(t);
@@ -1410,7 +1790,7 @@ test('CONCRETE stopped stand with undrained ledger refuses in the original netwo
   const x=stoppedFixture(t),db=new DB(join(x.paths.data,'ledger.sqlite'));db.exec('INSERT INTO outbox VALUES(NULL)');db.close();
   await assert.rejects(publicLlmStand(['up','--build','--ack-public-maintenance'],{root:x.f.root,home:x.state.home,run:x.run,ambient:{HOME:x.state.home,PATH:process.env.PATH},Database:DB,checkSource:sourceQualification,log:()=>{}}));
   assert.equal(x.f.builds,0);assert.deepEqual(x.f.serviceStarts,[]);assert.deepEqual(x.f.serviceStops,[]);
-  assert(x.f.submissions.some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_BACKUP_PROGRAM));
+  assert(x.f.submissions.some(a=>a[0]==='create'&&a.at(-1)===PUBLIC_LLM_CURRENT_BACKUP_PROGRAM));
   assert(!x.f.submissions.some(a=>a[0]==='compose'||a[1]==='exec'&&x.f.containers.some(c=>c.Id===a[2]&&c.Config.Labels['com.docker.compose.service'])));
   assert(fs.existsSync(join(x.f.stand,'.operation.lock/mutation.json')));assert(x.f.containers.filter(c=>c.Config.Labels['com.docker.compose.service']).every(c=>!c.State.Running));
 });
@@ -1426,7 +1806,7 @@ for (const fault of ['image-config-drift', 'late-api-health']) test(`CONCRETE ${
   const x = concreteFixture(t), originalApi = x.f.images.api.Id;
   if (fault === 'image-config-drift') x.f.afterBuild = () => { x.allImages.get(originalApi).Config.Env.push('NODE_OPTIONS=--inspect'); };
   else x.f.llmFault = fault;
-  await assert.rejects(publicLlmStand(['up', '--build', '--ack-public-maintenance'], { root:x.f.root, home:x.state.home, run:x.run, ambient:{ HOME:x.state.home, PATH:process.env.PATH }, Database:DB,checkSource:sourceQualification, sleep:async()=>{}, log:()=>{} }));
+  await assert.rejects(publicLlmStand(['up', '--build', '--ack-public-maintenance'], { root:x.f.root, home:x.state.home, run:x.run, ambient:{ HOME:x.state.home, PATH:process.env.PATH }, Database:DB,checkSource:sourceQualification, sleep:async()=>{}, log:()=>{} }), fault === 'image-config-drift' ? /phase=build-retained-images;/ : /phase=/);
   assert.equal(x.f.builds, 4); assert.equal(x.f.containers.find(c=>c.Name.endsWith('-web-1')).State.Running, false);
   assert(!fs.existsSync(join(x.f.stand, 'llm-profile.json'))); assert(fs.existsSync(join(x.f.stand, '.operation.lock/mutation.json')));
 });

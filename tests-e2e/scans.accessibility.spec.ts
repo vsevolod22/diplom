@@ -1,6 +1,38 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
+async function openScanData(page: Page) {
+  const details = page.locator('details').filter({ has: page.locator('summary', { hasText: /^Данные сканирования$/ }) });
+  await expect(details).not.toHaveAttribute('open', '');
+  await expect(details.getByText('Этап: не предоставлен', { exact: true })).toBeHidden();
+  const toggle = details.locator('summary');
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(details).toHaveAttribute('open', '');
+  await expect(toggle).toBeFocused();
+  await expect(details.getByText('Этап: не предоставлен', { exact: true })).toBeVisible();
+  await expect(details.getByText('Закреплённая цель: ожидаем подтверждения digest/platform от авторизованного GET status')).toBeVisible();
+  return details;
+}
+
+async function expectPartialReport(page: Page) {
+  await expect(page.getByText('Демонстрационный отчёт · вымышленные данные')).toBeVisible();
+  await expect(page.getByText('Не результат реального сканирования и не подтверждение безопасности образа.')).toBeVisible();
+  const progress = page.getByRole('group', { name: 'Ход сканирования partial-demo', exact: true });
+  await expect(progress.getByText('Итог скана: Частичный результат')).toBeVisible();
+  await expect(progress.getByText('Выполнение не подтверждено; оценка до остановки отсутствует.')).toBeVisible();
+  await expect(progress.getByText('Получены итоги: 3 из 3. Успешно выполнено: 1.')).toBeVisible();
+  await expect(progress.getByRole('progressbar')).toHaveCount(0);
+  await expect(progress).not.toContainText('100%');
+  await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
+  await expect(page.getByText('«Выполнено» означает завершение проверки, а не гарантию безопасности. Пропущенные проверки не означают отсутствие проблем.')).toBeVisible();
+}
+
+const pageErrors = new WeakMap<Page, string[]>();
+test.afterEach(async ({ page }) => { expect(pageErrors.get(page)).toEqual([]); });
 test.beforeEach(async ({ page, baseURL }) => {
+  const errors: string[] = [];
+  pageErrors.set(page, errors);
+  page.on('pageerror', error => errors.push(error.message));
   await page.route('**/*', route => {
     const url = new URL(route.request().url());
     if (url.origin !== baseURL) return route.abort();
@@ -111,14 +143,14 @@ for (const width of [320, 375, 1280]) {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.goto('/demo/scans/partial-demo');
     await expect(page.getByText('ДЕМО · вымышленные данные', { exact: false })).toBeVisible();
-    await expect(page.getByText('Состояние из локальной фикстуры', { exact: false })).toBeVisible();
+    await expectPartialReport(page);
+    await openScanData(page);
     await expect(page.locator('main nav [aria-current="page"]')).toHaveCount(0);
     await expect(
       page.locator('.scan-a1__facts').getByText('Частичный результат', { exact: true }),
     ).toBeVisible();
-    await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
-    await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
-    await expect(page.getByText('Демо не отправляет серверную отмену.')).toBeVisible();
+    await expectPartialReport(page);
+    await expect(page.getByText('Не результат реального сканирования и не подтверждение безопасности образа.')).toBeVisible();
         await expect(page.getByRole('button', { name: 'Отменить скан' })).toHaveCount(0);
     if (width === 375 || width === 1280)
       await page.screenshot({ path: `tests-e2e/test-results/frontend-review/scan-detail-${width}.png`, fullPage: true });
@@ -173,13 +205,15 @@ for (const width of [320, 375, 1280]) {
         await page.screenshot({ path: `tests-e2e/test-results/frontend-review/21st-create-${width}.png`, fullPage: true });
       await page.goto('/demo/scans/partial-demo');
       await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
-      await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
-      const trigger = page.getByRole('button', { name: 'Что означает неполный отчёт?' });
-      await trigger.focus();
-      await expect(trigger).toHaveCSS('outline-style', 'solid');
+      await expectPartialReport(page);
+      const details = await openScanData(page);
+      await expect(details.locator('summary')).toHaveCSS('outline-style', 'solid');
+      const technical = page.locator('details').filter({ has: page.locator('summary', { hasText: 'Технические данные · Secrets' }) });
+      await expect(technical).not.toHaveAttribute('open', '');
+      await expect(technical.getByText('scanner демо-версия')).toBeHidden();
+      await technical.locator('summary').focus();
       await page.keyboard.press('Enter');
-      await expect(trigger).toHaveAttribute('aria-expanded', 'true');
-      await expect(page.getByText('Сбой проверки не означает', { exact: false })).toBeVisible();
+      await expect(technical.getByText('scanner демо-версия')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       if (reducedMotion === 'reduce')
         await page.screenshot({ path: `tests-e2e/test-results/frontend-review/21st-detail-${width}.png`, fullPage: true });
@@ -239,11 +273,18 @@ test('21st.dev navigation card keeps real destinations, keyboard focus and reduc
   await page.setViewportSize({ width: 320, height: 740 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/demo/scans/partial-demo');
+  const compactNav = page.getByRole('navigation', { name: 'Разделы сканирования' });
+  await expect(compactNav.getByRole('link', { name: 'Мои сканы' })).toHaveAttribute('href', '/demo/scans');
+  await expect(compactNav.getByRole('link', { name: 'Новый скан' })).toHaveAttribute('href', '/demo/scans/new');
+  await compactNav.getByRole('link', { name: 'Мои сканы' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/demo\/scans$/);
   const nav = page.getByRole('navigation', { name: 'Разделы сканирования' });
   await expect(nav.locator('.scan-nav-card__items > li')).toHaveCount(3);
     // Tap animations must not introduce a second Tab stop inside a link.
     await expect(nav.locator('a [tabindex="0"]')).toHaveCount(0);
-  await expect(nav.locator('[aria-current="page"]')).toHaveCount(0);
+  await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
+  await expect(nav.getByRole('link', { name: 'Демо', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(nav.getByRole('link', { name: 'Реальные сканы' })).toHaveAttribute('href', '/scans');
   await expect(nav.getByRole('link', { name: 'Новый скан' })).toHaveAttribute('href', '/demo/scans/new');
   const demo = nav.getByRole('link', { name: 'Демо' });
@@ -266,8 +307,10 @@ test('21st.dev navigation card keeps real destinations, keyboard focus and reduc
   expect(description).toBeTruthy();
   await expect(page.locator(`[id="${description}"]`)).toHaveText('По защищённой сессии');
   await liveLink.click();
-  await expect(page).toHaveURL(/\/login$/);
-  await expect(page.getByText(/Доступ закрыт/)).toBeVisible();
+  await expect(page).toHaveURL(/\/scans$/);
+  await expect(page.getByRole('alert')).toHaveText('Не удалось проверить сессию. Данные скрыты до успешной проверки; выход из аккаунта не выполнялся.');
+  await expect(page.getByRole('button', { name: 'Повторить проверку сессии', exact: true })).toBeEnabled();
+  await expect(page.locator('.scan-a1__records > li')).toHaveCount(0);
   await page.goto('/demo/scans');
   await nav.getByRole('link', { name: 'Новый скан' }).click();
   await expect(page).toHaveURL(/\/demo\/scans\/new$/);
@@ -302,9 +345,7 @@ for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' });
     await page.setViewportSize({ width: 375, height: 740 });
     await page.goto('/demo/scans/partial-demo');
-    await expect(
-      page.locator('.scan-a1__facts').getByText('Частичный результат', { exact: true }),
-    ).toBeVisible();
+    await expectPartialReport(page);
     const pairs = await page.evaluate(() => {
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
@@ -372,7 +413,8 @@ for (const width of [320, 375, 1280]) {
       const records = page.locator('.scan-a1__records > li');
       await expect(records.first()).toBeVisible();
       expect(await records.count()).toBeGreaterThan(1);
-      await expect(records.first().getByText('Прогресс: неизвестен', { exact: false })).toBeVisible();
+      await expect(records.first().getByText('Выполнение не подтверждено; оценка до остановки отсутствует.')).toBeVisible();
+      await expect(records.first()).not.toContainText('100%');
       await expect(records.first().getByRole('link', { name: /Открыть деталь/ })).toHaveAttribute(
         'href',
         /\/demo\/scans\//,
@@ -391,17 +433,19 @@ for (const width of [320, 375, 1280]) {
 
       await page.goto('/demo/scans/partial-demo');
       await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
-      await expect(page.getByText('Прогресс: неизвестен')).toBeVisible();
-      await expect(page.getByText(/Порядок чтения/)).toBeVisible();
-      await expect(page.getByText(/Демо не отправляет данные модели/)).toBeVisible();
-            await expect(page.getByText(/Чат доступен только для авторизованного отчёта при разрешении сервера/)).toBeVisible();
+      await expectPartialReport(page);
+      await openScanData(page);
+      await expect(page.getByRole('navigation', { name: 'Разделы отчёта' }).getByRole('link', { name: 'Находки' })).toHaveAttribute('href', '#scan-a1-findings');
+      await expect(page.getByRole('heading', { name: 'ИИ-отчёт', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Включить авторазбор' })).toHaveCount(0);
             await expect(page.getByText('Чат пока не реализован.', { exact: false })).toHaveCount(0);
             await expect(page.getByRole('textbox', { name: 'Вопрос чату', exact: true })).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
 
       await page.goto('/scans');
-      await expect(page).toHaveURL(/\/login$/);
-      await expect(page.getByText(/Доступ закрыт/)).toBeVisible();
+      await expect(page).toHaveURL(/\/scans$/);
+      await expect(page.getByRole('alert')).toHaveText('Не удалось проверить сессию. Данные скрыты до успешной проверки; выход из аккаунта не выполнялся.');
+      await expect(page.getByRole('button', { name: 'Повторить проверку сессии', exact: true })).toBeEnabled();
       await expect(page.locator('.scan-a1__records > li')).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     });
@@ -417,11 +461,12 @@ test('long unbroken stage fits the actual card text cell at 320px', async ({ pag
   });
   await page.getByRole('link', { name: /К списку/ }).click();
   const facts = page.locator('.scan-a1__record-facts').first();
-  await expect(facts).toContainText('unbroken-');
+  await expect(page.locator('main')).not.toContainText('unbroken-');
+  await expect(facts.getByText('Этап сканирования: Внутренний этап сканирования', { exact: true })).toBeVisible();
   const bounds = await facts.evaluate((element) => {
     const card = element.closest('.scan-a1__magic')!.getBoundingClientRect();
     const cell = element.getBoundingClientRect();
-    const line = element.querySelector('p')!;
+    const line = element.querySelector('.scan-progress-panel__stage')!;
     const range = document.createRange();
     range.selectNodeContents(line);
     return {
@@ -430,7 +475,7 @@ test('long unbroken stage fits the actual card text cell at 320px', async ({ pag
       fragments: [...range.getClientRects()].map((rect) => ({ left: rect.left, right: rect.right })),
     };
   });
-  expect(bounds.fragments.length).toBeGreaterThan(2);
+  expect(bounds.fragments.length).toBeGreaterThanOrEqual(1);
   for (const fragment of bounds.fragments) {
     expect(fragment.left).toBeGreaterThanOrEqual(bounds.cell.left - 1);
     expect(fragment.right).toBeLessThanOrEqual(bounds.cell.right + 1);
@@ -448,12 +493,20 @@ for (const width of [320, 375, 1280]) {
       await page.emulateMedia({ reducedMotion: motion });
       for (const path of ['/demo/scans', '/demo/scans/new', '/demo/scans/partial-demo']) {
         await page.goto(path);
-        const scene = page.locator('.scan-a1__scene:visible').first();
-        await expect(scene).toHaveAttribute('aria-hidden', 'true');
-        await scene.scrollIntoViewIfNeeded();
-        await expect(scene.locator('[data-scan-glow]')).toHaveCount(0);
-        expect(await scene.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
-        await expect(scene.locator('[data-scan-scene-art]')).toBeAttached();
+        if (path === '/demo/scans/partial-demo') {
+          await expect(page.locator('.scan-a1__scene')).toHaveCount(0);
+          await expectPartialReport(page);
+          await openScanData(page);
+          await expect(page.locator('canvas')).toHaveCount(0);
+          if (motion === 'reduce') await expect.poll(() => page.locator('.scan-a1-detail').evaluate(element => element.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length)).toBe(0);
+        } else {
+          const scene = page.locator('.scan-a1__scene:visible').first();
+          await expect(scene).toHaveAttribute('aria-hidden', 'true');
+          await scene.scrollIntoViewIfNeeded();
+          await expect(scene.locator('[data-scan-glow]')).toHaveCount(0);
+          expect(await scene.evaluate(element => element.getAnimations({ subtree: true }).length)).toBe(0);
+          await expect(scene.locator('[data-scan-scene-art]')).toBeAttached();
+        }
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       }
       await page.goto('/demo/scans/new');
@@ -463,9 +516,10 @@ for (const width of [320, 375, 1280]) {
       await page.addStyleTag({ content: '.scan-a1__scene { display: none !important; }' });
       await page
         .getByRole('navigation', { name: 'Разделы отчёта' })
-        .getByRole('link', { name: /Покрытие/ })
+        .getByRole('link', { name: 'Находки' })
         .click();
-      await expect(page.getByRole('heading', { name: 'Покрытие проверок' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Отчёт', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Проверки', exact: true })).toBeVisible();
       await expect(page.getByText('База уязвимостей недоступна', { exact: false })).toBeVisible();
     });
   }

@@ -5,6 +5,7 @@ import { browserIdentity, BROWSER_SCAN_LOCAL_ORIGIN, type BrowserRequest, type B
 import { ScansService } from './scans.service.js';
 import type { Identity } from '../security/identity.js';
 import { ImageSearchSessions } from './image-search.js';
+import { browserScanSession } from './browser-scan-session.js';
 
 
 // The browser never receives a bearer token. The shared cookie bridge keeps the
@@ -23,9 +24,10 @@ export class BrowserScansController {
 
   @Get('images')
   @Header('Cache-Control', 'no-store')
-  searchImages(@Req() req: BrowserRequest, @Query('q') query?: string, @Query('generation') generation?: string, @Query('cursor') cursor?: string) {
+  searchImages(@Req() req: BrowserRequest, @Query('q') query?: string, @Query('generation') generation?: string, @Query('cursor') cursor?: string,
+    @Query('repository') repository?: string) {
     const { subject } = this.identity(req);
-    return this.imageSearch.search(subject, query, generation, cursor);
+    return this.imageSearch.search(subject, query, generation, cursor, repository);
   }
 
   private async withRetryHeaders(response: ServerResponse, operation: () => Promise<unknown>) {
@@ -53,7 +55,10 @@ export class BrowserScansController {
   @Header('Cache-Control', 'no-store')
   @HttpCode(202)
   create(@Req() req: BrowserRequest, @Body() body: unknown, @Res({ passthrough: true }) response: ServerResponse) {
-    return this.withRetryHeaders(response, () => this.scans.create(this.identity(req, true), body));
+    return this.withRetryHeaders(response, () => {
+      const { identity, guard } = browserScanSession(this.store, req, true, this.localOrigin);
+      return this.scans.create(identity, body, guard);
+    });
   }
 
   @Get()
@@ -95,6 +100,7 @@ export class BrowserScansController {
 
   @Get(':scanId/events')
   events(@Req() req: BrowserRequest, @Param('scanId') id: string, @Res() response: ServerResponse): void {
-    this.scans.events(this.identity(req), id, req.headers['last-event-id'], response);
+    const { identity, guard } = browserScanSession(this.store, req, false, this.localOrigin);
+    this.scans.events(identity, id, req.headers['last-event-id'], response, guard);
   }
 }

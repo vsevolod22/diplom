@@ -84,11 +84,14 @@ const checked = { check: 'secret', coverage: 'image', outcome: 'checked' } as co
 const group = (scanId = id) => screen.getByRole('group', { name: `Ход сканирования ${scanId}` });
 const bar = (scanId = id) => screen.getByRole('progressbar', { name: `Прогресс сканирования ${scanId}` });
 const percentValue = (scanId = id) => Number(bar(scanId).getAttribute('value'));
-function expectEstimate(scanId = id) {
-  expect(bar(scanId)).toHaveAttribute('value');
-  expect(percentValue(scanId)).toBeGreaterThanOrEqual(0);
-  expect(percentValue(scanId)).toBeLessThan(100);
-  expect(bar(scanId)).toHaveAttribute('aria-valuetext', expect.stringContaining('Оценка прогресса: ≈'));
+function expectIndeterminate(scanId = id) {
+  expect(bar(scanId)).not.toHaveAttribute('value');
+  expect(group(scanId)).toHaveAttribute('data-progress-source', 'unknown');
+  expect(bar(scanId).getAttribute('aria-valuetext')).not.toMatch(/≈\d+%|99%|100%/);
+}
+function expectUnresolved(count: number) {
+  const outcomes = within(group()).getByRole('list', { name: 'Результаты проверок' });
+  expect(outcomes.querySelectorAll('[data-outcome="unknown"]')).toHaveLength(count);
 }
 
 beforeEach(() => {
@@ -107,16 +110,19 @@ afterEach(() => {
 });
 
 it.each(['queued', 'running', 'cancelling'] as const)(
-  'shows approximate %s progress without inventing a check stage or ETA',
+  'shows indeterminate %s progress without inventing a check stage or ETA',
   (state) => {
     render(<ScanProgressPanel scan={snapshot({ state })} />);
-    expectEstimate();
-    expect(percentValue()).toBe(0);
-    expect(group()).toHaveTextContent('Этап сканирования: не предоставлен сервером');
-    expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
-    expect(group()).toHaveTextContent('Без подтверждённого итога: 3');
-    expect(group()).toHaveTextContent('Точное оставшееся время неизвестно');
-    expect(group().textContent).not.toMatch(/секунд|минут/);
+    expect(bar()).not.toHaveAttribute('value');
+    expect(group()).toHaveAttribute('data-progress-source', 'unknown');
+    const lifecycle = { queued: 'В очереди', running: 'Проверка продолжается', cancelling: 'Отменяем проверку' };
+    expect(group()).toHaveTextContent(lifecycle[state]);
+    expect(group()).toHaveTextContent('Получены результаты: 0 из 3');
+    const outcomes = within(group()).getByRole('list', { name: 'Результаты проверок' });
+    expect(within(outcomes).getAllByRole('listitem')).toHaveLength(3);
+    expect(outcomes.querySelectorAll('[data-outcome="unknown"]')).toHaveLength(3);
+    expect(group()).toHaveTextContent('Оставшееся время пока неизвестно.');
+    expect(group().textContent).not.toMatch(/секунд|минут|≈\d+%|100%/);
   },
 );
 
@@ -124,22 +130,22 @@ it('renders actual decoded active durable outcomes instead of the unpublished pe
   const scan = durableSnapshot({ secret: 'checked', sbom: 'failed' });
   expect(Object.values(scan.perCheck!)).toEqual([null, null, null, null]);
   render(<ScanProgressPanel scan={scan} />);
-  expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
-  expect(group()).toHaveTextContent('Без подтверждённого итога: 2.');
-  expectEstimate();
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+  expectUnresolved(2);
+  expectIndeterminate();
   expect(percentValue()).not.toBe(50);
-  expect(group()).toHaveTextContent('Точное оставшееся время неизвестно.');
-  expect(group()).toHaveTextContent('Этап сканирования: не предоставлен сервером');
+  expect(group()).toHaveTextContent('Оставшееся время пока неизвестно.');
+  expect(group()).toHaveTextContent('Проверка продолжается');
 });
 
 it.each(['failed', 'unsupported', 'skipped', 'not_authorized'] as const)(
   'durable %s counts as resolved, not checked or equal-share completion',
   (outcome) => {
     render(<ScanProgressPanel scan={durableSnapshot({ secret: outcome })} />);
-    expect(group()).toHaveTextContent('Получены итоги: 1 из 4. Успешно выполнено: 0.');
-    expect(group()).toHaveTextContent('Без подтверждённого итога: 3.');
-    expectEstimate();
-    expect(percentValue()).toBe(0);
+    expect(group()).toHaveTextContent('Получены результаты: 1 из 4. Выполнено проверок: 0.');
+    expectUnresolved(3);
+    expectIndeterminate();
+    expectIndeterminate();
   },
 );
 
@@ -148,9 +154,9 @@ it('prefers progress requested checks and counters over legacy perCheck display 
   render(
     <ScanProgressPanel scan={{ ...scan, checks: ['secret'], perCheck: { secret: null }, percent: 75 }} />,
   );
-  expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
-  expect(group()).toHaveTextContent('Без подтверждённого итога: 2.');
-  expectEstimate();
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+  expectUnresolved(2);
+  expectIndeterminate();
   expect(percentValue()).not.toBe(75);
 });
 
@@ -158,8 +164,8 @@ it.each(['partial', 'failed', 'cancelled'] as const)(
   'decoded terminal %s preserves durable missing outcomes without a full-success bar',
   (state) => {
     render(<ScanProgressPanel scan={durableSnapshot({ secret: 'checked', sbom: 'failed' }, state)} />);
-    expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
-    expect(group()).toHaveTextContent('Без сохранённого итога: 2.');
+    expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+    expectUnresolved(2);
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(group().textContent).not.toContain('100%');
   },
@@ -180,10 +186,10 @@ it('counts saved outcomes separately from checked and ignores unrequested checks
       })}
     />,
   );
-  expect(group()).toHaveTextContent('Этап сканирования: sbom');
-  expect(group()).toHaveTextContent('Получены итоги: 2 из 3. Успешно выполнено: 1');
-  expect(group()).toHaveTextContent('Без подтверждённого итога: 1');
-  expectEstimate();
+  expect(group()).toHaveTextContent('Состав пакетов (SBOM)');
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 3. Выполнено проверок: 1');
+  expectUnresolved(1);
+  expectIndeterminate();
   expect(percentValue()).not.toBe(66);
 });
 
@@ -195,10 +201,10 @@ it.each(['failed', 'unsupported', 'skipped', 'not_authorized'] as const)(
         scan={snapshot({ check: 'secret', checks: undefined, perCheck: { secret: { ...checked, outcome } } })}
       />,
     );
-    expect(group()).toHaveTextContent('Получены итоги: 1 из 1. Успешно выполнено: 0');
-    expect(group()).toHaveTextContent('Ожидаем итоговый статус скана');
-    expectEstimate();
-    expect(percentValue()).toBe(0);
+    expect(group()).toHaveTextContent('Получены результаты: 1 из 1. Выполнено проверок: 0');
+    expect(group()).toHaveTextContent('Ожидаем завершения проверки.');
+    expectIndeterminate();
+    expectIndeterminate();
   },
 );
 
@@ -210,9 +216,13 @@ it.each([
   render(
     <ScanProgressPanel scan={snapshot({ ...patch, checks: patch.checks ? [...patch.checks] : undefined })} />,
   );
-  expect(group()).toHaveTextContent('Счётчики проверок не предоставлены сервером');
+  expect(group()).toHaveTextContent('Результаты проверок пока недоступны.');
   expect(group().textContent).not.toMatch(/из 0|выполнено: 0|итога: 0/);
-  expectEstimate();
+  if (patch.checks?.length) expectIndeterminate();
+  else {
+    expect(bar()).not.toHaveAttribute('value');
+    expect(group()).toHaveTextContent('Процент выполнения пока неизвестен.');
+  }
 });
 
 it.each([0, 12.5, 99])(
@@ -220,15 +230,15 @@ it.each([0, 12.5, 99])(
   (percent) => {
     render(<ScanProgressPanel scan={snapshot({ percent })} />);
     expect(bar()).toHaveAttribute('value', String(percent));
-    expect(bar()).toHaveAttribute('aria-valuetext', expect.stringContaining(`${percent}% по данным сервера`));
-    expect(group()).toHaveTextContent('Без подтверждённого итога: 3');
+    expect(bar()).toHaveAttribute('aria-valuetext', expect.stringContaining(`Выполнено: ${percent}%.`));
+    expectUnresolved(3);
   },
 );
 
 it.each([NaN, Infinity, -1, 101])('does not clamp invalid percent %s into a misleading value', (percent) => {
   render(<ScanProgressPanel scan={snapshot({ percent })} />);
-  expectEstimate();
-  expect(percentValue()).toBe(0);
+  expectIndeterminate();
+  expectIndeterminate();
 });
 
 it.each(['completed', 'partial', 'failed', 'cancelled'] as const)(
@@ -240,15 +250,15 @@ it.each(['completed', 'partial', 'failed', 'cancelled'] as const)(
       />,
     );
     expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(group()).toHaveTextContent('Получены итоги: 1 из 3. Успешно выполнено: 1');
-    expect(group()).toHaveTextContent('Без сохранённого итога: 2');
-    expect(group()).toHaveTextContent('Скан больше не выполняется');
-    if (state === 'completed') expect(group()).toHaveTextContent('100% — завершение подтверждено сервером');
+    expect(group()).toHaveTextContent('Получены результаты: 1 из 3. Выполнено проверок: 1');
+    expectUnresolved(2);
+    expect(group()).toHaveTextContent('Смотрите результаты отдельных проверок.');
+    if (state === 'completed') expect(group()).toHaveTextContent('100% — проверка завершена.');
     else expect(group().textContent).not.toContain('100%');
   },
 );
 
-it('resets the estimate when a new running snapshot loses checked credit', () => {
+it('removes an explicit server percentage when the new running snapshot no longer provides it', () => {
   const view = render(
     <ScanProgressPanel
       scan={snapshot({ percent: 75, perCheck: { secret: checked, sbom: null, vuln: null } })}
@@ -256,49 +266,31 @@ it('resets the estimate when a new running snapshot loses checked credit', () =>
   );
   expect(bar()).toHaveAttribute('value', '75');
   view.rerender(<ScanProgressPanel scan={snapshot()} />);
-  expectEstimate();
-  expect(percentValue()).toBe(0);
-  expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
+  expectIndeterminate();
+  expectIndeterminate();
+  expect(group()).toHaveTextContent('Получены результаты: 0 из 3');
 });
 
-it('advances without moving focus or resetting on polls, and isolates scans with timer cleanup', async () => {
+it('elapsed time and repeated polls do not invent progress or move focus, and scan replacement uses current metadata', async () => {
   vi.useFakeTimers();
-  const content = (scan: ScanStatus) => (
-    <>
-      <button>Сохранить фокус</button>
-      <ScanProgressPanel scan={scan} />
-    </>
-  );
+  const content = (scan: ScanStatus) => <><button>Сохранить фокус</button><ScanProgressPanel scan={scan} /></>;
   const view = render(content(snapshot({ stage: 'secret' })));
-  const button = screen.getByRole('button');
-  button.focus();
-  // jsdom focus schedules its own task; isolate the panel's interval below.
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
-  const descriptionId = bar().getAttribute('aria-describedby')!;
-  expect(document.getElementById(descriptionId)).toHaveTextContent('Точное оставшееся время неизвестно');
-  const original = percentValue();
-  expect(vi.getTimerCount()).toBe(1);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(120000);
-  });
-  expect(percentValue()).toBeGreaterThan(original);
-  const advanced = percentValue();
+  const button = screen.getByRole('button'); button.focus();
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  const originalBar = bar();
+  const descriptionId = originalBar.getAttribute('aria-describedby')!;
+  expect(document.getElementById(descriptionId)).toHaveTextContent('Оставшееся время пока неизвестно.');
+  expectIndeterminate(); expect(vi.getTimerCount()).toBe(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
   for (let index = 0; index < 20; index++) view.rerender(content(snapshot({ stage: 'secret' })));
-  expect(percentValue()).toBe(advanced);
-  expect(vi.getTimerCount()).toBe(1);
+  expectIndeterminate(); expect(bar()).toBe(originalBar);
   expect(bar().getAttribute('aria-describedby')).toBe(descriptionId);
-  expect(document.activeElement).toBe(button);
+  expect(document.activeElement).toBe(button); expect(vi.getTimerCount()).toBe(0);
   view.rerender(content(snapshot({ scanId: otherId, checks: undefined, perCheck: undefined })));
   expect(screen.queryByRole('group', { name: `Ход сканирования ${id}` })).toBeNull();
-  expect(group(otherId)).toHaveTextContent('Счётчики проверок не предоставлены сервером');
-  expectEstimate(otherId);
-  expect(percentValue(otherId)).toBe(0);
-  expect(vi.getTimerCount()).toBe(1);
-  view.unmount();
-  expect(vi.getTimerCount()).toBe(0);
-  expect(fetch).not.toHaveBeenCalled();
+  expect(group(otherId)).toHaveTextContent('Результаты проверок пока недоступны.');
+  expectIndeterminate(otherId);
+  view.unmount(); expect(vi.getTimerCount()).toBe(0); expect(fetch).not.toHaveBeenCalled();
 });
 
 it('keeps native parser percent null and refuses an unreviewed progress shape', () => {
@@ -317,41 +309,42 @@ it('keeps native parser percent null and refuses an unreviewed progress shape', 
     parseCurrentStatus({ scanId: id, state: 'running', result: null, progress: { done: 1 } }),
   ).toThrow();
   render(<ScanProgressPanel scan={parsed} />);
-  expectEstimate();
+  expectIndeterminate();
   expect(parsed.percent).toBeNull();
   expect(group()).not.toHaveTextContent('invented-stage');
 });
 
-it('isolates styles from scroll progress and disables only decoration for reduced motion', () => {
+it('isolates static indeterminate styles from scroll progress and preserves forced-color support without animation', () => {
   const css = readFileSync('src/features/scans/ScanProgressPanel.css', 'utf8');
   expect(css).not.toContain('.scan-a1__progress');
-  expect(css).toMatch(/prefers-reduced-motion:\s*reduce/);
-  expect(css).toContain('--scan-progress-transition: none');
-  expect(css).toContain('transition: var(--scan-progress-transition)');
+  // The static unknown-work pattern needs no reduced-motion exception or local animation.
+  expect(css).not.toMatch(/(?:animation|transition)\s*:/);
+  expect(css).not.toContain('@keyframes');
+  expect(css).toContain(':indeterminate');
   expect(css).not.toContain('infinite');
   expect(css).not.toMatch(/display:\s*none/);
   expect(css).toContain('forced-colors: active');
 });
 
 it.each(['completed', 'partial', 'failed', 'cancelled', 'cancelling'] as const)(
-  'stops its timer at %s without claiming checked-safe or unconfirmed completion',
+  'never starts a local timer and preserves authoritative %s without claiming checked-safe or unconfirmed completion',
   async (state) => {
     vi.useFakeTimers();
     const view = render(<ScanProgressPanel scan={snapshot()} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(120_000);
     });
-    const before = percentValue();
-    expect(before).toBeGreaterThan(0);
+    expectIndeterminate();
     view.rerender(<ScanProgressPanel scan={snapshot({ state, percent: 100 })} />);
     expect(vi.getTimerCount()).toBe(0);
     if (state === 'cancelling') {
-      expect(percentValue()).toBe(before);
-      expect(group()).toHaveTextContent('Оценка приостановлена');
+      expect(bar()).not.toHaveAttribute('value');
+      expect(group()).toHaveTextContent('Ожидаем завершения проверки.');
+      expect(group()).toHaveTextContent('Отменяем проверку');
     } else expect(screen.queryByRole('progressbar')).toBeNull();
-    if (state === 'completed') expect(group()).toHaveTextContent('100% — завершение подтверждено');
+    if (state === 'completed') expect(group()).toHaveTextContent('100% — проверка завершена.');
     else expect(group().textContent).not.toContain('100%');
-    expect(group()).toHaveTextContent('Успешно выполнено: 0');
+    expect(group()).toHaveTextContent('Выполнено проверок: 0');
     const stopped = group().textContent;
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600_000);
@@ -360,133 +353,269 @@ it.each(['completed', 'partial', 'failed', 'cancelled', 'cancelling'] as const)(
   },
 );
 
-it('starts runtime on running, not during a long queue, and cleans StrictMode timers', async () => {
+it('StrictMode queue and running transitions never start a local percentage timer', async () => {
   vi.useFakeTimers();
-  const content = (state: ScanStatus['state']) => (
-    <StrictMode>
-      <ScanProgressPanel scan={snapshot({ state })} />
-    </StrictMode>
-  );
+  const content = (state: ScanStatus['state']) => <StrictMode><ScanProgressPanel scan={snapshot({ state })} /></StrictMode>;
   const view = render(content('queued'));
-  expect(vi.getTimerCount()).toBe(0);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(600_000);
-  });
-  expect(percentValue()).toBe(0);
+  expectIndeterminate(); expect(vi.getTimerCount()).toBe(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(600000); });
+  expectIndeterminate();
   view.rerender(content('running'));
-  expect(percentValue()).toBe(0);
-  expect(vi.getTimerCount()).toBe(1);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(60_000);
-  });
-  expect(percentValue()).toBeGreaterThan(0);
-  view.unmount();
-  expect(vi.getTimerCount()).toBe(0);
+  expectIndeterminate(); expect(vi.getTimerCount()).toBe(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+  expectIndeterminate();
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
 });
 
-it('resets observation on session/subject changes and remount, not context object churn', async () => {
+it('session/subject changes and remount never reuse local elapsed credit or previous snapshot counts', async () => {
   vi.useFakeTimers();
   const transport = transportFor();
-  const content = (currentScope: LiveContext['scope']) => (
-    <LiveScanContext.Provider value={{ transport, scope: currentScope }}>
-      <ScanProgressPanel scan={snapshot()} />
-    </LiveScanContext.Provider>
+  const content = (currentScope: LiveContext['scope'], scan = snapshot()) => (
+    <LiveScanContext.Provider value={{ transport, scope: currentScope }}><ScanProgressPanel scan={scan} /></LiveScanContext.Provider>
   );
-  const view = render(content(scope));
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(120_000);
-  });
-  const before = percentValue();
-  expect(before).toBeGreaterThan(0);
-  view.rerender(content([...scope]));
-  expect(percentValue()).toBe(before);
+  const current = snapshot({ perCheck: { secret: checked, sbom: null, vuln: null } });
+  const view = render(content(scope, current));
+  await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+  expectIndeterminate(); expect(group()).toHaveTextContent('Выполнено проверок: 1');
+  view.rerender(content([...scope], current));
+  expectIndeterminate(); expect(group()).toHaveTextContent('Выполнено проверок: 1');
   view.rerender(content(['live-scans', 2, 'alice']));
-  expect(percentValue()).toBe(0);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(60_000);
-  });
+  expectIndeterminate(); expect(group()).toHaveTextContent('Выполнено проверок: 0');
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
   view.rerender(content(['live-scans', 2, 'bob']));
-  expect(percentValue()).toBe(0);
-  expect(vi.getTimerCount()).toBe(1);
-  view.unmount();
+  expectIndeterminate(); expect(group()).toHaveTextContent('Выполнено проверок: 0');
   expect(vi.getTimerCount()).toBe(0);
-  render(content(scope));
-  expect(percentValue()).toBe(0);
-  expect(group()).toHaveTextContent('после ухода или перезагрузки начинается заново');
+  view.unmount(); render(content(scope));
+  expectIndeterminate(); expect(group()).toHaveTextContent('Выполнено проверок: 0');
 });
 
-it('resets a running -> running durable retry without retaining old elapsed credit or claiming 100%', async () => {
+it('running durable retry drops old outcomes without retaining elapsed credit or claiming 100%', async () => {
   vi.useFakeTimers();
   const view = render(<ScanProgressPanel scan={durableSnapshot({ secret: 'checked', config: 'failed' })} />);
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+  await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+  expectIndeterminate();
+  view.rerender(<ScanProgressPanel scan={durableSnapshot()} />);
+  expectIndeterminate(); expect(group()).toHaveTextContent('Получены результаты: 0 из 4. Выполнено проверок: 0.');
+  expectUnresolved(4); expect(vi.getTimerCount()).toBe(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+  expectIndeterminate(); expect(group()).not.toHaveTextContent('100%');
+  view.rerender(<ScanProgressPanel scan={durableSnapshot({}, 'cancelled')} />);
+  expect(group()).not.toHaveTextContent('100%'); expectUnresolved(4); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps compact unknown progress readable without interactive descendants in a card link', () => {
+  render(<MemoryRouter><Link to={`/scans/${id}`}><ScanProgressPanel compact scan={snapshot()} /></Link></MemoryRouter>);
+  expect(group()).toHaveClass('scan-progress-panel--compact'); expectIndeterminate();
+  expect(group()).toHaveTextContent('Процент выполнения пока неизвестен.');
+  expect(group()).toHaveTextContent('Оставшееся время пока неизвестно.');
+  expect(screen.getByRole('link').querySelector('a, button, input, select, textarea, details, summary, [tabindex]')).toBeNull();
+});
+
+it('keeps terminal progress after the overview collapsed and toggleable without changing its confirmed content', async () => {
+  const user = userEvent.setup();
+  mount(transportFor(snapshot({ state: 'completed' })));
+  const summary = await screen.findByText('Подробности · ход завершённой проверки', { selector: 'summary' });
+  expect(summary.closest('details')).not.toHaveAttribute('open');
+  expect(group()).not.toBeVisible();
+  await user.click(summary);
+  expect(summary.closest('details')).toHaveAttribute('open');
+  expect(group()).toHaveTextContent('100% — проверка завершена.');
+  expect(group()).toHaveTextContent('Получены результаты: 0 из 3. Выполнено проверок: 0.');
+  await user.click(summary);
+  expect(summary.closest('details')).not.toHaveAttribute('open');
+  expect(group()).not.toBeVisible();
+});
+
+it('reduced motion does not fabricate numerical progress, check counts or ETA', async () => {
+  vi.useFakeTimers(); vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
+  render(<ScanProgressPanel scan={snapshot({ perCheck: undefined })} />);
+  expectIndeterminate();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+  expectIndeterminate(); expect(vi.getTimerCount()).toBe(0);
+  expect(group()).toHaveTextContent('Результаты проверок пока недоступны.');
+  expect(group()).toHaveTextContent('Оставшееся время пока неизвестно.');
+  expect(group()).not.toHaveTextContent('Выполнено проверок: 0');
+});
+
+it('preserves explicit server percent without elapsed drift and becomes indeterminate when it disappears', async () => {
+  vi.useFakeTimers();
+  const view = render(<ScanProgressPanel scan={snapshot({ percent: 5, perCheck: { secret: checked } })} />);
+  expect(percentValue()).toBe(5);
+  expect(group()).toHaveAttribute('data-progress-source', 'server');
+  expect(group()).not.toHaveTextContent('Приблизительная оценка');
+  expect(vi.getTimerCount()).toBe(0);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_000);
   });
-  expect(percentValue()).toBeGreaterThan(0);
-  view.rerender(<ScanProgressPanel scan={durableSnapshot()} />);
+  expect(percentValue()).toBe(5);
+  view.rerender(<ScanProgressPanel scan={snapshot({ percent: 0, perCheck: { secret: checked } })} />);
   expect(percentValue()).toBe(0);
-  expect(group()).toHaveTextContent('Получены итоги: 0 из 4. Успешно выполнено: 0.');
-  expect(vi.getTimerCount()).toBe(1);
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(60_000);
-  });
-  expect(percentValue()).toBeGreaterThan(0);
-  expect(percentValue()).toBeLessThan(25);
-  expect(group().textContent).not.toContain('100%');
-  view.rerender(<ScanProgressPanel scan={durableSnapshot({}, 'cancelled')} />);
-  expect(group().textContent).not.toContain('100%');
-  expect(group()).toHaveTextContent('Без сохранённого итога: 4');
-  expect(vi.getTimerCount()).toBe(0);
+  expect(group()).toHaveTextContent('Выполнено: 0%.');
+  view.rerender(<ScanProgressPanel scan={snapshot({ perCheck: { secret: checked } })} />);
+  expectIndeterminate();
+  expect(group()).toHaveAttribute('data-progress-source', 'unknown');
+  expect(group()).not.toHaveTextContent('по данным сервера');
 });
 
-it('keeps compact heuristic/retry uncertainty readable without interactive descendants in a card link', () => {
-  render(
-    <MemoryRouter>
-      <Link to={`/scans/${id}`}>
-        <ScanProgressPanel compact scan={snapshot()} />
-      </Link>
-    </MemoryRouter>,
-  );
-  expect(group()).toHaveClass('scan-progress-panel--compact');
-  expect(group()).toHaveTextContent('Эвристика наблюдаемого скана, не измерение текущей попытки');
-  expect(group()).toHaveTextContent('Внутренний повтор без изменения итогов не распознаётся');
-  expect(group()).toHaveTextContent('Без новых данных оценка тоже может расти');
-  expect(
-    screen
-      .getByRole('link')
-      .querySelector('a, button, input, select, textarea, details, summary, [tabindex]'),
-  ).toBeNull();
-});
-
-it('keeps the full panel disclosure collapsed and toggleable with the same explanation', async () => {
-  const user = userEvent.setup();
-  render(<ScanProgressPanel scan={snapshot()} />);
-  const summary = within(group()).getByText('Как считается оценка');
-  const explanation = summary.closest('details');
-  expect(explanation).not.toHaveAttribute('open');
-  expect(explanation).toHaveTextContent('Внутренний повтор без изменения итогов не распознаётся');
-  expect(explanation).toHaveTextContent('Без новых данных оценка тоже может расти');
-  expect(explanation).toHaveTextContent('При потере сохранённых итогов');
-  await user.click(summary);
-  expect(explanation).toHaveAttribute('open');
-  await user.click(summary);
-  expect(explanation).not.toHaveAttribute('open');
-});
-
-it('retains numerical progress under reduced motion without fake checks or ETA', async () => {
+it('waits for completed rather than rewriting a premature server 100 to a fictitious 99', async () => {
   vi.useFakeTimers();
-  vi.stubGlobal(
-    'matchMedia',
-    vi.fn(() => ({ matches: true })),
-  );
-  render(<ScanProgressPanel scan={snapshot({ checks: undefined, perCheck: undefined })} />);
-  expectEstimate();
+  const view = render(<ScanProgressPanel scan={snapshot({ percent: 100 })} />);
+  expect(bar()).not.toHaveAttribute('value');
+  expect(group()).toHaveTextContent('Ожидаем завершения проверки.');
+  expect(group().textContent).not.toMatch(/99%|100%/);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(60_000);
   });
-  expect(percentValue()).toBeGreaterThan(0);
-  expect(group()).toHaveTextContent('Счётчики проверок не предоставлены сервером');
-  expect(group()).toHaveTextContent('Это не доля успешных проверок и не гарантия безопасности');
-  expect(group()).toHaveTextContent('Точное оставшееся время неизвестно');
+  expect(bar()).not.toHaveAttribute('value');
+  view.rerender(<ScanProgressPanel scan={snapshot({ state: 'completed' })} />);
+  expect(group()).toHaveTextContent('100% — проверка завершена.');
+});
+
+it('missing metadata stays indeterminate and never displays remembered counts as fresh', async () => {
+  vi.useFakeTimers(); const value = durableSnapshot({ secret: 'checked' });
+  const view = render(<ScanProgressPanel scan={value} />);
+  expect(group()).toHaveTextContent('Получены результаты: 1 из 4'); expectIndeterminate();
+  await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+  view.rerender(<ScanProgressPanel scan={snapshot({ checks: undefined, perCheck: {} })} />);
+  expectIndeterminate(); expect(group()).toHaveTextContent('Результаты проверок пока недоступны.');
+  expect(group()).not.toHaveTextContent('Получены результаты'); expect(vi.getTimerCount()).toBe(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60000); }); expectIndeterminate();
+  view.rerender(<ScanProgressPanel scan={value} />);
+  expectIndeterminate(); expect(group()).toHaveTextContent('Получены результаты: 1 из 4');
+});
+
+it('shows the same durable outcomes in the detail checks and progress, without unpublished report metadata', async () => {
+  const transport = transportFor(durableSnapshot({ secret: 'checked', sbom: 'failed' }));
+  mount(transport);
+  await screen.findByRole('progressbar');
+  const coverage = screen.getByRole('list', { name: 'Исходы проверок' });
+  const outcomes = within(coverage).getAllByRole('listitem');
+  expect(outcomes).toHaveLength(2);
+  expect(outcomes[0]).toHaveTextContent('Поиск секретов');
+  expect(outcomes[0]).toHaveAttribute('data-outcome', 'checked');
+  expect(outcomes[1]).toHaveTextContent('Состав пакетов (SBOM)');
+  expect(outcomes[1]).toHaveAttribute('data-outcome', 'failed');
+  expect(within(coverage).getAllByText('Исход проверки подтверждён; отчёт ещё не опубликован.')).toHaveLength(
+    2,
+  );
+  expect(coverage.querySelector('details')).toBeNull();
+  const pending = screen.getByRole('list', { name: 'Проверки без подтверждённого результата' });
+  expect(within(pending).getAllByRole('listitem')).toHaveLength(2);
+  expect(pending).toHaveTextContent('Уязвимости');
+  expect(pending).toHaveTextContent('Конфигурация образа');
+  expect(pending).not.toHaveTextContent('Поиск секретов');
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+  expect(screen.getByText('Отдельные сохранённые результаты')).toBeVisible();
+  expect(transport.results).not.toHaveBeenCalled();
+});
+
+it.each(['failed', 'unsupported', 'skipped', 'not_authorized'] as const)(
+  'detail keeps durable %s resolved but not successful',
+  async (outcome) => {
+    mount(transportFor(durableSnapshot({ secret: outcome })));
+    await screen.findByRole('progressbar');
+    const coverage = screen.getByRole('list', { name: 'Исходы проверок' });
+    expect(within(coverage).getByRole('listitem')).toHaveAttribute('data-outcome', outcome);
+    expect(group()).toHaveTextContent('Получены результаты: 1 из 4. Выполнено проверок: 0.');
+    expect(
+      screen.getByRole('list', { name: 'Проверки без подтверждённого результата' }),
+    ).not.toHaveTextContent('Поиск секретов');
+  },
+);
+
+it('offers an explicit retry after the first GET fails, without duplicate requests or optimistic progress', async () => {
+  const transport = transportFor();
+  let finish!: (value: ScanStatus) => void;
+  vi.mocked(transport.get)
+    .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  mount(transport);
+  const retry = await screen.findByRole('button', { name: 'Повторить получение статуса' });
+  expect(transport.get).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  fireEvent.click(retry);
+  expect(await screen.findByText('Загружаем снимок…')).toHaveAttribute('role', 'status');
+  expect(screen.queryByRole('button', { name: 'Повторить получение статуса' })).toBeNull();
+  fireEvent.click(retry);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  await act(async () => finish(snapshot()));
+  await screen.findByRole('progressbar');
+  expect(screen.queryByRole('button', { name: 'Повторить получение статуса' })).toBeNull();
+});
+
+it('keeps configuration findings visible while only diagnostic versions and source codes are collapsed', async () => {
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const config: NonNullable<ScanStatus['config']> = {
+    checksVersion: 'image-config-user-v1',
+    resourcePolicyVersion: 'image-config-policy-v1',
+    supportedRuleIds: ['IMGCFG_USER_ROOT'],
+    completedRuleIds: ['IMGCFG_USER_ROOT'],
+    config: { outcome: 'checked' },
+    rules: [{ ruleId: 'IMGCFG_USER_ROOT', outcome: 'checked' }],
+    history: { outcome: 'unsupported', reason: 'RULE_NOT_IMPLEMENTED' },
+    dockerfile: { outcome: 'unsupported', reason: 'SOURCE_NOT_PROVIDED' },
+    iac: { outcome: 'unsupported', reason: 'SOURCE_NOT_PROVIDED' },
+    findings: [
+      {
+        findingId: digest,
+        ruleId: 'IMGCFG_USER_ROOT',
+        category: 'image-config',
+        severity: 'MEDIUM',
+        severitySource: 'image-config-user-v1',
+        classification: 'DEFAULT_ROOT',
+        message: 'Image metadata uses the default root user.',
+        recommendation: 'Set an explicit non-zero numeric image user; verify runtime identity separately.',
+        location: '/config/User',
+        manifestDigest: digest,
+        configDigest: digest,
+        platform: { os: 'linux', architecture: 'amd64' },
+      },
+    ],
+  };
+  const value = parseCurrentStatus({
+    scanId: id,
+    state: 'completed',
+    digest,
+    platform: 'linux/amd64',
+    checks: ['config'],
+    config,
+    result: null,
+    perCheck: {
+      config: {
+        check: 'config',
+        coverage: 'image',
+        outcome: 'checked',
+        checksVersion: config.checksVersion,
+        resourcePolicyVersion: config.resourcePolicyVersion,
+        supportedRuleIds: config.supportedRuleIds,
+        completedRuleIds: config.completedRuleIds,
+        findingCount: 1,
+      },
+    },
+  });
+  mount(transportFor(value));
+  const section = await screen.findByRole('region', { name: 'Настройки образа' });
+  expect(within(section).getByText('Не задан пользователь без прав администратора')).toBeVisible();
+  expect(within(section).getByText(/Почему важно: запуск с правами администратора/)).toBeVisible();
+  expect(within(section).getByText(/Что сделать: задайте явный ненулевой числовой идентификатор/)).toBeVisible();
+  const versions = within(section).getByText(/checks image-config-user-v1/);
+  expect(versions.closest('details')).not.toHaveAttribute('open');
+  expect(versions).not.toBeVisible();
+  expect(within(section).getByText(config.findings[0].message)).not.toBeVisible();
+  fireEvent.click(within(section).getByText('Подробности проверки настроек', { selector: 'summary' }));
+  expect(versions).toBeVisible();
+  expect(within(section).getByText(/Правила: выполнено 1/)).toBeVisible();
+  fireEvent.click(within(section).getByText('Подробности · данные сканера', { selector: 'summary' }));
+  expect(within(section).getByText(config.findings[0].message)).toBeVisible();
+  expect(within(section).getByText(config.findings[0].recommendation)).toBeVisible();
+  expect(within(section).getByText(/Место: \/config\/User/)).toHaveTextContent(digest);
 });
 
 function transportFor(initial = snapshot()): ScanTransport {
@@ -539,19 +668,19 @@ it('uses the same presentation on list/detail and performs no N+1 detail GETs fo
   const transport = transportFor(scan);
   const list = mount(transport, '/scans');
   await screen.findByRole('progressbar');
-  const listCounts = within(group()).getByText(/Получены итоги/).textContent;
+  const listCounts = within(group()).getByText(/Получены результаты/).textContent;
   expect(transport.list).toHaveBeenCalledTimes(1);
   expect(transport.get).not.toHaveBeenCalled();
   list.unmount();
   mount(transport);
   await screen.findByRole('progressbar');
-  expect(within(group()).getByText(/Получены итоги/).textContent).toBe(listCounts);
+  expect(within(group()).getByText(/Получены результаты/).textContent).toBe(listCounts);
   expect(transport.get).toHaveBeenCalledTimes(1);
   expect(transport.create).not.toHaveBeenCalled();
   expect(transport.cancel).not.toHaveBeenCalled();
 });
 
-it('native list uses a generic local estimate, never borrowed from detail cache', async () => {
+it('native list remains indeterminate, never borrowing a percentage from detail cache', async () => {
   const transport = transportFor(snapshot({ checks: undefined, perCheck: undefined }));
   const view = mount(transport, '/scans');
   act(() =>
@@ -561,10 +690,10 @@ it('native list uses a generic local estimate, never borrowed from detail cache'
     ),
   );
   await screen.findByRole('progressbar');
-  expect(group()).toHaveTextContent('Счётчики проверок не предоставлены сервером');
-  expectEstimate();
-  expect(percentValue()).toBeLessThan(90);
-  expect(group()).toHaveTextContent('Набор проверок неизвестен; используется общая модель');
+  expect(group()).toHaveTextContent('Результаты проверок пока недоступны.');
+  expect(bar()).not.toHaveAttribute('value');
+  expect(group()).toHaveTextContent('Процент выполнения пока неизвестен.');
+  expect(group().textContent).not.toContain('%');
   expect(transport.get).not.toHaveBeenCalled();
 });
 
@@ -572,12 +701,12 @@ it('reload restores only the new authoritative snapshot, not the prior local cou
   const transport = transportFor(snapshot({ perCheck: { secret: checked, sbom: null, vuln: null } }));
   const first = mount(transport);
   await screen.findByRole('progressbar');
-  expect(group()).toHaveTextContent('Получены итоги: 1 из 3');
+  expect(group()).toHaveTextContent('Получены результаты: 1 из 3');
   first.unmount();
   vi.mocked(transport.get).mockResolvedValue(snapshot());
   mount(transport);
   await screen.findByRole('progressbar');
-  expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
+  expect(group()).toHaveTextContent('Получены результаты: 0 из 3');
   expect(transport.get).toHaveBeenCalledTimes(2);
 });
 
@@ -614,14 +743,14 @@ it('polls durable checkpoints with connected SSE and fences a late active GET be
   });
   expect(transport.get).toHaveBeenCalledTimes(2);
   expect(screen.getByRole('status', { name: 'Состояние realtime' })).toHaveTextContent('подключён');
-  expect(group()).toHaveTextContent('Получены итоги: 0 из 4');
+  expect(group()).toHaveTextContent('Получены результаты: 0 из 4');
   // Checkpoint persistence emits no SSE event: the existing bounded GET interval must still run.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(2100);
   });
   expect(transport.get).toHaveBeenCalledTimes(3);
-  expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
-  expectEstimate();
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+  expectIndeterminate();
   expect(transport.subscribeEvents).toHaveBeenCalledTimes(1);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(2100);
@@ -643,8 +772,8 @@ it('polls durable checkpoints with connected SSE and fences a late active GET be
   });
   expect(view.client.getQueryData<ScanStatus>([...scope, 'scan', id])?.state).toBe('cancelled');
   expect(screen.queryByRole('progressbar')).toBeNull();
-  expect(group()).toHaveTextContent('Получены итоги: 2 из 4. Успешно выполнено: 1.');
-  expect(group()).toHaveTextContent('Без сохранённого итога: 2.');
+  expect(group()).toHaveTextContent('Получены результаты: 2 из 4. Выполнено проверок: 1.');
+  expectUnresolved(2);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(7000);
   });
@@ -675,7 +804,6 @@ it('cancel invalidates an overlapping connected-SSE poll and a late running resp
       });
     })
     .mockResolvedValue(terminal);
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
   mount(transport);
   await screen.findByRole('progressbar');
   await waitFor(() => expect(opened).toBeTypeOf('function'));
@@ -689,6 +817,9 @@ it('cancel invalidates an overlapping connected-SSE poll and a late running resp
   });
   expect(finish).toBeTypeOf('function');
   fireEvent.click(screen.getByRole('button', { name: 'Отменить скан' }));
+  const dialog = screen.getByRole('alertdialog', { name: 'Отменить скан?' });
+  expect(transport.cancel).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Подтвердить отмену' }));
   await act(async () => {
     await vi.advanceTimersByTimeAsync(1);
   });
@@ -701,7 +832,7 @@ it('cancel invalidates an overlapping connected-SSE poll and a late running resp
     await vi.advanceTimersByTimeAsync(1);
   });
   expect(group()).toHaveTextContent('Итог скана: Отменён');
-  expect(group()).toHaveTextContent('Получены итоги: 1 из 4. Успешно выполнено: 1.');
+  expect(group()).toHaveTextContent('Получены результаты: 1 из 4. Выполнено проверок: 1.');
   expect(screen.queryByRole('progressbar')).toBeNull();
   expect(close).toHaveBeenCalledTimes(1);
   const reads = vi.mocked(transport.get).mock.calls.length;
@@ -748,8 +879,8 @@ it('SSE/reconnect hints cannot confirm completion; terminal stops activity and c
     opened();
     hint();
   });
-  expectEstimate();
-  expect(group()).toHaveTextContent('Получены итоги: 0 из 3');
+  expectIndeterminate();
+  expect(group()).toHaveTextContent('Получены результаты: 0 из 3');
   expect(close).not.toHaveBeenCalled();
   await act(async () => {
     finish(snapshot({ state: 'cancelled', perCheck: { secret: checked, sbom: null, vuln: null } }));
@@ -757,7 +888,7 @@ it('SSE/reconnect hints cannot confirm completion; terminal stops activity and c
   });
   expect(screen.queryByRole('progressbar')).toBeNull();
   expect(group()).toHaveTextContent('Итог скана: Отменён');
-  expect(group()).toHaveTextContent('Без сохранённого итога: 2');
+  expectUnresolved(2);
   expect(screen.getByText('Отдельные сохранённые результаты')).toBeTruthy();
   expect(close).toHaveBeenCalledTimes(1);
   await act(async () => {
@@ -780,6 +911,7 @@ it.each([401, 403] as const)(
     await waitFor(() => expect(screen.queryByRole('progressbar')).toBeNull());
     expect(screen.queryByRole('group', { name: `Ход сканирования ${id}` })).toBeNull();
     expect(screen.getByRole('alert')).toHaveTextContent('Не удалось получить данные скана');
+    expect(screen.queryByRole('button', { name: 'Повторить получение статуса' })).toBeNull();
   },
 );
 
@@ -787,12 +919,10 @@ it.each([401, 403] as const)(
   'list GET %s hides all prior progress and does not request individual scan details',
   async (status) => {
     const transport = transportFor();
-    const view = mount(transport, '/scans');
+    mount(transport, '/scans');
     await screen.findByRole('progressbar');
     vi.mocked(transport.list).mockRejectedValue(new ScanAccessError(status));
-    await act(async () => {
-      await view.client.invalidateQueries({ queryKey: [...scope, 'list'] });
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'Обновить список сначала' }));
     await waitFor(() => expect(screen.queryByRole('progressbar')).toBeNull());
     expect(screen.queryByRole('group', { name: `Ход сканирования ${id}` })).toBeNull();
     expect(screen.getByRole('alert')).toBeTruthy();

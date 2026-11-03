@@ -5,7 +5,6 @@ import { createChatClient } from '@/shared/api/scans/llmChatClient';
 import { chatContextSchema, chatReadinessSchema, chatResultSchema } from '@/shared/api/scans/llmChatContract';
 import { binding, context, epoch, history, json, receipt, reply, turnId } from './llmChatFixtures';
 import {
-  policyModule,
   publicDisclosure,
   publicMetadata,
   publicPolicy,
@@ -39,31 +38,36 @@ function backendContext(metadata: object = publicMetadata, policy: unknown = pub
   return HistoryService.prototype.context.call(scope, {}, binding.scanId).value;
 }
 
-it('accepts the actual HistoryService.context public wire via the real cookie client: Xing/Phala, complete counts and saved coverage', async () => {
+it('accepts the actual HistoryService.context public wire via the real cookie client: Dots/Atlas/no-training, complete counts and saved coverage', async () => {
   const wire = backendContext();
   const fetcher = vi.fn(async () => json(wire));
   const client = createChatClient(scanSession(), fetcher);
   const result = await client.context(binding.scanId, new AbortController().signal);
   expect(result).toMatchObject({ ...publicMetadata, disclosure: publicDisclosure });
-  expect(result.disclosure?.model).toBe('xingchen-agi/xing4.0-29b-a4b:free');
-  expect(result.disclosure?.providers).toEqual(['phala']);
+  expect(result.disclosure?.model).toBe('dots-studio/dots-3-note-preview:free');
+  if (result.disclosure?.provider !== 'OpenRouter') throw new Error('Expected OpenRouter wire');
+  expect(result.disclosure.providers).toEqual(['atlas-cloud/fp8']);
+  expect(result.disclosure?.retention).toBe('no-training');
   expect(fetcher.mock.calls).toHaveLength(1);
   expect(chatContextSchema.parse(wire)).toEqual(wire);
 });
 
 it('accepts only the two exact approved pairs, never mixed pairs, extra providers, paid caps or arbitrary profiles', () => {
-  for (const [model, providers] of [
-    ['xingchen-agi/xing4.0-29b-a4b:free', ['phala']],
-    ['apodex/apodex-1.1-mini:free', ['novita/bf16']],
+  for (const [model, providers, retention] of [
+    ['dots-studio/dots-3-note-preview:free', ['atlas-cloud/fp8'], 'no-training'],
+    ['apodex/apodex-1.1-mini:free', ['novita/bf16'], 'no-storage'],
   ] as const) {
-    const wire = backendContext(publicMetadata, { ...publicPolicy, model, providers });
+    const wire = backendContext(publicMetadata, { ...publicPolicy, model, providers, retention });
     expect(chatContextSchema.safeParse(wire).success).toBe(true);
-    expect(policyModule.supportedFreeProfile(model, providers)).toBe(true);
   }
   for (const patch of [
     { providers: ['novita/bf16'] },
     { model: 'apodex/apodex-1.1-mini:free' },
-    { providers: ['phala', 'novita/bf16'] },
+    { providers: ['atlas-cloud/fp8', 'novita/bf16'] },
+        { model: 'nvidia/nemotron-3.5-super-vl:free', providers: ['nvidia'], retention: 'no-training' },
+    { providers: ['phala'] },
+    { model: 'xingchen-agi/xing4.0-29b-a4b:free', providers: ['phala'], retention: 'no-storage' },
+    { retention: 'no-storage' },
     { model: 'openrouter/free' },
     { maxPrice: { prompt: 1, completion: 0, request: 0 } },
     { freeOnly: false },
@@ -167,7 +171,7 @@ it('keeps public unknown coverage distinct from checked zero, and accepts histor
   expect(chatContextSchema.safeParse(context).success).toBe(true);
 });
 
-it('parses the production readiness result without claiming provider verification, and rejects secret/contradictory fields', async () => {
+it('parses the actual backend readiness without claiming provider verification, and rejects secret/contradictory fields', async () => {
   const wire = readinessWire('missing');
   const fetcher = vi.fn(async () => json(wire));
   const result = await createChatClient(scanSession(), fetcher).readiness(

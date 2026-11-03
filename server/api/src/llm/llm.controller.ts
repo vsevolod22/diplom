@@ -33,7 +33,7 @@ export class LlmController {
     const body = JSON.stringify(result.value);
     result.write(() => {
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store',
-        'x-llm-summary-retention': 'process-lifetime' });
+        'x-llm-summary-retention': 'durable-owner-scan' });
       res.end(body);
     });
   }
@@ -81,7 +81,8 @@ export class LlmController {
       result = await this.safe(() => this.llm.history().generate(req, scanId, body, controller.signal, representation));
       if (representation === 'ndjson') {
         if (!result.delivery) throw new ServiceUnavailableException({ errorCode: 'LLM_UNAVAILABLE' });
-        await this.safe(() => writeDelivery({ delivery: result!.delivery!, write: result!.write, release: () => result?.release?.() }, res, controller.signal));
+        await this.safe(() => writeDelivery({ delivery: result!.delivery!, outputTokens: result!.outputTokens,
+                  write: result!.write, release: () => result?.release?.() }, res, controller.signal));
       } else this.writeHistoryResponse(res, result);
     } finally { result?.release?.(); req.off('aborted', abort); res.off('close', abort); }
   }

@@ -1,9 +1,9 @@
 import type { ArchiveReceipt } from './bounded-image-archive.js';
 
 export const PUBLIC_IMAGE_PROFILE = 'public-hub-amd64-v1';
-export const PUBLIC_IMAGE_RESOURCE_POLICY = 'public-hub-resources-v1';
-export const PUBLIC_IMAGE_CHECKS_VERSION = 'trivy-0.69.3-public-archive-v1';
-export const PUBLIC_IMAGE_LIMITS = Object.freeze({
+export const PUBLIC_IMAGE_RESOURCE_POLICY = 'public-hub-resources-v2';
+export const PUBLIC_IMAGE_CHECKS_VERSION = 'trivy-0.69.3-public-archive-v2';
+export const PUBLIC_IMAGE_V1_LIMITS = Object.freeze({
   maxLayers: 64, compressedLayer: 128 * 1024 ** 2, compressedTotal: 512 * 1024 ** 2,
   wireBytes: 544 * 1024 ** 2, requests: 320, deadlineMs: 180_000,
   expandedLayer: 512 * 1024 ** 2, expandedTotal: 1024 * 1024 ** 2, entries: 100_000,
@@ -12,6 +12,31 @@ export const PUBLIC_IMAGE_LIMITS = Object.freeze({
   maxObjectBytes: 4_000_000, maxConfigBytes: 1_000_000,
   inspectionWireBytes: 16_000_000, inspectionRequests: 12, inspectionDeadlineMs: 30_000,
 });
+
+// Transfer expansion only. Decoded bytes, scratch, time and worker concurrency do not grow.
+export const PUBLIC_IMAGE_LIMITS = Object.freeze({ ...PUBLIC_IMAGE_V1_LIMITS,
+  compressedLayer: 256 * 1024 ** 2, compressedTotal: 768 * 1024 ** 2, wireBytes: 800 * 1024 ** 2 });
+export type PublicLayerEncoding = 'gzip' | 'zstd' | 'raw';
+export function publicLayerEncoding(mediaType: unknown): PublicLayerEncoding | undefined {
+  switch (mediaType) {
+    case 'application/vnd.oci.image.layer.v1.tar+gzip':
+    case 'application/vnd.docker.image.rootfs.diff.tar.gzip': return 'gzip';
+    case 'application/vnd.oci.image.layer.v1.tar+zstd': return 'zstd';
+    case 'application/vnd.oci.image.layer.v1.tar':
+    case 'application/vnd.docker.image.rootfs.diff.tar': return 'raw';
+    default: return undefined;
+  }
+}
+function receiptLimits(receipt: Record<string, unknown>) {
+  if (receipt.resourcePolicyVersion === 'public-hub-resources-v1' &&
+      receipt.checksVersion === 'trivy-0.69.3-public-archive-v1') return PUBLIC_IMAGE_V1_LIMITS;
+  if (receipt.resourcePolicyVersion === PUBLIC_IMAGE_RESOURCE_POLICY &&
+      receipt.checksVersion === PUBLIC_IMAGE_CHECKS_VERSION) return PUBLIC_IMAGE_LIMITS;
+  return undefined;
+}
+export function publicReceiptLimits(receipt: unknown) {
+  return isPublicReceipt(receipt) ? receiptLimits(receipt)! : undefined;
+}
 
 export type PublicImageTarget = {
   registry: string; repository: string; digest: string; configDigest?: string; platform: string;
@@ -38,8 +63,7 @@ export function isPublicReceipt(receipt: unknown): receipt is ArchiveReceipt & {
     'archiveSha256', 'profileVersion', 'resourcePolicyVersion', 'checksVersion'];
   if (!publicObject(receipt) || Object.keys(receipt).length !== keys.length || keys.some(key => !Object.hasOwn(receipt, key))) return false;
   if (!validPublicTarget(receipt) || !publicObject(receipt) || !publicDigest(receipt.configDigest) ||
-      receipt.profileVersion !== PUBLIC_IMAGE_PROFILE || receipt.resourcePolicyVersion !== PUBLIC_IMAGE_RESOURCE_POLICY ||
-      receipt.checksVersion !== PUBLIC_IMAGE_CHECKS_VERSION || !publicDigest(receipt.archiveSha256) ||
+      receipt.profileVersion !== PUBLIC_IMAGE_PROFILE || !receiptLimits(receipt) || !publicDigest(receipt.archiveSha256) ||
       !Array.isArray(receipt.layerDigests) || !Array.isArray(receipt.diffIds) ||
       receipt.layerDigests.length < 1 || receipt.layerDigests.length > PUBLIC_IMAGE_LIMITS.maxLayers ||
       receipt.layerDigests.length !== receipt.diffIds.length) return false;

@@ -196,21 +196,99 @@ describe('local weighted scan estimate', () => {
     }
   });
 
-  it('has a bounded generic estimate when metadata is absent and rejects invalid percentages', () => {
-    for (const percent of [null, undefined, NaN, Infinity, -1, 101]) {
-      const result = after(scan({ checks: undefined, percent }), 60);
-      expect(Number.isFinite(result.percent)).toBe(true);
-      expect(result.percent).toBeGreaterThan(0);
-      expect(result.percent).toBeLessThan(100);
+  it('keeps unknown selections indeterminate rather than inventing generic work', () => {
+    for (const state of ['queued', 'running', 'cancelling'] as const) {
+      const value = scan({ state, checks: undefined });
+      expect(after(value, 60).percent).toBeNull();
+      expect(after(value, 1e9).percent).toBeNull();
     }
-    expect(after(scan({ percent: 100 }), 60).percent).toBe(99);
   });
 
-  it('retains explicit server progress when later polls return null, without changing the snapshot', () => {
+  it('never mixes server percentages into the independent local model', () => {
+    const expected = after(scan(), 60);
+    for (const percent of [null, undefined, 0, 5, 90, 100, NaN, Infinity, -1, 101]) {
+      expect(after(scan({ percent }), 60)).toEqual(expected);
+    }
     const result = estimateScanProgress(scan({ percent: 90 }), 0);
     const value = scan();
-    expect(estimateScanProgress(value, 1000, result).percent).toBe(90);
+    expect(estimateScanProgress(value, 1000, result)).toEqual(after(value, 1));
     expect(value.percent).toBeNull();
+  });
+
+  it('does not reset known -> missing -> same selection, or invent fresh counters from memory', () => {
+    const value = durable({ secret: 'checked' });
+    const before = after(value, 120);
+    const missing = scan({ checks: undefined, perCheck: {} });
+    const paused = estimateScanProgress(missing, 121_000, before);
+    expect(paused.percent).toBe(before.percent);
+    expect(paused.plan).toBe(before.plan);
+    expect(paused.observationPaused).toBe(true);
+    expect(paused.runningMs).toBe(120_000);
+    expect(paused.evidence).toBe(before.evidence);
+    expect(paused.evidenceMs).toBe(before.evidenceMs);
+    const restored = estimateScanProgress(value, 122_000, paused);
+    expect(restored.observationPaused).toBe(false);
+    expect(restored.percent).toBe(before.percent);
+    expect(restored.runningMs).toBe(120_000);
+    expect(missing.checks).toBeUndefined();
+    const changed = estimateScanProgress(scan({ checks: ['config'] }), 123_000, restored);
+    expect(changed.percent).toBe(0);
+    expect(changed.runningMs).toBe(0);
+    const regressed = estimateScanProgress(durable(), 123_000, paused);
+    expect(regressed.percent).toBe(0);
+    expect(regressed.runningMs).toBe(0);
+  });
+
+  it.each(['durable', 'perCheck'] as const)('excludes entry, duration and exit of a missing-selection pause with %s evidence', (kind) => {
+    const value = kind === 'durable' ? durable({ secret: 'checked' }) : scan({ perCheck: { secret: checked('secret') } });
+    const before = after(value, 120);
+    const original = structuredClone(before);
+    const unknown = scan({ checks: undefined, perCheck: {} });
+    let result = before;
+    for (const at of [121_000, 181_000]) {
+      result = estimateScanProgress(unknown, at, result);
+      expect(result.observationPaused).toBe(true);
+      expect(result.runningMs).toBe(120_000);
+      expect(result.percent).toBe(before.percent);
+      expect(result.evidence).toBe(before.evidence);
+      expect(result.evidenceMs).toBe(before.evidenceMs);
+      expect(result.durableOutcomes).toEqual(before.durableOutcomes);
+      expect(result.observedCheckedCount).toBe(before.observedCheckedCount);
+      expect(result.lastAt).toBe(at);
+    }
+    const resumed = estimateScanProgress(value, 182_000, result);
+    expect(resumed.observationPaused).toBe(false);
+    expect(resumed.runningMs).toBe(120_000);
+    expect(resumed.percent).toBe(before.percent);
+    expect(resumed.evidenceMs).toBe(before.evidenceMs);
+    const next = estimateScanProgress(value, 183_000, resumed);
+    const uninterrupted = estimateScanProgress(value, 121_000, before);
+    expect(next.runningMs).toBe(121_000);
+    expect(next.percent).toBe(uninterrupted.percent);
+    expect(next.percent).toBeGreaterThan(before.percent!);
+    expect(next.percent! - before.percent!).toBeLessThanOrEqual(0.5);
+    expect(next.evidenceMs).toBe(before.evidenceMs);
+    expect(next.percent).toBeLessThan(100);
+    expect(before).toEqual(original);
+    const regressed = kind === 'durable' ? durable() : scan({ perCheck: { secret: null } });
+    expect(estimateScanProgress(regressed, 184_000, next)).toEqual(estimateScanProgress(regressed, 184_000));
+  });
+
+  it('an initially unknown observation grants no runtime when selection first becomes known', () => {
+    const unknown = scan({ checks: undefined });
+    let result = estimateScanProgress(unknown, 0);
+    result = estimateScanProgress(unknown, 180_000, result);
+    expect(result.observationPaused).toBe(true);
+    expect(result.runningMs).toBe(0);
+    expect(result.percent).toBeNull();
+    result = estimateScanProgress(scan(), 181_000, result);
+    expect(result.observationPaused).toBe(false);
+    expect(result.runningMs).toBe(0);
+    expect(result.percent).toBe(0);
+    result = estimateScanProgress(scan(), 182_000, result);
+    expect(result.runningMs).toBe(1000);
+    expect(result.percent).toBeGreaterThan(0);
+    expect(result.percent).toBeLessThan(100);
   });
 
   it('resets for a different scan, selection, queue reentry, or a fresh observation', () => {

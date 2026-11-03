@@ -1,4 +1,3 @@
-import type { PublicIdentifierCounts } from '../scans/public-vulnerability-identifiers.js';
 import { ConflictException, ForbiddenException, HttpException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -8,11 +7,14 @@ import { validateConfigReport } from '../image-config/report-contract.js';
 import { ADVISORY_SOURCES, validateAdvisory, type AdvisoryV1 } from '../worker/vuln-advisory.js';
 import { PUBLIC_VULN_SOURCES } from '../worker/vuln-findings.js';
 import { CEILINGS } from './policy.js';
+import { requirePublicSummaryReport } from './summary-report-support.js';
+import { safeRemediationFields, type RemediationFields } from './remediation-identifiers.js';
 import { exact, object } from './response.js';
 import { validateDbEvidence, CURRENT_DB_POLICY } from '../worker/cve-db-evidence.js';
 import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
 import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, publicVulnerabilityKind, type PackageEcosystem } from '../worker/public-image-evidence.js';
 
+import type { PublicIdentifierCounts } from '../scans/public-vulnerability-identifiers.js';
 import { selectedTranslation, translationSelection, TRANSLATION, type TranslationSnapshot } from './translation-contract.js';
 
 export const PUBLIC_LLM_REPORTS = Symbol('PUBLIC_LLM_REPORTS');
@@ -23,7 +25,7 @@ const severities = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const reasons = ['SCAN_FAILED', 'SCAN_TIMEOUT', 'SCAN_UNAVAILABLE', 'DB_UNAVAILABLE', 'OS_EOL', 'OS_UNKNOWN',
   'NODE_INVENTORY_ABSENT', 'NODE_INVENTORY_UNKNOWN', 'OS_UNSUPPORTED', 'CHECK_DISABLED', 'INVALID_CHECK_FLAG', 'INVALID_RESOURCE_POLICY', 'OCI_IDENTITY_REJECTED',
   'CONFIG_LIMIT_EXCEEDED', 'INVALID_CONFIG', 'USER_NOT_RESOLVABLE', 'RULE_NOT_IMPLEMENTED', 'SOURCE_NOT_PROVIDED', 'SOURCE_ANALYZER_UNSUPPORTED'];
-export type SafeFinding = { findingId: string; check: Check; severity: string; [key: string]: unknown };
+export type SafeFinding = { findingId: string; check: Check; severity: string; [key: string]: unknown } & Partial<RemediationFields>;
 export type ReportContext = { scanId: string; digest: string; platform: string; reportVersion: string;
   state: string; attempt: number; requestedChecks: Check[]; coverage: Record<Check, unknown>; findings: SafeFinding[];
   findingCount: number; findingCounts?: { byCheck: Record<string, number | null>; bySeverity: Record<string, number> }; profile?: typeof PUBLIC_IMAGE_PROFILE; identifierCounts?: PublicIdentifierCounts;
@@ -114,6 +116,10 @@ function finding(v: unknown, check: 'secret' | 'vuln', publicProfile = false): S
     const safe: SafeFinding = { check, findingId: match(f.findingId, /^vuln-[a-f0-9]{64}$/), severity,
     cveId: f.cveId, ...(publicProfile ? { identifierKind: publicVulnerabilityKind(f.cveId, f.ecosystem as PackageEcosystem) } : {}), ecosystem: f.ecosystem, severitySources: [...f.severitySources],
     provenanceRef: match(f.provenanceRef, /^target-[a-f0-9]{64}$/), fixedVersionReported: f.fixedVersion !== null };
+  if (publicProfile) {
+    if (!safeRemediationFields(f)) return invalid();
+    safe.packageName = f.packageName; safe.installedVersion = f.installedVersion; safe.fixedVersion = f.fixedVersion;
+  }
   if (f.advisory != null) {
     validateAdvisory(f.advisory, safe.cveId as string);
     const advisory = record(f.advisory);
@@ -174,7 +180,7 @@ export class ReportReader {
         if (!connection.prepare('SELECT id FROM scans WHERE id=? AND subject=?').get(scanId, identity.subject))
           throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
         const report = this.collect(identity, scanId, connection);
-        if (!report.profile) throw new NotFoundException({ errorCode: 'SCAN_NOT_FOUND' });
+        requirePublicSummaryReport(report);
         const result = action(report);
         if (result && typeof result === 'object' && 'then' in result) return invalid();
         return result;
@@ -228,6 +234,9 @@ export class ReportReader {
   private collect(identity: Identity, scanId: string, db: Database.Database,
     selection?: { findingId: string; finding?: Record<string, unknown> }): ReportContext {
     const status = record(this.scans.status(identity, scanId)); // Ownership precedes config disclosure.
+    // Reject unknown source profiles before projection can erase them into legacy.
+    if (this.publicReports && status.profile !== undefined && status.profile !== PUBLIC_IMAGE_PROFILE)
+      throw new ConflictException({ errorCode: 'LLM_SUMMARY_UNSUPPORTED_REPORT' });
     const digest = match(status.digest, /^sha256:[a-f0-9]{64}$/);
     const platform = match(status.platform, /^linux\/amd64$/);
     if (!['completed', 'partial', 'failed', 'cancelled'].includes(String(status.state))) return invalid();
@@ -334,7 +343,8 @@ export class ReportReader {
         ...(record(allCoverage.vuln).outcome === 'checked' ? { identifierCounts } : {}) } : {}),
       attempt: binding.attempt as number, requestedChecks: [...requestedChecks], coverage: allCoverage,
       findings, findingCount: findings.length, checkedIsNotSafe: true,
-      omittedEvidence: 'All free text, URLs, credentials, env, package strings and raw output excluded' };
+      omittedEvidence: publicProfile ? 'All free text, URLs, credentials, env and raw output excluded; package identities and versions are sanitized scanner facts' :
+              'All free text, URLs, credentials, env, package strings and raw output excluded' };
     // Public selection bounds the actual wire later; a complete local dataset is
     // required first to compute whole counts and preserve late mandatory evidence.
     if (Buffer.byteLength(JSON.stringify(report)) > (publicProfile ? 4_000_000 : CEILINGS.requestBytes)) return overflow();

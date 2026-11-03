@@ -1,6 +1,8 @@
 import { lstat, readdir, readlink, statfs } from 'node:fs/promises';
 import { ARCHIVE_LIMITS } from '../oci/layer-tar-validator.js';
 
+import { ImageFailure, type ImageFailureDetail } from '../oci/image-failure.js';
+
 const scratchFilesystem = { lstat, readdir, readlink, statfs };
 const disappeared = (error: unknown): boolean => !!error && typeof error === 'object' &&
   'code' in error && error.code === 'ENOENT';
@@ -10,7 +12,9 @@ export async function auditArchiveScratch(directory: string, dbTarget?: string,
   filesystem: typeof scratchFilesystem = scratchFilesystem,
     limits: Readonly<{ scratchBytes: number; entries: number }> = ARCHIVE_LIMITS): Promise<number> {
   let entries = 0, bytes = 0;
-  const fail = (): never => { throw new Error('Invalid archive scratch'); };
+  const fail = (detail: ImageFailureDetail = { reason: 'ARCHIVE_UNSAFE', stage: 'scan' }): never => {
+      throw new ImageFailure('Invalid archive scratch', detail);
+    };
   const walk = async (path: string, depth: number): Promise<void> => {
     if (depth > 64) fail();
     let before, children;
@@ -25,7 +29,7 @@ export async function auditArchiveScratch(directory: string, dbTarget?: string,
       throw error;
     }
     for (const entry of children) {
-      if (++entries > limits.entries) fail();
+      if (++entries > limits.entries) fail({ reason: 'RESOURCE_LIMIT', stage: 'scan', resource: 'entries' });
       const child = `${path}/${entry.name}`;
       if (entry.isSymbolicLink() && (!dbTarget || child !== `${directory}/cache/db`)) fail();
       let info;
@@ -38,7 +42,8 @@ export async function auditArchiveScratch(directory: string, dbTarget?: string,
       } else if (info.isDirectory()) await walk(child, depth + 1);
       else if (info.isFile()) {
         bytes += info.size;
-        if (!Number.isSafeInteger(bytes) || bytes > limits.scratchBytes) fail();
+        if (!Number.isSafeInteger(bytes) || bytes > limits.scratchBytes)
+                  fail({ reason: 'RESOURCE_LIMIT', stage: 'scan', resource: 'scratch_bytes' });
       } else fail();
     }
     try {
@@ -55,6 +60,7 @@ export async function auditArchiveScratch(directory: string, dbTarget?: string,
   // Quiescent runner audits again after all subprocesses close. Traversal remains
   // bounded even under churn; the tmpfs is the independent physical hard quota.
   const fs = await filesystem.statfs(directory);
-  if (fs.bavail * fs.bsize < 16 * 1024 ** 2) fail();
+  if (fs.bavail * fs.bsize < 16 * 1024 ** 2)
+      fail({ reason: 'RESOURCE_LIMIT', stage: 'scan', resource: 'scratch_bytes' });
   return bytes;
 }

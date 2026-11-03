@@ -55,7 +55,11 @@ const imagePage = (items: Array<{ label: string; reference: string; scannable: b
   nextCursor, state: nextCursor ? 'more-available' : 'terminal', loaded: items.length, pages, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60_000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' },
 });
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  transitionScanSession(null, new QueryClient(), true);
+  vi.restoreAllMocks(); vi.unstubAllGlobals();
+});
 
 function mount(path: string, ownEligibility = false) {
   // Runtime has its own contract and must not consume image-search or eligibility responses.
@@ -222,7 +226,9 @@ describe('LOCAL server-authoritative saved target', () => {
     expect(posts[0]).toMatchObject({ imageReference: reference, checks: ['secret'] });
   });
 
-  for (const change of ['checks', 'target', 'consent', 'checks-back', 'target-back', 'consent-back', 'subject', 'unmount'] as const) it(`cancels pending submit after ${change}, even if eligibility later succeeds`, async () => {
+  for (const change of ['checks', 'target', 'consent', 'checks-back', 'target-back', 'consent-back', 'subject', 'unmount'] as const) it(change.startsWith('target')
+      ? `locks ${change} interaction during pending submit and preserves its accepted receipt`
+      : `cancels pending submit after stale ${change}, even if eligibility later succeeds`, async () => {
     const posts: Array<{ imageReference: string; checks: string[]; idempotencyKey: string }> = [];
     let holdNext = false;
     let finish!: (value: ReturnType<typeof json>) => void;
@@ -255,7 +261,10 @@ describe('LOCAL server-authoritative saved target', () => {
       fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
       if (change === 'checks-back') fireEvent.click(screen.getByRole('radio', { name: 'secret' }));
     } else if (change.startsWith('target')) {
-      fireEvent.click(screen.getByRole('button', { name: /Alpine · latest/ }));
+      const alternative = screen.getByRole('button', { name: /Alpine · latest/ });
+      expect(alternative.matches(':disabled')).toBe(true);
+      expect(card.matches(':disabled')).toBe(true);
+      fireEvent.click(alternative);
       if (change === 'target-back') fireEvent.click(card);
     } else if (change.startsWith('consent')) {
       fireEvent.click(consent);
@@ -264,6 +273,13 @@ describe('LOCAL server-authoritative saved target', () => {
       act(() => { transitionScanSession('bob', client); client.setQueryData(['demo-auth', 'me'], { id: 'bob', email: 'bob@example.com' }); });
     } else cleanup();
     await act(async () => finish(json(eligibility())));
+    if (change.startsWith('target')) {
+      await waitFor(() => expect(posts).toHaveLength(1));
+      expect(posts[0]).toMatchObject({ imageReference: reference, checks: ['secret'] });
+      expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+      expect(posts).toHaveLength(1);
+      return;
+    }
     expect(posts).toHaveLength(0);
     if (change === 'subject' || change === 'unmount') return;
     const submit = await screen.findByRole('button', { name: 'Запустить скан' });
@@ -272,7 +288,7 @@ describe('LOCAL server-authoritative saved target', () => {
     fireEvent.click(submit);
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toMatchObject({
-      imageReference: change === 'target' ? 'registry-1.docker.io/library/alpine:latest' : reference,
+      imageReference: reference,
       checks: change === 'checks' ? ['sbom'] : ['secret'],
     });
     expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
@@ -362,6 +378,7 @@ describe('LOCAL server-authoritative saved target', () => {
     now += 60_001;
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 1050)); });
     expect(posts).toHaveLength(1); expect(reads).toBe(2);
+    await waitFor(() => expect(submit.hasAttribute('disabled')).toBe(false));
     fireEvent.click(submit); await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts[1]).toEqual(posts[0]); expect(reads).toBe(2);
   });
@@ -709,7 +726,8 @@ describe('cookie-session live scans', () => {
     expect(screen.getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
     const pending = screen.getByRole('list', { name: 'Проверки без подтверждённого результата' });
     expect(pending.textContent).not.toContain('Пропущено');
-    expect(pending.textContent).toContain('внутренний этап не предоставлен сервером');
+    expect(pending.textContent).toContain('Поиск секретов: ожидаем подтверждённый результат');
+    expect(pending.textContent).toContain('Состав пакетов (SBOM): ожидаем подтверждённый результат');
     expect(pending.textContent).not.toContain('текущий этап указан сервером выше');
     act(() => { emit('open'); for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
     expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('подключён');
@@ -717,6 +735,9 @@ describe('cookie-session live scans', () => {
     act(() => { for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
     expect(reads).toBe(2); expect(screen.getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
+    // SSE terminal hints cannot authorize summary availability before a confirmed GET snapshot.
+    expect(fetchMock.mock.calls.filter(([path]) => path === contextUrl)).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([path, init]) => path === `${statusUrl}/llm/summary` && init?.method === 'POST')).toHaveLength(0);
     act(() => emit('error'));
     expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('переподключение');
     act(() => emit('open'));
@@ -724,7 +745,8 @@ describe('cookie-session live scans', () => {
     await waitFor(() => expect(close).toHaveBeenCalled(), { timeout: 2000 });
     expect(reads).toBe(3);
     expect(fetchMock.mock.calls.filter(([path]) => path === statusUrl)).toHaveLength(3);
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([path, init]) => path === contextUrl && init?.method === 'GET')).toHaveLength(1));
+    // Confirmed completion permits one passive availability read, never generation intent.
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => path === contextUrl)).toHaveLength(1));
     expect(fetchMock.mock.calls.filter(([path, init]) => path === `${statusUrl}/llm/summary` && init?.method === 'POST')).toHaveLength(0);
     expect(screen.getByRole('status', { name: 'Состояние realtime' }).textContent).toContain('realtime остановлен');
     expect(fetchMock.mock.calls.some(([path]) => path.includes('eligibility'))).toBe(false);
@@ -797,7 +819,7 @@ describe('cookie-session live scans', () => {
     mount(`/scans/${id}`);
     expect(await screen.findByText(/0 находок в выполненной проверенной области/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
-    expect(screen.getByText('Отмена недоступна в текущем состоянии.')).toBeTruthy();
+    expect(screen.queryByText('Отмена недоступна в текущем состоянии.')).toBeNull();
     expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/results?view=report-v1&limit=25&sort=ruleId%3Aasc`)).toBe(true);
   });
 
@@ -1102,7 +1124,7 @@ describe('cookie-session live scans', () => {
     expect(client.getQueryData(privateKey)).toBeUndefined();
   });
 
-  it('closes the scan view and requests a new login if session verification fails', async () => {
+  it('closes the scan view after transient session verification failure without logout and restores it on manual retry', async () => {
     let fail = false;
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') {
@@ -1117,9 +1139,14 @@ describe('cookie-session live scans', () => {
     expect(await screen.findByText('private/alpine')).toBeTruthy();
     fail = true;
     await client.invalidateQueries({ queryKey: ['demo-auth', 'me'] });
-    expect(await screen.findByRole('heading', { name: 'Вход' })).toBeTruthy();
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Не удалось проверить сессию. Данные скрыты до успешной проверки; выход из аккаунта не выполнялся.');
     expect(screen.queryByText('private/alpine')).toBeNull();
     expect(client.getQueryCache().findAll({ queryKey: ['live-scans'] })).toHaveLength(0);
+    expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/auth/logout')).toBe(false);
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить проверку сессии' }));
+    expect(await screen.findByText('private/alpine')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/auth/logout')).toBe(false);
   });
 
   it('replaces prior subject data after /auth/me changes', async () => {
@@ -1171,7 +1198,7 @@ describe('durable cancellation detail', () => {
         if (name === 'scan') emit = value => handler({ data: JSON.stringify(value) });
       }
     });
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
     const secret = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 1, errorCode: null, scannerVersion: '0.69.3' };
     const calls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
@@ -1190,8 +1217,17 @@ describe('durable cancellation detail', () => {
     }));
     let client = mount(`/scans/${id}`);
     await screen.findByRole('button', { name: 'Отменить скан' });
-    if (mode === 'button') fireEvent.click(screen.getByRole('button', { name: 'Отменить скан' }));
-    else {
+    if (mode === 'button') {
+      const user = userEvent.setup();
+      const trigger = screen.getByRole('button', { name: 'Отменить скан' });
+      await user.click(trigger);
+      expect(calls.filter(path => path.endsWith('/cancel'))).toHaveLength(0);
+      await user.click(within(screen.getByRole('alertdialog', { name: 'Отменить скан?' })).getByRole('button', { name: 'Продолжить сканирование' }));
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+      expect(calls.filter(path => path.endsWith('/cancel'))).toHaveLength(0);
+      await user.click(trigger);
+      await user.click(within(screen.getByRole('alertdialog', { name: 'Отменить скан?' })).getByRole('button', { name: 'Подтвердить отмену' }));
+    } else {
       // An event is only a hint: a false terminal hint cannot publish coverage.
       act(() => emit({ scanId: id, state: 'cancelled', percent: null }));
       expect(screen.queryByText('ID: saved-secret')).toBeNull();
@@ -1206,6 +1242,7 @@ describe('durable cancellation detail', () => {
     expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
     await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
     expect(calls.some(path => /\/(sbom|vuln)\?/.test(path))).toBe(false);
+    expect(calls.filter(path => path.endsWith('/cancel'))).toHaveLength(mode === 'button' ? 1 : 0);
     cleanup(); client.clear();
     client = mount(`/scans/${id}`);
     await screen.findByText('ID: saved-secret');
@@ -1260,8 +1297,8 @@ describe('Stage2 unified Findings detail', () => {
     mount(`/scans/${id}`);
     const row = await expectCve('CVE-2026-1234');
     fireEvent.click(row.getByText('Подробности CVE-2026-1234 · описание, CVSS и ссылки'));
-    const findings = screen.getByRole('region', { name: 'Результаты проверок' });
-    expect(screen.getAllByRole('heading', { name: 'Результаты проверок' })).toHaveLength(1);
+    const findings = screen.getByRole('region', { name: 'Отчёт' });
+    expect(screen.getAllByRole('heading', { name: 'Отчёт' })).toHaveLength(1);
     expect(within(findings).getAllByText(/Bounds 1 < 2 & comparison/)).toHaveLength(2);
     expect(within(findings).getAllByText(/Язык источника: не указан/)).toHaveLength(2);
     expect(within(findings).getByText(/Источники расходятся: severity/)).toBeTruthy();

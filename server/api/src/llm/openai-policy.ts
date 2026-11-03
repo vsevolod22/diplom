@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { exact } from './response.js';
 import { openAiResponseFormat } from './openai-response-contract.js';
+import { CHAT_SOURCE_BUDGET } from './chat-source-budget.js';
 
 // Candidate snapshot from the coordinator-supplied model docs; not activation approval.
 export const OPENAI_MODEL = 'gpt-5.4-mini-2026-03-17';
@@ -63,7 +64,7 @@ export function createOpenAiPolicy(config: unknown, prompts: OpenAiPrompts): Ope
     };
     const frozenPrompts = Object.freeze({ summary: prompts.summary, chat: prompts.chat });
     const version = hash(JSON.stringify({ contract: 'openai-offline-core-v2', accounting: 'configured-rates-ceil-micros-v1',
-      provider: 'OpenAI', endpoint: OPENAI_ENDPOINT, ...settings,
+      provider: 'OpenAI', endpoint: OPENAI_ENDPOINT, ...settings, chatSources: CHAT_SOURCE_BUDGET,
       prompts: { summary: hash(frozenPrompts.summary), chat: hash(frozenPrompts.chat) },
       responseFormats: { summary: openAiResponseFormat('summary'), chat: openAiResponseFormat('chat') } }));
     const policy = Object.freeze({ ...settings, provider: 'OpenAI' as const, version });

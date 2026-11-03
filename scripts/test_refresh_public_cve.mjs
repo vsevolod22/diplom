@@ -17,6 +17,107 @@ import {
 import { PROJECT } from './public-image-stand.mjs';
 import { checkDisk } from './refresh-local-cve.mjs';
 import { runChild } from './setup-local-cve.mjs';
+import { createPublicCveBridge } from './public-cve-bridge.mjs';
+import { publicLlmEnvironmentOverlay } from './public-llm-stand.mjs';
+// Real capacity admission with disposable metadata only. The inherited runner
+// is a fake engine/child dispatcher; no Docker/provider/lifecycle is executed.
+function earlyCapacityFixture(t, llm = false) {
+  const f = fixture(t), events = [];
+  let reservations = 0, available = 8 * 1024 ** 3;
+  if (llm) {
+    const selection = { version: 1, keyVolume: null };
+    fs.writeFileSync(join(f.stand, 'llm-profile.json'), JSON.stringify(selection), { mode: 0o600 });
+    fs.writeFileSync(join(f.stand, 'compose.llm-env.json'), JSON.stringify(publicLlmEnvironmentOverlay(selection)), { mode: 0o600 });
+    fs.copyFileSync(join(ROOT, 'server/deploy/compose.public-llm.yaml'), join(f.root, 'server/deploy/compose.public-llm.yaml'));
+  }
+  const bridge = createPublicCveBridge({ statfs: () => ({ bavail: available, bsize: 1 }) });
+  const integration = { ...f.integration, preflightPreservation(context) {
+    assert.equal(Boolean(context.runtime.selection), llm);
+    events.push(`reserve:${++reservations}`);
+    const reservation = bridge.preflightPreservation(context), n = reservations;
+    return { ...reservation, verify() { events.push(`verify:${n}`); reservation.verify(); } };
+  } };
+  const parent = join(f.stand, llm ? 'llm-deployments' : 'cve-backups');
+  const add = n => {
+    if (!fs.existsSync(parent)) fs.mkdirSync(parent, { mode: 0o700 });
+    const path = join(parent, `${llm ? 'deploy' : 'refresh'}-${n.toString(16).padStart(32, '0')}`);
+    fs.mkdirSync(path, { mode: 0o700 });
+    fs.writeFileSync(join(path, 'complete.json'), JSON.stringify({ version: 1, project: PROJECT, preserved: true }), { mode: 0o600 });
+    return path;
+  };
+  return { f, parent, add, events, integration, count: () => reservations, lowSpace: () => { available = 1; } };
+}
+const capacityRefusal = (f, phase = 'preflight', checkpoint = 'preservation-capacity') => error => {
+  const details = publicCveFailure(error);
+  assert.equal(details.phase, phase); assert.equal(details.checkpoint, checkpoint); assert.equal(details.hold, false);
+  assert.match(error.message, /No automatic recovery/);
+  const text = JSON.stringify({ message: error.message, details, logs: f.logs, error });
+  for (const value of [f.root, 'PRIVATE-CAPACITY-SENTINEL', 'refresh-signing-key.pem', 'openrouter.key', 'scan-jwt']) assert(!text.includes(value));
+  for (const key of ['cause', 'stdout', 'stderr', 'args', 'env', 'stackTrace']) assert(!Object.hasOwn(error, key));
+  return true;
+};
+const noPayloadOrDocker = f => {
+  assert(!f.calls.some(c => c.kind === 'docker'));
+  assert(!f.calls.some(c => c.args[0]?.endsWith('sign-offline-db.mjs') || c.args[0]?.endsWith('fetch-db-layer.mjs') && c.args[1] !== 'discover'));
+  assert(!fs.existsSync(join(f.stand, '.operation.lock')));
+  assert(!fs.existsSync(join(f.stand, '.cve-refresh-work')));
+};
+for (const count of [16, 17]) for (const stageOnly of [false, true])
+  test(`EARLY CAPACITY ${count} LLM audits ${stageOnly ? 'stage-only' : 'normal'} refuse before signer, staging, payload or Docker`, async t => {
+    const x = earlyCapacityFixture(t, true); for (let n = 0; n < count; n++) x.add(n);
+    // Capacity must win before even parsing signer metadata, not merely before signing.
+    fs.writeFileSync(join(x.f.stand, 'trust/refresh-signer.json'), 'PRIVATE-CAPACITY-SENTINEL', { mode: 0o600 });
+    const releases = fs.readdirSync(join(x.f.stand, 'db-releases')), profile = x.f.read('profile.json');
+    await assert.rejects(x.f.refresh(stageOnly ? ['--stage-only'] : [], { integration: x.integration }), capacityRefusal(x.f));
+    assert.equal(x.count(), 1); noPayloadOrDocker(x.f);
+    assert.deepEqual(fs.readdirSync(join(x.f.stand, 'db-releases')), releases); assert.equal(x.f.read('profile.json'), profile);
+    assert.equal(fs.readdirSync(x.parent).length, count);
+  });
+test('EARLY CAPACITY unchanged bypasses exhausted audits/free-space and absent signer while reauthenticating current release', async t => {
+  const x = earlyCapacityFixture(t, true); for (let n = 0; n < 17; n++) x.add(n);
+  x.lowSpace(); x.f.discover = oldManifest;
+  fs.unlinkSync(join(x.f.stand, 'trust/refresh-signing-key.pem')); fs.unlinkSync(join(x.f.stand, 'trust/refresh-signer.json'));
+  assert.equal((await x.f.refresh([], { integration: x.integration })).outcome, 'unchanged');
+  assert.equal(x.count(), 0); noPayloadOrDocker(x.f);
+  assert(x.f.calls.some(c => c.args.some(arg => arg.endsWith('verify-local-cve.mjs'))), 'unchanged still authenticates current payload');
+});
+for (const llm of [false, true]) for (const drift of ['inode', 'listing', 'completion', 'freeSpace'])
+  for (const stageOnly of (llm ? [true] : [false, true]))
+    test(`EARLY CAPACITY original ${llm ? 'LLM' : 'core'} reservation ${drift} drift ${stageOnly ? 'stage-only' : 'pre-fence'} refuses before intent`, async t => {
+      const x = earlyCapacityFixture(t, llm), completed = x.add(0); let injected = false;
+      x.f.beforeChild = (_exe, args) => {
+        if (injected || !args[0]?.endsWith('fetch-db-layer.mjs') || args[1] === 'discover') return;
+        injected = true; assert.equal(x.count(), 1);
+        if (drift === 'inode') { const prior = join(x.f.root, 'retained-capacity-directory'); fs.renameSync(x.parent, prior); fs.cpSync(prior, x.parent, { recursive: true }); }
+        if (drift === 'listing') x.add(1);
+        if (drift === 'completion') fs.writeFileSync(join(completed, 'complete.json'), JSON.stringify({ version: 1, project: PROJECT, preserved: false }));
+        if (drift === 'freeSpace') x.lowSpace();
+      };
+      await assert.rejects(x.f.refresh(stageOnly ? ['--stage-only'] : [], { integration: x.integration }),
+        capacityRefusal(x.f, stageOnly ? 'preflight' : 'namespace', stageOnly ? 'preservation-capacity' : 'preservation-capacity-recheck'));
+      assert(injected); assert.equal(x.count(), 1, 'old reservation must reject drift before recapture can accept it');
+      assert(!x.f.calls.some(c => c.kind === 'docker' && (['stop', 'start', 'create', 'rm'].includes(c.args[1]) || c.args[0] === 'create' || c.args.includes('up'))));
+      assert.equal(x.f.captures, 0); assert(!fs.existsSync(join(x.f.stand, '.operation.lock')));
+      assert(!fs.existsSync(join(x.f.stand, '.profile.pending')));
+    });
+test('EARLY CAPACITY stage-only rechecks the same reservation; normal additionally retains the original pre-fence capacity check', async t => {
+  for (const stageOnly of [true, false]) {
+    const x = earlyCapacityFixture(t); x.add(0);
+    const outcome = await x.f.refresh(stageOnly ? ['--stage-only'] : [], { integration: x.integration });
+    assert.equal(outcome.outcome, stageOnly ? 'staged' : 'activated');
+    assert.equal(x.count(), stageOnly ? 1 : 2);
+    assert(x.events.filter(e => e === 'verify:1').length >= 2);
+    if (!stageOnly) assert(x.events.indexOf('reserve:2') > x.events.lastIndexOf('verify:1'));
+  }
+});
+for (const boundary of ['capture', 'verify']) test(`EARLY CAPACITY ${boundary} raw errors remain private before payload/intent`, async t => {
+  const f = fixture(t), integration = { ...f.integration, preflightPreservation() {
+    const fail = () => { throw Object.assign(Error(`PRIVATE-CAPACITY-SENTINEL ${f.root} scan-jwt refresh-signing-key.pem`), { stdout: 'PRIVATE-CAPACITY-SENTINEL', cause: new Error('private cause'), env: { SECRET: 'PRIVATE-CAPACITY-SENTINEL' } }); };
+    if (boundary === 'capture') fail(); return { verify: fail };
+  } };
+  await assert.rejects(f.refresh([], { integration }), capacityRefusal(f)); noPayloadOrDocker(f);
+});
+
 test('Engine materialized mount ordering is not authority drift or a false HOLD', async (t) => {
   const f = fixture(t);
   let reordered = false;

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { assertCoverageWarning, coverageTile, loadCoverageLabels } from './public-automation-live.mjs';
 
 // Current actual-route UI with an independent synthetic report-v1 responder.
 // No scanner/backend/provider is started; all non-local requests are blocked.
@@ -17,6 +18,100 @@ const coverage = (check: string) => ({ check, coverage: 'image', outcome: 'check
   ...(check === 'sbom' ? { componentCount: 30 } : { findingCount: 30 }), ...(check === 'secret' ? { errorCode: null } : {}) });
 const status = { scanId: id, digest, imageReference: image, platform: 'linux/amd64', state: 'completed', checks: ['secret', 'sbom', 'vuln'],
   perCheck: { secret: coverage('secret'), sbom: coverage('sbom'), vuln: coverage('vuln') }, result: null };
+
+test('legacy owner capability restores durable summary without stored consent or generation, including reload', async ({ page, baseURL }) => {
+  const paths: string[] = [], mutations: string[] = [], errors: string[] = [];
+  const current = { scanId: id, digest, platform: 'linux/amd64', reportVersion: 'b'.repeat(64) };
+  const original = { ...status, checks: ['secret'], perCheck: { secret: { ...coverage('secret'), findingCount: 1 } } };
+  const finding = { findingId: 'secret-0-1', ruleId: 'RULE_A', line: 1, evidenceRef: 'redacted:1' };
+  const restoredText = 'Сохранённый разбор прежнего отчёта: проверьте исходную находку.';
+  const context = { ...current, summaryResultRead: true, enabled: true, policyVersion: 'c'.repeat(64), disclosure: {
+    provider: 'OpenRouter', model: 'dots-studio/dots-3-note-preview:free', providers: ['atlas-cloud/fp8'], region: 'global',
+    retention: 'no-training', operatorApprovedRouting: true, providerComplianceNotProvenByDeclaration: true,
+    requestBudgetUsd: 0, freeOnly: true, maxPrice: { prompt: 0, completion: 0, request: 0 },
+    data: 'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.',
+  } };
+  const saved = { ...current, hypotheses: [{ kind: 'hypothesis', text: restoredText, citations: [finding.findingId] }],
+    scannerFacts: [{ findingId: finding.findingId, check: 'secret', severity: 'UNKNOWN' }] };
+  page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/*', async route => {
+    const request = route.request(), url = new URL(request.url());
+    if (url.origin !== baseURL) return route.abort();
+    if (!url.pathname.startsWith('/api/')) return route.continue();
+    paths.push(url.pathname);
+    if (request.method() !== 'GET') { mutations.push(url.pathname); return route.abort(); }
+    const json = (body: unknown, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(body),
+      headers: { 'Cache-Control': 'no-store', 'X-LLM-Summary-Retention': 'durable-owner-scan' } });
+    if (url.pathname === '/api/v1/auth/me') return json({ id: 'legacy-summary-owner', email: 'legacy@example.invalid' });
+    if (url.pathname === `/api/v1/browser/scans/${id}`) return json(original);
+    if (url.pathname.endsWith('/llm/context')) return json(context);
+    if (url.pathname.endsWith('/llm/summary')) return json(saved);
+    if (url.pathname.endsWith('/results')) {
+      const limit = Number(url.searchParams.get('limit'));
+      return json({ findings: [finding], nextCursor: null, coverage: original.perCheck.secret,
+        ...(url.searchParams.get('view') === 'report-v1' ? { page: { version: 1, limit, offset: 0, returnedCount: 1,
+          totalCount: 1, matchedCount: 1, sort: 'ruleId:asc', filters: { ruleId: null, linePresence: null } } } : {}) });
+    }
+    return json({ errorCode: 'LLM_UNAVAILABLE' }, 503);
+  });
+  await page.goto(`/scans/${id}`);
+  const summary = page.getByRole('region', { name: 'ИИ-отчёт', exact: true });
+  await expect(summary.getByText(restoredText, { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Результаты Secrets', exact: true })).toContainText(finding.findingId);
+  await expect(summary.getByRole('button', { name: 'Включить авторазбор', exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('report-preferences:v1:legacy-summary-owner'))).toBeNull();
+  await page.reload();
+  await expect(summary.getByText(restoredText, { exact: true })).toBeVisible();
+  expect(paths.filter(path => path.endsWith('/llm/summary'))).toHaveLength(2);
+  expect(paths.some(path => path.includes('/translation'))).toBe(false);
+  expect(mutations).toEqual([]); expect(errors).toEqual([]);
+  expect(original).not.toHaveProperty('profile');
+});
+
+for (const width of [375, 1280]) {
+  test(`coverage warning ${width}px: checked is not safe, failed and unknown stay distinct`, async ({ page, baseURL }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const requests: string[] = [], errors: string[] = [];
+    const labels = await loadCoverageLabels();
+    const partial = { ...status, state: 'partial', perCheck: {
+      secret: { ...coverage('secret'), findingCount: 0 }, sbom: null,
+      vuln: { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_FAILED', reason: 'DB_UNAVAILABLE',
+              scannerVersion: '0.69.3', checksVersion: 'trivy-0.69.3-archive-v1', checkedAt },
+    } };
+    page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', async route => {
+      const request = route.request(), url = new URL(request.url());
+      if (url.origin !== baseURL) return route.abort();
+      if (!url.pathname.startsWith('/api/')) return route.continue();
+      requests.push(request.method());
+      const json = (body: unknown, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(body) });
+      if (request.method() !== 'GET') return route.abort();
+      if (url.pathname === '/api/v1/auth/me') return json({ id: 'coverage-warning-fixture', email: 'coverage@example.invalid' });
+      if (url.pathname === `/api/v1/browser/scans/${id}`) return json(partial);
+      return json({ errorCode: 'SYNTHETIC_UNAVAILABLE' }, 503);
+    });
+    await page.goto(`/scans/${id}`);
+    const region = page.getByRole('region', { name: 'Проверки', exact: true });
+    await assertCoverageWarning(region, expect);
+    const outcomes = region.getByRole('list', { name: 'Исходы проверок', exact: true });
+    const secret = coverageTile(outcomes, page, labels, 'secret');
+    const failed = coverageTile(outcomes, page, labels, 'vuln');
+    await expect(secret).toHaveAttribute('data-outcome', 'checked');
+    await expect(secret).toContainText('Выполнено');
+    await expect(failed).toHaveAttribute('data-outcome', 'failed');
+    await expect(failed).toContainText('Сбой · не проверено');
+    await expect(failed).toContainText('База уязвимостей недоступна');
+    await expect(outcomes.locator(':scope > li')).toHaveCount(2);
+    await expect(coverageTile(outcomes, page, labels, 'sbom')).toHaveCount(0);
+    await expect(region.getByRole('list', { name: 'Проверки без подтверждённого результата', exact: true }))
+      .toHaveText('Состав пакетов (SBOM): результат не предоставлен сервером');
+    await expect(region.getByRole('button', { name: 'Что означает неполный отчёт?', exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every(method => method === 'GET')).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
 
 for (const width of [320, 375, 1024, 1280, 1440]) {
   test(`current report-v1 ${width}px: independent pagers, errors, filters, reload and revocation`, async ({ page, baseURL }, testInfo) => {
@@ -116,6 +211,172 @@ for (const width of [320, 375, 1024, 1280, 1440]) {
     expect(errors).toEqual([]);
     expect(requests.every(request => request.method === 'GET')).toBe(true);
     await testInfo.attach('synthetic-requests', { body: JSON.stringify(requests), contentType: 'application/json' });
+  });
+}
+
+for (const width of [375, 1280]) {
+  test(`synthetic summary ${width}px: honest phases, safe failure and explicit retry`, async ({ page, baseURL }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const owner = 'summary-browser-proof';
+    await page.addInitScript((subject) => {
+      localStorage.setItem(`report-preferences:v1:${subject}`, JSON.stringify({
+        version: 1, automationRevision: 'report-automation-v4-remediation', language: 'original', autoSummary: true,
+      }));
+    }, owner);
+    const tuple = { scanId: id, digest, platform: 'linux/amd64', reportVersion: 'b'.repeat(64) };
+    const summaryContext = { ...tuple, enabled: true, policyVersion: 'c'.repeat(64), disclosure: {
+      provider: 'OpenRouter', model: 'dots-studio/dots-3-note-preview:free', providers: ['atlas-cloud/fp8'],
+      region: 'global', retention: 'no-training', operatorApprovedRouting: true,
+      providerComplianceNotProvenByDeclaration: true, requestBudgetUsd: 0, freeOnly: true,
+      maxPrice: { prompt: 0, completion: 0, request: 0 },
+      data: 'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.',
+    } };
+    const summaryReply = { ...tuple,
+      hypotheses: [{ kind: 'hypothesis', text: 'Синтетический разбор: проверьте исходную находку.', citations: ['secret-0-0'] }],
+      scannerFacts: [{ findingId: 'secret-0-0', check: 'secret', severity: 'UNKNOWN' }],
+    };
+    const counters = { limits: { input: 10000, output: 10000, costMicros: 0 },
+      used: { input: 100, output: 10, costMicros: 0 }, held: { input: 20, output: 20, costMicros: 0 },
+      carried: { input: 30, output: 30, costMicros: 0 }, remaining: { input: 9850, output: 9940, costMicros: 0 },
+      warning: false, exhausted: false };
+    const gate = () => {
+      let release!: () => void;
+      const promise = new Promise<void>(resolve => { release = resolve; });
+      return { promise, release };
+    };
+    const initial = gate();
+    const recovery = gate();
+    const generation = [gate(), gate()];
+    const verification = gate();
+    let contextReads = 0;
+    let posts = 0;
+    let sourceReads = 0;
+    const errors: string[] = [];
+    const unexpected: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', async route => {
+      const url = new URL(route.request().url());
+      if (url.origin !== baseURL) { unexpected.push(url.origin); return route.abort(); }
+      if (!url.pathname.startsWith('/api/')) return route.continue();
+      const json = (body: unknown, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(body) });
+      if (url.pathname === '/api/v1/auth/me') return json({ id: owner, email: 'summary@example.invalid' });
+      const root = `/api/v1/browser/scans/${id}`;
+      const secretCoverage = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 1, scannerVersion: 'synthetic', checkedAt, errorCode: null };
+      if (url.pathname === root) return json({ ...tuple, profile: 'public-hub-amd64-v1', imageReference: image,
+        state: 'completed', checks: ['secret'], perCheck: { secret: secretCoverage }, result: null });
+      if (url.pathname === `${root}/llm/context`) {
+        if (++contextReads === 1) await initial.promise;
+        return json(summaryContext);
+      }
+      if (url.pathname === `${root}/llm/summary`) {
+        if (route.request().method() === 'GET') {
+          await recovery.promise;
+          return json({ errorCode: 'LLM_SUMMARY_MISSING' }, 404);
+        }
+        if (route.request().method() === 'POST') {
+          const attempt = posts++;
+          expect(route.request().postDataJSON()).toEqual({ reportVersion: tuple.reportVersion,
+            consent: { accepted: true, policyVersion: summaryContext.policyVersion } });
+          if (attempt > 1) { unexpected.push('automatic replay'); return route.abort(); }
+          await generation[attempt].promise;
+          return attempt === 0
+            ? json({ errorCode: 'LLM_INVALID_RESPONSE', message: 'private-provider-detail' }, 502)
+            : json(summaryReply);
+        }
+      }
+      if (url.pathname === `${root}/llm/usage`) return json({ ...tuple, available: true, reason: 'ready',
+        integrationEnabled: true, quotaEnabled: true, admission: { status: 'unavailable' },
+        window: { start: 0, end: 86400000 }, signals: [], user: counters, scan: counters });
+      if (url.pathname === `${root}/results`) {
+        const rows = [{ findingId: 'secret-0-0', ruleId: 'rule-0000000000000000', line: 1, evidenceRef: 'redacted:synthetic' }];
+        if (url.searchParams.get('view') === 'report-v1') {
+          const limit = Number(url.searchParams.get('limit'));
+          return json({ findings: rows, nextCursor: null, coverage: secretCoverage,
+            page: { version: 1, limit, offset: 0, returnedCount: 1, totalCount: 1, matchedCount: 1,
+              sort: url.searchParams.get('sort'), filters: { ruleId: null, linePresence: null } } });
+        }
+        sourceReads++;
+        await verification.promise;
+        return json({ findings: rows, nextCursor: null, coverage: secretCoverage });
+      }
+      if (url.pathname === `${root}/llm/readiness` || url.pathname.includes('/chat/')) return json({ errorCode: 'LLM_DISABLED' }, 503);
+      unexpected.push(`${route.request().method()} ${url.pathname}`);
+      return json({ errorCode: 'FIXTURE_ONLY' }, 404);
+    });
+    await page.goto(`/scans/${id}`);
+    const reportNav = page.getByRole('navigation', { name: 'Разделы отчёта' });
+    const navLinks = reportNav.getByRole('link');
+    await expect(navLinks).toHaveCount(3);
+    await expect(navLinks).toHaveText(['ИИ-отчёт', 'Находки', 'Чат по отчёту']);
+    await expect(navLinks.nth(0)).toHaveAttribute('href', '#scan-a1-ai');
+    await expect(navLinks.nth(1)).toHaveAttribute('href', '#scan-a1-findings');
+    await expect(navLinks.nth(2)).toHaveAttribute('href', '#scan-report-chat');
+    await navLinks.first().focus();
+    for (let index = 0; index < 3; index++) {
+      const link = navLinks.nth(index);
+      await expect(link).toBeVisible();
+      await expect(link).toBeFocused();
+      await expect(link).toHaveCSS('outline-style', 'solid');
+      const bounds = await link.evaluate(element => {
+        const box = element.getBoundingClientRect();
+        const nav = element.closest('nav')!.getBoundingClientRect();
+        return { left: box.left, right: box.right, width: box.width, navLeft: nav.left, navRight: nav.right };
+      });
+      expect(bounds.width).toBeGreaterThan(0);
+      expect(bounds.left).toBeGreaterThanOrEqual(bounds.navLeft - 1);
+      expect(bounds.right).toBeLessThanOrEqual(bounds.navRight + 1);
+      expect(bounds.left).toBeGreaterThanOrEqual(0);
+      expect(bounds.right).toBeLessThanOrEqual(width);
+      if (index < 2) await page.keyboard.press('Tab');
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    const panel = page.locator('section[aria-labelledby="scan-a1-ai"]');
+    const assertPhase = async (phase: string, label: string) => {
+      await expect(panel.locator('[data-phase]')).toHaveAttribute('data-phase', phase);
+      await expect(panel.getByRole('status')).toHaveText(`Готовим разбор… ${label}`);
+      const progress = panel.getByRole('progressbar', { name: 'Подготовка ИИ-отчёта' });
+      await expect(progress).not.toHaveAttribute('value');
+      await expect(progress).not.toHaveAttribute('aria-valuenow');
+      await expect(panel).not.toContainText(/\d+\s*%/);
+      await expect(panel.getByText('ИИ-разбор готов')).toHaveCount(0);
+      await expect(panel.getByText(summaryReply.hypotheses[0].text)).toHaveCount(0);
+    };
+    await assertPhase('context', 'Проверяем доступность разбора');
+    expect(posts).toBe(0);
+    initial.release();
+    await assertPhase('recovery', 'Ищем сохранённый разбор');
+    expect(posts).toBe(0);
+    recovery.release();
+    await assertPhase('generation', 'Модель готовит рекомендации');
+    expect(posts).toBe(1);
+    await page.screenshot({ path: testInfo.outputPath(`summary-generation-${width}.png`), fullPage: true });
+    generation[0].release();
+    await expect(panel.getByRole('alert')).toHaveText('Ответ ИИ не прошёл проверку достоверности или формата и не показан. Исходные находки сохранены; можно повторить разбор вручную.');
+    await expect(panel).not.toContainText('private-provider-detail');
+    await expect(panel.getByText('ИИ-разбор готов')).toHaveCount(0);
+    await expect(panel.getByRole('progressbar')).toHaveCount(0);
+    await expect(page.getByText('ID: secret-0-0', { exact: true })).toBeVisible();
+    await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online')); });
+    await expect(panel.getByRole('button', { name: 'Повторить разбор' })).toBeEnabled();
+    expect(posts).toBe(1);
+    await page.screenshot({ path: testInfo.outputPath(`summary-failure-${width}.png`), fullPage: true });
+    await panel.getByRole('button', { name: 'Повторить разбор' }).focus();
+    await page.keyboard.press('Enter');
+    await assertPhase('generation', 'Модель готовит рекомендации');
+    expect(posts).toBe(2);
+    generation[1].release();
+    await assertPhase('verification', 'Проверяем источники и готовим результат');
+    await expect.poll(() => sourceReads).toBe(1);
+    await page.screenshot({ path: testInfo.outputPath(`summary-verification-${width}.png`), fullPage: true });
+    verification.release();
+    await expect(panel.getByRole('status')).toHaveText('ИИ-разбор готов');
+    await expect(panel.getByText(summaryReply.hypotheses[0].text)).toBeVisible();
+    await expect(panel.getByRole('progressbar')).toHaveCount(0);
+    expect(posts).toBe(2);
+    expect(errors).toEqual([]);
+    expect(unexpected).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath(`summary-ready-${width}.png`), fullPage: true });
   });
 }
 

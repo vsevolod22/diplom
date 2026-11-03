@@ -96,6 +96,50 @@ test('hostile upstream links, malformed pages and byte excess retire the search'
   }
 });
 
+test('continuations reject endpoint, credentials and parameter mismatches without following upstream URLs', async () => {
+  const expected = hubSearchUrl('repositories', 'nginx', 2);
+  const mutations = [
+    (url: URL) => { url.hostname = 'hub.docker.com.evil.example'; },
+    (url: URL) => { url.protocol = 'http:'; },
+    (url: URL) => { url.port = '444'; },
+    (url: URL) => { url.username = 'user'; url.password = 'password'; },
+    (url: URL) => { url.pathname = '/v2/repositories/library/alpine/tags/'; },
+    (url: URL) => { url.hash = 'fragment'; },
+    (url: URL) => { url.searchParams.set('query', 'other'); },
+    (url: URL) => { url.searchParams.set('page_size', '13'); },
+    (url: URL) => { url.searchParams.set('page', '3'); },
+    (url: URL) => { url.searchParams.append('page', '2'); },
+    (url: URL) => { url.searchParams.set('extra', 'value'); },
+  ];
+  for (const mutate of mutations) {
+    const next = new URL(expected); mutate(next);
+    let calls = 0;
+    const sessions = new ImageSearchSessions(async () => {
+      calls++;
+      return { results: [], count: 24, next: next.href };
+    });
+    await assert.rejects(sessions.search('alice', 'nginx', 'gen'), error =>
+      (error as { getStatus: () => number }).getStatus() === 503);
+    assert.equal(calls, 1, `must not follow ${next.pathname}`);
+  }
+});
+
+test('cached cursor replay spends the subject request budget without repeating egress', async () => {
+  let calls = 0;
+  const sessions = new ImageSearchSessions(async (kind, query, page = 1) => {
+    calls++;
+    return { results: [], count: 24, next: page === 1 ? hubSearchUrl(kind, query, 2).href : null };
+  });
+  const first = await sessions.search('alice', 'nginx', 'gen');
+  const second = await sessions.search('alice', 'nginx', 'gen', first.nextCursor);
+  for (let i = 0; i < 28; i++) {
+    assert.deepEqual(await sessions.search('alice', 'nginx', 'gen', first.nextCursor), second);
+  }
+  await assert.rejects(sessions.search('alice', 'nginx', 'gen', first.nextCursor), error =>
+    (error as { getResponse: () => { errorCode: string } }).getResponse().errorCode === 'IMAGE_SEARCH_RATE_LIMITED');
+  assert.equal(calls, 2);
+});
+
 test('subject/global concurrency and rate budgets release after failure without resetting rates', async () => {
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });

@@ -30,7 +30,7 @@ export function ScanFilterSheet({ filter, onFilterChange, cveValue = 'cve' }: Pr
             <p className="text-xs font-bold uppercase tracking-widest text-indigo-800">Просмотр отчёта</p>
             <Dialog.Title className="text-2xl font-semibold tracking-tight">Фильтры находок</Dialog.Title>
             <Dialog.Description className="text-sm leading-relaxed text-slate-600">
-              Категория выбирает набор CVE или Secrets. Позиция каждой страницы сохраняется.
+              Покажите уязвимости пакетов или возможные секреты. Позиция каждой страницы сохраняется.
             </Dialog.Description>
           </div>
           <div className="flex flex-col gap-2">
@@ -45,8 +45,8 @@ export function ScanFilterSheet({ filter, onFilterChange, cveValue = 'cve' }: Pr
               onChange={(event) => onFilterChange(event.target.value)}
             >
               <option value="all">Все категории</option>
-              <option value="secret">Secrets</option>
-              <option value={cveValue}>CVE</option>
+              <option value="secret">Возможные секреты</option>
+              <option value={cveValue}>Уязвимости пакетов</option>
             </select>
           </div>
           <Button

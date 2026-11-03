@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { refreshLocalCve, DISK_POLICY, checkDisk, DRAIN_PROBE, READY_PROBE, WEB_PROBE, publicRefreshFailure, validateStorageContinuity, validateRuntimeProfile } from './refresh-local-cve.mjs';
+import { refreshLocalCve, prepareFrozenCandidate, DISK_POLICY, checkDisk, DRAIN_PROBE, READY_PROBE, WEB_PROBE, publicRefreshFailure, validateStorageContinuity, validateRuntimeProfile } from './refresh-local-cve.mjs';
 import { acquireStandLock, setupLocalCve, childEnvironment, runChild, cveChildFailure, cveTimeout } from './setup-local-cve.mjs';
 import { localStand, PROJECT, LABEL, expectedEnvironment } from './local-stand.mjs';
 import { verifyLocalCve } from './verify-local-cve.mjs';
@@ -31,8 +31,9 @@ const refused = /LOCAL CVE refresh refused\/HOLD/;
 function failureAt(phase, checkpoint) {
   return error => {
     const details = publicRefreshFailure(error);
+    const budget = phase === 'staging' && checkpoint === 'disk-budget' ? ' Storage admission limit: 3 total releases, 10 GiB including incoming, 6 GiB free reserve; reviewed manual GC required if exhausted.' : '';
     assert.deepEqual(details, { phase, checkpoint,
-      message: `LOCAL CVE refresh refused/HOLD; phase=${phase}; checkpoint=${checkpoint}. No automatic recovery or cleanup.` });
+      message: `LOCAL CVE refresh refused/HOLD; phase=${phase}; checkpoint=${checkpoint}. No automatic recovery or cleanup.${budget}` });
     assert.equal(error.message, details.message);
     for (const key of ['cause', 'args', 'stdout', 'stderr', 'env']) assert.equal(Object.hasOwn(error, key), false);
     assert(Object.isFrozen(details));
@@ -279,7 +280,9 @@ function fixture(t) {
   t.after(() => { writableTree(root); fs.rmSync(root, { recursive: true, force: true }); });
   const refresh = (argv = [], options = {}) => refreshLocalCve(argv, { root, run, docker, now: () => state.clock,
     sleep: async ms => { state.clock += ms; }, ambient: { NODE_OPTIONS: 'do-not-inherit', OPENROUTER_API_KEY: 'do-not-inherit' },
-    log: s => logs.push(s), ...options });
+    log: s => logs.push(s), diskCheck: paths => checkDisk(paths, {
+      io: { ...fs, statfsSync: () => ({ bavail: 12 * 1024 ** 3, bsize: 1 }) },
+    }), ...options });
   return { root, stand, releases, prior, trust, activation, manifest, calls, state, containers, run, docker, refresh, logs,
     current: () => JSON.parse(fs.readFileSync(join(stand, 'cve.json'))), lock: join(stand, '.stand-operation.lock') };
 }
@@ -760,12 +763,50 @@ test('CAS conflict after fencing retains HOLD instead of overwriting concurrent 
 test('disk policy refuses retained-release count and unknown symlinks, never prunes', async t => {
   const f = fixture(t);
   for (let i = 1; i < DISK_POLICY.maxReleases; i++) fs.mkdirSync(join(f.releases, `retained-${i}`));
-  await assert.rejects(f.refresh(['--stage-only']), failureAt('staging', 'disk-budget')); assert.equal(fs.readdirSync(f.releases).length, 8);
+  await assert.rejects(f.refresh(['--stage-only']), failureAt('staging', 'disk-budget')); assert.equal(fs.readdirSync(f.releases).length, 3);
+    assert(!f.calls.some(c => c.exe === 'python3' || c.args[1] === f.manifest));
   const g = fixture(t); fs.symlinkSync(g.prior, join(g.releases, 'linked'));
   assert.throws(() => checkDisk({ stand: g.stand, releases: g.releases })); assert(fs.existsSync(join(g.releases, 'linked')));
 });
 
-test('actual readonly drain predicate counts queued, running and undelivered outbox, even terminal undelivered', t => {
+test('growth guard admits the third release and reuses that exact manifest at the cap without another fetch', async t => {
+  const f = fixture(t);
+  fs.mkdirSync(join(f.releases, 'previous'));
+  assert.equal((await f.refresh(['--stage-only'])).outcome, 'staged');
+  assert.equal(fs.readdirSync(f.releases).length, 3);
+  const calls = f.calls.length;
+  assert.equal((await f.refresh(['--stage-only'])).outcome, 'staged');
+  assert(!f.calls.slice(calls).some(c => c.exe === 'python3' || c.args[1] === f.manifest));
+  assert.deepEqual(f.current(), f.activation);
+});
+
+test('growth guard bounds bytes including incoming and preserves the independent free-space reserve', () => {
+  assert.deepEqual(DISK_POLICY, { maxReleases: 3, maxBytes: 10 * 1024 ** 3, reserveBytes: 6 * 1024 ** 3 });
+  const incoming = 2 * 1024 ** 3 + 512 * 1024 ** 2 + 4096 + 4096 + 64;
+  let bytes = DISK_POLICY.maxBytes - incoming, free = DISK_POLICY.reserveBytes;
+  const io = {
+    readdirSync: path => path === '/synthetic/releases' ? ['one'] : ['payload'],
+    lstatSync: path => ({ uid: process.getuid(), nlink: 1, size: bytes,
+      isSymbolicLink: () => false, isDirectory: () => path.endsWith('/one'), isFile: () => path.endsWith('/payload') }),
+    statfsSync: () => ({ bavail: free, bsize: 1 }),
+  };
+  const paths = { stand: '/synthetic', releases: '/synthetic/releases' };
+  checkDisk(paths, { io });
+  bytes++; assert.throws(() => checkDisk(paths, { io }), /Storage admission limit/);
+  bytes--; free--; assert.throws(() => checkDisk(paths, { io }), /6 GiB free reserve/);
+});
+
+test('growth guard PUBLIC shared-builder default refuses before fetch, conversion or signing', async t => {
+  const f = fixture(t), stand = join(f.root, '.local-public-images'), releases = join(stand, 'db-releases');
+  fs.mkdirSync(stand); fs.mkdirSync(releases);
+  for (const name of ['current', 'previous', 'incoming']) fs.mkdirSync(join(releases, name));
+  let children = 0;
+  await assert.rejects(prepareFrozenCandidate({ root: f.root, paths: { stand, releases }, manifest: f.manifest,
+    child: () => { children++; throw Error('unexpected child'); } }), /Storage admission limit/);
+  assert.equal(children, 0); assert.equal(fs.readdirSync(releases).length, 3);
+});
+
+test('actual readonly drain predicate counts queued, running and undelivered outbox, even terminal undelivered', async t => {
   const f = fixture(t), file = join(f.stand, 'synthetic.sqlite');
   const DB = requireApi('better-sqlite3'), db = new DB(file);
   db.exec('PRAGMA user_version = 14; CREATE TABLE scans(state TEXT); CREATE TABLE outbox(delivered_at TEXT);');

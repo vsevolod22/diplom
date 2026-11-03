@@ -2,17 +2,18 @@ import { vi } from 'vitest';
 import { binding, chatApi, context, json } from './llmChatFixtures';
 import { v2Evidence } from './reportViewSynthetic';
 
-// Actual non-secret policy disclosure/readiness producers. No environment, key or provider access.
+// Actual non-secret disclosure/readiness producers. No environment, key or provider access.
 export const policyModule = await import(/* @vite-ignore */ '../../../server/api/src/llm/' + 'policy.ts');
 export const readinessModule = await import(
   /* @vite-ignore */ '../../../server/api/src/llm/' + 'public-readiness.ts'
 );
+
 export const publicPolicy = {
   version: 'c'.repeat(64),
-  model: 'xingchen-agi/xing4.0-29b-a4b:free',
-  providers: ['phala'],
+  model: 'dots-studio/dots-3-note-preview:free',
+  providers: ['atlas-cloud/fp8'],
   region: 'global',
-  retention: 'no-storage',
+  retention: 'no-training',
   freeOnly: true,
   budgetUsd: 0,
   inputPricePerMillion: 0,

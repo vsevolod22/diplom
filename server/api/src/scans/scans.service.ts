@@ -19,9 +19,12 @@ import type { ImageSuggestion } from './image-search.js';
 import { localReceiptMatches, type LocalExecutionBinding } from '../oci/nginx-local-policy.js';
 import { hasReportView, parseReportQuery, ReportViewError, type ReportKind } from './report-query.js';
 import { pageVuln, pageSbom, pageSecrets } from './report-page.js';
+import type { ScanSessionGuard } from './browser-scan-session.js';
+import { imageFailureDetail, persistedFailureDetail, type ImageFailureDetail } from '../oci/image-failure.js';
 
 const allowed = new Set(['registry-1.docker.io']);
-const unavailable = () => new ServiceUnavailableException({ errorCode: 'SCANNER_UNAVAILABLE' });
+const unavailable = (failureDetail?: ImageFailureDetail) => new ServiceUnavailableException({
+  errorCode: 'SCANNER_UNAVAILABLE', ...(failureDetail ? { failureDetail } : {}) });
 function dbStillUsable(identity: Readonly<VerifiedDbIdentity> | boolean | undefined): boolean {
   if (!identity || typeof identity !== 'object') return false;
   try { assertDbFreshness(identity, Date.now(), CURRENT_DB_POLICY); return true; }
@@ -48,6 +51,10 @@ export class ScansService {
   ) {}
 
   protected readiness(): Promise<boolean> { return chainReady(); }
+    protected imageFailureDetailsEnabled(): boolean { return false; }
+    // Legacy compositions retain admission behavior; public composition owns its small gate.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Public composition binds the permit to the authenticated subject.
+      protected acquireCreatePermit(_subject: string): () => void { return () => undefined; }
 
   // Production is closed to archive candidates. Only a separately composed proof
   // server overrides these hooks; there is deliberately no environment enable flag.
@@ -91,7 +98,7 @@ export class ScansService {
     } catch { return false; }
   }
 
-  async create(identity: Identity, body: unknown): Promise<Receipt> {
+  async create(identity: Identity, body: unknown, guard: ScanSessionGuard = action => action()): Promise<Receipt> {
     if (!identity.scope.includes('scan:create')) throw new ForbiddenException();
     const ledger = this.ledgerStore.ledger;
     if (!ledger) throw unavailable();
@@ -107,20 +114,21 @@ export class ScansService {
       reject('UNSUPPORTED');
       throw new BadRequestException({ errorCode: 'UNSUPPORTED_SCAN' });
     }
-    if (request.checks.includes('vuln')) {
-      if (process.env.SCAN_VULN_ENABLED !== 'true') {
-        reject('UNSUPPORTED');
-        throw unavailable();
-      }
-    }
     let existing;
     try { existing = ledger.findByKey(identity.subject, request.idempotencyKey); }
     catch { throw unavailable(); }
     if (existing) {
       if (existing.fingerprint !== request.fingerprint) throw new ConflictException({ errorCode: 'IDEMPOTENCY_CONFLICT' });
-      return receipt(existing.scanId);
+      return guard(() => receipt(existing.scanId));
     }
+    // Disabling new CVE work must not hide a previously committed matching receipt.
+    if (request.checks.includes('vuln') && process.env.SCAN_VULN_ENABLED !== 'true') {
+      reject('UNSUPPORTED');
+      throw unavailable();
+    }
+    let releasePermit: (() => void) | undefined;
     try {
+      releasePermit = this.acquireCreatePermit(identity.subject);
       ledger.checkAdmission(identity.subject);
       ledger.reserveAttempt(identity.subject);
       // Charge admission before hashing the operator's DB release (up to 2 GiB).
@@ -133,11 +141,11 @@ export class ScansService {
       if (!(await this.readiness())) { reject('EGRESS'); throw unavailable(); }
       // Hashing/readiness/resolution may cross the deadline: use only this request's authenticated identity.
             if (request.checks.includes('vuln') && !dbStillUsable(db)) { reject('UNSUPPORTED'); throw unavailable(); }
-            const { scanId } = ledger.enqueue({ subject: identity.subject, idempotencyKey: request.idempotencyKey,
+      const { scanId } = guard(() => ledger.enqueue({ subject: identity.subject, idempotencyKey: request.idempotencyKey,
         registry: pinned.registry, repository: pinned.repository, digest: pinned.digest, platform: pinned.platform,
         fingerprint: request.fingerprint, checks: JSON.stringify(request.checks), scope: request.scope,
         executionProfile: this.executionBinding(request.reference),
-                ...(request.checks.includes('vuln') ? { cvePolicy: CURRENT_DB_POLICY } : {}) });
+        ...(request.checks.includes('vuln') ? { cvePolicy: CURRENT_DB_POLICY } : {}) }));
       return receipt(scanId);
     } catch (error) {
       if (error instanceof IdempotencyConflict || error instanceof AdmissionLimited) {
@@ -146,7 +154,7 @@ export class ScansService {
         let replay;
         try { replay = ledger.findByKey(identity.subject, request.idempotencyKey); }
         catch { throw unavailable(); }
-        if (replay?.fingerprint === request.fingerprint) return receipt(replay.scanId);
+        if (replay?.fingerprint === request.fingerprint) return guard(() => receipt(replay.scanId));
         if (error instanceof AdmissionLimited && !replay) {
           reject('CAPACITY');
           throw new HttpException({ errorCode: 'SCAN_CAPACITY', retryAfterSeconds: 60 }, HttpStatus.TOO_MANY_REQUESTS);
@@ -156,8 +164,8 @@ export class ScansService {
       if (error instanceof ServiceUnavailableException || error instanceof HttpException) throw error;
       reject('EGRESS');
       // No registry response, raw SQLite diagnostic or signed redirect URL in HTTP.
-      throw unavailable();
-    }
+      throw unavailable(this.imageFailureDetailsEnabled() ? imageFailureDetail(error) : undefined);
+    } finally { releasePermit?.(); }
   }
 
   private readonly eligibilityRates = new Map<string, { until: number; count: number; active: number }>();
@@ -189,7 +197,8 @@ export class ScansService {
     const allowedReference = this.acceptsReferenceInput((body as Record<string, unknown>).imageReference, request.reference);
     const sets = allowedReference ? this.allowedCheckSets(request.reference) : [];
     const binding = allowedReference ? this.executionBinding(request.reference) : undefined;
-    const result = (eligible: boolean, reason: string) => ({ imageReference: request.reference.canonical, eligible,
+    const result = (eligible: boolean, reason: string, failureDetail?: ImageFailureDetail) => ({ imageReference: request.reference.canonical, eligible,
+          ...(failureDetail ? { failureDetail } : {}),
       eligibility: this.eligibilityProfile(request.reference),
       allowedCheckSets: sets, ...(binding ? { qualificationId: binding.qualificationId } : {}), reason });
     if (!allowedReference || !this.acceptsChecks(request.reference, request.checks)) return result(false, 'UNSUPPORTED_SCAN');
@@ -203,7 +212,7 @@ export class ScansService {
       if (!this.acceptsPinned(pinned) || !(await this.readiness())) return result(false, 'SCANNER_UNAVAILABLE');
       if (request.checks.includes('vuln') && !dbStillUsable(db)) return result(false, 'DB_UNAVAILABLE');
       return result(true, 'READY');
-    } catch { return result(false, 'SCANNER_UNAVAILABLE'); }
+    } catch (error) { return result(false, 'SCANNER_UNAVAILABLE', this.imageFailureDetailsEnabled() ? imageFailureDetail(error) : undefined); }
     finally { rate.active--; this.eligibilityActive--; }
   }
 
@@ -237,7 +246,7 @@ export class ScansService {
   status(identity: Identity, scanId: string) {
     if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException();
     const ledger = this.ledgerStore.ledger;
-    if (!ledger) throw new NotFoundException();
+    if (!ledger) throw unavailable();
     return ledger.readReportSnapshot(() => this.statusSnapshot(ledger, identity, scanId));
   }
 
@@ -258,7 +267,7 @@ export class ScansService {
         const result = archive[check as 'secret' | 'sbom' | 'vuln'];
         return [check, result ? { check, coverage: 'image', outcome: result.outcome,
           errorCode: result.outcome === 'failed' ? (result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED') : null,
-          ...(result.outcome !== 'checked' ? { reason: result.reason } : {}),
+          ...(result.outcome !== 'checked' ? { reason: result.reason } : {}), ...persistedFailureDetail(result),
           ...(check === 'secret' && archive.secret?.outcome === 'checked' ? { findingCount: archive.secret.findings.length } : {}),
           ...(check === 'sbom' && archive.sbom?.outcome === 'checked' ? { componentCount: archive.sbom.sbom.components.length } : {}),
           ...(check === 'vuln' && archive.vuln?.outcome === 'checked' ? { findingCount: archive.vuln.findings.length } : {}),
@@ -354,7 +363,7 @@ export class ScansService {
               platform: archive.receipt.platform, findings: result.findings, findingCount: result.findings.length,
               db: result.db, os: result.os, node: result.node, scannerVersion: archive.scannerVersion,
               checkedAt: new Date(archive.checkedAt).toISOString(), ...archivePolicyMetadata(archive) }
-          : { outcome: result.outcome, reason: result.reason, coverage: 'image', findings: [],
+          : { outcome: result.outcome, reason: result.reason, ...persistedFailureDetail(result), coverage: 'image', findings: [],
               ...(result.outcome === 'failed' ? { errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED' } : {}),
               ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db,
                 ...(result.dbPolicy ? { ...archivePolicyMetadata(archive), checkedAt: new Date(archive.checkedAt).toISOString() } : {}) } : {}) };
@@ -372,7 +381,7 @@ export class ScansService {
           ? { outcome: result.outcome, coverage: 'image', image: result.sbom.image, platform: result.sbom.platform,
               os: result.sbom.os, components: result.sbom.components, componentCount: result.sbom.components.length,
               scannerVersion: archive.scannerVersion, checkedAt: new Date(archive.checkedAt).toISOString() }
-          : { outcome: result.outcome, reason: result.reason, errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED',
+          : { outcome: result.outcome, reason: result.reason, ...persistedFailureDetail(result), errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED',
               coverage: 'image', components: [] };
         return { kind, report, snapshot: archiveSnapshot };
       }
@@ -386,7 +395,7 @@ export class ScansService {
         ? { findings: result.findings, coverage: { check: 'secret', outcome: result.outcome, coverage: 'image',
             findingCount: result.findings.length, errorCode: null, scannerVersion: archive.scannerVersion,
             checkedAt: new Date(archive.checkedAt).toISOString() } }
-        : { findings: [], coverage: { check: 'secret', outcome: result.outcome, coverage: 'image', reason: result.reason,
+        : { findings: [], coverage: { check: 'secret', outcome: result.outcome, coverage: 'image', reason: result.reason, ...persistedFailureDetail(result),
             findingCount: null, errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', scannerVersion: archive.scannerVersion } };
       return { kind, report, snapshot: archiveSnapshot };
     }
@@ -400,11 +409,12 @@ export class ScansService {
     if (cursor !== undefined && !/^(0|[1-9]\d{0,5})$/.test(cursor) ||
         limit !== undefined && !/^(?:[1-9]|[1-9]\d|100)$/.test(limit)) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
     const ledger = this.ledgerStore.ledger;
-    const archive = ledger?.archiveResult(scanId, identity.subject);
+    if (!ledger) throw unavailable();
+    const archive = ledger.archiveResult(scanId, identity.subject);
         if (archive?.secret) {
           const result = archive.secret;
           if (result.outcome !== 'checked') return { findings: [], nextCursor: null, coverage: {
-            check: 'secret', coverage: 'image', outcome: result.outcome, reason: result.reason, findingCount: null,
+            check: 'secret', coverage: 'image', outcome: result.outcome, reason: result.reason, ...persistedFailureDetail(result), findingCount: null,
             errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', scannerVersion: archive.scannerVersion } };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.findings.length);
           if (start > result.findings.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
@@ -427,7 +437,7 @@ export class ScansService {
     const archive = ledger.archiveResult(scanId, identity.subject);
         if (archive?.sbom) {
           const result = archive.sbom;
-          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason,
+          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason, ...persistedFailureDetail(result),
             errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED', coverage: 'image', components: [], nextCursor: null };
           const start = Number(cursor ?? 0), end = Math.min(start + Number(limit ?? 50), result.sbom.components.length);
           if (start > result.sbom.components.length) throw new BadRequestException({ errorCode: 'INVALID_PAGINATION' });
@@ -452,7 +462,7 @@ export class ScansService {
     const archive = ledger.archiveResult(scanId, identity.subject);
         if (archive?.vuln) {
           const result = archive.vuln;
-          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason,
+          if (result.outcome !== 'checked') return { outcome: result.outcome, reason: result.reason, ...persistedFailureDetail(result),
             ...(result.outcome === 'failed' ? { errorCode: result.reason === 'SCAN_TIMEOUT' ? 'SCAN_TIMEOUT' : 'SCAN_FAILED' } : {}),
             coverage: 'image', findings: [], nextCursor: null,
             ...(result.outcome === 'unsupported' ? { os: result.os, node: result.node, db: result.db, ...(result.dbPolicy ? { ...archivePolicyMetadata(archive), checkedAt: new Date(archive.checkedAt).toISOString() } : {}) } : {}) };
@@ -477,13 +487,15 @@ export class ScansService {
   private activeStreams = 0;
   private readonly streamsBySubject = new Map<string, number>();
 
-  events(identity: Identity, scanId: string, lastId: string | string[] | undefined, response: ServerResponse): void {
+  events(identity: Identity, scanId: string, lastId: string | string[] | undefined, response: ServerResponse,
+    guard: ScanSessionGuard = action => action()): void {
     if (!/^[a-f0-9-]{36}$/.test(scanId)) throw new NotFoundException();
     if (lastId !== undefined && (typeof lastId !== 'string' || !/^(0|[1-9]\d{0,15})$/.test(lastId) ||
         !Number.isSafeInteger(Number(lastId)))) throw new BadRequestException({ errorCode: 'INVALID_EVENT_ID' });
     const ledger = this.ledgerStore.ledger;
     if (!ledger) throw unavailable();
     let cursor = lastId === undefined ? 0 : Number(lastId);
+    guard(() => undefined);
     // Validate ownership and the cursor before writing any SSE headers. Raw SQLite errors
     // must never escape as HTTP diagnostics, including from later polling callbacks.
     try {
@@ -518,13 +530,15 @@ export class ScansService {
       if (closed || response.destroyed) { cleanup(); return false; }
       try {
         // Do not queue unbounded data for a slow reader. Reconnect will replay from ledger.
-        if (!response.write(chunk)) { end(); return false; }
+        if (!guard(() => response.write(chunk))) { end(); return false; }
         return true;
       } catch { end(); return false; }
     };
     const poll = () => {
       if (closed) return;
       try {
+        // Idle streams must close after revocation too, without waiting for a new event.
+        guard(() => undefined);
         const events = ledger.events(scanId, identity.subject, cursor);
         if (!events) { end(); return; } // deleted/pruned or no longer visible
         for (const event of events) {
@@ -550,8 +564,8 @@ export class ScansService {
     };
     response.on('close', cleanup);
     try {
-      response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store',
-        'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+      guard(() => response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store',
+        'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' }));
       if (!write('retry: 2000\n\n')) return;
       timer = setInterval(poll, 1000);
       deadline = setTimeout(end, 120_000);

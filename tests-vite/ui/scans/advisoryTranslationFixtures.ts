@@ -2,10 +2,24 @@ import { vi } from 'vitest';
 import type { VulnFinding, ScanStatus } from '@/shared/api/scans/scanTransport';
 import {
   translationContextSchema,
+  translationReadinessSchema,
   type TranslationContext,
+  type TranslationReadiness,
 } from '@/shared/api/scans/advisoryTranslationContract';
 import { binding, json } from './llmChatFixtures';
-import { publicPolicy, readinessWire } from './publicLlmFixtures';
+import { publicPolicy, readinessModule } from './publicLlmFixtures';
+
+export function translationReadinessWire(
+  credential: 'unconfigured' | 'missing' | 'unsafe' | 'metadata-valid' = 'metadata-valid',
+  quota = true,
+  quotaCompatible = true,
+  policy: typeof publicPolicy | null = publicPolicy,
+): TranslationReadiness {
+  return translationReadinessSchema.parse({
+    ...binding,
+    ...readinessModule.translationReadiness(policy, credential, quota, quotaCompatible),
+  });
+}
 
 // Use the backend's actual non-secret contract producers, never its runtime or provider.
 export const backendTranslation = await import(
@@ -89,7 +103,7 @@ export function replyFor(context = contextFor()) {
 export function translationApi(value = finding, index = 0) {
   const api = {
     context: contextFor(value, index),
-    ready: readinessWire(),
+    ready: translationReadinessWire(),
     requests: [] as Array<{ path: string; init: RequestInit }>,
     post: async (): Promise<Response> => json(replyFor(api.context)),
     fetcher: vi.fn<typeof fetch>(),
@@ -97,7 +111,11 @@ export function translationApi(value = finding, index = 0) {
   api.fetcher.mockImplementation(async (input, init) => {
     const path = String(input);
     api.requests.push({ path, init: init ?? {} });
-    if (path.endsWith('/readiness')) return json(api.ready);
+    if (
+      path === `/api/v1/browser/scans/${api.context.scanId}/llm/translation/readiness` &&
+      init?.method === 'GET'
+    )
+      return json(api.ready);
     if (path.includes('/translation/context?')) return json(api.context);
     if (path.endsWith('/translation') && init?.method === 'POST') return api.post();
     throw new Error('Unexpected translation route');

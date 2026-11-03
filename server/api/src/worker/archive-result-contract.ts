@@ -1,5 +1,5 @@
 import { plainObject, validateAdvisoryBudget } from './vuln-advisory.js';
-import { PUBLIC_IMAGE_LIMITS, isPublicReceipt } from '../oci/public-image-policy.js';
+import { PUBLIC_IMAGE_RESOURCE_POLICY, publicReceiptLimits, isPublicReceipt } from '../oci/public-image-policy.js';
 import { PUBLIC_ECOSYSTEMS, publicOs, publicPackageName, publicPackageVersion, publicVulnerabilityId, type PackageEcosystem } from './public-image-evidence.js';
 import { PUBLIC_VULN_SOURCES } from './vuln-findings.js';
 import { NGINX_ARCHIVE_TARGET } from '../oci/bounded-image-archive.js';
@@ -8,6 +8,7 @@ import { ARCHIVE_LIMITS as L } from '../oci/layer-tar-validator.js';
 import { assertDbFreshness } from './vuln-db-bundle.js';
 import { CURRENT_DB_POLICY, LEGACY_DB_POLICY, validateDbPolicyReceipt, type CveDbPolicy } from './cve-db-policy.mjs';
 import type { ArchiveScanReport } from './archive-scan-worker.js';
+import { isImageFailureDetail } from '../oci/image-failure.js';
 const object = (value: unknown): value is Record<string, unknown> => plainObject(value);
 const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => object(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const invalid = (): never => { throw new TypeError('Invalid archive result'); };
@@ -77,7 +78,7 @@ export function validateArchiveReport(report: ArchiveScanReport, requested: stri
         'profileVersion', 'resourcePolicyVersion', 'checksVersion']) ||
       !validArchiveBinding({ receipt: report.receipt, archivePath: '/tmp/trivy/jobs/00000000-0000-0000-0000-000000000000/image.tar' })) invalid();
   const publicImage = isPublicReceipt(report.receipt);
-  const limits = publicImage ? PUBLIC_IMAGE_LIMITS : L;
+  const limits = publicReceiptLimits(report.receipt) ?? L;
   const bounds = { wireBytes: limits.wireBytes, requests: limits.requests, compressedBytes: limits.compressedTotal,
     expandedBytes: limits.expandedTotal, entries: limits.entries, archiveBytes: limits.archiveBytes, reservationPeak: limits.scratchBytes, scratchPeak: limits.scratchBytes };
   if (!exact(report.metrics, Object.keys(bounds)) || Object.entries(bounds).some(([key, max]) => {
@@ -88,7 +89,11 @@ export function validateArchiveReport(report: ArchiveScanReport, requested: stri
     if (!object(candidate)) return invalid();
     const item = candidate;
     if (item.outcome === 'failed') {
-      if (!exact(item, ['outcome', 'reason']) || !['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE'].includes(item.reason as string)) invalid();
+      const detailed = Object.hasOwn(item, 'failureDetail');
+            if (!exact(item, ['outcome', 'reason', ...(detailed ? ['failureDetail'] : [])]) ||
+                !['SCAN_FAILED', 'SCAN_TIMEOUT', 'DB_UNAVAILABLE'].includes(item.reason as string) ||
+                detailed && (!publicImage || report.receipt.resourcePolicyVersion !== PUBLIC_IMAGE_RESOURCE_POLICY ||
+                  !isImageFailureDetail(item.failureDetail))) invalid();
     } else if (check === 'vuln' && item.outcome === 'unsupported') {
       if (!exact(item, ['outcome', 'reason', 'db', 'os', 'node', ...(policy === CURRENT_DB_POLICY ? ['dbPolicy'] : [])]) || !['OS_EOL', 'OS_UNKNOWN'].includes(item.reason as string) ||
           !exact(item.os, ['outcome', 'reason']) || item.os.outcome !== 'unsupported' || item.os.reason !== item.reason ||

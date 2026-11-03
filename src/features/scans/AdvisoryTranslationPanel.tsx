@@ -34,12 +34,14 @@ import {
   matchesTranslationFields,
   matchesTranslationSource,
   translationContextFence,
+  translationReadinessSchema,
   translationSourceVersion,
   type AdvisoryAssessment,
   type TranslationContext,
   type TranslationReply,
+  type TranslationReadiness,
 } from '@/shared/api/scans/advisoryTranslationContract';
-import { sameChatBinding, type ChatReadiness } from '@/shared/api/scans/llmChatContract';
+import { sameChatBinding } from '@/shared/api/scans/llmChatContract';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
 
 const ReportScope = createContext<ScanStatus | null>(null);
@@ -59,7 +61,10 @@ type Props = {
   assessment: AdvisoryAssessment;
   client?: AdvisoryTranslationClient;
 };
-type Snapshot = { context: TranslationContext; readiness: Extract<ChatReadiness, { setupAction: 'operator-public-file-configuration' }> };
+type Snapshot = {
+  context: TranslationContext;
+  readiness: TranslationReadiness;
+};
 const sessionKey = () => JSON.stringify(scanSession());
 const blockerMessages = {
   'configuration-required': 'Оператор должен настроить политику ИИ.',
@@ -68,6 +73,8 @@ const blockerMessages = {
   'quota-store-unavailable': 'Хранилище квоты недоступно.',
   'history-store-unavailable': 'Хранилище истории недоступно.',
   'provider-profile-unavailable': 'Проверенный профиль провайдера недоступен.',
+  'quota-policy-incompatible':
+    'Текущая денежная политика несовместима с бесплатным OpenRouter-переводом. Обратитесь к оператору; оригинал доступен.',
 };
 export function AdvisoryTranslationPanel(props: Props) {
   const status = useContext(ReportScope);
@@ -126,12 +133,13 @@ function TranslationScope({
       const key = JSON.stringify(['translation-metadata', status, selection, vulnerabilityId, assessment]);
       return runReportMetadata(key, signal, (sharedSignal) => readSnapshot(sharedSignal));
     }
-    const [context, readiness, sourceVersion] = await Promise.all([
+    const [context, rawReadiness, sourceVersion] = await Promise.all([
       client.context(status.scanId, selection, signal),
       client.readiness(status.scanId, signal),
       translationSourceVersion(vulnerabilityId, assessment),
     ]);
-    if (readiness.setupAction !== 'operator-public-file-configuration') throw new TranslationError('INVALID');
+    // Validate injected clients too: neither OpenAI nor legacy summary readiness grants translation.
+    const readiness = translationReadinessSchema.parse(rawReadiness);
     if (
       context.scanId !== status.scanId ||
       context.findingId !== findingId ||
@@ -174,10 +182,13 @@ function TranslationScope({
     request.current = controller;
     const live = () => generation.current === version && !controller.signal.aborted && current();
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, 45_000);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        controller.abort();
+      },
+      action === 'translate' ? 120_000 : 45_000,
+    );
     const stopped = new Promise<never>((_, reject) =>
       controller.signal.addEventListener(
         'abort',
@@ -352,7 +363,7 @@ function TranslationScope({
           <p>
             {context.disclosure.retention === 'no-storage'
               ? 'Без хранения и обучения'
-              : 'Без обучения; отсутствие хранения не заявлено'}{' '}
+              : 'Без обучения (no-training); отсутствие хранения не заявлено, это не ZDR; запросы могут сохраняться'}{' '}
             — декларация провайдера, не доказательство соблюдения.
           </p>
           <p>

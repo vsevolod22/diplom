@@ -18,7 +18,8 @@ export function reportPreferencesCurrent(accepted: ReportPreferences, kind?: 'su
   );
 }
 
-const SUMMARY_DATA = 'Sanitized scanner findings and coverage; no raw evidence or credentials.';
+const SUMMARY_DATA =
+  'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.';
 const TRANSLATION_DATA =
   'Only the selected normalized advisory title and description eligible for translation; no other report metadata, package data, history, raw evidence or credentials. Identifiers within the selected text remain unchanged.';
 
@@ -75,12 +76,12 @@ export function allowAutomationDisclosure(value: unknown, kind: 'summary' | 'tra
   const p = price as Record<string, unknown>;
   return (
     v.provider === 'OpenRouter' &&
-    v.model === 'xingchen-agi/xing4.0-29b-a4b:free' &&
+    v.model === 'dots-studio/dots-3-note-preview:free' &&
     Array.isArray(v.providers) &&
     v.providers.length === 1 &&
-    v.providers[0] === 'phala' &&
+    v.providers[0] === 'atlas-cloud/fp8' &&
     v.region === 'global' &&
-    v.retention === 'no-storage' &&
+    v.retention === 'no-training' &&
     v.freeOnly === true &&
     v.requestBudgetUsd === 0 &&
     v.operatorApprovedRouting === true &&

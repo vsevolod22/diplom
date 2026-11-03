@@ -7,6 +7,7 @@ export const translationBodyParsed = (request: object) => parsed.has(request);
 const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 const mutation = new RegExp(`^/api/v1/browser/scans/${uuid}/llm/translation$`);
 const context = new RegExp(`^/api/v1/browser/scans/${uuid}/llm/translation/context\\?[^#]+$`);
+const readiness = new RegExp(`^/api/v1/browser/scans/${uuid}/llm/translation/readiness$`);
 const candidate = /^\/api\/v1\/browser\/scans\/[^/?]+\/llm\/translation(?:[/?]|$)/i;
 
 // Public composition only; run before Nest's body parser, never a generic LLM proxy.
@@ -20,7 +21,7 @@ export function registerTranslationIngress(app: INestApplication): void {
       res.end(JSON.stringify({ errorCode: 'LLM_INVALID_REQUEST' })); req.resume();
     };
     if (req.headers['transfer-encoding'] || req.headers['content-encoding'] || req.headers.expect) { refuse(400); return; }
-    if (req.method === 'GET' && context.test(path)) {
+    if (req.method === 'GET' && (context.test(path) || readiness.test(path))) {
       if (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0') { refuse(400); return; }
       next(); return;
     }

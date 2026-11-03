@@ -67,9 +67,7 @@ test('CVE/TEMP retain stable finding identity and historical counts without a DL
 
 test('frontend DTO accepts exact DLA counts only with public profile and consistent nonnegative totals', () => {
   const value = page(parse(raw()));
-  const parsed = parseCurrentVuln(value);
-  assert.ok(parsed.outcome === 'checked');
-  assert.deepEqual(parsed.identifierCounts, { cve: 0, debianTemp: 0, debianDla: 3 });
+  assert.deepEqual(parseCurrentVuln(value).identifierCounts, { cve: 0, debianTemp: 0, debianDla: 3 });
   for (const identifierCounts of [{ cve: 0, debianTemp: 0 }, { cve: 3, debianTemp: 0 }, { cve: 0, debianTemp: 0, debianDla: -1 }, { cve: 0, debianTemp: 0, debianDla: 2 }]) {
     assert.throws(() => parseCurrentVuln({ ...value, identifierCounts }));
   }

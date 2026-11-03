@@ -11,9 +11,11 @@ import {
   type Turn,
 } from './history-contract.js';
 import { safeHistoryFinding } from './history-sources.js';
+import { chatSourcesWithinBudget } from './chat-source-budget.js';
 import { exact } from './response.js';
 import { safeProviderFailure, type ProviderFailureResponse } from './openrouter-provider.js';
 import { diagnosticHeaders } from './provider-diagnostic.js';
+import { CEILINGS, PUBLIC_FREE_OUTPUT_TOKENS } from './policy.js';
 
 export const DELIVERY = Object.freeze({
   lineBytes: 8192,
@@ -22,12 +24,10 @@ export const DELIVERY = Object.freeze({
   deltaBytes: 1024,
   timeoutMs: 5000,
 });
-export type ChatReceipt = {
-  input: number;
-  output: number;
-  costMicros: number;
-  source: 'server-validated-provider-reported-not-invoice';
-};
+import { validChatReceipt, type ChatReceipt as BrowserChatReceipt } from './provider-browser-contract.js';
+// Encoder input retains the legacy numeric field so malformed receipts are
+// rejected at runtime too. The validated browser contract is the strict union.
+export type ChatReceipt = Omit<BrowserChatReceipt, 'costMicros'> & { costMicros: number };
 type Binding = ReportBinding & { epoch: string; revision: number; mutationId: string; turnId: string };
 // Constructed after an exact admitted attempt's durable terminal history transition; usage requires its successful observation.
 export type ChatDelivery = Binding &
@@ -37,7 +37,7 @@ export type ChatDelivery = Binding &
     | { outcome: 'failed'; receipt: 'unavailable'; failure?: ProviderFailureResponse }
     | { outcome: 'duplicate'; state: Turn['state'] }
   );
-export type DeliveryResult = { delivery: ChatDelivery; write(action: () => void): void; release(): void };
+export type DeliveryResult = { delivery: ChatDelivery; outputTokens?: number; write(action: () => void): void; release(): void };
 const unavailable = () => new ServiceUnavailableException({ errorCode: 'LLM_UNAVAILABLE' });
 const count = (value: number) => Number.isSafeInteger(value) && value >= 0;
 const same = (a: ReportBinding, b: ReportBinding) =>
@@ -50,7 +50,9 @@ export function chatRepresentation(accept: string | undefined): 'json' | 'ndjson
   if (accept === undefined || accept === '*/*' || accept === 'application/json') return 'json';
   throw new NotAcceptableException({ errorCode: 'LLM_INVALID_REQUEST' });
 }
-export function encodeDelivery(value: ChatDelivery) {
+export function encodeDelivery(value: ChatDelivery, outputTokens: number = CEILINGS.outputTokens) {
+  // Server-local policy metadata, never a client field or part of the wire.
+  if (!Number.isSafeInteger(outputTokens) || outputTokens < 1 || outputTokens > PUBLIC_FREE_OUTPUT_TOKENS) throw unavailable();
   if (
     !isId(value.scanId) ||
     !isId(value.epoch) ||
@@ -112,12 +114,7 @@ export function encodeDelivery(value: ChatDelivery) {
   } else {
     const { usage } = value;
     if (
-      !exact(usage, ['input', 'output', 'costMicros', 'source']) ||
-      !count(usage.input) ||
-      !count(usage.output) ||
-      usage.output > 2048 ||
-      usage.costMicros !== 0 ||
-      usage.source !== 'server-validated-provider-reported-not-invoice'
+      !validChatReceipt(usage, outputTokens)
     )
       throw unavailable();
     if (value.outcome === 'failed') {
@@ -147,7 +144,7 @@ export function encodeDelivery(value: ChatDelivery) {
         !same(reply, value) ||
         !Array.isArray(reply.sources) ||
         !reply.sources.length ||
-        reply.sources.length > HISTORY.citations ||
+        !chatSourcesWithinBudget(reply.sources) ||
         new Set(reply.sources.map((s) => s.finding.findingId)).size !== reply.sources.length ||
         reply.sources.some(
           (s) =>
@@ -238,7 +235,7 @@ export async function writeDelivery(result: DeliveryResult, response: ServerResp
     }
   };
   try {
-    plan = encodeDelivery(result.delivery);
+    plan = encodeDelivery(result.delivery, result.outputTokens);
     live();
     timer = setTimeout(abort, Math.max(1, deadline - Date.now()));
     result.write(() => {

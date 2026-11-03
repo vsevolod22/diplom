@@ -1,7 +1,11 @@
 // PREPARED ONLY: no browser/runtime/provider contact without coordinator READYGO.
 // Offline: node --test tests-e2e/public-automation-live.test.mjs
+// Isolated (READYGO only): --run --chat-translation-only --ack-coordinator-readygo --ack-three-generation-posts --ack-source-deployed --attempt-id NEW_UUID
+// Translation only: --run --translation-only --ack-coordinator-readygo --ack-one-generation-post --ack-source-deployed --attempt-id NEW_UUID
+// Fresh account + one fresh completed native scan; isolated summary POST forbidden, never resume an old attempt.
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { lstat, open, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -14,13 +18,14 @@ import {
   trackBrowserReadPage, readBrowserJson, settleAuthNavigation, runtimeProbeRead, assertRuntimeOffReply, BrowserReadError,
 } from './public-product-live.mjs';
 import {
-  GLOBAL_MS, MODEL, ENDPOINT, GuardLedger, guardAbortReason, projectMeta, diagnosticFromHeaders,
+  GLOBAL_MS, MODEL, ENDPOINT, GuardLedger, guardAbortReason, projectMeta, diagnosticFromHeaders as baseDiagnosticFromHeaders,
   llmFailureMeta, assertLlmSuccess, assertFixedPolicy, assertReady, chatBodyMatches, translationBody,
   eligibleAssessment, renderedReplyMatches, historyMetadata, loadTranslationContracts,
   settleAcceptedScan, completeFreshOwnerLogin, Fault as BaseFault,
 } from './public-ai-translation-live.mjs';
 
 export { GLOBAL_MS, WORKER_MS };
+export const AUTOMATION_REVISION = 'report-automation-v4-remediation';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
@@ -44,12 +49,97 @@ const CODES = new Set(['NOT_RUN', 'VERIFIED', 'INVALID_ARGUMENTS', 'EVIDENCE_ALR
 export const FAILURE_PREDICATES = Object.freeze(['vuln-http-status', 'vuln-decode', 'vuln-target-image', 'vuln-target-platform',
   'vuln-profile', 'vuln-outcome', 'vuln-scanner-version', 'vuln-checked-at', 'vuln-identifiers',
   'secret-http-status', 'secret-decode', 'secret-outcome', 'secret-count', 'secret-scanner-version', 'secret-checked-at',
-  'secret-decoded-coverage', 'report-partition']);
-export const SUMMARY_DRAIN_MS = 45_000;
+  'secret-decoded-coverage', 'report-partition', 'generation-body-read', 'generation-body-limit', 'generation-utf8', 'generation-json', 'generation-frames']);
+// Metadata remains short and read-only. A generation observation must outlive
+// the 90s API operation (+5s metadata allowance) and the 120s browser client.
+export const METADATA_MS = 45_000;
+export const GENERATION_MS = 135_000;
+export const SUMMARY_DRAIN_MS = GENERATION_MS;
+export const SUMMARY_CASES = Object.freeze(['tooling', 'owner_registration', 'preferences_original', 'native_scan',
+  'report', 'summary_initial_missing', 'summary', 'summary_reload_no_post', 'summary_reload_restore', 'preservation', 'safety']);
+export const TRANSLATION_CASES = Object.freeze(CASES.filter(name => ['tooling', 'owner_registration', 'preferences_original', 'native_scan', 'estimate', 'coverage_click', 'report', 'preferences_ru', 'translation', 'translation_toggle', 'anonymous_denial', 'settings_owner_isolation', 'preservation', 'safety'].includes(name)));
+export const CHAT_TRANSLATION_CASES = Object.freeze(CASES.filter(name => ![
+  'summary_initial_missing', 'summary', 'summary_reload_no_post', 'summary_reload_restore', 'summary_fresh_login_restore',
+].includes(name)));
+export async function loadCoverageLabels() {
+  const require = createRequire(join(ROOT, 'server/api/package.json'));
+  const manifest = require('tsx/package.json');
+  const { tsImport } = await import(pathToFileURL(join(dirname(require.resolve('tsx/package.json')), manifest.exports['./esm/api'].import.default)).href);
+  const { scanCheckLabels } = await tsImport(join(ROOT, 'src/features/scans/scanProgressPresentation.ts'), { parentURL: import.meta.url, tsconfig: false });
+  assert.ok(exact(scanCheckLabels, CHECKS) && CHECKS.every(check => typeof scanCheckLabels[check] === 'string' && scanCheckLabels[check].length > 0));
+  return Object.freeze({ ...scanCheckLabels });
+}
+export function coverageTile(outcomes, page, labels, check) {
+  assert.ok(CHECKS.includes(check) && exact(labels, CHECKS));
+  return outcomes.locator(':scope > li').filter({ has: page.getByText(labels[check], { exact: true }) });
+}
+export const COVERAGE_WARNING = '«Выполнено» означает завершение проверки, а не гарантию безопасности. Пропущенные проверки не означают отсутствие проблем.';
+export async function assertCoverageWarning(region, expect) {
+  await expect(region.getByText(COVERAGE_WARNING, { exact: true })).toBeVisible();
+}
+export const GROUNDING_PREDICATES = Object.freeze(['cvss_version', 'package_label', 'version_label', 'update_target', 'score_parentheses', 'score_value', 'score_boundary', 'unmasked_tilde', 'unmasked_dotted_number', 'advisory_identifier']);
+export const GROUNDING_SOURCE_RELATIONS = Object.freeze(['cited_value_match', 'no_cited_value_match', 'indeterminate']);
+export const GROUNDING_LEXICAL_CLASSES = Object.freeze(['unsigned_decimal', 'signed_decimal', 'dotted_numeric', 'ascii_identity', 'tilde', 'indeterminate']);
+export const GROUNDING_BOUNDARY_CLASSES = Object.freeze(['end', 'whitespace', 'sentence_punctuation', 'typography', 'identity_continuation', 'other', 'indeterminate']);
+export const LANGUAGE_REASONS = Object.freeze(['insufficient_russian', 'residual_latin', 'residual_other_script', 'mixed']);
+export const LANGUAGE_TOKEN_CLASSES = Object.freeze(['cited_identity', 'cited_ecosystem', 'conventional_report_term', 'unknown', 'indeterminate']);
+function finiteLanguage(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 3 || !['reason', 'index', 'tokenClass'].every(key => keys.includes(key))) return undefined;
+  const reason = Object.getOwnPropertyDescriptor(value, 'reason')?.value;
+  const index = Object.getOwnPropertyDescriptor(value, 'index')?.value;
+  const tokenClass = Object.getOwnPropertyDescriptor(value, 'tokenClass')?.value;
+  return LANGUAGE_REASONS.includes(reason) && Number.isInteger(index) && index >= 0 && index <= 11 && LANGUAGE_TOKEN_CLASSES.includes(tokenClass)
+    ? { reason, index, tokenClass } : undefined;
+}
+function finiteWitness(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 3 || !['sourceRelation', 'lexicalClass', 'boundaryClass'].every(key => keys.includes(key))) return undefined;
+  const sourceRelation = Object.getOwnPropertyDescriptor(value, 'sourceRelation')?.value;
+  const lexicalClass = Object.getOwnPropertyDescriptor(value, 'lexicalClass')?.value;
+  const boundaryClass = Object.getOwnPropertyDescriptor(value, 'boundaryClass')?.value;
+  return GROUNDING_SOURCE_RELATIONS.includes(sourceRelation) && GROUNDING_LEXICAL_CLASSES.includes(lexicalClass) && GROUNDING_BOUNDARY_CLASSES.includes(boundaryClass)
+    ? { sourceRelation, lexicalClass, boundaryClass } : undefined;
+}
+export function diagnosticFromHeaders(headers) {
+  const base = baseDiagnosticFromHeaders(headers);
+  if (!base) return undefined;
+  const get = name => typeof headers?.get === 'function' ? headers.get(name) :
+    Object.hasOwn(headers ?? {}, name.toLowerCase()) ? headers[name.toLowerCase()] :
+      Object.hasOwn(headers ?? {}, name) ? headers[name] : undefined;
+  if (base.phase === 'language' && base.reason === 'not_russian') {
+      const index = get('X-LLM-Language-Index');
+      const language = typeof index === 'string' && /^(?:[0-9]|1[01])$/.test(index) ? finiteLanguage({
+        reason: get('X-LLM-Language-Reason'), index: Number(index), tokenClass: get('X-LLM-Language-Token-Class'),
+      }) : undefined;
+      return { ...base, ...(language ? { languageRejection: language } : {}) };
+    }
+    const predicate = get('X-LLM-Grounding-Predicate'), index = get('X-LLM-Grounding-Index');
+  if (base.phase !== 'grounding' || base.reason !== 'unknown_identifier' ||
+    !GROUNDING_PREDICATES.includes(predicate) || typeof index !== 'string' || !/^(?:[0-9]|1[01])$/.test(index)) return base;
+  const witness = finiteWitness({ sourceRelation: get('X-LLM-Grounding-Source-Relation'),
+    lexicalClass: get('X-LLM-Grounding-Lexical-Class'), boundaryClass: get('X-LLM-Grounding-Boundary-Class') });
+  return { ...base, groundingPredicate: predicate, groundingIndex: Number(index), ...(witness ? { groundingWitness: witness } : {}) };
+}
 export function automationMeta(input = {}) {
-  const out = projectMeta(input);
-  if (!Number.isInteger(out.runnerLine) || out.runnerLine < 1 || out.runnerLine > 100_000) delete out.runnerLine;
+  const diagnostic = input.providerDiagnostic;
+  const out = projectMeta({ ...input, providerDiagnostic: diagnostic ? { phase: diagnostic.phase, reason: diagnostic.reason } : undefined });
+  if (out.providerDiagnostic?.phase === 'grounding' && out.providerDiagnostic?.reason === 'unknown_identifier' &&
+    GROUNDING_PREDICATES.includes(diagnostic?.groundingPredicate) && Number.isInteger(diagnostic?.groundingIndex) && diagnostic.groundingIndex >= 0 && diagnostic.groundingIndex <= 11) {
+        const witness = finiteWitness(diagnostic.groundingWitness);
+        out.providerDiagnostic = { ...out.providerDiagnostic, groundingPredicate: diagnostic.groundingPredicate, groundingIndex: diagnostic.groundingIndex,
+          ...(witness ? { groundingWitness: witness } : {}) };
+      }
+  if (out.providerDiagnostic?.phase === 'language' && out.providerDiagnostic?.reason === 'not_russian') {
+      const language = finiteLanguage(diagnostic?.languageRejection);
+      if (language) out.providerDiagnostic = { ...out.providerDiagnostic, languageRejection: language };
+    }
+    if (!Number.isInteger(out.runnerLine) || out.runnerLine < 1 || out.runnerLine > 100_000) delete out.runnerLine;
   if (FAILURE_PREDICATES.includes(input.predicate)) out.predicate = input.predicate;
+  for (const key of ['findingCount', 'selectedFindings', 'omittedFindings'])
+    if (Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 10_000_000) out[key] = input[key];
   return out;
 }
 export function failureMetadata(error) {
@@ -127,6 +217,15 @@ export function parseMode(args) {
   if (args.length === 6 && isDeepStrictEqual(args.slice(0, 4),
     ['--run', '--ack-coordinator-readygo', '--ack-four-generation-posts', '--ack-source-deployed']) &&
     args[4] === '--attempt-id' && UUID.test(args[5])) return 'live';
+  if (args.length === 7 && isDeepStrictEqual(args.slice(0, 5),
+    ['--run', '--summary-only', '--ack-coordinator-readygo', '--ack-one-generation-post', '--ack-source-deployed']) &&
+    args[5] === '--attempt-id' && UUID.test(args[6])) return 'summary-only';
+  if (args.length === 7 && isDeepStrictEqual(args.slice(0, 5),
+    ['--run', '--chat-translation-only', '--ack-coordinator-readygo', '--ack-three-generation-posts', '--ack-source-deployed']) &&
+    args[5] === '--attempt-id' && UUID.test(args[6])) return 'chat-translation-only';
+  if (args.length === 7 && isDeepStrictEqual(args.slice(0, 5),
+    ['--run', '--translation-only', '--ack-coordinator-readygo', '--ack-one-generation-post', '--ack-source-deployed']) &&
+    args[5] === '--attempt-id' && UUID.test(args[6])) return 'translation-only';
   throw new Fault('INVALID_ARGUMENTS');
 }
 export function assertFreshAttempt(id, filenames) {
@@ -154,10 +253,12 @@ export function generationMetadata(gate) {
   return out;
 }
 export class ResultBook {
-  constructor(id) {
+  constructor(id, mode = 'full') {
+    assert.ok(['full', 'summary-only', 'chat-translation-only', 'translation-only'].includes(mode));
+    this.mode = mode; this.requiredCases = mode === 'translation-only' ? TRANSLATION_CASES : mode === 'summary-only' ? SUMMARY_CASES : mode === 'chat-translation-only' ? CHAT_TRANSLATION_CASES : CASES;
     evidencePaths(id); this.id = id; this.runId = randomUUID(); this.actual = false;
     this.startedAt = new Date().toISOString(); this.finishedAt = null; this.guard = new GuardLedger(); this.passiveSummaryReads = 0;
-    this.cases = Object.fromEntries(CASES.map(name => [name, { status: 'BLOCKED', code: 'NOT_RUN' }]));
+    this.cases = Object.fromEntries(CASES.map(name => [name, { status: !this.requiredCases.includes(name) ? 'NOT_RUN' : 'BLOCKED', code: 'NOT_RUN' }]));
   }
   record(name, status, code = 'VERIFIED', meta = {}) {
     assert.ok(CASES.includes(name) && ['PASS', 'FAIL', 'BLOCKED'].includes(status) && CODES.has(code));
@@ -173,17 +274,19 @@ export class ResultBook {
     return { schemaVersion: 1, scope: 'native-public8081-report-automation', attemptId: this.id,
       runId: this.runId, origin: ORIGIN, actuallyRun: this.actual, startedAt: this.startedAt, finishedAt: this.finishedAt,
       ...(this.scanReceipt ? { scanReceipt: projectMeta(this.scanReceipt) } : {}), guard: this.guard.evidence(),
-      maxAccounts: 1, maxScans: 1, maxGenerationPosts: 4, requiredChecks: [...CHECKS],
-            generationAdmissions: generationMetadata(this.generation), requiredCases: [...CASES],
+      mode: this.mode, maxAccounts: 1, maxScans: 1, maxGenerationPosts: ['summary-only', 'translation-only'].includes(this.mode) ? 1 : this.mode === 'chat-translation-only' ? 3 : 4, requiredChecks: [...CHECKS],
+      generationWaitMs: GENERATION_MS, metadataWaitMs: METADATA_MS,
+      generationAdmissions: generationMetadata(this.generation), requiredCases: [...this.requiredCases],
                   passiveSummaryReads: Number.isSafeInteger(this.passiveSummaryReads) && this.passiveSummaryReads >= 0 && this.passiveSummaryReads <= 1000 ? this.passiveSummaryReads : 0,
-                  summaryRetention: 'process-lifetime-not-durable',
+                  summaryRetention: 'durable-owner-scan',
                         admittedSummaryObservation: summaryObservationMeta(this.summaryObservation ?? {
                           admitted: this.generation?.counts?.summary === 1, capture: this.generation?.counts?.summary === 1 ? 'NOT_CAPTURED' : 'NOT_ADMITTED' }),
-      policy: { model: MODEL, endpoint: ENDPOINT, freeOnly: true, noFallback: true },
+      policy: { model: MODEL, endpoint: ENDPOINT, retention: 'no-training', freeOnly: true, noFallback: true,
+              automationRevision: AUTOMATION_REVISION },
       serverEgressIndependentlyObserved: false, billingIndependentlyVerified: false,
       semanticAccuracy: 'unverified-requires-memory-only-human-review',
-      ownershipScope: 'fresh-owner-login-and-anonymous-denial-not-foreign-owner',
-      preferenceScope: 'same-owner-browser-local-and-empty-context-not-foreign-owner',
+      ownershipScope: this.mode === 'translation-only' ? 'fresh-owner-and-anonymous-denial-no-relogin-or-foreign-owner' : this.mode === 'summary-only' ? 'same-owner-reload-only-no-isolation-claim' : 'fresh-owner-login-and-anonymous-denial-not-foreign-owner',
+      preferenceScope: this.mode === 'translation-only' ? 'same-owner-browser-local-original-to-ru-auto-summary-off' : this.mode === 'summary-only' ? 'same-owner-browser-local-saved-original-auto-summary' : 'same-owner-browser-local-and-empty-context-not-foreign-owner',
       payloadArtifacts: false, credentialsPersisted: false, screenshots: false, har: false, storageState: false,
       createdRuntimeDataAutomaticallyDeleted: false,
       cases: Object.fromEntries(CASES.map(name => [name, { status: this.cases[name].status,
@@ -192,19 +295,23 @@ export class ResultBook {
 }
 export function exitCode(book) {
   return CASES.some(name => book.cases[name].status === 'FAIL') ? 1 :
-    CASES.every(name => book.cases[name].status === 'PASS') ? 0 : 2;
+    book.requiredCases.every(name => book.cases[name].status === 'PASS') ? 0 : 2;
 }
 export function evidenceDocuments(book) {
   const value = book.evidence();
   return [JSON.stringify(value, null, 2) + '\n', ['# Native public automation qualification — 2026-10-26', '',
     `Attempt: ${book.id}. Actually run: ${book.actual}. Origin: ${ORIGIN}.`,
-    'Maximum one disposable account, one native Node four-check scan, four generation POSTs. No retries/fallback.',
+    `Maximum one disposable account, one native Node four-check scan, ${value.maxGenerationPosts} generation POST(s). Mode: ${value.mode}. No retries/fallback.`,
+    ...(book.mode === 'summary-only' ? ['Chat and translation are NOT_RUN, not diagnosed as current root causes. Fresh login/isolation are not exercised.'] : []),
+    ...(book.mode === 'translation-only' ? ['Translation-only: summary/chat POSTs forbidden; both auto-summary and chat are not prerequisites. One fresh report, at most one translation POST, no retry. Summary/chat/history/relogin are NOT_RUN.'] : []),
+    ...(book.mode === 'chat-translation-only' ? ['Isolated chat/translation scope: summary POSTs are forbidden, auto-summary stays off; summary generation/restore cases are NOT_RUN, not accepted or diagnosed. Fresh account and native completed report are required; this is not resume of any previous attempt.'] : []),
     'Metadata only: no answers, selected source text, conversations, credentials, screenshots, HAR or storage state.',
     'Already-admitted summary transport may be observed during bounded cleanup; consumption remains UNKNOWN and this cannot qualify a failed/skipped case.',
     `Already-admitted summary capture: ${value.admittedSummaryObservation.capture}; consumption: UNKNOWN.`,
     'Russian/schema/citation checks do not establish semantic accuracy or translation fidelity. Review only in memory.',
     'No foreign-owner isolation claim: only one account is authorized. Summary reload/fresh-login restoration requires passive GET, never another POST.',
-    'Source changes and offline tests are not deployment or live acceptance; 412 remains the stand source until coordinator deployment.',
+        'Require the durable-owner-scan retention header. API restart/backup/restore durability is not exercised by this browser run.',
+    'Source changes and offline tests are not deployment or live acceptance. Only the coordinator may execute after confirming the actual source rollout.',
     '', '| Case | Result | Code |', '| --- | --- | --- |',
     ...CASES.map(name => `| ${name} | ${value.cases[name].status} | ${value.cases[name].code} |`), ''].join('\n')];
 }
@@ -221,10 +328,10 @@ export function summaryBody(context) {
 }
 export function automationDisclosureMatches(disclosure, kind) {
   if (!['summary', 'translation'].includes(kind)) return false;
-  const expected = { provider: 'OpenRouter', model: MODEL, providers: [ENDPOINT], region: 'global', retention: 'no-storage',
+  const expected = { provider: 'OpenRouter', model: MODEL, providers: [ENDPOINT], region: 'global', retention: 'no-training',
     operatorApprovedRouting: true, providerComplianceNotProvenByDeclaration: true, requestBudgetUsd: 0, freeOnly: true,
     maxPrice: { prompt: 0, completion: 0, request: 0 }, data: kind === 'summary'
-      ? 'Sanitized scanner findings and coverage; no raw evidence or credentials.'
+      ? 'Sanitized scanner findings, package names, installed and reported fixed versions, and coverage; no raw evidence or credentials.'
       : 'Only the selected normalized advisory title and description eligible for translation; no other report metadata, package data, history, raw evidence or credentials. Identifiers within the selected text remain unchanged.',
     ...(kind === 'translation' ? { targetLanguage: 'ru', machineTranslation: true, automaticDispatch: 'account-preference', persistentTranslationCache: false } : {}) };
   return isDeepStrictEqual(disclosure, expected);
@@ -242,7 +349,7 @@ export function passiveSummaryValue(result, context) {
   if (summaryMissing(result)) return null;
   if (result?.status !== 200) throw new Fault('SUMMARY_READ_FAILED', llmFailureMeta(result?.status, result?.value, 'http-error'));
   assertFixedPolicy(context);
-  if (headers['x-llm-summary-retention'] !== 'process-lifetime' || result.value?.errorCode || !automationDisclosureMatches(context.disclosure, 'summary'))
+  if (headers['x-llm-summary-retention'] !== 'durable-owner-scan' || result.value?.errorCode || !automationDisclosureMatches(context.disclosure, 'summary'))
     throw new Fault('SUMMARY_READ_FAILED', { httpStatus: result.status });
   for (const key of ['scanId', 'digest', 'platform', 'reportVersion'])
     if (result.value?.[key] !== context[key]) throw new Fault('CONTEXT_CHANGED');
@@ -261,10 +368,17 @@ export function generationKind(path, scanId, method = 'POST') {
     [`${SCANS}/${scanId}/llm/translation`]: 'translation' })[path];
 }
 export class GenerationGate {
-  constructor() { this.counts = { summary: 0, chat: 0, translation: 0 }; this.total = 0; this.busy = false; this.halted = false; this.chatSuccesses = 0; }
+  constructor(mode = 'full') {
+    assert.ok(['full', 'summary-only', 'chat-translation-only', 'translation-only'].includes(mode));
+    Object.defineProperty(this, 'mode', { value: mode, enumerable: true });
+    Object.defineProperty(this, 'maxPosts', { value: ['summary-only', 'translation-only'].includes(mode) ? 1 : mode === 'chat-translation-only' ? 3 : 4, enumerable: true });
+    this.counts = { summary: 0, chat: 0, translation: 0 }; this.total = 0; this.busy = false; this.halted = false; this.chatSuccesses = 0;
+  }
   admit({ owner, path, scanId, body, permit, context, completed, report, preferences, readiness, passiveSummary }) {
     const kind = generationKind(path, scanId);
-    if (!kind || !owner || this.halted || this.busy || this.total >= 4 || !permit || permit.used ||
+    if (!kind || this.mode === 'translation-only' && (kind !== 'translation' || preferences?.autoSummary !== false) || this.mode === 'summary-only' && kind !== 'summary' ||
+        this.mode === 'chat-translation-only' && (kind === 'summary' || this.counts.summary !== 0 || preferences?.autoSummary !== false ||
+          kind === 'translation' && this.chatSuccesses !== 2) || !owner || this.halted || this.busy || this.total >= this.maxPosts || !permit || permit.used ||
       permit.path !== path || permit.kind !== kind || !completed || !context || context.scanId !== scanId ||
             report?.scanId !== scanId || report.state !== 'completed' || !CHECKS.every(check => report.perCheck?.[check]?.outcome === 'checked') ||
             context.digest !== report.digest || context.platform !== report.platform || !/^[a-f0-9]{64}$/.test(context.reportVersion ?? '')) return false;
@@ -290,20 +404,31 @@ export class GenerationGate {
   }
   finish() { this.busy = false; }
 }
-export async function bounded(promise, ms = 45_000, code = 'DELIVERY_UNCONFIRMED_NO_RETRY') {
+export async function bounded(promise, ms = METADATA_MS, code = 'DELIVERY_UNCONFIRMED_NO_RETRY') {
   let timer;
   try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Fault(code)), ms); })]); }
   finally { clearTimeout(timer); }
 }
-export async function readGeneration(response, gate, chat, context) {
+export async function receiveGeneration(request, gate, chat, context, deadlineAt = Date.now() + GENERATION_MS) {
+  try {
+    const response = await bounded(request.response(), Math.max(0, deadlineAt - Date.now()));
+    return await readGeneration(response, gate, chat, context, deadlineAt);
+  } catch (error) { gate.halted = true; gate.finish(); throw error; }
+}
+export async function readGeneration(response, gate, chat, context, deadlineAt = Date.now() + GENERATION_MS) {
   if (!response) { gate.halted = true; throw new Fault('DELIVERY_UNCONFIRMED_NO_RETRY'); }
   const status = response.status(), headers = response.headers(); gate.observe(status);
+  gate.responseMeta = automationMeta({ httpStatus: status, providerDiagnostic: diagnosticFromHeaders(headers) });
+  let predicate = 'generation-body-read';
   try {
-    const bytes = await bounded(response.body()); assert.ok(bytes.length <= 4 * 1024 * 1024);
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    const bytes = await bounded(response.body(), Math.max(0, deadlineAt - Date.now()));
+    predicate = 'generation-body-limit'; assert.ok(bytes.length <= 4 * 1024 * 1024);
+    predicate = 'generation-utf8'; const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    predicate = 'generation-json';
     let value;
     const ndjson = /^application\/x-ndjson(?:;|$)/i.test(headers['content-type'] ?? '');
     if (status === 200 && ndjson) {
+      predicate = 'generation-frames';
       assert.ok(bytes.length <= chat.CHAT_DELIVERY.totalBytes && text.endsWith('\n'));
       const parser = chat.createChatFrameParser(context, response.request().postDataJSON().mutationId);
       for (const line of text.slice(0, -1).split('\n')) {
@@ -314,28 +439,132 @@ export async function readGeneration(response, gate, chat, context) {
     } else value = JSON.parse(text);
     gate.observe(status, value);
     if (status !== 200 || value?.errorCode) throw new Fault('LLM_HTTP_ERROR',
-      llmFailureMeta(status, value, ndjson ? 'ndjson-error' : 'http-error', diagnosticFromHeaders(headers)));
+      { ...llmFailureMeta(status, value, ndjson ? 'ndjson-error' : 'http-error', diagnosticFromHeaders(headers)), providerDiagnostic: diagnosticFromHeaders(headers) });
     return value;
-  } catch (error) { gate.halted = true; throw error; }
+  } catch (error) {
+    gate.halted = true;
+    throw new Fault(error instanceof BaseFault ? error.message : 'ASSERTION_FAILED',
+      { httpStatus: status, ...(!(error instanceof BaseFault) ? { predicate } : {}), ...automationMeta(error?.meta), providerDiagnostic: diagnosticFromHeaders(headers) },
+      !(error instanceof BaseFault) || error.failure);
+  }
   finally { gate.finish(); }
+}
+export function assertOneSummary(gate) {
+  assert.equal(gate.total, 1); assert.deepEqual(gate.counts, { summary: 1, chat: 0, translation: 0 });
+}
+export function assertSummaryQualification(reply, context, snapshot, evidenceChecks, validText) {
+  assertFixedPolicy(context); assert.ok(automationDisclosureMatches(context.disclosure, 'summary'));
+  for (const key of ['scanId', 'digest', 'platform', 'reportVersion']) assert.equal(reply?.[key], context[key]);
+  for (const key of ['scanId', 'digest', 'platform']) assert.equal(context[key], snapshot[key]);
+  const counts = Object.fromEntries(CHECKS.map(check => [check, check === 'sbom' ? 0 : snapshot.perCheck[check].findingCount]));
+  for (const count of Object.values(counts)) assert.ok(Number.isSafeInteger(count) && count >= 0);
+  assert.equal(context.findingCount, evidenceChecks.size);
+  assert.equal(Object.values(counts).reduce((sum, count) => sum + count, 0), evidenceChecks.size);
+  assert.deepEqual(context.findingCounts?.byCheck, counts);
+  assert.ok(exact(context.findingCounts?.bySeverity, ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']));
+  assert.ok(Object.values(context.findingCounts.bySeverity).every(count => Number.isSafeInteger(count) && count >= 0));
+  assert.equal(Object.values(context.findingCounts.bySeverity).reduce((sum, count) => sum + count, 0), context.findingCount);
+  assert.deepEqual(context.identifierCounts, snapshot.identifierCounts);
+  for (const key of ['findingCount', 'findingCounts', 'identifierCounts', 'coverage']) assert.deepEqual(reply[key], context[key]);
+  assert.ok(exact(context.coverage, CHECKS));
+  for (const check of CHECKS) {
+    const coverage = context.coverage[check], original = snapshot.perCheck[check];
+    assert.equal(coverage.outcome, 'checked'); assert.equal(original.outcome, 'checked');
+    for (const key of [check === 'sbom' ? 'componentCount' : 'findingCount', 'scannerVersion', 'checkedAt'])
+      assert.equal(coverage[key], original[key]);
+  }
+  const selection = reply.contextSelection;
+  assert.ok(exact(selection, ['totalFindings', 'selectedFindings', 'omittedFindings', 'strategy', 'selectedFindingIds']));
+  assert.equal(selection.strategy, 'all-critical-and-unknown-then-severity');
+  assert.equal(selection.totalFindings, context.findingCount);
+  assert.ok(Number.isSafeInteger(selection.selectedFindings) && selection.selectedFindings > 0 && selection.selectedFindings <= selection.totalFindings);
+  assert.equal(selection.omittedFindings, selection.totalFindings - selection.selectedFindings);
+  assert.ok(Array.isArray(selection.selectedFindingIds));
+  assert.equal(selection.selectedFindingIds.length, selection.selectedFindings);
+  const selected = new Set(selection.selectedFindingIds);
+  assert.equal(selected.size, selection.selectedFindings);
+  assert.ok([...selected].every(id => evidenceChecks.has(id)));
+  assert.ok(Array.isArray(reply.scannerFacts) && reply.scannerFacts.length <= 1000);
+  const facts = new Map(reply.scannerFacts.map(fact => [fact.findingId, fact.check]));
+  assert.equal(facts.size, reply.scannerFacts.length); assert.ok(facts.size > 0 && facts.size <= selected.size);
+  assert.ok([...facts].every(([id, check]) => selected.has(id) && evidenceChecks.get(id) === check));
+  assert.ok(Array.isArray(reply.hypotheses) && reply.hypotheses.length > 0 && reply.hypotheses.length <= 12);
+  for (const item of reply.hypotheses) {
+    assert.ok(exact(item, ['kind', 'text', 'citations'])); assert.equal(item.kind, 'hypothesis');
+    assert.ok(validText(item.text, 2000) && /[А-Яа-яЁё]{3}/u.test(item.text));
+    assert.ok(Array.isArray(item.citations) && item.citations.length > 0 && item.citations.length <= 20);
+    assert.equal(new Set(item.citations).size, item.citations.length);
+    assert.ok(item.citations.every(id => selected.has(id) && facts.get(id) === evidenceChecks.get(id)));
+  }
+  // The backend returns only cited facts, not every selected finding sent to the model.
+  const cited = new Set(reply.hypotheses.flatMap(item => item.citations));
+  assert.equal(cited.size, facts.size); assert.ok([...facts.keys()].every(id => cited.has(id)));
+}
+export function assertZeroSummaryUsage(usage, context) {
+  assert.ok(usage?.available === true && usage.integrationEnabled === true && usage.quotaEnabled === true);
+  for (const key of ['scanId', 'digest', 'platform', 'reportVersion']) assert.equal(usage[key], context[key]);
+  for (const scope of ['user', 'scan']) for (const vector of ['used', 'held', 'carried']) {
+    assert.ok(exact(usage[scope]?.[vector], ['input', 'output', 'costMicros']));
+    assert.ok(Object.values(usage[scope][vector]).every(value => Number.isSafeInteger(value) && value >= 0));
+    assert.equal(usage[scope][vector].costMicros, 0);
+  }
 }
 export function estimateSample(sample) {
   return sample?.state === 'running' && Number.isFinite(sample.value) && sample.value >= 0 && sample.value < 100 &&
     /Оценка прогресса: ≈\d+%/.test(sample.text) && /Точное оставшееся время неизвестно/.test(sample.text);
 }
+export function selectTranslationCandidate(rows, translation) {
+  for (const row of rows) {
+    if (row.advisory?.state !== 'available') continue;
+    const assessments = row.advisory.assessments;
+    // Opening one card mounts every assessment. Exactly one may auto-translate;
+    // metadata-only siblings do not justify rejecting an otherwise safe card.
+    const eligible = assessments.map((item, index) => ({ item, index })).filter(({ item }) => translation.hasTranslationText(item));
+    if (eligible.length !== 1) continue;
+    const { item, index } = eligible[0];
+    if (eligibleAssessment(item) && ['title', 'description'].every(field => item[field].value === null ||
+      translation.translatableField(item[field], field === 'title' ? 512 : 4096))) return { row, index, item };
+  }
+  return undefined;
+}
+export async function locateTranslationRow(page, expect, selected, rows) {
+  const ordinal = rows.findIndex(row => row.findingId === selected.row.findingId);
+  assert.ok(ordinal >= 0);
+  const report = page.getByRole('region', { name: 'Результаты Уязвимости', exact: true });
+  // Match actual UI paging (25); API inventory uses50 and must not be confused with it.
+  // Navigation is read-only with every card closed: no translation is armed yet.
+  for (let offset = 0; offset <= ordinal; offset += 25) {
+    await expect(report.locator('li.scan-vuln-row').first()).toContainText(`ID находки: ${rows[offset].findingId}`);
+    if (ordinal < offset + 25) break;
+    const next = report.getByRole('button', { name: 'Далее · Уязвимости', exact: true });
+    await expect(next).toBeEnabled(); await next.click();
+  }
+  const row = report.locator('li.scan-vuln-row').filter({ hasText: `ID находки: ${selected.row.findingId}` });
+  await expect(row).toBeVisible();
+  await expect(row.locator('details.scan-vuln-row__details')).not.toHaveAttribute('open', '');
+  return row;
+}
 export async function savePreferences(page, expect, language, autoSummary) {
-  const panel = page.getByRole('region', { name: 'Язык и сводка отчётов', exact: true });
-  if (!await panel.count()) throw new Fault('UI_NOT_DEPLOYED');
-  await expect(panel).toBeVisible();
-  await expect(panel.locator('#report-preferences-disclosure')).toContainText('До сохранения выбора внешняя отправка не разрешена.');
-  await panel.getByLabel('Язык отчёта', { exact: true }).selectOption(language);
-  await panel.getByLabel('Краткая ИИ-сводка', { exact: true }).selectOption(autoSummary ? 'on' : 'off');
+  const panel = page.getByRole('region', { name: 'Настройки отчётов', exact: true });
+  // Navigation can finish before React mounts the account region; count() does not wait.
+  try { await expect(panel).toBeVisible({ timeout: 15_000 }); }
+  catch { throw new Fault('UI_NOT_DEPLOYED'); }
+  const disclosure = panel.locator('#report-preferences-disclosure');
+  await expect(disclosure).toHaveAttribute('data-automation-revision', AUTOMATION_REVISION);
+  for (const text of ['До сохранения выбора внешняя отправка не разрешена.', MODEL, 'провайдеру Atlas Cloud', ENDPOINT,
+    'отсутствие обучения (no-training)', 'но не отсутствие хранения', 'могут сохраняться', 'не Zero Data Retention (ZDR)'])
+    await expect(disclosure).toContainText(text);
+  await panel.getByLabel('Язык исходных описаний уязвимостей', { exact: true }).selectOption(language);
+  await panel.getByLabel('ИИ-разбор', { exact: true }).selectOption(autoSummary ? 'on' : 'off');
   await panel.getByRole('button', { name: 'Сохранить настройки отчётов', exact: true }).click();
   await expect(panel.getByRole('status')).toHaveText('Настройки сохранены для аккаунта в этом браузере.');
   return { language, autoSummary };
 }
 
-async function runLive(id) {
+async function runLive(id, mode = 'full') {
+  const summaryOnly = mode === 'summary-only';
+  const translationOnly = mode === 'translation-only';
+  const chatTranslationOnly = mode === 'chat-translation-only' || translationOnly;
   evidencePaths(id);
   if (['DEBUG', 'PWDEBUG', 'NODE_DEBUG', 'NODE_OPTIONS', 'NODE_PATH', 'PLAYWRIGHT_TRACE_DIR', 'PLAYWRIGHT_BROWSERS_PATH'].some(key => process.env[key])) throw new Fault('UNSAFE_DEBUG_ENVIRONMENT');
   assertFreshAttempt(id, await readdir(join(ROOT, 'docs')));
@@ -343,7 +572,7 @@ async function runLive(id) {
     try { await lstat(path); } catch (error) { if (error.code === 'ENOENT') continue; throw new Fault('EVIDENCE_WRITE_FAILED'); }
     throw new Fault('EVIDENCE_ALREADY_EXISTS');
   }
-  const book = new ResultBook(id), gate = new GenerationGate(), handles = [], knownIds = new Set();
+  const book = new ResultBook(id, mode), gate = new GenerationGate(mode), handles = [], knownIds = new Set();
   const stats = { accountsCreated: 0, scanLaunches: 0, chatPosts: 0, translationPosts: 0, pageErrors: 0, blockedRequests: 0 };
   const owner = { email: `automation-${randomUUID()}@example.invalid`, password: randomBytes(40).toString('base64url') };
   const target = TARGETS[0];
@@ -351,7 +580,7 @@ async function runLive(id) {
     const evidenceChecks = new Map();
   let stopped = false, fatal, currentCase = 'tooling', activeLaunch, pendingCreation = Promise.resolve();
   let interrupt;
-  const interrupted = new Promise((_, reject) => { interrupt = code => { stopped = true; fatal = code; gate.halted = true; reject(new Fault(code)); }; });
+  const interrupted = new Promise((_, reject) => { interrupt = (code, meta = {}) => { stopped = true; fatal = code; gate.halted = true; reject(new Fault(code, meta)); }; });
   const deadlineAt = Date.now() + GLOBAL_MS;
   const timer = setTimeout(() => interrupt('GLOBAL_DEADLINE'), GLOBAL_MS);
   const signal = () => interrupt('INTERRUPTED');
@@ -363,17 +592,18 @@ async function runLive(id) {
     catch (error) {
       const code = CODES.has(error?.message) ? error.message : error instanceof BrowserReadError ? 'BROWSER_READ_FAILED' : 'ASSERTION_FAILED';
       if (['summary', 'chat_1', 'chat_2', 'translation'].includes(name)) gate.halted = true;
-      book.record(name, error instanceof BaseFault && !error.failure || code === 'BROWSER_READ_FAILED' ? 'BLOCKED' : 'FAIL', code, failureMetadata(error));
+      book.record(name, error instanceof BaseFault && !error.failure || code === 'BROWSER_READ_FAILED' ? 'BLOCKED' : 'FAIL', code,
+              { ...(['summary', 'chat_1', 'chat_2', 'translation'].includes(name) ? gate.responseMeta : {}), ...failureMetadata(error) });
       if (fatal || stats.blockedRequests) throw error;
       return false;
     }
   };
   const http = (page, path) => { live(); return readBrowserJson(page, path, knownIds); };
   const responseFor = (page, path) => page.waitForResponse(response => fixedUrl(response.url()) &&
-    new URL(response.url()).pathname === path && response.request().method() === 'POST', { timeout: 45_000 }).catch(() => null);
+    new URL(response.url()).pathname === path && response.request().method() === 'POST', { timeout: generationKind(path, scanId) ? GENERATION_MS : METADATA_MS }).catch(() => null);
   const readResponse = async response => {
     if (!response) throw new Fault('DELIVERY_UNCONFIRMED_NO_RETRY');
-    const bytes = await bounded(response.body()); assert.ok(bytes.length <= 4 * 1024 * 1024);
+    const bytes = await bounded(response.body(), METADATA_MS); assert.ok(bytes.length <= 4 * 1024 * 1024);
     let value; try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { value = null; }
     return { status: response.status(), value, headers: response.headers(), providerDiagnostic: diagnosticFromHeaders(response.headers()) };
   };
@@ -385,7 +615,7 @@ async function runLive(id) {
     live();
     const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, reducedMotion: 'reduce', serviceWorkers: 'block', acceptDownloads: false });
     const state = { context, aiOwner, closing: false, permit: null, readSession: 0, fence: new EligibilityFence(),
-      eligibilityPending: Promise.resolve(), observations: new Set(), observed: new Map(), generations: new Map(), summaryReads: [], preferences: null };
+      eligibilityPending: Promise.resolve(), observations: new Set(), observed: new Map(), generations: new Map(), generationDeadlines: new Map(), summaryReads: [], preferences: null };
     handles.push(state);
     const rejected = new WeakSet();
     const denyNote = (request, reason) => {
@@ -417,7 +647,7 @@ async function runLive(id) {
         if (method === 'GET') {
           if (!safeReadRequest(input, await request.allHeaders())) return deny('mutation-shape');
           approvedRead = browserGetAllowed(input, knownIds);
-          if (!approvedRead && activeLaunch) { await bounded(pendingCreation); approvedRead = browserGetAllowed(input, knownIds); }
+          if (!approvedRead && activeLaunch) { await bounded(pendingCreation, METADATA_MS); approvedRead = browserGetAllowed(input, knownIds); }
           if (!approvedRead) return deny('api-get-not-allowed');
           if (stopped || state.closing) return deny('controlled-shutdown-read');
           const pending = observeGet(route, request, path); state.observations.add(pending);
@@ -426,6 +656,11 @@ async function runLive(id) {
         }
         if (stopped || state.closing) return deny('shutdown-request');
         if (method !== 'POST') return deny('method-not-allowed');
+        // This route fence precedes every permit, metadata wait and continue().
+        // Reject even malformed/other-scan chat or translation POST paths.
+        if (summaryOnly && /\/llm\/(?:chat|translation)(?:\/|$)/.test(path)) return deny('ai-permit-or-limit');
+        if (chatTranslationOnly && /\/llm\/summary(?:\/|$)/.test(path)) return deny('ai-permit-or-limit');
+                if (translationOnly && /\/llm\/chat(?:\/|$)/.test(path)) return deny('ai-permit-or-limit');
         if (!safeMutationRequest(input, await request.allHeaders()) || new URL(input).search) return deny('mutation-shape');
         let body; try { body = request.postDataJSON(); } catch { return deny('mutation-shape'); }
         if (path === `${SCANS}/images/eligibility`) {
@@ -451,31 +686,35 @@ async function runLive(id) {
             if (response?.status() === 202) {
               scanId = book.recordScanReceipt(202, (await readResponse(response)).value); knownIds.add(scanId);
               // Arm before native report navigation/completion, not after its automatic effect.
-              arm(state, `${SCANS}/${scanId}/llm/summary`, value => isDeepStrictEqual(value, summaryBody(state.observed.get(`${SCANS}/${scanId}/llm/context`))), { kind: 'summary' });
+              if (!chatTranslationOnly) arm(state, `${SCANS}/${scanId}/llm/summary`, value => isDeepStrictEqual(value, summaryBody(state.observed.get(`${SCANS}/${scanId}/llm/context`))), { kind: 'summary' });
             }
           })(); await pendingCreation; return;
         }
         const kind = generationKind(path, scanId);
         if (kind) {
-          await bounded(Promise.all([...state.observations]));
+          if (translationOnly && kind !== 'translation' || summaryOnly && kind !== 'summary' || chatTranslationOnly && kind === 'summary') return deny('ai-permit-or-limit');
+          await bounded(Promise.all([...state.observations]), METADATA_MS);
           const permit = state.permit;
           const binding = kind === 'summary' ? state.observed.get(`${SCANS}/${scanId}/llm/context`) : permit?.context;
           const status = state.observed.get(`${SCANS}/${scanId}`);
           const readiness = tools.chat.chatReadinessSchema.safeParse(state.observed.get(`${SCANS}/${scanId}/llm/readiness`));
-          if (!readiness.success) return deny('ai-permit-or-limit');
+          if (!readiness.success || deadlineAt - Date.now() < GENERATION_MS) return deny('ai-permit-or-limit');
           if (!gate.admit({ owner: state.aiOwner, path, scanId, body, permit, context: binding,
             completed: status?.state === 'completed' && CHECKS.every(check => status.perCheck?.[check]?.outcome === 'checked'), report: status, preferences: state.preferences,
                         readiness: readiness.data, passiveSummary: state.summaryReads.at(-1) })) return deny('ai-permit-or-limit');
           stats.chatPosts = gate.counts.chat; stats.translationPosts = gate.counts.translation;
+          const generationDeadlineAt = Date.now() + GENERATION_MS;
           const pending = (async () => {
-            await route.continue(); const response = await request.response();
-            return readGeneration(response, gate, tools.chat, binding);
+            await route.continue();
+            return receiveGeneration(request, gate, tools.chat, binding, generationDeadlineAt);
           })();
           const key = kind === 'chat' ? `chat_${gate.counts.chat}` : kind;
-          state.generations.set(key, pending);
+          state.generationDeadlines.set(key, generationDeadlineAt); state.generations.set(key, pending);
           // Preserve finite diagnostics even if a queued hidden POST ends the workflow first.
           pending.catch(error => { gate.halted = true;
-            book.record(key, 'BLOCKED', CODES.has(error?.message) ? error.message : 'ASSERTION_FAILED', failureMetadata(error));
+            const code = CODES.has(error?.message) ? error.message : 'ASSERTION_FAILED';
+            book.record(key, 'BLOCKED', code, failureMetadata(error));
+            if (summaryOnly && !stopped) { currentCase = 'summary'; interrupt(code, failureMetadata(error)); }
           });
           await pending.catch(() => {}); return;
         }
@@ -561,23 +800,22 @@ async function runLive(id) {
     }
   };
   const delivered = async (handle, key) => {
-    const end = Date.now() + 45_000;
+    const end = Date.now() + GENERATION_MS;
     while (!handle.generations.has(key) && Date.now() < end) {
       live(); if (gate.halted) throw new Fault('PROVIDER_STOP_NO_RETRY'); await pause(25);
     }
     if (!handle.generations.has(key)) throw new Fault('DELIVERY_UNCONFIRMED_NO_RETRY');
-    return bounded(handle.generations.get(key));
+    return bounded(handle.generations.get(key), Math.max(0, handle.generationDeadlines.get(key) - Date.now()));
   };
   const waitSummaryRead = async (handle, after = 0) => {
-    const end = Date.now() + 45_000;
+    const end = Date.now() + METADATA_MS;
     while (handle.summaryReads.length <= after && Date.now() < end) { live(); await pause(25); }
     if (handle.summaryReads.length <= after) throw new Fault('SUMMARY_READ_FAILED');
     return handle.summaryReads[after];
   };
   const summaryUi = async (page, value) => {
-    const output = page.locator('[aria-label="Сводка ИИ · требует проверки"]');
+    const output = page.locator('[aria-label="ИИ-разбор отчёта"]');
     await expect(output).toBeVisible();
-    await expect(output).toContainText('Сводка восстановлена из кэша процесса сервера; это не долговечная история.');
     for (const hypothesis of value.hypotheses) await expect(output).toContainText(hypothesis.text);
   };
   const originalVisible = async () => {
@@ -589,6 +827,7 @@ async function runLive(id) {
     await Promise.race([interrupted, (async () => {
       if (!await step('tooling', async () => {
         tools = await loadTranslationContracts();
+        tools.coverageLabels = await loadCoverageLabels();
         const { chromium, expect: baseExpect } = await import('@playwright/test'); expect = baseExpect.configure({ timeout: 15_000 });
         const env = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ', 'SystemRoot'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
         try { browser = await chromium.launch({ headless: true, timeout: 20_000, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, env, args: [...BROWSER_ARGS] }); }
@@ -597,10 +836,10 @@ async function runLive(id) {
       own = await newPage(true);
       if (!await step('owner_registration', () => auth(own, 'register'))) return;
       if (!await step('preferences_original', async () => {
-        own.preferences = await savePreferences(own.page, expect, 'original', true);
+        own.preferences = await savePreferences(own.page, expect, 'original', !chatTranslationOnly);
         await own.page.reload();
-        await expect(own.page.getByLabel('Язык отчёта', { exact: true })).toHaveValue('original');
-        await expect(own.page.getByLabel('Краткая ИИ-сводка', { exact: true })).toHaveValue('on'); assert.equal(gate.total, 0);
+        await expect(own.page.getByLabel('Язык исходных описаний уязвимостей', { exact: true })).toHaveValue('original');
+        await expect(own.page.getByLabel('ИИ-разбор', { exact: true })).toHaveValue(chatTranslationOnly ? 'off' : 'on'); assert.equal(gate.total, 0);
         return { meta: { explicitConsent: true, noAdditionalPosts: true } };
       })) return;
       if (!await step('native_scan', async () => {
@@ -641,12 +880,11 @@ async function runLive(id) {
                 await expect(terminalPanel.locator('progress')).toHaveCount(0);
                 return { meta: { scanId, digest: snapshot.digest, platform: snapshot.platform, state: snapshot.state } };
       })) return;
-      await step('coverage_click', async () => {
-        const region = own.page.getByRole('region', { name: 'Покрытие проверок', exact: true }); const before = gate.total;
+      if (!summaryOnly) await step('coverage_click', async () => {
+        const region = own.page.getByRole('region', { name: 'Проверки', exact: true }); const before = gate.total;
         const outcomes = region.getByRole('list', { name: 'Исходы проверок', exact: true });
         for (const check of CHECKS) {
-          const label = { secret: 'Secrets', sbom: 'SBOM', vuln: 'Уязвимости', config: 'Image config' }[check];
-          const tile = outcomes.locator(':scope > li').filter({ has: own.page.getByText(label, { exact: true }) });
+          const tile = coverageTile(outcomes, own.page, tools.coverageLabels, check);
           await expect(tile).toHaveAttribute('data-outcome', 'checked');
           const details = tile.locator('details');
           if (!await details.count()) throw new Fault('UI_NOT_DEPLOYED');
@@ -654,10 +892,7 @@ async function runLive(id) {
           await expect(details.locator('p').first()).toBeVisible(); await details.locator('summary').click();
           await expect(details).not.toHaveAttribute('open', '');
         }
-        const help = region.getByRole('button', { name: 'Что означает неполный отчёт?', exact: true });
-        await help.click(); await expect(help).toHaveAttribute('aria-expanded', 'true');
-        await expect(region.getByText('Нельзя считать непроверенные категории безопасными.', { exact: false })).toBeVisible();
-        await help.click(); await expect(help).toHaveAttribute('aria-expanded', 'false');
+        await assertCoverageWarning(region, expect);
         assert.equal(gate.total, before); return { meta: { noAdditionalPosts: true } };
       });
       if (!await step('report', async () => {
@@ -673,25 +908,26 @@ async function runLive(id) {
           return parseBoundReport('secret', response.value, snapshot, query, cursor, tools.decoder);
         });
         for (const finding of secrets.rows) evidenceChecks.set(finding.findingId, 'secret');
-        // Opening a card mounts ALL its assessments: authorize only a single-assessment card.
-        for (const row of rows.slice(0, 25)) if (!selected && row.advisory?.assessments?.length === 1 && eligibleAssessment(row.advisory.assessments[0]) &&
-                  ['title', 'description'].every(field => row.advisory.assessments[0][field].value === null ||
-                    tools.translation.translatableField(row.advisory.assessments[0][field], field === 'title' ? 512 : 4096))) selected = { row, index: 0, item: row.advisory.assessments[0] };
+        selected = summaryOnly ? undefined : selectTranslationCandidate(rows, tools.translation);
         return { meta: { pages: result.pages, vulnerabilities: rows.length } };
       })) return;
-      await step('always_open_chat', async () => { await openChat(own.page); });
-      await step('summary_initial_missing', async () => {
+      if (!summaryOnly && !translationOnly) await step('always_open_chat', async () => { await openChat(own.page); });
+      let summaryOk = false;
+      if (!chatTranslationOnly) {
+      const initialMissing = await step('summary_initial_missing', async () => {
         const first = await waitSummaryRead(own);
         assert.equal(passiveSummaryValue(first, own.observed.get(`${SCANS}/${scanId}/llm/context`)), null);
         return { meta: { httpStatus: 404, errorCode: 'LLM_SUMMARY_MISSING' } };
       });
-      const summaryOk = await step('summary', async () => {
+      if (summaryOnly && !initialMissing) return;
+      summaryOk = await step('summary', async () => {
         summaryReply = await delivered(own, 'summary'); const context = own.observed.get(`${SCANS}/${scanId}/llm/context`); assertFixedPolicy(context);
+        if (summaryOnly) assertSummaryQualification(summaryReply, context, snapshot, evidenceChecks, tools.chat.validChatText);
         for (const key of ['scanId', 'digest', 'platform', 'reportVersion']) assert.equal(summaryReply[key], context[key]);
         assert.ok(Array.isArray(summaryReply.hypotheses) && summaryReply.hypotheses.length > 0 && summaryReply.hypotheses.length <= 12);
         const facts = new Map(summaryReply.scannerFacts.map(fact => [fact.findingId, fact.check]));
                 assert.equal(facts.size, summaryReply.scannerFacts.length);
-        const output = own.page.locator('[aria-label="Сводка ИИ · требует проверки"]'); await expect(output).toBeVisible();
+        const output = own.page.locator('[aria-label="ИИ-разбор отчёта"]'); await expect(output).toBeVisible();
         for (const hypothesis of summaryReply.hypotheses) {
           assert.equal(hypothesis.kind, 'hypothesis');
                     assert.ok(tools.chat.validChatText(hypothesis.text, 8000));
@@ -699,10 +935,45 @@ async function runLive(id) {
                     assert.ok(/[А-Яа-яЁё]{3}/u.test(hypothesis.text)); // Not a fidelity/grounding verdict.
           await expect(output).toContainText(hypothesis.text);
         }
-        assert.equal(gate.counts.summary, 1); return { meta: { explicitConsent: true, transferNoteVisible: true } };
+        assert.equal(gate.counts.summary, 1); return { meta: { explicitConsent: true, transferNoteVisible: true,
+          ...(summaryOnly ? { httpStatus: 200, reportVersion: context.reportVersion, findingCount: summaryReply.findingCount,
+            selectedFindings: summaryReply.contextSelection.selectedFindings, omittedFindings: summaryReply.contextSelection.omittedFindings,
+            cve: summaryReply.identifierCounts.cve, debianTemp: summaryReply.identifierCounts.debianTemp } : {}) } };
       });
-      for (const [index, question] of QUESTIONS.entries()) await step(`chat_${index + 1}`, async () => {
-        if (!summaryOk || gate.halted || index === 1 && book.cases.chat_1.status !== 'PASS') throw new Fault(gate.halted ? 'PROVIDER_STOP_NO_RETRY' : 'PREREQUISITE_UNAVAILABLE');
+      }
+      if (summaryOnly) {
+        // No chat questions, translation preferences/cards or fresh-login workflow
+        // is reachable here, on success OR failure. Close admissions before reads.
+        gate.halted = true;
+        if (!summaryOk) return;
+        assertOneSummary(gate);
+        const reads = own.summaryReads.length;
+        let restored;
+        if (!await step('summary_reload_no_post', async () => {
+          await own.page.reload(); await settleAcceptedScan(book, own.page, () => !stopped && !own.closing);
+          restored = await waitSummaryRead(own, reads);
+          passiveSummaryValue(restored, own.observed.get(`${SCANS}/${scanId}/llm/context`));
+          await expect(own.page.getByRole('region', { name: 'ИИ-отчёт', exact: true })).toHaveAttribute('aria-busy', 'false');
+          assertOneSummary(gate); return { meta: { httpStatus: restored.status, noAdditionalPosts: true } };
+        })) return;
+        if (!await step('summary_reload_restore', async () => {
+          assertSummaryRestored(restored, own.observed.get(`${SCANS}/${scanId}/llm/context`), summaryReply);
+          await summaryUi(own.page, summaryReply); assertOneSummary(gate);
+          return { meta: { httpStatus: 200, noAdditionalPosts: true } };
+        })) return;
+        await step('preservation', async () => {
+          const current = await readStatus(own.page); assert.deepEqual(current, snapshot);
+          const result = await readFindings(own.page); assert.equal(hash({ snapshot: current, rows: result.rows }), baseline);
+          const context = assertLlmSuccess(await http(own.page, `${SCANS}/${scanId}/llm/context`));
+          assertFixedPolicy(context); assert.ok(automationDisclosureMatches(context.disclosure, 'summary'));
+          assertSummaryQualification(summaryReply, context, current, evidenceChecks, tools.chat.validChatText);
+          assertZeroSummaryUsage(assertLlmSuccess(await http(own.page, `${SCANS}/${scanId}/llm/usage`)), context);
+          assertOneSummary(gate); return { meta: { countsUnchanged: true, originalUnchanged: true, costMicros: 0, noAdditionalPosts: true } };
+        });
+        return;
+      }
+      for (const [index, question] of (translationOnly ? [] : QUESTIONS).entries()) await step(`chat_${index + 1}`, async () => {
+        if (!chatTranslationOnly && !summaryOk || gate.halted || index === 1 && book.cases.chat_1.status !== 'PASS') throw new Fault(gate.halted ? 'PROVIDER_STOP_NO_RETRY' : 'PREREQUISITE_UNAVAILABLE');
         const panel = await openChat(own.page), before = await readChat(own.page); await readyFor(own.page, before.context);
         assert.equal(before.history.turns.length, index);
         const usage = assertChatUsage(assertLlmSuccess(await http(own.page, `${SCANS}/${scanId}/llm/chat/usage`)), before.context);
@@ -723,28 +994,29 @@ async function runLive(id) {
         return { meta: { ...historyMetadata(savedHistory), turnId: turn.id, costMicros: value.usage.costMicros, explicitConsent: true } };
       });
       const beforeReload = gate.total, beforeReloadReads = own.summaryReads.length; let reloadRead;
-      await step('summary_reload_no_post', async () => {
+      if (!chatTranslationOnly) await step('summary_reload_no_post', async () => {
         if (!summaryOk) throw new Fault('PREREQUISITE_UNAVAILABLE');
         await own.page.reload(); await settleAcceptedScan(book, own.page, () => !stopped && !own.closing);
         reloadRead = await waitSummaryRead(own, beforeReloadReads);
         passiveSummaryValue(reloadRead, own.observed.get(`${SCANS}/${scanId}/llm/context`));
-        await expect(own.page.getByRole('region', { name: 'Сводка отчёта', exact: true })).toHaveAttribute('aria-busy', 'false');
+        await expect(own.page.getByRole('region', { name: 'ИИ-отчёт', exact: true })).toHaveAttribute('aria-busy', 'false');
         assert.equal(gate.total, beforeReload); return { meta: { httpStatus: reloadRead.status, noAdditionalPosts: true } };
       });
-      await step('summary_reload_restore', async () => {
+      if (!chatTranslationOnly) await step('summary_reload_restore', async () => {
         if (!summaryOk || !reloadRead) throw new Fault('PREREQUISITE_UNAVAILABLE');
         assertSummaryRestored(reloadRead, own.observed.get(`${SCANS}/${scanId}/llm/context`), summaryReply);
         await summaryUi(own.page, summaryReply); assert.equal(gate.total, beforeReload);
         return { meta: { httpStatus: 200, noAdditionalPosts: true } };
       });
-      await step('history_reload', async () => {
+      if (!translationOnly) await step('history_reload', async () => {
         if (!savedHistory || book.cases.chat_2.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
+        if (chatTranslationOnly) { await own.page.reload(); await settleAcceptedScan(book, own.page, () => !stopped && !own.closing); }
         const current = await readChat(own.page); assert.deepEqual(current.history, savedHistory); await historyUi(own.page, savedHistory);
         assert.equal(gate.total, beforeReload); return { meta: { ...historyMetadata(savedHistory), historyUnchanged: true, noAdditionalPosts: true } };
       });
       const prefsRu = await step('preferences_ru', async () => {
         if (gate.halted) throw new Fault('PROVIDER_STOP_NO_RETRY');
-        await own.page.goto(`${ORIGIN}/account`); own.preferences = await savePreferences(own.page, expect, 'ru', true);
+        await own.page.goto(`${ORIGIN}/account`); own.preferences = await savePreferences(own.page, expect, 'ru', !chatTranslationOnly);
         return { meta: { explicitConsent: true } };
       });
       let translated, region;
@@ -752,15 +1024,14 @@ async function runLive(id) {
         if (!prefsRu || gate.halted) throw new Fault('PROVIDER_STOP_NO_RETRY');
         if (!selected) throw new Fault('NO_ELIGIBLE_ASSESSMENT');
         await own.page.goto(`${ORIGIN}/scans/${scanId}`); await settleAcceptedScan(book, own.page, () => !stopped && !own.closing);
-        const path = `${SCANS}/${scanId}/llm/translation/context?findingId=${selected.row.findingId}&assessmentIndex=${selected.index}`;
+        const row = await locateTranslationRow(own.page, expect, selected, rows);
+                const path = `${SCANS}/${scanId}/llm/translation/context?findingId=${selected.row.findingId}&assessmentIndex=${selected.index}`;
         const context = tools.translation.translationContextSchema.parse(assertLlmSuccess(await http(own.page, path))); await readyFor(own.page, context);
         assert.equal(context.sourceVersion, hash(['selected-advisory-ru-v1', selected.row.cveId, selected.item]));
         const post = `${SCANS}/${scanId}/llm/translation`;
         arm(own, post, body => isDeepStrictEqual(body, translationBody(context)), { kind: 'translation', context });
-        const row = own.page.locator('li.scan-vuln-row').filter({ hasText: `ID находки: ${selected.row.findingId}` });
-        await expect(row.locator('details.scan-vuln-row__details')).not.toHaveAttribute('open', '');
         await row.locator('details.scan-vuln-row__details > summary').click();
-        region = row.getByRole('region', { name: `Перевод ${selected.row.cveId}, источник ${selected.item.source}, оценка 1`, exact: true });
+        region = row.getByRole('region', { name: `Перевод ${selected.row.cveId}, источник ${selected.item.source}, оценка ${selected.index + 1}`, exact: true });
         translated = tools.translation.translationReplySchema.parse(await delivered(own, 'translation'));
         assert.ok(tools.translation.sameTranslationBinding(translated, context)); assert.equal(translated.model, MODEL); assert.equal(translated.provider, 'OpenRouter');
                 assert.ok(tools.translation.matchesTranslationFields(translated, selected.item));
@@ -773,7 +1044,7 @@ async function runLive(id) {
                 assert.ok(/[А-Яа-яЁё]{3}/u.test(Object.values(translated.translation).filter(Boolean).join(' '))); // Not semantic fidelity.
         await expect(region).toContainText('Машинный перевод на русский · не официальный текст NVD или БДУ');
         for (const text of Object.values(translated.translation).filter(value => value !== null)) await expect(region).toContainText(text);
-        await originalVisible(); assert.equal(gate.counts.translation, 1); return { meta: { findingId: context.findingId, assessmentIndex: 0, sourceVersion: context.sourceVersion, originalUnchanged: true, explicitConsent: true } };
+        await originalVisible(); assert.equal(gate.counts.translation, 1); return { meta: { findingId: context.findingId, assessmentIndex: selected.index, sourceVersion: context.sourceVersion, originalUnchanged: true, explicitConsent: true } };
       });
       await step('translation_toggle', async () => {
         if (!translatedOk) throw new Fault('PREREQUISITE_UNAVAILABLE'); const before = gate.total;
@@ -791,6 +1062,17 @@ async function runLive(id) {
       });
       // completeFreshOwnerLogin requires a NEW about:blank context, not the anonymous probe page.
       fresh.closing = true; await fresh.context.close();
+      if (translationOnly) {
+        book.record('settings_owner_isolation', 'BLOCKED', 'SECOND_OWNER_NOT_AUTHORIZED');
+        await step('preservation', async () => {
+          const current = await readStatus(own.page); assert.deepEqual(current, snapshot);
+          const result = await readFindings(own.page); assert.equal(hash({ snapshot: current, rows: result.rows }), baseline);
+          assert.equal(gate.counts.summary, 0); assert.equal(gate.counts.chat, 0);
+          assert.ok(gate.counts.translation <= 1);
+          return { meta: { countsUnchanged: true, originalUnchanged: true, noAdditionalPosts: true } };
+        });
+        return;
+      }
       await step('fresh_login', async () => {
         if (!savedHistory || book.cases.chat_2.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
         own.closing = true; await own.context.close(); own = await newPage(true);
@@ -799,19 +1081,19 @@ async function runLive(id) {
       await step('preferences_fresh_context', async () => {
         if (book.cases.fresh_login.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
         await own.page.goto(`${ORIGIN}/account`);
-        await expect(own.page.getByLabel('Язык отчёта', { exact: true })).toHaveValue('original');
-        await expect(own.page.getByLabel('Краткая ИИ-сводка', { exact: true })).toHaveValue('off');
-        await expect(own.page.getByText('Автоматика отключена: сохраните выбор, чтобы подтвердить текущие условия.', { exact: true })).toBeVisible();
+        await expect(own.page.getByLabel('Язык исходных описаний уязвимостей', { exact: true })).toHaveValue('original');
+        await expect(own.page.getByLabel('ИИ-разбор', { exact: true })).toHaveValue('off');
+        await expect(own.page.getByText('Автоматические функции отключены: сохраните выбор, чтобы подтвердить текущие условия.', { exact: true })).toBeVisible();
       });
       let freshSummaryRead;
       await step('history_fresh_login', async () => {
         if (book.cases.fresh_login.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE'); const before = gate.total, reads = own.summaryReads.length;
         await own.page.goto(`${ORIGIN}/scans/${scanId}`); await settleAcceptedScan(book, own.page, () => !stopped && !own.closing);
-        freshSummaryRead = await waitSummaryRead(own, reads);
+        if (!chatTranslationOnly) freshSummaryRead = await waitSummaryRead(own, reads);
         assert.deepEqual((await readChat(own.page)).history, savedHistory); await historyUi(own.page, savedHistory);
         assert.equal(gate.total, before); return { meta: { ...historyMetadata(savedHistory), historyUnchanged: true, noAdditionalPosts: true } };
       });
-      await step('summary_fresh_login_restore', async () => {
+      if (!chatTranslationOnly) await step('summary_fresh_login_restore', async () => {
         if (!summaryOk || !freshSummaryRead || book.cases.fresh_login.status !== 'PASS') throw new Fault('PREREQUISITE_UNAVAILABLE');
         const before = gate.total;
         assertSummaryRestored(freshSummaryRead, own.observed.get(`${SCANS}/${scanId}/llm/context`), summaryReply);
@@ -840,7 +1122,7 @@ async function runLive(id) {
     await collectAdmittedSummary(book, gate, pendingSummary, Math.max(0, Math.min(SUMMARY_DRAIN_MS, deadlineAt - Date.now())));
     let browserClosed = false;
     try { await bounded(Promise.allSettled(handles.map(handle => handle.context.close())), 10_000); if (browser) await bounded(browser.close(), 10_000); browserClosed = !browser || !browser.isConnected(); } catch { /* Finite cleanup result only. */ }
-    const bad = !browserClosed || stats.blockedRequests || stats.pageErrors || stats.accountsCreated > 1 || stats.scanLaunches > 1 || gate.total > 4;
+    const bad = !browserClosed || stats.blockedRequests || stats.pageErrors || stats.accountsCreated > 1 || stats.scanLaunches > 1 || gate.total > gate.maxPosts || translationOnly && gate.counts.chat !== 0 || chatTranslationOnly && gate.counts.summary !== 0 || summaryOnly && (gate.counts.chat !== 0 || gate.counts.translation !== 0);
     book.record('safety', bad ? 'FAIL' : 'PASS', !browserClosed ? 'CLEANUP_FAILED' : stats.blockedRequests ? 'REQUEST_GUARD' : stats.pageErrors ? 'PAGE_ERRORS' : bad ? 'ASSERTION_FAILED' : 'VERIFIED',
       { ...stats, browserClosed, nativeScanMayRemainActive: stats.scanLaunches > 0 && !snapshot });
     book.generation = gate; book.finishedAt = new Date().toISOString();
@@ -855,12 +1137,13 @@ async function main() {
   if (mode === 'not-run') { console.log(JSON.stringify({ status: 'BLOCKED', code: 'NOT_RUN', actuallyRun: false, requiresCoordinatorReadyGo: true })); return 2; }
   if (mode === 'offline') {
     const contracts = await loadTranslationContracts();
+    await loadCoverageLabels();
     const { DIAGNOSTIC_PHASES, DIAGNOSTIC_REASONS } = await import('./public-ai-translation-live.mjs');
     assert.deepEqual(DIAGNOSTIC_PHASES, [...contracts.diagnostics.FAILURE_PHASES]); assert.deepEqual(DIAGNOSTIC_REASONS, [...contracts.diagnostics.FAILURE_REASONS]);
     assert.equal(allowedApiGet('http://127.0.0.1:8080/api/v1/auth/me', []), false);
     console.log(JSON.stringify({ status: 'PASS', scope: 'OFFLINE_PREFLIGHT_ONLY', actuallyRun: false, browserLaunched: false, networkRequests: 0, evidenceWritten: false })); return 0;
   }
-  try { return await runLive(process.argv.at(-1)); }
+  try { return await runLive(process.argv.at(-1), mode === 'live' ? 'full' : mode); }
   catch { console.log(JSON.stringify({ status: 'BLOCKED', code: 'PREFLIGHT_FAILED', actuallyRun: false, rawDiagnosticsSuppressed: true })); return 2; }
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) process.exitCode = await main();

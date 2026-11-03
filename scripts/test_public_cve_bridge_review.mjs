@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { bridgeFixture } from './public-cve-bridge-fixtures.mjs';
 import { PROJECT, acquireLock } from './public-image-stand.mjs';
-import { llmBridgeFixture } from './public-cve-bridge-llm-fixtures.mjs';
+import { currentLlmBridgeFixture as llmBridgeFixture } from './public-cve-bridge-llm-fixtures.mjs';
 import { createPublicCveBridge } from './public-cve-bridge.mjs';
 import { archiveCveBackup, preflightCveCapacity } from './public-cve-bridge-capacity.mjs';
 const changed = (f) =>

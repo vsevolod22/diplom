@@ -12,19 +12,23 @@ import { PROJECT, STATE, LABEL, IMAGE_LABEL, ORIGIN, readProfile, acquireLock,
 import { readPublicLlmBinding, loadPublicLlmSettings, expectedPublicLlmConfig,
   validatePublicLlmContainer, validatePublicLlmImage, validatePublicLlmTransition,
   capturePublicLlmSource, qualifyPublicAuthSnapshot, capturePublicLlmRetentions,
-    publicLlmEnvironmentOverlay, validatePublicLlmConfig, currentPublicLlmHelperArguments,
-    validateCurrentPublicLlmHelper, publicAuthSchema, PUBLIC_LLM_GATEWAY_PROBE } from './public-llm-stand.mjs';
+    publicLlmEnvironmentOverlay, validatePublicLlmConfig,
+    publicAuthSchema, PUBLIC_LLM_GATEWAY_PROBE,
+    reservationPublicLlmHelperArguments, validateReservationPublicLlmHelper, PUBLIC_LLM_RESERVATION_HEADER_PROGRAM,
+    reservationLlmFingerprint, verifyHistoryReservationMigration } from './public-llm-stand.mjs';
 import { captureDeploymentCatalog, DEPLOYMENT_TOTAL_LIMIT, DEPLOYMENT_RETAINED_REFERENCE_LIMIT } from './public-llm-deployment-catalog.mjs';
 import { assertNoOpenAiDockerSecret, checkPublicLlmSourceBuild, validateOpenAiVolume, selectOpenAiOperations } from './public-llm-source-build.mjs';
 import { writeExclusive, syncDirectory } from './setup-local-cve.mjs';
 import { PUBLIC_DRAIN_PROBE, PUBLIC_READY_PROBE } from './refresh-public-cve.mjs';
 import { createAdapterSnapshots, qualifyAdapterStoreCopies } from './deploy-adapter-stores.mjs';
+import { requireDeploySupervisor, inspectDeploySupervisor } from './deploy-supervisor.mjs';
+import { deploymentAuthority, deploymentFileIdentity, createEngineJournal, readEngineJournal } from './deploy-authority.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROLES = Object.freeze(['api','worker','web','egress','llm-egress','openai-egress']);
 const AUTH_SOURCE = Object.freeze(['src/auth/auth.store.ts','src/auth/auth.controller.ts']);
 const RECORDS = 'deploy-adapter-v1';
-const diagnostics = new WeakMap(), authQualifications = new WeakSet();
+const diagnostics = new WeakMap(), authQualifications = new WeakSet(), historyQualifications = new WeakSet();
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const role = c => c.Config?.Labels?.['com.docker.compose.service'];
 const exists = path => fs.lstatSync(path, { throwIfNoEntry: false }) !== undefined;
@@ -49,6 +53,7 @@ function safeError(code, error) {
 export function deployAdapterDiagnostic(error) { return diagnostics.get(error) ?? Object.freeze({ code: 'ADAPTER_REFUSED' }); }
 export const DEPLOY_ADAPTER_CAPABILITIES = Object.freeze({ version: 2, status: true, prepare: true, buildCandidate: true,
   singleLease: true, webCompatibility: true, applyWeb: true, applyApp: true, recover: false,
+    recoverHistoryV5Prestart: true, recoveryCheckpointVersion: 3,
   liveQualified: false, noAutomaticDatabaseRollback: true });
 
 export function deploymentTargets(mode, services) {
@@ -159,18 +164,34 @@ function control(c) {
   return { Id:c.Id, Image:c.Image, Name:c.Name, Path:c.Path, Args:c.Args, Config:c.Config,
     HostConfig:c.HostConfig, Mounts:[...c.Mounts].sort((a,b)=>a.Destination.localeCompare(b.Destination)) };
 }
-export function assertFourStoreTransition(before, after, authQualification = null) {
-  need(before?.historyVersion === 4 && after?.historyVersion === 4 && before.llm && after.llm &&
+export function assertFourStoreTransition(before, after, authQualification = null, historyQualification = null) {
+  need([4,5].includes(before?.historyVersion) && [4,5].includes(after?.historyVersion) && before.llm && after.llm &&
     equal(Object.keys(before.core ?? {}).sort(),['auth','ledger']) && equal(Object.keys(after.core ?? {}).sort(),['auth','ledger']) &&
     equal(Object.keys(before.llm).sort(),['history','quota']) && equal(Object.keys(after.llm).sort(),['history','quota']) &&
     [before,after].every(v => Object.values(v.llm).every(id) && Object.values(v.core).every(p => plain(p) && equal(Object.keys(p),['logicalSha256']) && id(p.logicalSha256))), 'FOUR_STORES_REQUIRED');
-  need(equal(before.llm,after.llm) && equal(before.core.ledger,after.core.ledger), 'STORE_MISMATCH');
+  need(equal(before.core.ledger,after.core.ledger) && before.llm.quota===after.llm.quota, 'STORE_MISMATCH');
+  if(historyQualification===null) need(before.historyVersion===after.historyVersion && before.llm.history===after.llm.history,'HISTORY_STORE_MISMATCH');
+  else need(historyQualifications.has(historyQualification) && before.historyVersion===4 && after.historyVersion===5 &&
+    historyQualification.migration==='history-reservations-v4-to-v5' && historyQualification.allRowsPreserved===true &&
+    historyQualification.before===before.llm.history && historyQualification.after===after.llm.history &&
+    (!authQualification || authQualification.migration==='none'), 'HISTORY_MIGRATION_MISMATCH');
   if (!authQualification || authQualification.migration === 'none') need(equal(before.core.auth,after.core.auth), 'AUTH_STORE_MISMATCH');
   else {
     need(authQualifications.has(authQualification) && authQualification.version === 1 && authQualification.migration === 'auth-a2-to-a3' && authQualification.constructorPasses === 2 &&
       id(authQualification.before) && id(authQualification.expected) && authQualification.before !== authQualification.expected &&
       equal(before.core.auth,{logicalSha256:authQualification.before}) && equal(after.core.auth,{logicalSha256:authQualification.expected}), 'AUTH_MIGRATION_MISMATCH');
   }
+}
+// Bind the one permitted version inequality to independently inspected sealed B0/B1.
+export function qualifyAdapterHistoryMigration({DB,before,after,beforeDirectory,afterDirectory}) {
+  for(const [snapshot,directory] of [[before,beforeDirectory],[after,afterDirectory]]) {
+    for(const [kind,path] of [['auth','core/auth.sqlite'],['ledger','core/ledger.sqlite'],['history','llm/auth.sqlite'],['quota','llm/ledger.sqlite']]) {
+      const expected=['auth','ledger'].includes(kind)?snapshot.core[kind].logicalSha256:snapshot.llm[kind];
+      need(reservationLlmFingerprint(DB,fs,{createHash},join(directory,path),kind)===expected,'HISTORY_PROOF_SNAPSHOT_MISMATCH');
+    }
+  }
+  const proof=verifyHistoryReservationMigration({DB,beforePath:join(beforeDirectory,'llm/auth.sqlite'),afterPath:join(afterDirectory,'llm/auth.sqlite')});
+  historyQualifications.add(proof);assertFourStoreTransition(before,after,null,proof);return proof;
 }
 // Qualification is copy-only; this is NOT a live migration, startup or rollback.
 export function qualifyAdapterAuthCopy(root, options) {
@@ -252,7 +273,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
   now = () => performance.now(), context = 'desktop-linux', Database,
   sleep = ms => new Promise(r=>setTimeout(r,ms)), http = fetch,
   checkSource = checkPublicLlmSourceBuild } = {}) {
-  const plans = new WeakMap(), leases = new WeakMap(); let activeDeadline = null, leaseDeadline = null;
+  const plans = new WeakMap(), leases = new WeakMap(); let activeDeadline = null, leaseDeadline = null, engineJournal = null;
   const database = () => Database ?? createRequire(join(root,'server/api/package.json'))('better-sqlite3');
   const bounded = (work, budget) => async (...args) => {
     need(activeDeadline === null, 'ADAPTER_OPERATION_IN_PROGRESS');
@@ -264,7 +285,8 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
   async function request(args, options, code, timeout = 30000) {
     need(activeDeadline !== null, 'ADAPTER_DEADLINE_MISSING');
     const remaining = Math.floor(Math.min(timeout, activeDeadline - now(), leaseDeadline === null ? Infinity : leaseDeadline - now())); need(remaining > 0, 'ADAPTER_DEADLINE');
-    try { const result = await run(args,{...options,timeout:remaining}); need(now() < activeDeadline && (leaseDeadline===null||now()<leaseDeadline), 'ADAPTER_DEADLINE'); return result; }
+    engineJournal?.submit(code);
+    try { const result = await run(args,{...options,timeout:remaining}); need(now() < activeDeadline && (leaseDeadline===null||now()<leaseDeadline), 'ADAPTER_DEADLINE'); engineJournal?.settle(); return result; }
     catch(error) { throw safeError(code,error); }
   }
   async function connect() {
@@ -343,16 +365,17 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         networks:observed.networks.length,volumes:observed.volumes.length,capabilities:DEPLOY_ADAPTER_CAPABILITIES});
     } catch(error){throw safeError('STATUS_REFUSED',error);}
   }
-  async function prepare({mode,services,lease,upgradeOperations=false}={}) {
-    try {rootCheck();const owned=lease?ownedLease(lease):null;if(!owned)noLock();else need(!owned.plan,'PREFLIGHT_ALREADY_PREPARED');const targets=deploymentTargets(mode,services);
-      need(typeof upgradeOperations === 'boolean', 'OPERATIONS_FLAG_INVALID');
+  async function prepare({mode,services,lease,upgradeOperations=false,migrateHistoryV4ToV5=false}={}) {
+    try {rootCheck();const owned=lease?ownedLease(lease):null;if(!owned)noLock();else {need(!owned.plan,'PREFLIGHT_ALREADY_PREPARED');need(mode!=='app'||owned.supervisor,'APP_SUPERVISOR_REQUIRED');}const targets=deploymentTargets(mode,services);
+      need(typeof upgradeOperations === 'boolean' && typeof migrateHistoryV4ToV5 === 'boolean', 'OPERATIONS_FLAG_INVALID');
+      need(!migrateHistoryV4ToV5 || mode==='app' && !upgradeOperations && targets.includes('api') && targets.every(n=>['web','api'].includes(n)), 'HISTORY_MIGRATION_SCOPE');
       need(!upgradeOperations || mode === 'app' && equal(targets,[...ROLES].sort()), 'OPERATIONS_UPGRADE_REQUIRES_ALL_APP_TARGETS');
       const config=loadConfiguration(root,home,true,upgradeOperations);
       need(mode!=='web'||equal(config.selection,config.next),'WEB_REQUIRES_UNCHANGED_RUNTIME_CONFIG');
       const next=expectedPublicLlmConfig(root,config.profile.cve,config.next);
       if(!equal(config.selection,config.next))need(ROLES.every(n=>targets.includes(n)),'CONFIG_CHANGE_REQUIRES_ALL_APP_TARGETS');
       const source=capturePublicLlmSource(root,{openai:true}),self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
-      const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs'].map(name=>captureFile(join(root,'scripts',name),{privateMode:false,limit:1024**2}));
+      const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs'].map(name=>captureFile(join(root,'scripts',name),{privateMode:false,limit:1024**2}));
       const contract=sourceContract(root),catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),history=captureBuildHistory(root,owned?.nonce);
       source.verify();
       need(catalog.entries.length+history.count<DEPLOYMENT_TOTAL_LIMIT,'HISTORICAL_CATALOG_CAPACITY');
@@ -381,6 +404,15 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
               const schema=JSON.parse(text);need(plain(schema)&&equal(Object.keys(schema),['version'])&&[2,3].includes(schema.version),'AUTH_SCHEMA_UNSUPPORTED');authVersion=schema.version;
             }
             plan.migration=mode==='app'&&authVersion===2;
+            plan.historyMigration='none';plan.historyVersion=null;plan.historyConsent=migrateHistoryV4ToV5;
+            if(mode==='app') {
+              const text=await request(['container','exec',plan.peers.get('api').Id,'node','-e',PUBLIC_LLM_RESERVATION_HEADER_PROGRAM],connection.options,'HISTORY_SCHEMA_PROBE_FAILED',5000);
+              const schema=JSON.parse(text);need(plain(schema)&&equal(Object.keys(schema).sort(),['historyVersion','ready'])&&schema.ready===true&&[4,5].includes(schema.historyVersion),'HISTORY_SCHEMA_UNSUPPORTED');
+              plan.historyVersion=schema.historyVersion;
+              plan.historyMigration=schema.historyVersion===4?'history-reservations-v4-to-v5':'none';
+              need(!migrateHistoryV4ToV5 || !plan.migration,'HISTORY_AUTH_MIGRATION_CONFLICT');
+              if(plan.historyMigration!=='none') need(!plan.migration&&!upgradeOperations&&equal(config.selection,config.next)&&targets.every(n=>['web','api'].includes(n)),'HISTORY_MIGRATION_SCOPE');
+            }
             for(const n of ROLES.filter(n=>!targets.includes(n)))need(equal(config.model.services[n],next.services[n]),'NON_TARGET_CONFIG_CHANGE');
             need(equal(config.model.networks,next.networks)&&equal(config.model.volumes,next.volumes),'TOPOLOGY_CHANGE_UNSUPPORTED');
       if(mode==='web'){
@@ -389,7 +421,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         need(plain(proof)&&equal(Object.keys(proof).sort(),['source','version'])&&proof.version===1&&proof.source===contract.digest,'WEB_BACKEND_A3_COMPATIBILITY_UNPROVEN');
       }
       await stable(plan);const token=Object.freeze({version:2,mode,services:targets,interruptedServices:Object.freeze(mode==='web'?['web']:[...new Set([...targets,'web','api','worker'])].sort()),
-              migration:plan.migration,...(config.next.operations?{operations:config.next.operations}:{}),upgradeOperations,rollbackSafe:mode==='web',old:Object.freeze({images:Object.fromEntries(targets.map(n=>[n,before.images[n].Id]))}),
+              migration:plan.migration,historyMigration:plan.historyMigration,historyVersion:plan.historyVersion,...(config.next.operations?{operations:config.next.operations}:{}),upgradeOperations,rollbackSafe:mode==='web',old:Object.freeze({images:Object.fromEntries(targets.map(n=>[n,before.images[n].Id]))}),
               availableCapabilities:Object.freeze([contract.name]),backendContract:contract.name,lifecycleSupported:true});plans.set(token,plan);plan.token=token;return token;
     }catch(error){throw safeError('PREFLIGHT_REFUSED',error);}
   }
@@ -430,18 +462,19 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       throw failure;}
   }
   function ownedLease(token) {
-    const state=leases.get(token);need(state&&!state.released,'LEASE_NOT_OWNED');state.lock.verify();state.owner.verify();
+    const state=leases.get(token);need(state&&!state.released,'LEASE_NOT_OWNED');state.supervisor?.verify();state.lock.verify();state.owner.verify();
     need(equal(fs.readdirSync(state.lock.path),['deploy-adapter-owner.json']),'LEASE_FOREIGN_CONTENT');return state;
   }
   function guard(p) {
     ownedLease(p.lease);p.config.verify();p.source.verify();p.self.verify();p.entryProofs.forEach(f=>f.verify());
-    p.contract.verify();p.catalog.verify();p.retentions.verify();p.history.verify();p.proofs.forEach(f=>f.verify());p.jwt?.verify();
+    p.contract.verify();p.catalog.verify();p.retentions.verify();p.history.verify();p.proofs.forEach(f=>f.verify());p.jwt?.verify();p.extraGuard?.();
   }
   function contextPlan(ctx) {
     const p=planFor(ctx.plan);need(p.lease===ctx.lease&&p.mode===ctx.mode&&equal([...ctx.services].sort(),p.targets),'CONTEXT_NOT_OWNED');guard(p);return p;
   }
-  async function acquire() {
-    rootCheck();noLock();const history=captureBuildHistory(root);history.verify();
+  async function acquire(ctx) {
+    rootCheck();const supervisor=ctx?.mode==='app'?requireDeploySupervisor(root):null;
+    noLock();const history=captureBuildHistory(root);history.verify();
     const lock=acquireLock(root),nonce=randomBytes(16).toString('hex'),parent=join(root,STATE,RECORDS);leaseDeadline=now()+3600000;
     // An error after acquisition intentionally leaves an unowned HOLD, never guessed recovery.
     if(!exists(parent)){fs.mkdirSync(parent,{mode:0o700});syncDirectory(join(root,STATE));}
@@ -453,7 +486,14 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       const bytes=JSON.stringify(value);need(Buffer.byteLength(bytes)<=262144,'JOURNAL_SIZE');
       writeExclusive(join(audit,name),bytes,0o600);syncDirectory(audit);proofs.push(captureFile(join(audit,name),{limit:262144}));};
     record('lease.json',{version:2,project:PROJECT,nonce});
-    const token=Object.freeze({version:2,nonce});leases.set(token,{lock,nonce,audit,owner,proofs,record,released:false});return token;
+    const token=Object.freeze({version:2,nonce});
+    const state={lock,nonce,audit,owner,proofs,record,released:false,supervisor};leases.set(token,state);
+    if(supervisor){
+      record('supervisor.json',{version:1,session:supervisor.session,identity:supervisor.identity});
+      engineJournal=createEngineJournal(join(audit,'engine.jsonl'),()=>{supervisor.verify();lock.verify();owner.verify();});
+      state.engineJournal=engineJournal;
+    }
+    return token;
   }
   async function peers(p) {
     guard(p);const expected=[...p.peers.values()];
@@ -534,7 +574,13 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     }
     save(p,'recovery.json',{version:2,nonce:p.nonce,project:PROJECT,daemon:p.connection.initial.id,services:p.targets,interruptedServices:p.token.interruptedServices,
       oldRecipe:'recipe-old.json',candidateRecipe:'recipe-candidate.json',old:p.before.containers.map(c=>({role:role(c),id:c.Id,image:c.Image,startedAt:c.State.StartedAt})),
-      migration:p.migration,automaticDatabaseRollback:false});
+      migration:p.migration,historyMigration:p.historyMigration,historyVersion:p.historyVersion,
+      historyRecovery:'guarded-hold-no-automatic-resume',oldBinaryAfterHistoryV5:false,automaticDatabaseRollback:false});
+    if(p.historyMigration!=='none') {
+      const lease=ownedLease(p.lease);need(lease.supervisor&&engineJournal,'HISTORY_SUPERVISOR_REQUIRED');
+      save(p,'authority-v3.json',{version:3,project:PROJECT,nonce:p.nonce,supervisor:lease.supervisor.identity,
+        files:recoveryFileSet(p),authority:deploymentAuthority(p.before)});
+    }
     p.phase='recovery';return {durable:true,attempt:p.nonce};
   }
   const cleanStopped = c => c.State.Running===false&&c.State.Status==='exited'&&c.State.Pid===0&&c.RestartCount===0&&
@@ -604,15 +650,15 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     await stop(p,'web');await stop(p,'api');await waitForIdle(ctx);await stop(p,'worker');
     p.phase='fenced';save(p,'fenced.json',{writers:['web','api','worker'],drain:p.drain});return {fenced:true};
   }
-  async function backupHelper(p,phase,work) {
-    await boundary(p);const image=p.before.images.api,name=`${PROJECT}-llm-${p.nonce}-${phase}`;
-    save(p,'helper-'+phase+'-submission.json',{name,image:image.Id,purpose:'backup'});
-    const helperId=(await request(currentPublicLlmHelperArguments(name,image.Id,'backup'),p.connection.options,'HELPER_CREATE_FAILED')).trim();need(id(helperId),'HELPER_ID');
+  async function backupHelper(p,phase,work,{purpose='backup',image=p.before.images.api}={}) {
+    await boundary(p);const name=`${PROJECT}-llm-${p.nonce}-${phase}`;
+    save(p,'helper-'+phase+'-submission.json',{name,image:image.Id,purpose});
+    const helperId=(await request(reservationPublicLlmHelperArguments(name,image.Id,purpose),p.connection.options,'HELPER_CREATE_FAILED')).trim();need(id(helperId),'HELPER_ID');
     save(p,'helper-'+phase+'-created.json',{id:helperId});let authority,epoch,latest;
     const check=async state=>{
       guard(p);const expected=[...p.peers.values()],rows=JSON.parse(await request(['container','inspect',helperId,...expected.map(c=>c.Id)],p.connection.options,'HELPER_BATCH_INSPECT_FAILED'));
       need(rows.length===expected.length+1&&new Set(rows.map(c=>c.Id)).size===rows.length,'HELPER_BATCH_CARDINALITY');
-      const c=rows.find(c=>c.Id===helperId);need(c,'HELPER_MISSING');validateCurrentPublicLlmHelper(c,name,image,'backup',state);
+      const c=rows.find(c=>c.Id===helperId);need(c,'HELPER_MISSING');validateReservationPublicLlmHelper(c,name,image,purpose,state);
       // Observed helper create/start transition: false -> null; strict policy above permits only these values.
       need([null,false].includes(c.HostConfig.OomKillDisable),'HELPER_OOM_POLICY');
       const ctl=control(c);ctl.HostConfig={...ctl.HostConfig,OomKillDisable:false};
@@ -656,7 +702,8 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
   async function snapshot(ctx) {
     const p=contextPlan(ctx);need(p.phase==='fenced','SNAPSHOT_STAGE');
     const directory=join(p.audit,'snapshots');fs.mkdirSync(directory,{mode:0o700});syncDirectory(p.audit);
-    p.snapshots=createAdapterSnapshots({DB:database(),directory,helper:(phase,work)=>backupHelper(p,phase,work),guard:()=>guard(p),record:p.record});
+    p.snapshots=createAdapterSnapshots({DB:database(),directory,helper:(phase,work)=>backupHelper(p,phase,work),guard:()=>guard(p),record:p.record,
+      historyVersion:p.historyVersion,migrateHistory:p.historyMigration!=='none'});
     p.baseline=await p.snapshots.capture('fenced');assertFourStoreTransition(p.baseline,p.baseline);p.phase='snapshotted';
     return {durable:true,attempt:p.nonce,stores:structuredClone(p.baseline)};
   }
@@ -667,8 +714,54 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const environment=Object.fromEntries(['AUTH_ORIGIN','AUTH_ALLOW_INSECURE_LOCAL_HTTP','SCAN_BROWSER_ALLOWED_USER_IDS','SCAN_BROWSER_ALLOW_ALL_LOCAL_ACCOUNTS'].map(k=>[k,p.next.services.api.environment[k]]));
     p.auth=qualifyAdapterAuthCopy(root,{DB:database(),snapshotPath:join(dir,'core/auth.sqlite'),environment,migrate:p.migration});
     need(p.auth.before===p.baseline.core.auth.logicalSha256&&(p.auth.migration==='auth-a2-to-a3')===p.migration,'AUTH_COPY_EXPECTATION');
-    const stores=qualifyAdapterStoreCopies({root,DB:database(),directory:dir,environment:p.config.next.environment,baseline:p.baseline,verify:()=>p.snapshots.verify()});
-        p.snapshots.verify();save(p,'qualification.json',{auth:p.auth,...stores,liveMigration:false});p.phase='qualified';return {qualified:true,migration:p.migration};
+    const stores=qualifyAdapterStoreCopies({root,DB:database(),directory:dir,environment:p.config.next.environment,baseline:p.baseline,verify:()=>p.snapshots.verify(),migrateHistory:p.historyMigration!=='none'});
+    p.expectedHistory=stores.historyProof;
+    p.snapshots.verify();save(p,'qualification.json',{auth:p.auth,...stores,liveMigration:false});p.phase='qualified';return {qualified:true,migration:p.migration,historyMigration:p.historyMigration};
+  }
+  function recoveryFileSet(p) {
+    const files=['profile.json','llm-profile.json','compose.images.json','compose.llm-env.json',...(p.config.profile.cve?['compose.cve.json']:[])];
+    const state=join(root,STATE), history=[];
+    // Metadata-only historical identities: old records may contain image Config.Env.
+    // Never reserialize or hash that content into a recovery checkpoint.
+    const walk=(path,relative,depth=0)=>{
+      need(depth<=6&&history.length<4096,'RECOVERY_HISTORY_LIMIT');const s=fs.lstatSync(path);
+      need(!s.isSymbolicLink()&&s.uid===process.getuid(),'RECOVERY_HISTORY_OWNER');
+      if(s.isDirectory()){
+        need((s.mode&0o7777)===0o700,'RECOVERY_HISTORY_MODE');
+        const names=fs.readdirSync(path).filter(n=>relative===RECORDS?n!==p.nonce:true).sort();
+        history.push({path:relative,dev:s.dev,ino:s.ino,mode:s.mode,names});
+        for(const n of names){need(/^[a-zA-Z0-9_.-]{1,100}$/.test(n),'RECOVERY_HISTORY_NAME');walk(join(path,n),relative+'/'+n,depth+1);}
+      }else{
+        need(s.isFile()&&s.nlink===1&&(s.mode&0o7777)===0o600,'RECOVERY_HISTORY_FILE');
+        history.push({path:relative,stamp:[s.dev,s.ino,s.uid,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]});
+      }
+    };
+    // Catalog paths are established by its strict parser; include ancestor names/identities.
+    const roots=new Set([RECORDS,...p.catalog.entries.map(e=>e.path.slice(state.length+1).split('/')[0])]);
+    for(const name of [...roots].sort()) if(exists(join(state,name)))walk(join(state,name),name);
+    return {config:Object.fromEntries(files.map(n=>[n,deploymentFileIdentity(join(state,n))])),
+      jwt:deploymentFileIdentity(join(state,'scan-jwt'),{secret:true}),history,
+      catalog:{active:p.catalog.active,archived:p.catalog.archived,records:p.catalog.records},
+      references:p.history.references};
+  }
+  function operationIdentity(path) {
+    const s=fs.lstatSync(path);protectedDirectory(path);
+    return {dev:s.dev,ino:s.ino,owner:deploymentFileIdentity(join(path,'deploy-adapter-owner.json'))};
+  }
+  async function checkpointPrestart(p) {
+    need(p.historyMigration==='history-reservations-v4-to-v5'&&p.postMigration&&p.historyProof,'PRESTART_MIGRATION_PROOF');
+    await boundary(p);p.snapshots.verify();
+    need(['web','api','worker'].every(n=>cleanStopped(p.peers.get(n))),'PRESTART_WRITERS');
+    const authority=deploymentAuthority(await namespace(p.config,p.connection,p));
+    const initial=JSON.parse(captureFile(join(p.audit,'authority-v3.json'),{limit:262144}).bytes);
+    const files=recoveryFileSet(p);need(equal(files,initial.files),'PRESTART_FILE_DRIFT');
+    const lease=ownedLease(p.lease),engine=engineJournal.checkpoint();
+    const evidence=evidenceIndex(p.audit).filter(e=>e.path!=='engine.jsonl');
+    save(p,'history-v5-prestart.json',{version:3,kind:'history-v5-prestart',project:PROJECT,nonce:p.nonce,
+      supervisor:{identity:lease.supervisor.identity,session:lease.supervisor.session},operation:operationIdentity(p.lock.path),daemon:p.connection.initial,
+      source:digest(JSON.stringify(p.source.manifest.files.map(f=>({path:f.path,digest:f.digest})))),
+      adapter:digest(p.self.bytes),entrySources:p.entryProofs.map(f=>digest(f.bytes)),services:p.targets,
+      files,authority,evidence,engine,before:p.baseline,after:p.postMigration,proof:p.historyProof});
   }
   async function ready(p,name) {
     const end=now()+120000,previousDeadline=activeDeadline;activeDeadline=Math.min(activeDeadline,end);
@@ -715,13 +808,33 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
   async function switchServices(ctx) {
     const p=contextPlan(ctx);need(ctx.recovery?.attempt===p.nonce,'RECOVERY_NOT_OWNED');
     if(p.mode==='web'){need(p.phase==='recovery','WEB_SWITCH_STAGE');await stable(p);p.mutated=true;p.phase='switching';await startService(p,'web');}
-    else {need(p.phase==='qualified'&&ctx.qualification?.qualified===true&&ctx.migrationAttempted===p.migration,'APP_SWITCH_STAGE');p.phase='switching';
-      for(const n of ['egress','llm-egress','openai-egress'].filter(n=>p.targets.includes(n))){await stop(p,n);await startService(p,n);}
-      await startService(p,'worker');const beforeApi=await p.snapshots.capture('before-api');assertFourStoreTransition(p.baseline,beforeApi);
-      await startService(p,'api');const afterApi=await p.snapshots.capture('after-api');assertFourStoreTransition(p.baseline,afterApi,p.auth);p.after=afterApi;
-      save(p,'preservation.json',{version:2,before:p.baseline,after:afterApi,auth:p.auth,allFourStores:true});
-      await startService(p,'web');
+    else {need(p.phase==='qualified'&&ctx.qualification?.qualified===true&&ctx.migrationAttempted===p.migration&&
+      ctx.historyMigrationAttempted===(p.historyMigration!=='none'),'APP_SWITCH_STAGE');p.phase='switching';
+      if(p.historyMigration!=='none') {
+        need(p.historyConsent===true&&ctx.options?.migrateHistoryV4ToV5===true&&p.expectedHistory&&['web','api','worker'].every(n=>cleanStopped(p.peers.get(n))),'HISTORY_MIGRATION_NOT_AUTHORIZED');
+        await boundary(p);p.snapshots.verify();p.historyMigrationAttempted=true;
+        save(p,'history-migration-intent.json',{version:1,migration:p.historyMigration,from:4,to:5,candidateImage:p.candidateImages.api.Id,
+          source:digest(JSON.stringify(p.source.manifest.files.map(f=>({path:f.path,digest:f.digest})))),baseline:p.baseline,expected:p.expectedHistory,
+          recovery:'guarded-hold-no-old-binary-or-stale-restore'});
+        await backupHelper(p,'migrate-history-v4-to-v5',async (_id,_dispatch,check,receipt)=>{
+          await check();need(equal(receipt,{ready:true,migration:p.historyMigration,from:4,to:5}),'HISTORY_MIGRATION_RECEIPT');
+        },{purpose:'migrate-history-v4-to-v5',image:p.candidateImages.api});
+        const after=await p.snapshots.capture('post-migration');
+        const proof=qualifyAdapterHistoryMigration({DB:database(),before:p.baseline,after,beforeDirectory:join(p.audit,'snapshots/fenced'),afterDirectory:join(p.audit,'snapshots/post-migration')});
+        need(equal(proof,p.expectedHistory),'HISTORY_MIGRATION_EXPECTATION');p.historyProof=proof;p.postMigration=after;
+        save(p,'history-migration-complete.json',{version:1,proof,candidateImage:p.candidateImages.api.Id,before:p.baseline,after});
+        await checkpointPrestart(p);
+      }
+      await forwardApp(p);
     }p.phase='switched';return {switched:true};
+  }
+  async function forwardApp(p) {
+    const baseline=p.postMigration??p.baseline;
+    for(const n of ['egress','llm-egress','openai-egress'].filter(n=>p.targets.includes(n))){await stop(p,n);await startService(p,n);}
+    await startService(p,'worker');const beforeApi=await p.snapshots.capture('before-api');assertFourStoreTransition(baseline,beforeApi);
+    await startService(p,'api');const afterApi=await p.snapshots.capture('after-api');assertFourStoreTransition(baseline,afterApi,p.auth);p.after=afterApi;
+    save(p,'preservation.json',{version:2,before:p.baseline,postMigration:p.postMigration??null,historyProof:p.historyProof??null,after:afterApi,auth:p.auth,allFourStores:true});
+    await startService(p,'web');
   }
   async function health(ctx) {
     const p=contextPlan(ctx);need(['switched','restored'].includes(p.phase),'HEALTH_STAGE');await boundary(p);
@@ -729,11 +842,13 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     need(rows.length===p.peers.size&&new Set(rows.map(c=>c.Id)).size===rows.length&&equal(rows.map(c=>c.Id).sort(),[...p.peers.values()].map(c=>c.Id).sort())&&rows.filter(c=>!role(c).endsWith('volume-init')).every(healthy),'FINAL_HEALTH_INVALID');
     for(const [path,status]of [['/',200],['/api/v1/auth/me',401],['/api/v1/browser/scans/00000000-0000-0000-0000-000000000000/llm/readiness',401]]){
       guard(p);const r=await http(ORIGIN+path,{redirect:'error',signal:AbortSignal.timeout(5000)});await r.body?.cancel();need(r.status===status,'HTTP_READINESS_FAILED');}
-    if(p.mode==='app'){p.snapshots.verify();assertFourStoreTransition(p.baseline,p.after,p.auth);}await boundary(p);
+    if(p.mode==='app'){p.snapshots.verify();assertFourStoreTransition(p.postMigration??p.baseline,p.after,p.auth);}await boundary(p);
     p.healthTarget=ctx.target;p.phase=ctx.target==='old'?'restored-healthy':'healthy';return {healthy:true};
   }
   async function publishReceipt(ctx) {
-    const p=contextPlan(ctx);need(p.phase==='healthy'&&ctx.publishAttempted===true,'PUBLICATION_STAGE');await boundary(p);p.phase='publishing';
+    const p=contextPlan(ctx);need(p.phase==='healthy'&&ctx.publishAttempted===true&&ctx.receipt?.historyMigration===p.historyMigration,'PUBLICATION_STAGE');await boundary(p);
+    if(p.mode==='app'){p.snapshots.verify();assertFourStoreTransition(p.postMigration??p.baseline,p.after,p.auth);}
+    p.phase='publishing';
     const pins={services:Object.fromEntries([...p.peers].map(([name,c])=>[name,{image:c.Image}]))};
     const outputs=[['compose.images.json',pins],...(p.mode==='app'?[['compose.llm-env.json',publicLlmEnvironmentOverlay(p.config.next)],['llm-profile.json',p.config.next]]:[])];
     save(p,'publication-submission.json',{version:2,targets:outputs.map(([name])=>name),pins});
@@ -745,7 +860,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     p.config=loadConfiguration(root,home,false);need(equal(p.config.selection,p.nextSelection??p.authorities.get('api').selection),'PUBLISHED_SELECTION_MISMATCH');
     await boundary(p);need(ctx.receipt?.healthy===true&&typeof ctx.receipt.verified==='boolean'&&Number.isFinite(Date.parse(ctx.receipt.completedAt)),'RECEIPT_INVALID');
         save(p,'published.json',{version:2,project:PROJECT,nonce:p.nonce,mode:p.mode,services:p.targets,interruptedServices:p.token.interruptedServices,
-          migration:p.migration,verified:ctx.receipt.verified,healthy:true,completedAt:ctx.receipt.completedAt,pins,stores:p.after??null});p.phase='published';return {published:true};
+          migration:p.migration,historyMigration:p.historyMigration,historyProof:p.historyProof??null,verified:ctx.receipt.verified,healthy:true,completedAt:ctx.receipt.completedAt,pins,stores:p.after??null});p.phase='published';return {published:true};
   }
   async function reconcileWebRollback(p) {
     guard(p);const identified=p.webCandidate;
@@ -785,20 +900,161 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     need(!ctx.fenceAttempted||p?.phase==='published','APP_FENCE_HOLD');
     need(!ctx.switchAttempted||['published','restored-healthy'].includes(p?.phase),'SWITCH_HOLD');
     if(p){if(p.mutated)await boundary(p);else await stable(p);}
-    state.proofs.forEach(f=>f.verify());
+    state.proofs.forEach(f=>f.verify());state.engineJournal?.checkpoint();
     // Partial/uncertain image builds cannot be represented as a completed deployment.
     need(!p||!['building','hold'].includes(p.phase),'BUILD_HOLD');
     const references=Object.entries(p?.candidates??{}).flatMap(([name,r])=>[{name,tag:r.tag,image:r.image},{name,tag:r.oldTag,image:r.oldImage}]);
     state.record('complete.json',{version:2,project:PROJECT,nonce:state.nonce,outcome:p?.phase==='published'?'published':p?.phase==='restored-healthy'?'old-restored':'pre-mutation-aborted',references,evidence:evidenceIndex(state.audit)});
     ownedLease(ctx.lease);need(!exists(join(state.audit,'operation.lock')),'LOCK_ARCHIVE_COLLISION');
-    fs.renameSync(state.lock.path,join(state.audit,'operation.lock'));syncDirectory(state.audit);syncDirectory(join(root,STATE));state.released=true;leaseDeadline=null;return {released:true};
+    fs.renameSync(state.lock.path,join(state.audit,'operation.lock'));syncDirectory(state.audit);syncDirectory(join(root,STATE));state.released=true;leaseDeadline=null;engineJournal=null;return {released:true};
+  }
+  async function readRecovery(options, supervisor = null) {
+    rootCheck();need(engineJournal===null,'RECOVERY_FRESH_EXECUTOR_REQUIRED');
+    need(/^[a-f0-9]{32}$/.test(options?.audit??''),'RECOVERY_EXACT_AUDIT_REQUIRED');
+    const nonce=options.audit,audit=join(root,STATE,RECORDS,nonce),lockPath=join(root,STATE,'.operation.lock');
+    const auditGuard=protectedDirectory(audit),lockGuard=protectedDirectory(lockPath);
+    const owner=captureFile(join(lockPath,'deploy-adapter-owner.json'));
+    need(equal(JSON.parse(owner.bytes),{version:2,nonce,kind:'preserving-deployment'})&&equal(fs.readdirSync(lockPath),['deploy-adapter-owner.json']),'RECOVERY_OWNER_MISMATCH');
+    need(!exists(join(audit,'recovery-v5'))&&!exists(join(audit,'complete.json')),'RECOVERY_ALREADY_ATTEMPTED');
+    const checkpoint=captureFile(join(audit,'history-v5-prestart.json'),{limit:262144});
+    const cp=JSON.parse(checkpoint.bytes),checkpointDigest=digest(checkpoint.bytes);
+    need(cp.version===3&&cp.kind==='history-v5-prestart'&&cp.project===PROJECT&&cp.nonce===nonce,'RECOVERY_CHECKPOINT_REQUIRED');
+    need(options.checkpoint===undefined||options.checkpoint===checkpointDigest,'RECOVERY_CHECKPOINT_MISMATCH');
+    need(!options.apply||options.checkpoint===checkpointDigest,'RECOVERY_CHECKPOINT_SELECTION_REQUIRED');
+    need(equal(operationIdentity(lockPath),cp.operation),'RECOVERY_LOCK_IDENTITY');
+    const osIdentity=supervisor?supervisor.identity:inspectDeploySupervisor(root);
+    need(equal(osIdentity,cp.supervisor.identity)&&(!supervisor||supervisor.session!==cp.supervisor.session),'RECOVERY_SUPERVISOR_IDENTITY');
+    const names=fs.readdirSync(audit).sort();
+    need(!names.some(n=>/^(start-|restore-|publication-|published|preservation|complete)/.test(n)),'RECOVERY_NOT_PRESTART');
+    const journal=readEngineJournal(join(audit,'engine.jsonl'));
+    need(Number.isSafeInteger(cp.engine.count)&&cp.engine.count>0&&cp.engine.count<=journal.count&&
+      Number.isSafeInteger(cp.engine.bytes)&&journal.ends[cp.engine.count-1]===cp.engine.bytes&&
+      digest(journal.bytes.subarray(0,cp.engine.bytes))===cp.engine.sha256,'RECOVERY_ENGINE_PREFIX');
+    // Between the B1 checkpoint and the first durable start intent the original
+    // executor may only finish read-only boundary inspections. Even a settled
+    // unexpected dispatch is not permission to enter the prestart branch.
+    const prestartReads=new Set(['PEER_INSPECT_FAILED','CONTAINER_INSPECT_FAILED','CONTAINER_CENSUS_FAILED',
+      'CONTAINER_NAME_CENSUS_FAILED','IMAGE_INSPECT_FAILED','NETWORK_CENSUS_FAILED','NETWORK_INSPECT_FAILED',
+      'VOLUME_INSPECT_FAILED','VOLUME_CONSUMERS_FAILED','DOCKER_INFO_FAILED','RETAINED_IMAGE_INSPECT_FAILED','IMAGE_REFERENCE_CENSUS_FAILED']);
+    need(journal.codes.slice(cp.engine.count).every(code=>prestartReads.has(code)),'RECOVERY_POST_CHECKPOINT_DISPATCH');
+    const evidence=evidenceIndex(audit).filter(e=>!['engine.jsonl','history-v5-prestart.json','failure-switchservices.json'].includes(e.path));
+    need(equal(evidence,cp.evidence),'RECOVERY_EVIDENCE_DRIFT');
+    const originalEvidence=evidenceIndex(audit),proofs=[owner,checkpoint];
+    const read=name=>{const f=captureFile(join(audit,name),{limit:262144});proofs.push(f);return JSON.parse(f.bytes);};
+    const authority=read('authority-v3.json'),intent=read('intent.json'),recovery=read('recovery.json'),built=read('built.json');
+    const completion=read('history-migration-complete.json'),migration=read('history-migration-intent.json');
+    need(equal(read('lease.json'),{version:2,project:PROJECT,nonce})&&
+      equal(read('supervisor.json'),{version:1,session:cp.supervisor.session,identity:cp.supervisor.identity})&&
+      /^[a-f0-9]{64}$/.test(cp.supervisor.session),'RECOVERY_ORIGINAL_SUPERVISOR');
+    need(authority.version===3&&authority.project===PROJECT&&authority.nonce===nonce&&equal(authority.supervisor,cp.supervisor.identity)&&equal(authority.files,cp.files),'RECOVERY_PROSPECTIVE_AUTHORITY');
+    need(intent.kind==='preserving-deployment'&&intent.nonce===nonce&&intent.mode==='app'&&recovery.nonce===nonce&&recovery.migration===false&&
+      recovery.historyVersion===4&&recovery.historyMigration==='history-reservations-v4-to-v5','RECOVERY_SCOPE');
+    const targets=deploymentTargets('app',cp.services);need(targets.every(n=>['web','api'].includes(n))&&equal(targets,intent.services)&&equal(targets,recovery.services),'RECOVERY_TARGET_SCOPE');
+    need(built.nonce===nonce&&built.outcome==='candidate-built-old-site-unchanged'&&equal(Object.keys(built.candidates).sort(),targets),'RECOVERY_CANDIDATES');
+    need(equal(completion.before,cp.before)&&equal(completion.after,cp.after)&&equal(completion.proof,cp.proof)&&cp.before.historyVersion===4&&cp.after.historyVersion===5&&
+      migration.from===4&&migration.to===5&&migration.migration===recovery.historyMigration&&equal(migration.baseline,cp.before)&&equal(migration.expected,cp.proof)&&
+      completion.candidateImage===built.candidates.api.image&&migration.candidateImage===completion.candidateImage,'RECOVERY_MIGRATION_EVIDENCE');
+    for(const phase of ['migrate-history-v4-to-v5','post-migration']){
+      const receipt=read('helper-'+phase+'-complete.json');need(id(receipt.id)&&receipt.exit===0&&receipt.removed===true&&receipt.namespaceVerified===true,'RECOVERY_HELPER_UNSETTLED');
+    }
+    for(const name of ['web','api','worker']){
+      const stopped=read('stop-'+name+'-complete.json'),current=cp.authority.containers.find(c=>c.role===name),original=authority.authority.containers.find(c=>c.role===name);
+      need(current&&original&&stopped.id===current.Id&&current.Id===original.Id&&
+        stopped.startedAt===current.process[0]&&stopped.startedAt===original.process[0]&&stopped.finishedAt===current.process[1]&&
+        stopped.exit===current.process[6]&&(name==='web'?[0,143]:[0]).includes(stopped.exit),'RECOVERY_WRITER_STOP');
+    }
+    // Retain the exact published profile, including an existing pinned CVE binding.
+    // No refresh, reprovisioning or configuration transition is part of recovery.
+    const config=loadConfiguration(root,home,false);
+    const next=expectedPublicLlmConfig(root,config.profile.cve,config.selection),source=capturePublicLlmSource(root,{openai:true});
+    const self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
+    const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs'].map(n=>captureFile(join(root,'scripts',n),{privateMode:false,limit:1024**2}));
+    const sourceDigest=digest(JSON.stringify(source.manifest.files.map(f=>({path:f.path,digest:f.digest}))));
+    need(sourceDigest===cp.source&&sourceDigest===intent.source&&sourceDigest===migration.source&&digest(self.bytes)===cp.adapter&&cp.adapter===intent.adapter&&
+      equal(entryProofs.map(f=>digest(f.bytes)),cp.entrySources)&&equal(cp.entrySources,intent.entrySources),'RECOVERY_SOURCE_DRIFT');
+    const contract=sourceContract(root),catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),history=captureBuildHistory(root,nonce);
+    need(contract.digest===intent.backendSource,'RECOVERY_CONTRACT_DRIFT');
+    const shell={nonce,config,catalog,history};need(equal(recoveryFileSet(shell),cp.files),'RECOVERY_FILE_IDENTITY_DRIFT');
+    const verifyOriginal=()=>{
+      auditGuard();lockGuard();owner.verify();checkpoint.verify();proofs.forEach(f=>f.verify());
+      need(equal(operationIdentity(lockPath),cp.operation),'RECOVERY_LOCK_CHANGED');
+      const current=evidenceIndex(audit).filter(e=>e.path!=='recovery-v5'&&!e.path.startsWith('recovery-v5/'));
+      need(equal(current,originalEvidence),'RECOVERY_ORIGINAL_EVIDENCE_CHANGED');
+    };
+    verifyOriginal();const connection=await connect();need(equal(connection.initial,cp.daemon)&&connection.initial.id===intent.daemon,'RECOVERY_DAEMON_CHANGED');
+    const before=await namespace(config,connection);
+    need(equal(deploymentAuthority(before),cp.authority),'RECOVERY_AUTHORITY_CHANGED');
+    need(before.containers.filter(c=>['web','api','worker'].includes(role(c))).every(cleanStopped)&&
+      before.containers.filter(c=>!['web','api','worker'].includes(role(c))&&!role(c).endsWith('volume-init')).every(healthy),'RECOVERY_PEERS_NOT_STOPPED');
+    const candidateImages={...before.images};
+    for(const name of targets){
+      const row=built.candidates[name];need(imageId(row.image)&&row.oldImage===before.images[name].Id&&row.tag===`dip-deploy-${name}:candidate-${nonce}`&&row.oldTag===`dip-deploy-${name}:old-${nonce}`,'RECOVERY_IMAGE_BINDING');
+      const images=JSON.parse(await request(['image','inspect',row.image],connection.options,'RECOVERY_IMAGE_INSPECT_FAILED'));
+      need(images.length===1&&images[0].Id===row.image,'RECOVERY_IMAGE_CARDINALITY');validatePublicLlmImage(images[0],name);assertNoOpenAiDockerSecret(images[0].Config);candidateImages[name]=images[0];
+    }
+    const oldRecipe=join(audit,'recipe-old.json'),newRecipe=join(audit,'recipe-candidate.json');
+    need(equal(read('recipe-old.json'),recipe(config.model,before.images))&&equal(read('recipe-candidate.json'),recipe(next,candidateImages)),'RECOVERY_RECIPE_CHANGED');
+    const p={mode:'app',nonce,audit,targets,config,next,source,self,entryProofs,contract,catalog,retentions,history,connection,before,
+      peers:new Map(before.containers.map(c=>[role(c),c])),authorities:new Map(before.containers.map(c=>[role(c),{model:config.model,selection:config.selection}])),
+      images:{...before.images},candidateImages,candidates:built.candidates,oldRecipe,newRecipe,apiReady:false,mutated:true,
+      migration:false,historyMigration:recovery.historyMigration,historyVersion:4,historyConsent:true,
+      baseline:cp.before,postMigration:cp.after,auth:null,extraGuard:verifyOriginal,proofs};
+    // Revalidate immutable image/config references and all protected inputs; no helper or SQL in a plan.
+    await retained(p);source.verify();self.verify();entryProofs.forEach(f=>f.verify());config.verify();catalog.verify();retentions.verify();history.verify();verifyOriginal();
+    need(equal(recoveryFileSet(p),cp.files),'RECOVERY_PLAN_CHANGED');
+    if(!supervisor)need(equal(inspectDeploySupervisor(root),osIdentity),'RECOVERY_SUPERVISOR_CHANGED');
+    return {p,cp,checkpointDigest,owner,lockGuard,auditGuard,originalAudit:audit};
+  }
+  async function planRecovery({options}) {
+    const {p,checkpointDigest}=await readRecovery(options);
+    return {eligible:true,audit:p.nonce,checkpoint:checkpointDigest,phase:'v5-committed-prestart',services:p.targets,
+      currentStores:'not-inspected-requires-fresh-B1-equality-on-apply',migrationReplay:false};
+  }
+  async function applyRecovery({options}) {
+    const supervisor=requireDeploySupervisor(root),data=await readRecovery(options,supervisor);
+    const {p,cp,checkpointDigest,owner,lockGuard,originalAudit}=data;
+    // Recompute the private proof from sealed B0/B1, never deserialize a trusted brand.
+    p.historyProof=qualifyAdapterHistoryMigration({DB:database(),before:cp.before,after:cp.after,
+      beforeDirectory:join(originalAudit,'snapshots/fenced'),afterDirectory:join(originalAudit,'snapshots/post-migration')});
+    need(equal(p.historyProof,cp.proof),'RECOVERY_INDEPENDENT_PROOF');p.extraGuard();supervisor.verify();
+    const audit=join(originalAudit,'recovery-v5');fs.mkdirSync(audit,{mode:0o700});syncDirectory(originalAudit);
+    const auditGuard=protectedDirectory(audit),proofs=p.proofs;
+    const lock={path:join(root,STATE,'.operation.lock'),verify:lockGuard};
+    const record=(name,value)=>{
+      supervisor.verify();lock.verify();owner.verify();auditGuard();proofs.forEach(f=>f.verify());p.extraGuard();
+      need(/^[a-z][a-z0-9-]{0,79}\.json$/.test(name),'RECOVERY_RECORD_NAME');const bytes=JSON.stringify(value);need(Buffer.byteLength(bytes)<=262144,'RECOVERY_RECORD_SIZE');
+      writeExclusive(join(audit,name),bytes,0o600);syncDirectory(audit);proofs.push(captureFile(join(audit,name),{limit:262144}));
+    };
+    record('adoption.json',{version:3,nonce:p.nonce,checkpoint:checkpointDigest,supervisor:{identity:supervisor.identity,session:supervisor.session},phase:'v5-committed-prestart'});
+    engineJournal=createEngineJournal(join(audit,'engine.jsonl'),()=>{supervisor.verify();lock.verify();owner.verify();p.extraGuard();});
+    const lease=Object.freeze({version:3,nonce:p.nonce,recovery:true});leaseDeadline=now()+3600000;
+    const state={lock,nonce:p.nonce,audit:originalAudit,owner,proofs,supervisor,engineJournal,released:false,plan:p,
+      record(name,value){need(name==='complete.json','RECOVERY_ROOT_WRITE_FORBIDDEN');p.extraGuard();supervisor.verify();writeExclusive(join(originalAudit,name),JSON.stringify(value),0o600);syncDirectory(originalAudit);}};
+    leases.set(lease,state);Object.assign(p,{lease,lock,owner,record,audit,phase:'qualified'});
+    const token=Object.freeze({version:3,mode:'app',services:p.targets,interruptedServices:['api','web','worker']});p.token=token;plans.set(token,p);
+    p.jwt=captureFile(join(root,STATE,'scan-jwt'),{limit:96});need(/^[a-f0-9]{96}$/.test(p.jwt.bytes.toString())&&p.peers.get('api').Config.Env.includes('SCAN_JWT_SECRET='+p.jwt.bytes.toString()),'RECOVERY_JWT_BINDING');
+    const ctx={options,mode:'app',services:p.targets,interruptedServices:token.interruptedServices,lease,plan:token,fenceAttempted:true,switchAttempted:true,historyMigrationAttempted:true,publishAttempted:false};
+    try {
+      await boundary(p);const directory=join(audit,'snapshots');fs.mkdirSync(directory,{mode:0o700});syncDirectory(audit);
+      p.snapshots=createAdapterSnapshots({DB:database(),directory,helper:(phase,work)=>backupHelper(p,phase,work,{image:p.candidateImages.api}),guard:()=>guard(p),record,historyVersion:5,migrateHistory:false});
+      const fresh=await p.snapshots.capture('fenced');assertFourStoreTransition(p.postMigration,fresh);save(p,'current-b1-equality.json',{version:1,stores:fresh});
+      p.phase='switching';await forwardApp(p);p.phase='switched';await health({...ctx,target:'candidate'});
+      ctx.receipt={version:1,mode:'app',services:p.targets,interruptedServices:token.interruptedServices,migration:false,historyMigration:p.historyMigration,
+        verified:false,healthy:true,completedAt:new Date().toISOString()};ctx.publishAttempted=true;
+      await publishReceipt(ctx);await release(ctx);
+      return {recovered:true,audit:p.nonce,checkpoint:checkpointDigest,phase:'published',migrationReplay:false};
+    }catch(error){
+      try{record('failure.json',{version:1,phase:p.phase,...deployAdapterDiagnostic(error)});}catch{/* Never destroy evidence to report an error. */}
+      throw error;
+    }
   }
   const methods={acquireLock:acquire,releaseLock:release,
-    preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease,upgradeOperations:ctx.options?.upgradeOperations}),
+    preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease,upgradeOperations:ctx.options?.upgradeOperations,migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5}),
     build:ctx=>{contextPlan(ctx);return buildCandidate(ctx.plan);},validateCandidate:validate,
     verify:async ctx=>{const p=contextPlan(ctx);need(p.phase==='validated','VERIFY_STAGE');await stable(p);return {valid:true};},
     waitForIdle,prepareRecovery,fenceAdmissions,snapshot,qualifyState,switchServices,health,publishReceipt,restoreOld};
   return Object.freeze({capabilities:()=>DEPLOY_ADAPTER_CAPABILITIES,status:bounded(status,120000),prepare:bounded(prepare,300000),
+    planRecovery:bounded(planRecovery,300000),applyRecovery:bounded(applyRecovery,1800000),
     ...Object.fromEntries(Object.entries(methods).map(([name,fn])=>[name,bounded(async ctx=>{
       try{return await fn(ctx);}catch(error){const failure=safeError('ADAPTER_'+name.toUpperCase()+'_FAILED',error);
         const p=ctx?.lease&&leases.get(ctx.lease)?.plan;
@@ -815,11 +1071,12 @@ export async function createAdapter(options = {}) {
       const { code } = deployAdapterDiagnostic(error);
       const mapped = code === 'SHARED_OPERATION_HOLD' ? 'DEPLOY_LOCKED' :
         code === 'WEB_BACKEND_A3_COMPATIBILITY_UNPROVEN' ? 'DEPLOY_COMPATIBILITY' :
+        ['HISTORY_MIGRATION_SCOPE','HISTORY_AUTH_MIGRATION_CONFLICT'].includes(code) ? 'DEPLOY_HISTORY_MIGRATION_SCOPE' :
         code === 'TARGETS_INVALID' || code === 'WEB_ONLY_TARGET_REQUIRED' || code === 'APP_API_REQUIRED' || code === 'OPERATIONS_UPGRADE_REQUIRES_ALL_APP_TARGETS' || code === 'OPERATIONS_FLAG_INVALID' ? 'DEPLOY_SCOPE' : fallback;
       throw coreError(mapped);
     }
   };
-  const codes={acquireLock:'LOCKED',releaseLock:'UNLOCK',preflight:'PREFLIGHT',build:'BUILD',validateCandidate:'CANDIDATE',verify:'VERIFY',
+  const codes={planRecovery:'RECOVERY',applyRecovery:'RECOVERY',acquireLock:'LOCKED',releaseLock:'UNLOCK',preflight:'PREFLIGHT',build:'BUILD',validateCandidate:'CANDIDATE',verify:'VERIFY',
     waitForIdle:'DRAIN',prepareRecovery:'RECOVERY',fenceAdmissions:'FENCE',snapshot:'SNAPSHOT',qualifyState:'QUALIFY',switchServices:'SWITCH',health:'HEALTH',publishReceipt:'RECEIPT',restoreOld:'RESTORE'};
   return Object.freeze({
     async status() {return translate(async()=>{const r=await adapter.status();return {ready:r.services.filter(c=>!c.name.endsWith('volume-init')).every(c=>c.healthy),locked:r.hold};},'DEPLOY_STATUS');},

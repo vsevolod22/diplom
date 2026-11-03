@@ -73,9 +73,9 @@ describe('list-level active scan polling', () => {
     return { ...render(content()), client, transport, content };
   }
 
-  it('refreshes the list without per-row GETs, then stops polling and the estimate on completion without leaving the list', async () => {
+  it('refreshes the indeterminate list without per-row GETs, then confirms completion and stops polling without leaving the list', async () => {
     const intervals = vi.spyOn(window, 'setInterval');
-    const clearInterval = vi.spyOn(window, 'clearInterval');
+
     let finish!: (rows: ScanSummary[]) => void;
     const pending = new Promise<ScanSummary[]>(resolve => { finish = resolve; });
     const list = vi.fn<ScanTransport['list']>()
@@ -87,11 +87,9 @@ describe('list-level active scan polling', () => {
     expect(link.querySelector('a, button, input, select, textarea, details, summary, [tabindex]')).toBeNull();
     link.focus();
     const progress = within(link).getByRole('progressbar');
-    const initialEstimate = Number(progress.getAttribute('value'));
-    expect(within(link).getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
-    const estimateIndex = intervals.mock.calls.findIndex(([, delay]) => delay === 1000);
-    expect(estimateIndex).toBeGreaterThanOrEqual(0);
-    const estimateTimer = intervals.mock.results[estimateIndex].value;
+    expect(progress.hasAttribute('value')).toBe(false);
+    expect(within(link).getByText('Процент выполнения неизвестен.')).toBeTruthy();
+    expect(intervals.mock.calls.some(([, delay]) => delay === 1000)).toBe(false);
     await advance(1998);
     expect(list).toHaveBeenCalledTimes(1);
     await advance(2);
@@ -99,7 +97,7 @@ describe('list-level active scan polling', () => {
     // A slow list response must not fan out status requests or overlap another list request.
     await advance(12_000);
     expect(list).toHaveBeenCalledTimes(2);
-    expect(Number(progress.getAttribute('value'))).toBeGreaterThan(initialEstimate);
+    expect(progress.hasAttribute('value')).toBe(false);
     await act(async () => {
       finish([scan('completed', 'saved'), scan('completed')]);
       await vi.advanceTimersByTimeAsync(1);
@@ -109,7 +107,7 @@ describe('list-level active scan polling', () => {
     expect(within(link).queryByRole('progressbar')).toBeNull();
     expect(within(link).getByText('Прогресс: 100% — завершение подтверждено сервером.')).toBeTruthy();
     expect(within(link).queryByText(/^Оценка прогресса:/)).toBeNull();
-    expect(clearInterval).toHaveBeenCalledWith(estimateTimer);
+    expect(intervals.mock.calls.some(([, delay]) => delay === 1000)).toBe(false);
     const finalText = link.textContent;
     await advance(60_000);
     expect(list).toHaveBeenCalledTimes(2);
@@ -198,7 +196,7 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(within(progress).getByText(/Отсутствующие итоги не считаются успешными проверками/)).toBeTruthy();
     expect(screen.getByText(/ожидаем подтверждения digest\/platform/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
-    expect(screen.getByText('Демо не отправляет серверную отмену.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
     expect(screen.queryByText(/0 CVE/)).toBeNull();
     expect(screen.queryByText(/100%/)).toBeNull();
     expect(document.body.textContent).not.toContain('secretValue');
@@ -355,17 +353,17 @@ describe('scan UI fixture versus unavailable production', () => {
     vi.spyOn(fixtureScanTransport, 'results').mockRejectedValue(new Error('Report unavailable'));
     const { client } = page('/demo/scans/partial-demo', <ScanDetailPage demo />);
     await waitFor(() => expect(client.getQueryState(['scan-results', 'fixture', 'partial-demo'])?.status).toBe('error'));
-    expect(screen.getByText(/Нет подтверждённого coverage; тип проверки и результат неизвестны/)).toBeTruthy();
+    expect(screen.getByText(/Итоги проверок ещё не подтверждены/)).toBeTruthy();
     expect(screen.queryByRole('list', { name: 'Исходы проверок' })).toBeNull();
     expect(document.querySelector('[data-outcome="checked"]')).toBeNull();
   });
-  it('uses a separate non-factual MagicCard on the detail and keeps coverage outside it', async () => {
+  it('keeps the report compact without decorative reading cards or AI sections', async () => {
     page('/demo/scans/partial-demo', <ScanDetailPage demo />);
-    expect(await screen.findByText(/Порядок чтения/)).toBeTruthy();
-    const card = document.querySelector('.scan-a1__reading-card');
-    expect(card?.textContent).toContain('не показывает ход проверки');
-    expect(card?.textContent).not.toContain('База уязвимостей');
-    expect((await screen.findByText(/База уязвимостей недоступна/)).closest('.scan-a1__magic')).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Отчёт сканирования' })).toBeTruthy();
+    expect(document.querySelector('.scan-a1__reading-card')).toBeNull();
+    expect(document.querySelector('.scan-a1__detail-divider')).toBeNull();
+    expect(screen.queryByRole('heading', { name: /Сводка/ })).toBeNull();
+    expect((await screen.findByText(/База уязвимостей недоступна/)).closest('details')).toBeNull();
   });
   it('holds focus in the mobile filter Sheet, preserves selection and restores the trigger on Escape', async () => {
     const user = userEvent.setup();
@@ -468,18 +466,54 @@ describe('scan UI fixture versus unavailable production', () => {
     expect(screen.getByRole('checkbox', { name: /CVE · доступно/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Запуск недоступен' }).hasAttribute('disabled')).toBe(true);
   });
-  it('renders 21st.dev report accordion after always-visible failed coverage', async () => {
+  it('collapses scan metadata without hiding failed checks', async () => {
     const user = userEvent.setup();
     page('/demo/scans/partial-demo', <ScanDetailPage demo />);
-    await screen.findByText(/База уязвимостей недоступна/);
-    expect(
-      screen.getByText(/База уязвимостей недоступна/).closest('[data-slot="accordion-content"]'),
-    ).toBeNull();
-    const trigger = screen.getByRole('button', { name: 'Что означает неполный отчёт?' });
-    trigger.focus();
-    await user.keyboard('{Enter}');
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByText(/Сбой проверки не означает/)).toBeTruthy();
+    const failure = await screen.findByText(/База уязвимостей недоступна/);
+    expect(failure.closest('details')).toBeNull();
+    const trigger = screen.getByText('Данные сканирования');
+    const details = trigger.closest('details');
+    expect(details?.open).toBe(false);
+    await user.click(trigger);
+    expect(details?.open).toBe(true);
+    expect(details?.textContent).toContain('partial-demo');
+  });
+  it('associates canonical input and checks validation with their rendered errors and clears stale ARIA', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    page('/demo/scans/new', <ScanCreatePage demo />);
+    const input = screen.getByRole('textbox', { name: 'Canonical reference Docker Hub' });
+    const checks = screen.getByRole('group', { name: /Проверки · одновременно/ });
+    const form = screen.getByRole('form', { name: 'Параметры скана' });
+    expect(input.getAttribute('aria-invalid')).toBe('false');
+    expect(input.hasAttribute('aria-describedby')).toBe(false);
+    expect(checks.getAttribute('aria-invalid')).toBe('false');
+    fireEvent.change(input, { target: { value: 'https://docker.io/alpine:latest' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Secrets · проверка образа/ }));
+    fireEvent.submit(form);
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2));
+    for (const field of [input, checks]) {
+      expect(field.getAttribute('aria-invalid')).toBe('true');
+      const errorId = field.getAttribute('aria-describedby');
+      expect(errorId).toBeTruthy();
+      expect(field.getAttribute('aria-errormessage')).toBe(errorId);
+      const error = document.getElementById(errorId!);
+      expect(error?.getAttribute('role')).toBe('alert');
+      expect(error?.textContent?.length).toBeGreaterThan(0);
+    }
+    expect(document.getElementById(checks.getAttribute('aria-describedby')!)?.textContent).toBe('Выберите хотя бы одну проверку');
+    expect(screen.getByRole('group', { name: 'Выбор образа' }).hasAttribute('aria-describedby')).toBe(false);
+    expect(screen.getByRole('searchbox').hasAttribute('aria-invalid')).toBe(false);
+    fireEvent.change(input, { target: { value: 'registry-1.docker.io/library/alpine:3.21' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Secrets · проверка образа/ }));
+    fireEvent.submit(form);
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    for (const field of [input, checks]) {
+      expect(field.getAttribute('aria-invalid')).toBe('false');
+      expect(field.hasAttribute('aria-describedby')).toBe(false);
+      expect(field.hasAttribute('aria-errormessage')).toBe(false);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
   it('confirms live cancellation, waits for authoritative GET and never publishes intermediate results', async () => {
     const id = '00000000-0000-4000-8000-000000000001';
@@ -490,14 +524,17 @@ describe('scan UI fixture versus unavailable production', () => {
     let resolveSnapshot!: (value: Response) => void;
     const pendingSnapshot = new Promise<Response>(resolve => { resolveSnapshot = resolve; });
     const snapshot = (state: string) => new Response(JSON.stringify({ scanId: id, state, checks: ['secret'], perCheck: { secret: null }, result: null }));
-    const fetchMock = vi.fn((path: string) => {
-      if (path === `/api/v1/browser/scans/${id}/cancel`) return pendingCancel;
+    const fetchMock = vi.fn((path: string, init?: RequestInit) => {
+      if (path === `/api/v1/browser/scans/${id}/cancel`) {
+        expect(init?.method).toBe('POST');
+        return pendingCancel;
+      }
       if (path !== `/api/v1/browser/scans/${id}`) throw new Error(`Unexpected request: ${path}`);
       statusReads++;
       return statusReads === 1 ? Promise.resolve(snapshot('running')) : pendingSnapshot;
     });
     vi.stubGlobal('fetch', fetchMock);
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -508,12 +545,36 @@ describe('scan UI fixture versus unavailable production', () => {
     );
     expect(await screen.findByText('Статус')).toBeTruthy();
     expect(statusReads).toBe(1);
-        expect(fetchMock.mock.calls.some(([path]) => path.includes('/results'))).toBe(false);
-    await user.click(screen.getByRole('button', { name: 'Отменить скан' }));
+    expect(fetchMock.mock.calls.some(([path]) => path.includes('/results'))).toBe(false);
+    const trigger = screen.getByRole('button', { name: 'Отменить скан' });
+    await user.click(trigger);
+    const dialog = screen.getByRole('alertdialog', { name: 'Отменить скан?' });
+    const dismiss = within(dialog).getByRole('button', { name: 'Продолжить сканирование' });
+    const accept = within(dialog).getByRole('button', { name: 'Подтвердить отмену' });
+    expect(dialog.getAttribute('aria-describedby')).toBeTruthy();
+    expect(document.getElementById(dialog.getAttribute('aria-describedby')!)?.textContent).toContain('Сохранённые результаты завершённых проверок останутся доступны');
+    expect(document.activeElement).toBe(dismiss);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(accept);
+    await user.tab();
+    expect(document.activeElement).toBe(dismiss);
     expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/cancel'))).toBe(false);
-    confirm.mockReturnValue(true);
-    await user.click(screen.getByRole('button', { name: 'Отменить скан' }));
-    expect(screen.getByRole('button', { name: 'Отменяем…' }).hasAttribute('disabled')).toBe(true);
+    await user.click(dismiss);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/cancel'))).toBe(false);
+    await user.click(trigger);
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/cancel'))).toBe(false);
+    await user.click(trigger);
+    await user.dblClick(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Подтвердить отмену' }));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    const pending = screen.getByRole('button', { name: 'Отменяем…' });
+    expect(pending.hasAttribute('disabled')).toBe(true);
+    await user.click(pending);
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith('/cancel'))).toHaveLength(1);
     expect(screen.getByText('Статус').parentElement?.textContent).toContain('Выполняется');
     await act(async () => { resolveCancel({ ok: true, json: async () => ({ scanId: id, state: 'cancelled' }) }); });
     await waitFor(() => expect(statusReads).toBe(2));
@@ -521,15 +582,61 @@ describe('scan UI fixture versus unavailable production', () => {
     await act(async () => { resolveSnapshot(snapshot('cancelled')); });
     await waitFor(() => expect(screen.getByText('Статус').parentElement?.textContent).toContain('Отменён'));
     expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
-    expect(screen.getByText('Отмена недоступна в текущем состоянии.')).toBeTruthy();
+    expect(screen.queryByText('Отмена недоступна в текущем состоянии.')).toBeNull();
     expect(fetchMock.mock.calls.some(([path]) => /\/(results|sbom|vuln)\?/.test(path))).toBe(false);
     expect(screen.queryByText(/0 находок|100%/)).toBeNull();
     expect(fetchMock.mock.calls.filter(([path]) => path.endsWith('/cancel'))).toHaveLength(1);
-    confirm.mockRestore();
+
   });
+  it.each(['cancelled', 'running'] as const)('batch4 regression: lost cancel response followed by authoritative GET %s never retries POST or keeps a false terminal error', async finalState => {
+    const id = '00000000-0000-4000-8000-000000000077';
+    const user = userEvent.setup();
+    let reads = 0;
+    let rejectCancel!: (error: Error) => void;
+    let resolveStatus!: (value: Response) => void;
+    const pendingCancel = new Promise<Response>((_resolve, reject) => { rejectCancel = reject; });
+    const pendingStatus = new Promise<Response>(resolve => { resolveStatus = resolve; });
+    const snapshot = (state: string) => new Response(JSON.stringify({ scanId: id, state, checks: ['secret'], perCheck: { secret: null }, result: null }), { headers: { 'Content-Type': 'application/json' } });
+    const fetchMock = vi.fn((path: string, init?: RequestInit) => {
+      if (path === `/api/v1/browser/scans/${id}/cancel`) {
+        expect(init?.method).toBe('POST'); return pendingCancel;
+      }
+      if (path === `/api/v1/browser/scans/${id}`) return ++reads === 1 ? Promise.resolve(snapshot('running')) : pendingStatus;
+      throw new Error(`Unexpected controlled cancel route: ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const scope = ['live-scans', 1, 'alice'] as const;
+    render(<QueryClientProvider client={client}><LiveScanContext.Provider value={{ transport: createAuthorizedScanTransport({ subject: 'alice', currentSubject: () => 'alice' }), scope }}><MemoryRouter initialEntries={[`/scans/${id}`]}><Routes><Route path="/scans/:scanId" element={<ScanDetailPage />} /></Routes></MemoryRouter></LiveScanContext.Provider></QueryClientProvider>);
+    await user.click(await screen.findByRole('button', { name: 'Отменить скан' }));
+    await user.click(within(screen.getByRole('alertdialog', { name: 'Отменить скан?' })).getByRole('button', { name: 'Подтвердить отмену' }));
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith('/cancel'))).toHaveLength(1);
+    await act(async () => { rejectCancel(new TypeError('Controlled response lost after server dispatch')); });
+    // A separate authoritative read, not optimistic success from the POST outcome.
+    act(() => { void client.invalidateQueries({ queryKey: [...scope, 'scan', id] }); });
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    await act(async () => { resolveStatus(snapshot(finalState)); });
+    await waitFor(() => expect(screen.getByText('Статус').parentElement?.textContent).toContain(finalState === 'cancelled' ? 'Отменён' : 'Выполняется'));
+    if (finalState === 'cancelled') {
+      expect(screen.queryByText(/Не удалось (?:отменить скан|подтвердить отмену):/)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Проверить статус отмены' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
+      expect(screen.getByText(/Сохранённых результатов завершённых проверок нет/)).toBeTruthy();
+    } else {
+      expect(await screen.findByText('Не удалось подтвердить отмену: результат запроса неизвестен. Проверьте статус перед повторной отменой.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Проверить статус отмены' }).hasAttribute('disabled')).toBe(false);
+      expect(screen.getByRole('button', { name: 'Отменить скан' }).hasAttribute('disabled')).toBe(false);
+    }
+    fireEvent.focus(window); fireEvent.online(window);
+    await act(async () => { await client.invalidateQueries({ queryKey: [...scope, 'scan', id] }); });
+    expect(fetchMock.mock.calls.filter(([path]) => path.endsWith('/cancel'))).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([path]) => /\/(?:results|sbom|vuln)(?:\?|$)/.test(path))).toBe(false);
+    client.clear();
+  });
+
   it.each([409, 404])('shows a safe message on live cancel HTTP %i without optimistic state', async (status) => {
     const user = userEvent.setup();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
     const fetchMock = vi.fn((path: string) => Promise.resolve(path.endsWith('/cancel')
       ? { ok: false, status, json: async () => ({ secret: 'private' }) }
       : path.includes('/results')
@@ -539,6 +646,7 @@ describe('scan UI fixture versus unavailable production', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><LiveScanContext.Provider value={{ transport: createAuthorizedScanTransport({ subject: 'alice', currentSubject: () => 'alice' }), scope: ['live-scans', 1, 'alice'] }}><MemoryRouter initialEntries={['/scans/abc']}><Routes><Route path="/scans/:scanId" element={<ScanDetailPage />} /></Routes></MemoryRouter></LiveScanContext.Provider></QueryClientProvider>);
     await user.click(await screen.findByRole('button', { name: 'Отменить скан' }));
+    await user.click(within(screen.getByRole('alertdialog', { name: 'Отменить скан?' })).getByRole('button', { name: 'Подтвердить отмену' }));
     expect((await screen.findByRole('alert')).textContent).toMatch(/отмена невозможна/i);
     expect(document.body.textContent).not.toContain('private');
     expect(screen.getByRole('button', { name: 'Отменить скан' }).hasAttribute('disabled')).toBe(false);

@@ -24,13 +24,22 @@ const policy = policyFromEnvironment({ ...fixtureEnv, LLM_FREE_ONLY: 'true', LLM
   LLM_PROVIDER_ALLOWLIST: 'novita/bf16', LLM_REQUEST_BUDGET_USD: '0', LLM_INPUT_PRICE_PER_MILLION_USD: '0',
   LLM_OUTPUT_PRICE_PER_MILLION_USD: '0', LLM_REQUEST_PRICE_USD: '0' })!;
 
-test('public helper settings are accepted by actual policy/quota/history parsers, without loading any state', () => {
+test('public helper policy drift fails closed; explicit Dots3 switch preserves quota/history settings without loading state', () => {
   const source = readFileSync(new URL('../../../../../scripts/public-llm-config.py', import.meta.url), 'utf8');
   const config = source.match(/CONFIG = """([\s\S]*?)"""/)![1];
   const env = Object.fromEntries(config.split('\n').filter(line => line && !line.startsWith('#')).map(line => {
     const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)];
   }));
-  const profile = policyFromEnvironment(env), quota = quotaPolicyFromEnvironment(env);
+  // scripts/ is owned by the operator/coordinator: the old helper must not
+  // silently select a retired model or relax data_collection:deny at the API.
+  if (env.LLM_MODEL === PUBLIC_FREE_MODEL) assert.ok(policyFromEnvironment(env)?.freeOnly);
+  else {
+    assert.ok(['xingchen-agi/xing4.0-29b-a4b:free', 'nvidia/nemotron-3.5-super-vl:free'].includes(env.LLM_MODEL));
+    assert.equal(policyFromEnvironment(env), null);
+  }
+  const profile = policyFromEnvironment({ ...env, LLM_MODEL: PUBLIC_FREE_MODEL, LLM_PROVIDER_ALLOWLIST: PUBLIC_FREE_PROVIDER,
+    LLM_RETENTION: 'no-training', LLM_POLICY_REVISION: 'public-8081-dots3-atlas-v1', LLM_TIMEOUT_MS: '90000' });
+  const quota = quotaPolicyFromEnvironment(env);
   assert.ok(profile?.freeOnly); assert.equal(profile.model, PUBLIC_FREE_MODEL); assert.deepEqual(profile.providers, [PUBLIC_FREE_PROVIDER]);
   assert.ok(quota); assert.equal(quota.user.costMicros, 0); assert.equal(quota.scan.costMicros, 0);
   assert.equal(env.LLM_HISTORY_AUTHORITY, HISTORY_AUTHORITY); assert.equal(env.LLM_HISTORY_REVISION, HISTORY.version);
@@ -72,7 +81,7 @@ test('readiness is metadata-only, not credential validity or live generation pro
     assert.equal(publicCredentialStatus({}), 'unconfigured');
     assert.equal(publicCredentialStatus({ OPENROUTER_API_KEY_FILE: file }), 'unsafe');
     assert.equal(publicCredentialStatus({ OPENROUTER_API_KEY_FILE: PUBLIC_OPENROUTER_KEY_FILE, OPENROUTER_API_KEY: 'not-read' }), 'unsafe');
-    const fresh = { ...policy, model: PUBLIC_FREE_MODEL, providers: [PUBLIC_FREE_PROVIDER] };
+    const fresh = { ...policy, model: PUBLIC_FREE_MODEL, providers: [PUBLIC_FREE_PROVIDER], retention: 'no-training' as const };
     assert.equal(publicReadiness(fresh, 'metadata-valid', true, true).status, 'locally-configured');
     assert.equal(publicReadiness(fresh, 'missing', true, true).localReady, false);
     assert.equal(publicReadiness(fresh, 'metadata-valid', false, true).localReady, false);
@@ -95,6 +104,13 @@ test('whole counts/coverage are immutable through selection; mandatory evidence 
   assert.deepEqual(report, before); assert.equal(selected.findingCount, 80);
   assert.deepEqual(selected.identifierCounts, { cve: 78, debianTemp: 2 }); assert.deepEqual(selected.coverage, report.coverage);
   assert.equal(selected.contextSelection!.selectedFindings + selected.contextSelection!.omittedFindings, 80);
+  assert.equal(selected.findings.length, 10, 'all two mandatory findings plus eight optional findings');
+  assert.equal(selected.contextSelection!.omittedFindings, 70);
+  const manyMandatory = { ...report, findings: report.findings.map((f, i) => ({ ...f, severity: i < 40 ? 'CRITICAL' : 'LOW' })) };
+  assert.equal(selectSummaryReport(manyMandatory, policy, 65536).findings.filter(f => f.severity === 'CRITICAL').length, 40,
+    'the focused optional sample must never cap mandatory critical evidence');
+  const legacyReport = { ...report, profile: undefined };
+  assert.equal(selectSummaryReport(legacyReport, policy, 65536), legacyReport);
   assert.ok(selected.findings.some(f => f.severity === 'CRITICAL')); assert.ok(selected.findings.some(f => f.severity === 'UNKNOWN'));
   assert.ok(prepareSummary(selected, policy).reserve.input <= 65536);
   assert.throws(() => selectSummaryReport(report, { ...policy, findings: 1 }, 65536));

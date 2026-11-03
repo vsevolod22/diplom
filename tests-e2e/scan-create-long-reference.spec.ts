@@ -108,7 +108,7 @@ for (const { width, zoom } of [
       .filter({ hasText: 'Выбранная цель (сохраняется отдельно от поиска):' });
     await expect(selected).toContainText(reference);
     await expect(consent).toHaveAccessibleName(new RegExp(reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    await expect(form.locator('input[type="hidden"]')).toHaveValue(reference);
+    await expect(form.getByRole('textbox', { name: 'Canonical reference Docker Hub', exact: true })).toHaveValue(reference);
 
     // Preserve checkbox and confirmation guards while exercising their actual flex labels.
     const secret = form.getByRole('checkbox', { name: 'Secrets · проверка образа', exact: true });

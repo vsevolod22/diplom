@@ -1,7 +1,45 @@
 import { z } from 'zod';
 import { advisorySource, provenanceRef, utf8Bytes } from './vulnAdvisory';
 import { chatBindingSchema, sameChatBinding, validChatText } from './llmChatContract';
+import {
+  freeProfileSchema,
+  publicReadinessShape,
+  readinessBlockerSchema,
+} from './llmPublicContract';
 import type { AdvisoryV1 } from './vulnAdvisory';
+
+// Dedicated operation DTO: a summary/chat readiness response is never translation authority.
+export const translationReadinessSchema = z
+  .strictObject({
+    ...chatBindingSchema.shape,
+    ...publicReadinessShape,
+    operation: z.literal('translation'),
+    provider: z.discriminatedUnion('status', [
+      publicReadinessShape.provider.options[0].extend({ name: z.literal('OpenRouter') }),
+      publicReadinessShape.provider.options[1].extend({ name: z.literal('OpenRouter') }),
+      publicReadinessShape.provider.options[2].extend({ name: z.literal('OpenRouter') }),
+    ]),
+    blockers: z
+      .array(z.union([readinessBlockerSchema.exclude(['history-store-unavailable']), z.literal('quota-policy-incompatible')]))
+      .max(5)
+      .refine((values) => new Set(values).size === values.length),
+  })
+  .refine((value) => {
+    // History is informational, not an operational dependency of translation.
+    const expected: typeof value.blockers = [];
+    if (value.provider.status !== 'catalog-listed-unprobed') expected.push('configuration-required');
+    if (value.credential !== 'metadata-valid')
+      expected.push(value.credential === 'unsafe' ? 'public-key-unsafe' : 'public-key-required');
+    if (value.quota !== 'available') expected.push('quota-store-unavailable');
+    if (value.provider.status !== 'catalog-listed-unprobed') expected.push('provider-profile-unavailable');
+    if (value.blockers.includes('quota-policy-incompatible')) expected.push('quota-policy-incompatible');
+    return (
+      JSON.stringify(expected) === JSON.stringify(value.blockers) &&
+      value.localReady === (value.blockers.length === 0) &&
+      value.status === (value.blockers.length ? 'setup-required' : 'locally-configured')
+    );
+  });
+export type TranslationReadiness = z.infer<typeof translationReadinessSchema>;
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const displayText = (bytes: number) =>
@@ -59,7 +97,12 @@ const disclosure = z
       (value.requestBudgetUsd === 0 &&
         value.maxPrice.prompt === 0 &&
         value.maxPrice.completion === 0 &&
-        value.maxPrice.request === 0),
+        value.maxPrice.request === 0 &&
+        freeProfileSchema.safeParse({
+          model: value.model,
+          providers: value.providers,
+          retention: value.retention,
+        }).success),
   );
 export const translationContextSchema = z
   .strictObject({

@@ -506,7 +506,9 @@ export class ScanLedger {
         .run(scanId, JSON.stringify(target.executionProfile));
       this.db.prepare('INSERT INTO outbox (scan_id) VALUES (?)').run(scanId);
       this.event(scanId, 'queued');
-      this.audit(target.subject, 'alpine', 'image', 'accepted', 'CREATED', scanId);
+      // Classify only the resolved canonical identity; keep all other targets opaque.
+      const auditTarget = target.registry === 'registry-1.docker.io' && target.repository === 'library/alpine' ? 'alpine' : 'unknown';
+      this.audit(target.subject, auditTarget, 'image', 'accepted', 'CREATED', scanId);
       return { scanId, created: true };
     });
   }

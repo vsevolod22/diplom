@@ -46,7 +46,7 @@ export function openRouterRuntime(policy: LlmPolicy, provider: () => LlmProvider
       reserveAttempt: (ledger: QuotaLedger, binding: QuotaBindings): RuntimeAttempt<T> => {
         const id = ledger.reserve(binding, prepared.reserve);
         return Object.freeze({ id, release: () => { ledger.release(id); },
-          async generate(signal, fence, observed) {
+          async generate(signal, fence, observed, dispatched) {
             const adapter = admittedAdapter ?? provider();
             let receipt: ChatReceipt | undefined;
             const accounting = { policy: ledger.policy, observe: (usage: Parameters<QuotaLedger['observe']>[1]) => {
@@ -55,19 +55,21 @@ export function openRouterRuntime(policy: LlmPolicy, provider: () => LlmProvider
               observed(receipt);
             } };
             let raw: unknown;
-            if (chat) {
+            if (chat || adapter instanceof OpenRouterProvider) {
               if (!(adapter instanceof OpenRouterProvider)) throw configError();
               raw = await adapter.generateGuarded(prepared, policy, signal, accounting, send => fence(() => {
                 if (!ledger.dispatch(id)) throw quotaUnavailable();
+                dispatched?.();
                 send();
               }));
             } else {
-              // Preserve the established OpenRouter summary seam, including injected
-              // three/four-argument fixtures. OpenAI never enters this branch.
+              // Trusted injected summary fixtures retain the legacy synchronous
+              // seam. Production OpenRouter uses the actual guarded transport above.
               if (!adapter.summarizePrepared) throw configError();
               let pending: Promise<unknown> | undefined;
               fence(() => {
                 if (!ledger.dispatch(id)) throw quotaUnavailable();
+                dispatched?.();
                 pending = adapter.summarizePrepared!(prepared, policy, signal, accounting);
               });
               if (!pending) throw quotaUnavailable();
@@ -122,7 +124,7 @@ export function createOpenAiRuntime(config: OpenAiServerConfiguration, quota: Qu
       reserveAttempt: (ledger: QuotaLedger, binding: QuotaBindings): RuntimeAttempt<T> => {
         const context = contextFor(binding), id = ledger.reserveOpenAi(context), bound = bindOpenAiAccounting(ledger, id, context);
         return Object.freeze({ id, release: () => { bound.release(); },
-          async generate(signal, fence, observed) {
+          async generate(signal, fence, observed, dispatched) {
             let release: (() => void) | undefined;
             try {
               let adapter: OpenAiProvider | undefined;
@@ -147,6 +149,7 @@ export function createOpenAiRuntime(config: OpenAiServerConfiguration, quota: Qu
                 },
               }, (binding, send) => fence(() => {
                 if (!bound.dispatch(binding)) throw quotaUnavailable();
+                dispatched?.();
                 send();
               }));
               if (!receipt) throw quotaUnavailable();

@@ -117,8 +117,9 @@ including LF,196608 aggregate bytes,52 frames including reserved terminal-error 
 1024 UTF8 bytes per codepoint-safe delta. Existing16384-byte reply/32sources/2048-byte source
 ceilings remain. Every writeHead/frame/end uses the fresh guarded closure, rechecked after
 drain; no auth/history transaction survives a network await. Absolute delivery5000ms is
-inside existing provider<=30000ms/client40000ms budgets; short synchronous DB/CPU scheduling
-may add wall-clock overhead and is not a hard realtime guarantee.
+separate from the generation deadline (legacy<=30000ms; exact public Xing/Phala<=90000ms).
+The public integration requires proxy100s/client105s/panel120s; see PUBLIC-TIMEOUT-CONTRACT.md.
+Short synchronous DB/CPU scheduling may add wall-clock overhead and is not a hard realtime guarantee.
 
 Common exact frame keys:
 `{v:1,deliveryMode:'validated-completed-reply',nativeProviderStream:false,scanId,digest,platform,reportVersion,epoch,revision,mutationId,turnId,type,seq}`.
