@@ -6,6 +6,7 @@ import { ScansService } from '../scans/scans.service.js';
 import type { Identity } from '../security/identity.js';
 import { validateConfigReport } from '../image-config/report-contract.js';
 import { ADVISORY_SOURCES, validateAdvisory, type AdvisoryV1 } from '../worker/vuln-advisory.js';
+import { PUBLIC_VULN_SOURCES } from '../worker/vuln-findings.js';
 import { CEILINGS } from './policy.js';
 import { exact, object } from './response.js';
 import { validateDbEvidence, CURRENT_DB_POLICY } from '../worker/cve-db-evidence.js';
@@ -107,7 +108,7 @@ function finding(v: unknown, check: 'secret' | 'vuln', publicProfile = false): S
   }
   const severity = nullableEnum(f.severity, severities);
   if (!severity || !(publicProfile ? PUBLIC_ECOSYSTEMS : ['apk', 'npm']).includes(f.ecosystem as PackageEcosystem) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
-      f.severitySources.some(source => !ADVISORY_SOURCES.includes(source))) return invalid();
+      f.severitySources.some(source => !(publicProfile ? PUBLIC_VULN_SOURCES : ADVISORY_SOURCES).includes(source))) return invalid();
   if (publicProfile ? !publicVulnerabilityId(f.cveId, f.ecosystem as PackageEcosystem) :
       typeof f.cveId !== 'string' || !/^CVE-\d{4}-\d{4,12}$/.test(f.cveId)) return invalid();
     const safe: SafeFinding = { check, findingId: match(f.findingId, /^vuln-[a-f0-9]{64}$/), severity,

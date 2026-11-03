@@ -1,5 +1,6 @@
 import { PUBLIC_ECOSYSTEMS, publicVulnerabilityId, publicVulnerabilityKind, type PackageEcosystem } from '../worker/public-image-evidence.js';
 import { ADVISORY_SOURCES } from '../worker/vuln-advisory.js';
+import { PUBLIC_VULN_SOURCES } from '../worker/vuln-findings.js';
 import { exact, object } from './response.js';
 import { safeRemediationFields } from './remediation-identifiers.js';
 
@@ -27,6 +28,7 @@ export function safeHistoryFinding(value: unknown): boolean {
   const base = ['check', 'findingId', 'severity', 'cveId', 'ecosystem', 'severitySources', 'provenanceRef', 'fixedVersionReported', 'advisoryState'];
   const advisory = ['assessments', 'conflictState', 'conflicts', 'limitations'];
   const publicFinding = Object.hasOwn(f, 'identifierKind');
+  const severitySources = publicFinding ? PUBLIC_VULN_SOURCES : ADVISORY_SOURCES;
   // Old public citations remain readable; new citations carry all three fields,
   // never a partial package identity. Legacy findings cannot add these fields.
   const remediation = ['packageName', 'installedVersion', 'fixedVersion'];
@@ -38,7 +40,7 @@ export function safeHistoryFinding(value: unknown): boolean {
     (publicFinding ? !member(f.ecosystem, PUBLIC_ECOSYSTEMS) || !publicVulnerabilityId(f.cveId, f.ecosystem as PackageEcosystem) ||
       f.identifierKind !== publicVulnerabilityKind(f.cveId, f.ecosystem as PackageEcosystem) :
       !matches(f.cveId, /^CVE-\d{4}-\d{4,12}$/) || !member(f.ecosystem, ['apk', 'npm'])) || !Array.isArray(f.severitySources) || !f.severitySources.length ||
-    !list(f.severitySources, ADVISORY_SOURCES, ADVISORY_SOURCES.length) ||
+    !list(f.severitySources, severitySources, severitySources.length) ||
     !matches(f.provenanceRef, /^target-[a-f0-9]{64}$/) || typeof f.fixedVersionReported !== 'boolean') return false;
   if (f.advisoryState === 'unknown') return true;
   if (!member(f.advisoryState, ['available', 'omitted']) || !member(f.conflictState, ['none', 'present', 'unknown']) ||
