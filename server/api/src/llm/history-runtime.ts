@@ -8,10 +8,16 @@ export function historyEnabled(): boolean {
 }
 export class HistoryRuntime {
   private handle?: HistoryStore;
-  store(): HistoryStore {
+  private open(): HistoryStore {
     if (!historyEnabled()) return historyUnavailable();
     if (!this.handle) this.handle = new HistoryStore('/auth/llm-history.sqlite');
-    this.handle.recoverExpired(); return this.handle;
+    return this.handle;
+  }
+  // Readiness must freshly validate even a cached handle, without expiry recovery.
+  assertHealthy(): void { this.open().assertHealthy(); }
+  store(): HistoryStore {
+    const store = this.open();
+    store.recoverExpired(); return store;
   }
   close() { this.handle?.close(); this.handle = undefined; }
 }

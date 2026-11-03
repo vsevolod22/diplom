@@ -283,6 +283,13 @@ export class HistoryStore {
             this.update(scope, head, revision); return true;
     });
   }
+  // Match recovery's fresh safety/envelope checks without terminalizing any turn.
+  // The transaction bounds the read to the existing <=128 heads / <=8MiB DB.
+  assertHealthy(): void {
+    this.transaction(() => {
+      for (const row of this.db.prepare('SELECT epoch,revision,content,content_hash FROM history_head').all() as Row[]) this.decode(row);
+    });
+  }
   // Only expired pending operations are recovered online. A live second connection
   // must never terminalize a still-running operation during ordinary reads.
   recoverExpired() {

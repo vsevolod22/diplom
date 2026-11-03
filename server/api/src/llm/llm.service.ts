@@ -121,7 +121,7 @@ export class LlmService {
     if (!report.profile) throw new NotFoundException();
     let quotaAvailable = false, historyAvailable = false;
     try { this.quotas.ledger().snapshot(identity.subject, scanId); quotaAvailable = true; } catch { /* No raw store diagnostics. */ }
-    try { this.history().runtime.store(); historyAvailable = true; } catch { /* Never initialize missing stores. */ }
+    try { this.history().runtime.assertHealthy(); historyAvailable = true; } catch { /* Never initialize missing stores. */ }
     return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,
       ...publicReadiness(this.runtime.policy(), this.runtime.credentialStatus(), quotaAvailable, historyAvailable) };
   }
