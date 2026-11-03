@@ -58,10 +58,6 @@ function AccountSessionPending({ message }: { message: string }) {
         {message}
       </p>
       <p className="demo-auth__pending-description">Данные аккаунта скрыты до успешной проверки.</p>
-      <div className="demo-auth__pending-placeholder" aria-hidden="true">
-        <span />
-        <span />
-      </div>
     </section>
   );
 }

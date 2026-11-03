@@ -564,19 +564,6 @@
   color: #b9bac6;
   font-size: 14px;
 }
-.demo-auth__pending-placeholder {
-  display: grid;
-  gap: 12px;
-  margin-top: 24px;
-}
-.demo-auth__pending-placeholder span {
-  height: 10px;
-  border-radius: 3px;
-  background: #332e4d;
-}
-.demo-auth__pending-placeholder span:last-child {
-  width: 65%;
-}
 
 @media (max-width: 750px) {
   .demo-auth__account .demo-auth__identity {

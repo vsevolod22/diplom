@@ -2,7 +2,11 @@
   --route-loading-ink: #0b0c11;
   --route-loading-acid: #d5fb57;
   --route-loading-violet: #a58aff;
-  min-height: 65vh;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100svh;
+  padding: clamp(48px, 8vw, 96px) 24px;
   background: var(--route-loading-ink);
   color: #f7f7f4;
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -14,124 +18,107 @@
 }
 
 .route-loading__inner {
-  width: min(100% - 40px, 1280px);
-  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(100%, 560px);
+  min-width: 0;
+  text-align: center;
+}
+
+.route-loading__mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--route-loading-acid);
+  color: var(--route-loading-ink);
+  transform: rotate(-9deg);
+}
+
+.route-loading__mark svg {
+  width: 32px;
+  height: 32px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .route-loading__brand {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  min-height: 78px;
-  padding-block: 16px;
-  border-bottom: 1px solid #50515e;
-  font-size: 20px;
-  font-weight: 900;
-  letter-spacing: -0.04em;
+  margin: 24px 0 16px;
+  color: var(--route-loading-violet);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.5;
+  letter-spacing: 0.12em;
 }
 
 .route-loading__brand span {
   color: var(--route-loading-acid);
 }
 
-.route-loading__body {
-  padding-block: clamp(40px, 7vw, 88px);
-}
-
-.route-loading__eyebrow {
-  margin: 0 0 20px;
-  color: var(--route-loading-violet);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.6;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
 .route-loading__status {
-  display: flex;
-  align-items: flex-start;
-  gap: clamp(12px, 2vw, 24px);
-}
-
-.route-loading__status h1 {
+  width: 100%;
   min-width: 0;
-  max-width: 18ch;
-  margin: 0;
-  font-size: clamp(32px, 5vw, 64px);
-  font-weight: 800;
-  line-height: 1.12;
-  letter-spacing: -0.04em;
   overflow-wrap: anywhere;
 }
 
-.route-loading__indicator {
-  flex: 0 0 12px;
-  height: 12px;
-  margin-top: clamp(12px, 2vw, 26px);
+.route-loading__status h1 {
+  margin: 0;
+  font-family: Impact, 'Arial Narrow', 'Helvetica Neue', sans-serif;
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 900;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+  text-transform: uppercase;
+  text-wrap: balance;
+}
+
+.route-loading__description {
+  max-width: 40ch;
+  margin: 16px auto 0;
+  color: #c5c6cf;
+  font-size: 14px;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.route-loading__activity {
+  display: flex;
+  gap: 8px;
+  margin-top: 28px;
+}
+
+.route-loading__activity span {
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--route-loading-acid);
 }
 
-.route-loading__description {
-  max-width: 50ch;
-  margin: 24px 0 0;
-  color: #c5c6cf;
-  font-size: 16px;
-  line-height: 1.65;
-}
-
-.route-loading__skeleton {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  max-width: 880px;
-  margin-top: 40px;
-}
-
-.route-loading__placeholder {
-  display: grid;
-  gap: 16px;
-  min-width: 0;
-  padding: clamp(20px, 3vw, 32px);
-  border: 1px solid #50515e;
-  border-radius: 12px;
-  background: #141324;
-}
-
-.route-loading__line {
-  display: block;
-  height: 10px;
-  border-radius: 3px;
-  background: #332e4d;
-}
-
-.route-loading__line--title {
-  width: 45%;
-  height: 16px;
-  margin-bottom: 8px;
-  background: #625e74;
-}
-
-.route-loading__line--short {
-  width: 70%;
-}
-
-@media (max-width: 600px) {
-  .route-loading__skeleton {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 @media (prefers-reduced-motion: no-preference) {
-  .route-loading__indicator {
+  .route-loading__activity span {
     animation: route-loading-pulse 1.8s ease-in-out infinite;
+  }
+
+  .route-loading__activity span:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .route-loading__activity span:nth-child(3) {
+    animation-delay: 0.4s;
   }
 }
 
 @keyframes route-loading-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+
   50% {
-    opacity: 0.4;
+    opacity: 1;
   }
 }
