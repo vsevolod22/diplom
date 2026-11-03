@@ -164,8 +164,10 @@ test('nested historical schema, expired pending recovery, finite heads and short
     const privateDb = (quota as unknown as { db: Database.Database }).db;
     assert.equal(privateDb.pragma('busy_timeout', { simple: true }), quotaPolicy.busyMs, 'connection default restored');
     assert.throws(() => quota.withBusyTimeout(10, () => Promise.resolve()));
-    for (let n = 1; n < HISTORY.heads; n++) store.snapshot(owner, randomUUID());
-    assert.throws(() => store.snapshot(owner, randomUUID()), 'persistent scope capacity refuses rather than evicts');
+    for (let n = 1; n <= HISTORY.heads; n++) assert.equal(store.snapshot(owner, randomUUID()).revision, 0);
+    const readDb = new Database(path, { readonly: true });
+    try { assert.deepEqual(readDb.prepare('SELECT count(*) n FROM history_head').get(), { n: 1 }); }
+    finally { readDb.close(); }
     assert.equal(store.snapshot(owner, scan).turns[0].state, 'interrupted');
   } finally { qdb.close(); quota.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

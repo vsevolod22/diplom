@@ -45,6 +45,14 @@ export type Decision = { id: string; mutationId: string; kind: 'user-decision'; 
 export type Pending = { id: string; sessionId: string; generation: number; accessIncarnation: string; policyVersion: string;
   deadline: number; requestHash: string; reservation?: string };
 export type HistoryHead = { epoch: string; revision: number; turns: Turn[]; decisions: Decision[]; pending: Pending | null };
+// A missing scope has a stable, stateless revision-0 token. It is not authority:
+// authorization/report/session checks and the write transaction remain mandatory.
+// Restored-lineage incarnation rotation invalidates even never-materialized heads.
+export function emptyHistoryHead(incarnation: string, scope: string): HistoryHead {
+  const hash = hashValue(['history-empty-v1', incarnation, scope]);
+  const epoch = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+  return { epoch, revision: 0, turns: [], decisions: [], pending: null };
+}
 export type PublicTurn = Pick<Turn, 'id' | 'mutationId' | 'state' | 'question' | 'report' | 'createdAt' | 'reply'>;
 function publicTurn(turn: Turn): PublicTurn {
   return { id: turn.id, mutationId: turn.mutationId, state: turn.state, question: turn.question,

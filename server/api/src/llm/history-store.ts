@@ -3,13 +3,14 @@ import { closeSync, existsSync, lstatSync, openSync, realpathSync, statfsSync } 
 import { basename, dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { HttpException } from '@nestjs/common';
-import { HISTORY, bytes, hashValue, historyCapacity, historyConflict, historyUnavailable, isId, historyProjection, validateHead,
+import { HISTORY, bytes, emptyHistoryHead, hashValue, historyCapacity, historyConflict, historyUnavailable, isId, historyProjection, validateHead,
   type Decision, type HistoryHead, type Pending, type Turn, type ChatReply } from './history-contract.js';
 import type { SummaryValidationPolicy } from './provider-runtime-contract.js';
 import type { ReportContext } from './report-context.js';
 import { SUMMARY_STORAGE, decodeSummaryRecord, summaryRecordHash, summaryRecordMatches, validateStoredSummary,
   type SummaryRow } from './summary-record.js';
 import type { SummaryResponse } from './summary-result-cache.js';
+import { HISTORY_OWNER_CAPACITY, assertOwnerCapacity, historyOccupancy } from './history-capacity.js';
 
 const APPLICATION = 1145655602;
 export const HISTORY_SCHEMA_VERSION = 4;
@@ -131,12 +132,16 @@ export class HistoryStore {
     });
   }
   requireSummarySchema(): void { this.transaction(() => { this.summarySafety(); }); }
-  private summaryCapacity(scope: string, size: number) {
+  private summaryCapacity(owner: string, scope: string, size: number) {
     const totals = this.summarySafety();
     const old = this.db.prepare('SELECT scope,content,content_hash FROM llm_summary WHERE scope=?').get(scope) as SummaryRow | undefined;
     if (old) decodeSummaryRecord(old);
     if (size > SUMMARY_STORAGE.entryBytes || !old && totals.entries >= SUMMARY_STORAGE.entries ||
         totals.bytes - (old ? Buffer.byteLength(old.content) : 0) + size > SUMMARY_STORAGE.bytes) return historyCapacity();
+    const rows = (this.db.prepare('SELECT scope,content,content_hash FROM llm_summary').all() as SummaryRow[])
+      .map(row => ({ scope: row.scope, scanId: decodeSummaryRecord(row).value.scanId, bytes: Buffer.byteLength(row.content) }));
+    assertOwnerCapacity(owner, scope, size, rows,
+      { entries: HISTORY_OWNER_CAPACITY.summaries, bytes: HISTORY_OWNER_CAPACITY.summaryBytes });
   }
   private upsertSummary(scope: string, content: string): void {
     this.db.prepare(`INSERT INTO llm_summary(scope,content,content_hash) VALUES(?,?,?)
@@ -150,7 +155,7 @@ export class HistoryStore {
   assertSummaryWritable(owner: string, scanId: string): void {
     this.transaction(() => {
       const scope = this.key(owner, scanId);
-      this.summaryCapacity(scope, SUMMARY_STORAGE.entryBytes);
+      this.summaryCapacity(owner, scope, SUMMARY_STORAGE.entryBytes);
       this.upsertSummary(scope, ' '.repeat(SUMMARY_STORAGE.entryBytes));
     }, 'rollback');
   }
@@ -170,7 +175,7 @@ export class HistoryStore {
     const scope = this.key(owner, report.scanId);
     const content = JSON.stringify({ version: SUMMARY_STORAGE.version, policyVersion: policy.version, value: validated });
     return this.transaction(() => {
-      this.summaryCapacity(scope, Buffer.byteLength(content));
+      this.summaryCapacity(owner, scope, Buffer.byteLength(content));
       this.upsertSummary(scope, content);
       return validated;
     });
@@ -193,12 +198,12 @@ export class HistoryStore {
           if (head.pending ? space?.n !== HISTORY.completionReserve : !!space) return historyUnavailable();
           return head;
         }
-    if ((this.db.prepare('SELECT count(*) AS n FROM history_head').get() as { n: number }).n >= HISTORY.heads) return historyCapacity();
-    const head: HistoryHead = { epoch: randomUUID(), revision: 0, turns: [], decisions: [], pending: null };
-    this.db.prepare('INSERT INTO history_head VALUES(?,?,?,?,?)').run(scope, head.epoch, head.revision, JSON.stringify(head), hashValue(head));
-    return head;
+    return emptyHistoryHead(this.incarnation, scope);
   }
-  snapshot(owner: string, scanId: string): HistoryHead { return this.transaction(() => this.read(this.key(owner, scanId))); }
+  // Reads and publication/dedup guards never materialize a missing scope. Existing
+  // persisted empty heads keep their original epoch/revision, including after reopen.
+  readSnapshot(owner: string, scanId: string): HistoryHead { return this.transaction(() => this.read(this.key(owner, scanId))); }
+  snapshot(owner: string, scanId: string): HistoryHead { return this.readSnapshot(owner, scanId); }
     guardHead<T>(owner: string, scanId: string, epoch: string, revision: number, action: () => T): T {
       return this.transaction(() => {
         this.expected(this.read(this.key(owner, scanId)), epoch, revision);
@@ -207,10 +212,23 @@ export class HistoryStore {
         return result;
       });
     }
+  private admitHistory(owner: string, scope: string, head: HistoryHead) {
+    validateHead(head);
+    const rows = (this.db.prepare('SELECT scope,epoch,revision,content,content_hash FROM history_head').all() as (Row & { scope: string })[])
+      .map(row => historyOccupancy(row.scope, this.decode(row), Buffer.byteLength(row.content)));
+    assertOwnerCapacity(owner, scope, historyOccupancy(scope, head).bytes, rows,
+      { entries: HISTORY_OWNER_CAPACITY.heads, bytes: HISTORY_OWNER_CAPACITY.historyBytes });
+  }
   private update(scope: string, head: HistoryHead, oldRevision: number) {
     validateHead(head);
+    const content = JSON.stringify(head), hash = hashValue(head);
     if (this.db.prepare('UPDATE history_head SET revision=?,content=?,content_hash=? WHERE scope=? AND epoch=? AND revision=?')
-      .run(head.revision, JSON.stringify(head), hashValue(head), scope, head.epoch, oldRevision).changes !== 1) return historyConflict();
+      .run(head.revision, content, hash, scope, head.epoch, oldRevision).changes === 1) return;
+    // First write consumes the virtual revision-0 token under the same IMMEDIATE
+    // transaction as admission and completion padding. No durable empty placeholder.
+    if (oldRevision !== 0 || head.revision !== 1 || head.epoch !== emptyHistoryHead(this.incarnation, scope).epoch ||
+        this.db.prepare('SELECT 1 FROM history_head WHERE scope=?').get(scope)) return historyConflict();
+    this.db.prepare('INSERT INTO history_head VALUES(?,?,?,?,?)').run(scope, head.epoch, head.revision, content, hash);
   }
   private advance(head: HistoryHead) {
     if (!Number.isSafeInteger(head.revision) || head.revision >= Number.MAX_SAFE_INTEGER) return historyCapacity();
@@ -230,12 +248,13 @@ export class HistoryStore {
   begin(owner: string, scanId: string, epoch: string, revision: number, turn: Turn, pending: Pending): HistoryHead {
     return this.transaction(() => {
       const scope = this.key(owner, scanId), head = this.read(scope); this.expected(head, epoch, revision);
-      if (head.pending || [...head.turns, ...head.decisions].some(t => t.mutationId === turn.mutationId)) return historyConflict();
+      if (turn.report.scanId !== scanId || head.pending || [...head.turns, ...head.decisions].some(t => t.mutationId === turn.mutationId)) return historyConflict();
       const refs = head.turns.reduce((n, t) => n + (t.reply?.sources.length ?? 0), 0) + head.decisions.reduce((n, d) => n + d.sources.length, 0);
       if (head.turns.length >= HISTORY.turns || refs + HISTORY.citations > HISTORY.references) return historyCapacity();
       head.turns.push(turn); head.pending = pending; this.advance(head);
       // Include complete stored/private pending identity AND the actual public HTTP envelope.
       if (Math.max(bytes(head), bytes(historyProjection(head))) + HISTORY.completionReserve > HISTORY.scopeBytes) return historyCapacity();
+      this.admitHistory(owner, scope, head);
       this.update(scope, head, revision);
       // Physically allocate completion headroom in the SAME bounded main DB before
       // quota/provider admission, not merely a process-local byte estimate.
@@ -246,9 +265,10 @@ export class HistoryStore {
   decision(owner: string, scanId: string, epoch: string, revision: number, entry: Decision): HistoryHead {
     return this.transaction(() => {
       const scope = this.key(owner, scanId), head = this.read(scope); this.expected(head, epoch, revision);
-      if (head.pending || [...head.turns, ...head.decisions].some(t => t.mutationId === entry.mutationId)) return historyConflict();
+      if (entry.report.scanId !== scanId || head.pending || [...head.turns, ...head.decisions].some(t => t.mutationId === entry.mutationId)) return historyConflict();
       if (head.decisions.length >= HISTORY.decisions) return historyCapacity();
-      head.decisions.push(entry); this.advance(head); this.update(scope, head, revision); return head;
+      head.decisions.push(entry); this.advance(head); this.admitHistory(owner, scope, head);
+      this.update(scope, head, revision); return head;
     });
   }
   guardPending<T>(owner: string, scanId: string, epoch: string, revision: number, pendingId: string, action: (head: HistoryHead) => T): T {
