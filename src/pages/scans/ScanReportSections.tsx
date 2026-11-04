@@ -112,6 +112,27 @@ function useReportSelection<Q>(initial: Q) {
   const select = (query: Q) => setSelection(previous => ({ query, revision: previous.revision + 1 }));
   return [selection.query, select, selection.revision] as const;
 }
+function usePendingReportLoad<T>(
+  identity: string,
+  load: (cursor: string | undefined, signal: AbortSignal) => Promise<T>,
+) {
+  const [pending, setPending] = useState<{ identity: string; token: symbol } | null>(null);
+  const read = useCallback(async (cursor: string | undefined, signal: AbortSignal) => {
+    signal.throwIfAborted();
+    const token = Symbol();
+    const release = () => setPending(current => current?.token === token ? null : current);
+    setPending({ identity, token });
+    signal.addEventListener('abort', release, { once: true });
+    try {
+      return await load(cursor, signal);
+    } finally {
+      signal.removeEventListener('abort', release);
+      // An obsolete read must never unlock the replacement query's controls.
+      release();
+    }
+  }, [identity, load]);
+  return [read, pending?.identity === identity] as const;
+}
 function viewRowFingerprint(rows: Parameters<typeof fingerprintReportRows>[0], reportView: boolean): string {
   try { return fingerprintReportRows(rows); }
   catch (error) { if (reportView) throw new ReportViewContractError(); throw error; }
@@ -125,6 +146,7 @@ function VulnReport({ status, transport, reportKey, demo, scope }: SectionProps)
     (cursor: string | undefined, signal: AbortSignal) => transport.vuln(status.scanId, cursor, signal, supported ? query : undefined),
     [transport, status.scanId, supported, query],
   );
+  const [loadPage, pending] = usePendingReportLoad(`${reportKey}:${revision}:${JSON.stringify(query)}`, load);
   const describe = useCallback(
     (page: ScanVuln): PageDescription => {
       if (supported && !page.page) throw new ReportViewContractError();
@@ -171,15 +193,15 @@ function VulnReport({ status, transport, reportKey, demo, scope }: SectionProps)
   );
   return (
     <section id="scan-report-vulnerabilities" tabIndex={-1} aria-label={`Результаты ${label}`} className="scan-report-section">
-      <h4>{label}</h4>
+      <h4 id="scan-report-vulnerabilities-heading" tabIndex={-1}>{label}</h4>
       <p className="scan-report-section__intro">Сравните установленную и исправленную версии. Оценка опасности относится к находке, а не ко всему образу.</p>
       {/* Controls survive query changes; the keyed pager alone cancels and resets replaced reads. */}
-      {supported ? <VulnReportControls query={query} onChange={setQuery} disabled={false} label={label} /> : <UnsupportedReportControls />}
+      {supported ? <VulnReportControls query={query} onChange={setQuery} disabled={pending} label={label} /> : <UnsupportedReportControls />}
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
         queryKey={[...scope, 'report-page', status.scanId, 'vuln', supported ? { view: query.view, ...normalizeReportQuery('vuln', query) } : null, reportKey]}
         label={label}
-        load={load}
+        load={loadPage}
         describe={describe}
         enabled={terminal.includes(status.state) && !!status.perCheck?.vuln}
         waiting={status.state === 'cancelled' ? `${label}: завершённый результат не сохранён. Число уязвимостей неизвестно.` : `Ожидаем результат ${label}. Нулевое число не подтверждено.`}
@@ -287,6 +309,7 @@ function SbomReport({ status, transport, reportKey, demo, scope }: SectionProps)
     (cursor: string | undefined, signal: AbortSignal) => transport.sbom(status.scanId, cursor, signal, supported ? query : undefined),
     [transport, status.scanId, supported, query],
   );
+  const [loadPage, pending] = usePendingReportLoad(`${reportKey}:${revision}:${JSON.stringify(query)}`, load);
   const describe = useCallback(
     (page: ScanSbom): PageDescription => {
       if (supported && !page.page) throw new ReportViewContractError();
@@ -317,13 +340,13 @@ function SbomReport({ status, transport, reportKey, demo, scope }: SectionProps)
     <details aria-label="Пакеты SBOM" className="scan-report-section">
       <summary>Состав образа · найти пакет и его версию{status.perCheck?.sbom?.outcome === 'checked' && status.perCheck.sbom.componentCount != null ? <> · <ReportCount value={status.perCheck.sbom.componentCount} unit="package" /></> : null}</summary>
       <p>Инвентарь пакетов (SBOM) — для проверки зависимостей. Это не список уязвимостей.</p>
-      {supported ? <SbomReportControls query={query} onChange={setQuery} disabled={false} /> : <UnsupportedReportControls />}
+      {supported ? <SbomReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
         queryKey={[...scope, 'report-page', status.scanId, 'sbom', supported ? { view: query.view, ...normalizeReportQuery('sbom', query) } : null, reportKey]}
 
         label="Пакеты"
-        load={load}
+        load={loadPage}
         describe={describe}
         enabled={terminal.includes(status.state) && !!status.perCheck?.sbom}
         waiting={status.state === 'cancelled' ? 'Состав пакетов не сохранён до отмены. Число пакетов неизвестно.' : 'Состав образа ещё не подтверждён; число пакетов неизвестно.'}
@@ -372,6 +395,7 @@ function SecretReport({ status, transport, reportKey, demo, scope, filter, onRes
     (cursor: string | undefined, signal: AbortSignal) => transport.results(status.scanId, cursor, signal, supported ? query : undefined),
     [transport, status.scanId, supported, query],
   );
+  const [loadPage, pending] = usePendingReportLoad(`${reportKey}:${revision}:${JSON.stringify(query)}`, load);
   const describe = useCallback(
     (page: ScanResults): PageDescription => {
       if (supported && !page.page) throw new ReportViewContractError();
@@ -402,15 +426,15 @@ function SecretReport({ status, transport, reportKey, demo, scope, filter, onRes
   );
   return (
     <section id="scan-report-secrets" tabIndex={-1} aria-label="Возможные секреты" className="scan-report-section">
-      <h4>Возможные ключи и пароли</h4>
+      <h4 id="scan-report-secrets-heading" tabIndex={-1}>Возможные ключи и пароли</h4>
       <p>Совпадение с правилом ещё не означает утечку. Проверьте, являются ли найденные данные действующими; сами значения здесь не отображаются.</p>
-      {supported ? <SecretReportControls query={query} onChange={setQuery} disabled={false} /> : <UnsupportedReportControls />}
+      {supported ? <SecretReportControls query={query} onChange={setQuery} disabled={pending} /> : <UnsupportedReportControls />}
       <CursorReportPager
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
         queryKey={[...scope, 'report-page', status.scanId, 'secret', supported ? { view: query.view, ...normalizeReportQuery('secret', query) } : null, reportKey]}
 
         label="Возможные секреты"
-        load={load}
+        load={loadPage}
         describe={describe}
         enabled={demo || !!status.perCheck?.secret}
         waiting={status.state === 'cancelled' ? 'Результат поиска секретов не сохранён до отмены. Число находок неизвестно.' : 'Результат поиска секретов не подтверждён; число находок неизвестно.'}

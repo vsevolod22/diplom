@@ -29,7 +29,7 @@ beforeEach(() => transitionScanSession('alice', new QueryClient(), true));
 function backendContext(metadata: object = publicMetadata, policy: unknown = publicPolicy) {
   const scope = {
     reports: { read: () => ({ ...binding, profile: 'public-hub-amd64-v1', ...metadata }) },
-    runtime: { store: () => ({ snapshot: () => history }) },
+    runtime: { readStore: () => ({ readSnapshot: () => history }) },
     providerRuntime: { policy: () => policy },
     access: () => ({ identity: { subject: 'alice' } }),
     guard: (_access: unknown, action: () => unknown) => action(),
@@ -64,7 +64,7 @@ it('accepts only the two exact approved pairs, never mixed pairs, extra provider
     { providers: ['novita/bf16'] },
     { model: 'apodex/apodex-1.1-mini:free' },
     { providers: ['atlas-cloud/fp8', 'novita/bf16'] },
-        { model: 'nvidia/nemotron-3.5-super-vl:free', providers: ['nvidia'], retention: 'no-training' },
+    { model: 'nvidia/nemotron-3.5-super-vl:free', providers: ['nvidia'], retention: 'no-training' },
     { providers: ['phala'] },
     { model: 'xingchen-agi/xing4.0-29b-a4b:free', providers: ['phala'], retention: 'no-storage' },
     { retention: 'no-storage' },

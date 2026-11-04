@@ -8,6 +8,8 @@ import { Link, useParams } from 'react-router-dom';
 
 import { ScanChatPanel } from '@/features/scans/ScanChatPanel';
 import { ScanSummaryPanel } from '@/features/scans/ScanSummaryPanel';
+import { isReportSourceCategory, reportSourceTargets, type ReportSourceCategory } from '@/features/scans/reportSourceNavigation';
+import { scanSession } from '@/shared/api/auth/scanSession';
 import { AdvisoryTranslationScope } from '@/features/scans/AdvisoryTranslationPanel';
 import { ScanShell, controlClass } from '@/features/scans/ScanShell';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
@@ -87,6 +89,11 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
   const { scanId = '' } = useParams();
   const [filter, setFilter] = useState('all');
   const [coverageOpen, setCoverageOpen] = useState(false);
+  const [sourceNavigation, setSourceNavigation] = useState<{
+    category: ReportSourceCategory;
+    snapshot: ScanStatus;
+    session: string;
+  } | null>(null);
 
   const live = useLiveScanSession();
   const transport = demo ? fixtureScanTransport : live?.transport ?? unavailableScanTransport;
@@ -240,6 +247,42 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
   const changeFilter = (value: string) => {
       if (!staleSnapshot) setFilter(value);
     };
+  const sourceNavigationCurrent = () => {
+    const session = scanSession();
+    const current = queryClient.getQueryState<ScanStatus>(scanQueryKey);
+    return !demo && !!live && showSnapshot && !staleSnapshot &&
+      !snapshotGuard.accessFailure && snapshotGuard.retainable &&
+      session.subject === live.scope[2] && session.generation === live.scope[1] &&
+      current?.status === 'success' && current.error === null && !current.isInvalidated &&
+      current.fetchStatus === 'idle' && current.dataUpdatedAt > 0 && current.data === scan.data;
+  };
+  const navigateSource = (category: ReportSourceCategory): boolean => {
+    if (!isReportSourceCategory(category) || !sourceNavigationCurrent() || !scan.data) return false;
+    const checks = scan.data.checks ?? (scan.data.check ? [scan.data.check] : []);
+    if (category === 'config' ? !scan.data.config : category !== 'all' && !checks.includes(category)) return false;
+    changeFilter(category === 'vuln' ? 'cve' : category === 'secret' ? 'secret' : 'all');
+    setSourceNavigation({ category, snapshot: scan.data, session: JSON.stringify(scanSession()) });
+    return true;
+  };
+  useEffect(() => {
+    if (!sourceNavigation) return;
+    const session = scanSession();
+    const current = queryClient.getQueryState<ScanStatus>([...scope, 'scan', scanId]);
+    if (!demo && live && showSnapshot && !staleSnapshot &&
+        !snapshotGuard.accessFailure && snapshotGuard.retainable &&
+        current?.status === 'success' && current.error === null && !current.isInvalidated &&
+        current.fetchStatus === 'idle' && current.dataUpdatedAt > 0 && current.data === sourceNavigation.snapshot &&
+        sourceNavigation.snapshot === scan.data && session.subject === live.scope[2] &&
+        session.generation === live.scope[1] && sourceNavigation.session === JSON.stringify(session)) {
+      const target = reportSourceTargets[sourceNavigation.category];
+      const heading = document.getElementById(sourceNavigation.category === 'all' ? target : `${target}-heading`);
+      if (heading && !heading.closest('[hidden]')) {
+        heading.focus();
+        heading.scrollIntoView?.({ block: 'start', behavior: 'instant' });
+      }
+    }
+    setSourceNavigation(null);
+  }, [sourceNavigation, scan.data, demo, live, showSnapshot, staleSnapshot, snapshotGuard, queryClient, scope, scanId]);
 
   const statusDetails = showSnapshot && scan.data ? (
             <div className="scan-a1__state">
@@ -476,11 +519,11 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                 )}
               </details>
               <section className="scan-a1__panel scan-a1__findings-panel" aria-labelledby="scan-a1-findings">
-                <h3 id="scan-a1-findings">Находки и исправления</h3>
+                <h3 id="scan-a1-findings" tabIndex={-1}>Находки и исправления</h3>
                 <p>Выберите категорию, проверьте находку и выполните следующий шаг. Точные данные источников — в подробностях карточки.</p>
                 {!demo ? scan.data.config ? (
                   <section id="scan-report-config" tabIndex={-1} aria-label="Настройки образа" className="scan-report-section">
-                    <h4>Пользователь запуска контейнера</h4>
+                    <h4 id="scan-report-config-heading" tabIndex={-1}>Пользователь запуска контейнера</h4>
                     <p>{coverageLabels[scan.data.config.config.outcome]}{scan.data.config.config.outcome !== 'checked' ? ` · ${scanReasonLabel(scan.data.config.config.reason)}` : ''}</p>
                     <details className="scan-a1__coverage-technical">
                       <summary>Подробности проверки настроек</summary>
@@ -521,11 +564,13 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
               key={JSON.stringify(['summary', scope, scan.data])}
               status={scan.data}
               transport={transport}
+              onNavigateSource={navigateSource}
             /> : null}
             {!demo && live && !staleSnapshot && !active ? <ScanChatPanel
               key={JSON.stringify(['chat', scope, scan.data])}
               status={scan.data}
               transport={transport}
+              onNavigateSource={navigateSource}
             /> : null}
           </>
         ) : null}

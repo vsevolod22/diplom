@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateScanProgress, type ScanProgressEstimate } from '@/features/scans/scanProgressEstimate';
+import { estimateScanProgress } from '@/features/scans/scanProgressEstimate';
 import {
   parseCurrentStatus,
   type ScanCheck,
@@ -15,16 +15,11 @@ const scan = (patch: Partial<ScanStatus> = {}): ScanStatus => ({
   ...patch,
 });
 const checked = (check: ScanCheck) => ({ check, coverage: 'image', outcome: 'checked' }) as const;
-function after(value: ScanStatus, seconds: number) {
-  return estimateScanProgress(value, seconds * 1000, estimateScanProgress(value, 0));
-}
-
 function durable(outcomes: ScanProgress['outcomes'] = {}): ScanStatus {
-  const requestedChecks: ScanCheck[] = ['secret', 'sbom', 'vuln', 'config'];
   return scan({
     progress: {
       basis: 'durable-outcomes-v1',
-      requestedChecks,
+      requestedChecks: ['secret', 'sbom', 'vuln', 'config'],
       outcomes,
       resolvedChecks: Object.values(outcomes).filter((outcome) => outcome != null).length,
       checkedChecks: Object.values(outcomes).filter((outcome) => outcome === 'checked').length,
@@ -32,58 +27,40 @@ function durable(outcomes: ScanProgress['outcomes'] = {}): ScanStatus {
   });
 }
 
-describe('local weighted scan estimate', () => {
-  it('advances with actual observed runtime, not render count, stage text or updatedAt', () => {
+describe('snapshot-only scan progress compatibility entry point', () => {
+  it('elapsed time, renders, stage and timestamps never invent progress', () => {
     const value = scan({ updatedAt: '2000-01-01T00:00:00Z', stage: 'vuln' });
-    let result = estimateScanProgress(value, 0);
-    expect(result.percent).toBe(0);
-    for (let i = 0; i < 100; i++) result = estimateScanProgress({ ...value }, 0, result);
-    expect(result.percent).toBe(0);
-    result = estimateScanProgress(value, 60_000, result);
-    expect(result.percent).toBeGreaterThan(0);
-    expect(result.percent).toBeLessThan(25);
-  });
-
-  it('is monotonic and bounded with late checkpoints, missing metadata and clock rollback', () => {
-    let result = estimateScanProgress(scan(), 0);
-    let previous = result.percent!;
-    for (let second = 1; second <= 600; second++) {
-      const perCheck =
-        second < 120 || second > 500 ? undefined : { secret: checked('secret'), config: checked('config') };
-      result = estimateScanProgress(scan({ perCheck }), second * 1000, result);
-      expect(result.percent).toBeGreaterThanOrEqual(previous);
-      expect(result.percent! - previous).toBeLessThanOrEqual(0.500001);
-      expect(result.percent).toBeLessThan(100);
-      previous = result.percent!;
+    let previous = estimateScanProgress(value, 0);
+    for (const at of [0, 0, 60_000, 600_000, 1e12, -100, NaN, Infinity]) {
+      previous = estimateScanProgress({ ...value }, at, previous);
+      expect(previous.percent).toBeNull();
+      expect(previous.runningMs).toBe(0);
+      expect(previous.evidenceMs).toBe(0);
     }
-    expect(estimateScanProgress(scan(), -100, result).percent).toBe(previous);
-    expect(estimateScanProgress(scan(), NaN, result).percent).toBe(previous);
-    expect(estimateScanProgress(scan(), Number.MAX_SAFE_INTEGER, result).percent).toBeLessThanOrEqual(95);
   });
 
-  it('weights acquisition and long vulnerability work above config, never equal 25% per check', () => {
-    const config = estimateScanProgress(scan({ perCheck: { config: checked('config') } }), 0);
-    const secret = estimateScanProgress(scan({ perCheck: { secret: checked('secret') } }), 0);
-    const vuln = estimateScanProgress(scan({ perCheck: { vuln: checked('vuln') } }), 0);
-    expect(config.percent).toBeGreaterThan(0);
-    expect(config.percent).toBeLessThan(5);
-    expect(secret.percent).toBeGreaterThan(config.percent!);
-    expect(vuln.percent).toBeGreaterThan(secret.percent!);
-    for (const result of [config, secret, vuln]) expect(result.percent).not.toBe(25);
-    expect(after(scan({ checks: ['config'] }), 30).percent).toBeGreaterThan(
-      after(scan({ checks: ['vuln'] }), 30).percent!,
-    );
-  });
+  it.each(['config', 'secret', 'sbom', 'vuln'] as const)(
+    '%s checked is a count, not weighted or equal-work percentage',
+    (check) => {
+      const value = scan({ perCheck: { [check]: checked(check) } });
+      const result = estimateScanProgress(value, 1e12);
+      expect(result.percent).toBeNull();
+      expect(result.observedCheckedCount).toBe(1);
+      expect(result.runningMs).toBe(0);
+      expect(estimateScanProgress(scan({ checks: [check] }), 1e12).percent).toBeNull();
+    },
+  );
 
   it.each(['failed', 'skipped', 'unsupported', 'not_authorized'] as const)(
     '%s grants no checked-work or acquisition credit',
     (outcome) => {
       const result = estimateScanProgress(scan({ perCheck: { vuln: { ...checked('vuln'), outcome } } }), 0);
-      expect(result.percent).toBe(0);
+      expect(result.percent).toBeNull();
+      expect(result.observedCheckedCount).toBe(0);
     },
   );
 
-  it('uses durable outcomes rather than stale perCheck and preserves the null server contract', () => {
+  it('durable outcomes override stale perCheck and server percent without mutating the snapshot', () => {
     const value = parseCurrentStatus({
       scanId: 'scan-1',
       state: 'running',
@@ -100,21 +77,22 @@ describe('local weighted scan estimate', () => {
     });
     const original = structuredClone(value);
     const result = estimateScanProgress({ ...value, perCheck: { vuln: checked('vuln') }, percent: 90 }, 0);
-    expect(result.percent).toBeGreaterThan(0);
-    expect(result.percent).toBeLessThan(5);
+    expect(result.percent).toBeNull();
+    expect(result.observedCheckedCount).toBe(1);
+    expect(result.durableOutcomes).toEqual({ config: 'checked' });
     expect(value).toEqual(original);
     expect(value.percent).toBeNull();
+    result.durableOutcomes!.config = 'failed';
+    expect(value.progress!.outcomes.config).toBe('checked');
   });
 
-  it('does not jump when a checkpoint arrives or reset on each polling snapshot', () => {
-    let result = after(scan(), 60);
-    const before = result.percent!;
-    const checkpoint = scan({ perCheck: { vuln: checked('vuln') } });
-    result = estimateScanProgress(checkpoint, 60_000, result);
-    expect(result.percent).toBe(before);
-    result = estimateScanProgress({ ...checkpoint }, 61_000, result);
-    expect(result.percent).toBeGreaterThan(before);
-    expect(result.percent! - before).toBeLessThanOrEqual(0.5);
+  it('polling and new checkpoints report current counts without elapsed smoothing', () => {
+    const previous = estimateScanProgress(durable(), 60_000);
+    const value = durable({ secret: 'checked', vuln: 'failed' });
+    const result = estimateScanProgress(value, 60_000, previous);
+    expect(result.observedCheckedCount).toBe(1);
+    expect(result.percent).toBeNull();
+    expect(estimateScanProgress({ ...value }, 61_000, result)).toEqual(estimateScanProgress(value, 61_000));
   });
 
   it.each([
@@ -124,188 +102,125 @@ describe('local weighted scan estimate', () => {
     { before: { secret: 'checked' }, next: { sbom: 'checked' } },
     { before: { secret: 'checked', config: 'checked' }, next: { config: 'checked' } },
   ] satisfies Array<{ before: ScanProgress['outcomes']; next: ScanProgress['outcomes'] }>)(
-    'resets running -> running on observed durable regression: $before -> $next',
+    'durable regression is never masked by remembered evidence: $before -> $next',
     ({ before, next }) => {
-      const previous = after(durable(before), 120);
-      expect(previous.percent).toBeGreaterThan(0);
+      const previous = estimateScanProgress(durable(before), 120_000);
       const value = durable(next);
-      const reset = estimateScanProgress(value, 120_000, previous);
-      expect(reset).toEqual(estimateScanProgress(value, 120_000));
-      expect(reset.runningMs).toBe(0);
-      expect(reset.percent).toBeLessThan(100);
-      const resumed = estimateScanProgress(value, 121_000, reset);
-      expect(resumed.percent).toBeGreaterThanOrEqual(reset.percent!);
-      expect(resumed.percent! - reset.percent!).toBeLessThanOrEqual(0.5);
-      expect(estimateScanProgress(value, 1e12, resumed).percent).toBeLessThan(100);
+      const result = estimateScanProgress(value, 121_000, previous);
+      expect(result).toEqual(estimateScanProgress(value, 121_000));
+      expect(result.durableOutcomes).toEqual(next);
+      expect(result.observedCheckedCount).toBe(
+        Object.values(next).filter((outcome) => outcome === 'checked').length,
+      );
+      expect(result.percent).toBeNull();
     },
   );
 
-  it('resets on an observed checked-count drop without durable progress', () => {
-    const previous = after(scan({ perCheck: { secret: checked('secret') } }), 120);
-    const value = scan({ perCheck: { secret: null } });
-    const reset = estimateScanProgress(value, 120_000, previous);
-    expect(reset.runningMs).toBe(0);
-    expect(reset.percent).toBe(0);
-  });
-
-  it('retains the observation for unchanged evidence; an invisible repeat cannot be inferred', () => {
-    const value = durable({ config: 'checked' });
-    const previous = after(value, 120);
-    const unchanged = estimateScanProgress(durable({ config: 'checked' }), 121_000, previous);
-    expect(unchanged.runningMs).toBe(121_000);
-    expect(unchanged.percent).toBeGreaterThanOrEqual(previous.percent!);
-    expect(unchanged.percent).toBeLessThan(100);
-    const missing = estimateScanProgress(scan(), 122_000, unchanged);
-    expect(missing.runningMs).toBe(122_000);
-    expect(missing.percent).toBeGreaterThanOrEqual(unchanged.percent!);
-    const cleared = estimateScanProgress(durable(), 123_000, missing);
-    expect(cleared.runningMs).toBe(0);
-    expect(cleared.percent).toBe(0);
-  });
-
-  it('does not count queue time; freezes cancelling, failed, partial and cancelled estimates', () => {
-    let result = estimateScanProgress(scan({ state: 'queued' }), 0);
-    result = estimateScanProgress(scan({ state: 'queued' }), 600_000, result);
-    expect(result.percent).toBe(0);
-    expect(result.runningMs).toBe(0);
-    result = estimateScanProgress(scan(), 600_000, result);
-    expect(result.percent).toBe(0);
-    result = estimateScanProgress(scan(), 660_000, result);
-    for (const state of ['cancelling', 'failed', 'partial', 'cancelled'] as const) {
-      const stopped = estimateScanProgress(scan({ state, percent: 100 }), 700_000, result);
-      expect(stopped.percent).toBe(result.percent);
-      expect(estimateScanProgress(scan({ state }), 900_000, stopped).percent).toBe(stopped.percent);
-      expect(stopped.percent).toBeLessThan(100);
-    }
-  });
-
-  it('requires confirmed completed for 100, even with every checkpoint checked', () => {
-    const value = scan({
-      perCheck: {
-        secret: checked('secret'),
-        sbom: checked('sbom'),
-        vuln: checked('vuln'),
-        config: checked('config'),
-      },
-    });
-    const result = after(value, 1e9);
-    expect(result.percent).toBeLessThanOrEqual(95);
-    expect(estimateScanProgress({ ...value, state: 'completed' }, 1e12, result).percent).toBe(100);
-    for (const state of ['failed', 'partial', 'cancelled'] as const) {
-      expect(estimateScanProgress(scan({ state, percent: 100 }), 0).percent).toBeNull();
-    }
-  });
-
-  it('keeps unknown selections indeterminate rather than inventing generic work', () => {
-    for (const state of ['queued', 'running', 'cancelling'] as const) {
-      const value = scan({ state, checks: undefined });
-      expect(after(value, 60).percent).toBeNull();
-      expect(after(value, 1e9).percent).toBeNull();
-    }
-  });
-
-  it('never mixes server percentages into the independent local model', () => {
-    const expected = after(scan(), 60);
-    for (const percent of [null, undefined, 0, 5, 90, 100, NaN, Infinity, -1, 101]) {
-      expect(after(scan({ percent }), 60)).toEqual(expected);
-    }
-    const result = estimateScanProgress(scan({ percent: 90 }), 0);
-    const value = scan();
-    expect(estimateScanProgress(value, 1000, result)).toEqual(after(value, 1));
-    expect(value.percent).toBeNull();
-  });
-
-  it('does not reset known -> missing -> same selection, or invent fresh counters from memory', () => {
-    const value = durable({ secret: 'checked' });
-    const before = after(value, 120);
-    const missing = scan({ checks: undefined, perCheck: {} });
-    const paused = estimateScanProgress(missing, 121_000, before);
-    expect(paused.percent).toBe(before.percent);
-    expect(paused.plan).toBe(before.plan);
-    expect(paused.observationPaused).toBe(true);
-    expect(paused.runningMs).toBe(120_000);
-    expect(paused.evidence).toBe(before.evidence);
-    expect(paused.evidenceMs).toBe(before.evidenceMs);
-    const restored = estimateScanProgress(value, 122_000, paused);
-    expect(restored.observationPaused).toBe(false);
-    expect(restored.percent).toBe(before.percent);
-    expect(restored.runningMs).toBe(120_000);
-    expect(missing.checks).toBeUndefined();
-    const changed = estimateScanProgress(scan({ checks: ['config'] }), 123_000, restored);
-    expect(changed.percent).toBe(0);
-    expect(changed.runningMs).toBe(0);
-    const regressed = estimateScanProgress(durable(), 123_000, paused);
-    expect(regressed.percent).toBe(0);
-    expect(regressed.runningMs).toBe(0);
-  });
-
-  it.each(['durable', 'perCheck'] as const)('excludes entry, duration and exit of a missing-selection pause with %s evidence', (kind) => {
-    const value = kind === 'durable' ? durable({ secret: 'checked' }) : scan({ perCheck: { secret: checked('secret') } });
-    const before = after(value, 120);
-    const original = structuredClone(before);
-    const unknown = scan({ checks: undefined, perCheck: {} });
-    let result = before;
-    for (const at of [121_000, 181_000]) {
-      result = estimateScanProgress(unknown, at, result);
-      expect(result.observationPaused).toBe(true);
-      expect(result.runningMs).toBe(120_000);
-      expect(result.percent).toBe(before.percent);
-      expect(result.evidence).toBe(before.evidence);
-      expect(result.evidenceMs).toBe(before.evidenceMs);
-      expect(result.durableOutcomes).toEqual(before.durableOutcomes);
-      expect(result.observedCheckedCount).toBe(before.observedCheckedCount);
-      expect(result.lastAt).toBe(at);
-    }
-    const resumed = estimateScanProgress(value, 182_000, result);
-    expect(resumed.observationPaused).toBe(false);
-    expect(resumed.runningMs).toBe(120_000);
-    expect(resumed.percent).toBe(before.percent);
-    expect(resumed.evidenceMs).toBe(before.evidenceMs);
-    const next = estimateScanProgress(value, 183_000, resumed);
-    const uninterrupted = estimateScanProgress(value, 121_000, before);
-    expect(next.runningMs).toBe(121_000);
-    expect(next.percent).toBe(uninterrupted.percent);
-    expect(next.percent).toBeGreaterThan(before.percent!);
-    expect(next.percent! - before.percent!).toBeLessThanOrEqual(0.5);
-    expect(next.evidenceMs).toBe(before.evidenceMs);
-    expect(next.percent).toBeLessThan(100);
-    expect(before).toEqual(original);
-    const regressed = kind === 'durable' ? durable() : scan({ perCheck: { secret: null } });
-    expect(estimateScanProgress(regressed, 184_000, next)).toEqual(estimateScanProgress(regressed, 184_000));
-  });
-
-  it('an initially unknown observation grants no runtime when selection first becomes known', () => {
-    const unknown = scan({ checks: undefined });
-    let result = estimateScanProgress(unknown, 0);
-    result = estimateScanProgress(unknown, 180_000, result);
-    expect(result.observationPaused).toBe(true);
-    expect(result.runningMs).toBe(0);
+  it('a dropped perCheck count is not recovered from memory', () => {
+    const previous = estimateScanProgress(scan({ perCheck: { secret: checked('secret') } }), 120_000);
+    const result = estimateScanProgress(scan({ perCheck: { secret: null } }), 121_000, previous);
+    expect(result.observedCheckedCount).toBe(0);
     expect(result.percent).toBeNull();
-    result = estimateScanProgress(scan(), 181_000, result);
-    expect(result.observationPaused).toBe(false);
     expect(result.runningMs).toBe(0);
-    expect(result.percent).toBe(0);
-    result = estimateScanProgress(scan(), 182_000, result);
-    expect(result.runningMs).toBe(1000);
-    expect(result.percent).toBeGreaterThan(0);
-    expect(result.percent).toBeLessThan(100);
   });
 
-  it('resets for a different scan, selection, queue reentry, or a fresh observation', () => {
-    const result: ScanProgressEstimate = after(scan(), 120);
-    expect(result.percent).toBeGreaterThan(0);
+  it('missing evidence is unknown, not a paused remembered result', () => {
+    const previous = estimateScanProgress(durable({ config: 'checked' }), 120_000);
+    const result = estimateScanProgress(scan(), 121_000, previous);
+    expect(result.observationPaused).toBe(true);
+    expect(result.observedCheckedCount).toBeNull();
+    expect(result.durableOutcomes).toBeUndefined();
+    expect(result.percent).toBeNull();
+    expect(estimateScanProgress(durable(), 122_000, result).observedCheckedCount).toBe(0);
+  });
+
+  it.each(['queued', 'cancelling', 'failed', 'partial', 'cancelled'] as const)(
+    '%s never inherits an earlier server or local percentage',
+    (state) => {
+      const previous = estimateScanProgress(scan({ percent: 80 }), 0);
+      const result = estimateScanProgress(scan({ state }), 700_000, previous);
+      expect(result.percent).toBeNull();
+      expect(result.runningMs).toBe(0);
+      expect(estimateScanProgress(scan({ state, percent: 100 }), 900_000, result).percent).toBeNull();
+    },
+  );
+
+  it('100 requires completed even when every check is resolved', () => {
+    const value = durable({ secret: 'checked', sbom: 'checked', vuln: 'checked', config: 'checked' });
+    const previous = estimateScanProgress(value, 1e12);
+    expect(previous.percent).toBeNull();
+    expect(previous.observedCheckedCount).toBe(4);
+    expect(estimateScanProgress({ ...value, state: 'completed' }, 0, previous).percent).toBe(100);
+    expect(estimateScanProgress(scan({ state: 'completed', percent: 0 }), 0).percent).toBe(100);
+  });
+
+  it.each(['queued', 'running', 'cancelling'] as const)(
+    '%s missing selection stays indeterminate regardless of elapsed time',
+    (state) => {
+      const value = scan({ state, checks: undefined });
+      for (const at of [0, 60_000, 1e12]) {
+        const result = estimateScanProgress(value, at);
+        expect(result.percent).toBeNull();
+        expect(result.plan).toBeNull();
+        expect(result.observedCheckedCount).toBeNull();
+      }
+    },
+  );
+
+  it('preserves valid explicit server zero and percentages only without durable progress', () => {
+    for (const state of ['running', 'cancelling'] as const) {
+      for (const percent of [0, 5, 90, 99.5]) {
+        expect(estimateScanProgress(scan({ state, percent }), 0).percent).toBe(percent);
+        expect(estimateScanProgress({ ...durable(), state, percent }, 0).percent).toBeNull();
+      }
+      for (const percent of [null, undefined, 100, NaN, Infinity, -1, 101]) {
+        expect(estimateScanProgress(scan({ state, percent }), 0).percent).toBeNull();
+      }
+    }
+  });
+
+  it.each(['durable', 'perCheck'] as const)(
+    'known -> missing -> same selection never revives stale %s evidence',
+    (kind) => {
+      const value =
+        kind === 'durable'
+          ? durable({ secret: 'checked' })
+          : scan({ perCheck: { secret: checked('secret') } });
+      const previous = estimateScanProgress(value, 120_000);
+      const original = structuredClone(previous);
+      const missing = scan({ checks: undefined, perCheck: {} });
+      const result = estimateScanProgress(missing, 181_000, previous);
+      expect(result.plan).toBeNull();
+      expect(result.observedCheckedCount).toBeNull();
+      expect(result.durableOutcomes).toBeUndefined();
+      expect(result.percent).toBeNull();
+      expect(estimateScanProgress(value, 182_000, result)).toEqual(estimateScanProgress(value, 182_000));
+      expect(previous).toEqual(original);
+      expect(missing.checks).toBeUndefined();
+    },
+  );
+
+  it('first known selection after an unknown observation gains no elapsed credit', () => {
+    const previous = estimateScanProgress(scan({ checks: undefined }), 180_000);
+    const result = estimateScanProgress(scan(), 181_000, previous);
+    expect(result.percent).toBeNull();
+    expect(result.runningMs).toBe(0);
+    expect(result.observationPaused).toBe(true);
+  });
+
+  it('different scan, selection, queue reentry and fresh observation are independent of previous state', () => {
+    const previous = estimateScanProgress(
+      scan({ percent: 80, perCheck: { secret: checked('secret') } }),
+      120_000,
+    );
     for (const value of [
       scan({ scanId: 'scan-2' }),
       scan({ checks: ['config'] }),
       scan({ state: 'queued' }),
+      scan({ checks: ['config', 'vuln', 'sbom', 'secret'] }),
     ]) {
-      const reset = estimateScanProgress(value, 120_000, result);
-      expect(reset.percent).toBe(0);
-      expect(reset.runningMs).toBe(0);
+      expect(estimateScanProgress(value, 120_000, previous)).toEqual(estimateScanProgress(value, 120_000));
+      expect(estimateScanProgress(value, 120_000, previous).percent).toBeNull();
     }
-    expect(estimateScanProgress(scan(), 120_000).percent).toBe(0);
-    expect(
-      estimateScanProgress(scan({ checks: ['config', 'vuln', 'sbom', 'secret'] }), 120_000, result).percent,
-    ).toBe(result.percent);
   });
 });

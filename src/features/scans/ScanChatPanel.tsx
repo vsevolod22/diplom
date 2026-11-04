@@ -19,7 +19,8 @@ import { collectSummarySources, type SummarySource } from '@/shared/api/scans/ll
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import { usageMatchesDisclosure, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
 import { OpenAiDisclosure } from './OpenAiDisclosure';
-import { LlmFindingDetails } from './LlmFindingDetails';
+import { ReportRemediation } from './ReportRemediation';
+import type { ReportSourceNavigate } from './reportSourceNavigation';
 import { utf8Bytes } from '@/shared/api/scans/vulnAdvisory';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import { identifierLabel, identifierCountsTotal } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
@@ -27,7 +28,7 @@ import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
 import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
 
-type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient };
+type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient; onNavigateSource?: ReportSourceNavigate };
 type Operation = 'read' | 'chat' | 'decision';
 type Snapshot = {
   context: ChatContext;
@@ -172,14 +173,18 @@ function SourceList({
   sources,
   current,
   prefix,
+  onNavigate,
+  disabled,
 }: {
   sources: ChatSource[];
   current: ChatContext;
   prefix: string;
+  onNavigate?: ReportSourceNavigate;
+  disabled: boolean;
 }) {
   return (
-    <details>
-      <summary>Источники ({sources.length})</summary>
+    <div aria-label="Источники ответа">
+      <p>Источники ({sources.length})</p>
       <ul>
         {sources.map((source) => (
           <li key={source.finding.findingId} id={`${prefix}-${source.finding.findingId}`} tabIndex={-1}>
@@ -191,22 +196,25 @@ function SourceList({
                 {source.finding.cveId} · {sourceLabel(identifierLabel(source.finding.cveId))}
               </p>
             ) : null}
-            <LlmFindingDetails finding={source.finding} />
             <p>
               {sameChatBinding(source, current)
                 ? 'Источник текущего отчёта, проверен по результатам сканирования.'
-                : 'Исторический источник — не разрешён как находка текущего отчёта.'}
+                : 'Исторический источник — не разрешён как находка текущего отчёта. Данные ниже относятся только к сохранённому источнику, не к текущему образу.'}
             </p>
+            <ReportRemediation source={{ findingId: source.finding.findingId, check: source.finding.check,
+              label: source.finding.check === 'vuln' ? source.finding.cveId : checkLabels[source.finding.check], finding: source.finding }}
+              onNavigate={onNavigate} disabled={disabled || !sameChatBinding(source, current)} />
           </li>
         ))}
       </ul>
-    </details>
+    </div>
   );
 }
 function ChatScope({
   status,
   transport,
   client: providedClient,
+  onNavigateSource,
   preferences,
 }: Props & { preferences: ReturnType<typeof useReportPreferences> }) {
   const client = useMemo(() => providedClient ?? createChatClient(scanSession()), [providedClient]);
@@ -631,7 +639,9 @@ function ChatScope({
                 <>
                   <h5>Ответ · проверьте по источникам</h5>
                   <SafeMarkdown text={turn.reply.text} />
-                  <SourceList sources={turn.reply.sources} current={context} prefix={`chat-${turn.id}`} />
+                  <SourceList sources={turn.reply.sources} current={context} prefix={`chat-${turn.id}`}
+                                      onNavigate={onNavigateSource ? category => current() && !pending && onNavigateSource(category) : undefined}
+                                      disabled={pending} />
                 </>
               ) : (
                 <>
@@ -881,7 +891,9 @@ function ChatScope({
               <article key={entry.id}>
                 <h5>Решение пользователя · не вывод сканера</h5>
                 <p style={{ whiteSpace: 'pre-wrap' }}>{entry.text}</p>
-                <SourceList sources={entry.sources} current={context} prefix={`decision-${entry.id}`} />
+                <SourceList sources={entry.sources} current={context} prefix={`decision-${entry.id}`}
+                                  onNavigate={onNavigateSource ? category => current() && !pending && onNavigateSource(category) : undefined}
+                                  disabled={pending} />
               </article>
             ))}
             <fieldset

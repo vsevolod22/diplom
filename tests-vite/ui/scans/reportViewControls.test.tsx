@@ -15,7 +15,12 @@ type Override = (wire: ReturnType<typeof vulnWire>) => Response | Promise<Respon
 const json = (wire: unknown, status = 200) => new Response(JSON.stringify(wire), { status });
 let queryClient: QueryClient;
 function render(ui: ReactNode) {
-  return renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+  const view = renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+  // Exercise disclosed inventory and filters through the same summaries as a user.
+  for (const summary of screen.queryAllByText(/^(Состав образа · найти пакет и его версию|Фильтры и сортировка ·)/, { selector: 'summary' })) {
+    if (!summary.closest('details')!.open) fireEvent.click(summary);
+  }
+  return view;
 }
 let requests: URL[];
 let overrides: Override[];
@@ -75,24 +80,24 @@ function mount(checks: ScanCheck[] = ['vuln'], scanStatus: ScanStatus = status) 
   const props = { status: { ...scanStatus, checks }, transport: transport(), scope: ['synthetic', 1], demo: false, filter: 'all', onResetFilter: vi.fn() };
   return { ...render(<ScanReportSections {...props} />), props };
 }
-const cve = () => within(screen.getByRole('region', { name: 'Результаты CVE' }));
-const next = async () => { fireEvent.click(cve().getByRole('button', { name: 'Далее · CVE · сверху' })); await screen.findByText('CVE-2026-1025'); };
-const retry = () => fireEvent.click(cve().getByRole('button', { name: 'Повторить загрузку CVE' }));
+const cve = () => within(screen.getByRole('region', { name: 'Результаты Уязвимости' }));
+const next = async () => { fireEvent.click(cve().getByRole('button', { name: 'Далее · Уязвимости · сверху' })); await screen.findByText('CVE-2026-1025'); };
+const retry = () => fireEvent.click(cve().getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
 const lastVulnRequest = () => requests.filter(url => url.pathname.endsWith('/vuln')).at(-1)!;
 
 describe('actual parser → opt-in HTTP transport → sections / dual cursor pagers', () => {
   it('loads all saved cancelled datasets, pages them independently and reloads without discarding results', async () => {
     const cancelled: ScanStatus = { ...status, state: 'cancelled' };
     const view = mount(['secret', 'sbom', 'vuln'], cancelled);
-    const sbom = within(screen.getByRole('region', { name: 'Пакеты SBOM' }));
-    const secrets = within(screen.getByRole('region', { name: 'Результаты Secrets' }));
+    const sbom = within(screen.getByLabelText('Пакеты SBOM'));
+    const secrets = within(screen.getByRole('region', { name: 'Возможные секреты' }));
     await screen.findByText('CVE-2026-1000');
     await sbom.findByText('package-00');
     await secrets.findByText('ID: secret-0');
     await next();
-    fireEvent.click(sbom.getByRole('button', { name: 'Далее · SBOM · сверху' }));
+    fireEvent.click(sbom.getByRole('button', { name: 'Далее · Пакеты · сверху' }));
     await sbom.findByText('package-25');
-    fireEvent.click(secrets.getByRole('button', { name: 'Далее · Secrets · сверху' }));
+    fireEvent.click(secrets.getByRole('button', { name: 'Далее · Возможные секреты · сверху' }));
     await secrets.findByText('ID: secret-25');
     for (const section of [cve(), sbom, secrets]) expect(section.getByText('Страница 2')).toBeVisible();
     view.unmount();
@@ -109,22 +114,26 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
     await screen.findByText(check === 'secret' ? 'ID: secret-0' : check === 'sbom' ? 'package-00' : 'CVE-2026-1000');
     expect(requests).toHaveLength(1);
     expect(requests[0].pathname.endsWith(check === 'secret' ? '/results' : `/${check}`)).toBe(true);
-    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(2);
-    expect(screen.queryByText(/Ожидаем результат CVE/)).not.toBeInTheDocument();
+    for (const absent of (['secret', 'sbom', 'vuln'] as const).filter(kind => kind !== check)) {
+      const label = absent === 'secret' ? 'Возможные секреты' : absent === 'sbom' ? 'Пакеты SBOM' : 'Результаты Уязвимости';
+      expect(within(screen.getByLabelText(label)).getByText(/не сохранён/)).toHaveTextContent(/неизвестно/);
+    }
+    expect(screen.queryByText(/Ожидаем результат Уязвимости/)).not.toBeInTheDocument();
   });
   it('retains a completed failed checkpoint as failed after cancellation, never a checked zero', async () => {
     overrides.push(wire => json({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_TIMEOUT', findings: [], nextCursor: null,
       page: { ...wire.page, returnedCount: 0, totalCount: null, matchedCount: null } }));
     mount(['vuln'], { ...status, state: 'cancelled', perCheck: { vuln: { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' } } });
-    await screen.findByText('CVE не проверены: SCAN_TIMEOUT. Число уязвимостей неизвестно.');
+    await screen.findByText('Не удалось проверить уязвимости');
     expect(requests).toHaveLength(1);
-    expect(screen.queryByText(/0 CVE|Полный итог CVE: 0/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 находок в выполненной|Совпадений во всём отчёте Уязвимости: 0|Всего находок в проверенной области:/)).not.toBeInTheDocument();
   });
   it('does not request cancelled reports without checkpoints or invent checked zero', () => {
     mount(['secret', 'sbom', 'vuln'], { ...status, state: 'cancelled', perCheck: { secret: null, sbom: null, vuln: null } });
     expect(requests).toHaveLength(0);
-    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(3);
-    expect(screen.queryByText(/Полный итог|0 CVE|0 находок/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/не сохранён/)).toHaveLength(3);
+    for (const message of screen.getAllByText(/не сохранён/)) expect(message).toHaveTextContent(/неизвестно/);
+    expect(screen.queryByText(/Совпадений во всём отчёте|Всего находок в проверенной области|0 находок/)).not.toBeInTheDocument();
   });
   it('preserves top/bottom pagers; page-size5 resets cursors, truthful range and totals', async () => {
     mount();
@@ -133,49 +142,49 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
     expect(cve().getByText('Строки 1–25')).toBeVisible();
     await next();
     expect(cve().getByText('Страница 2')).toBeVisible();
-    fireEvent.change(cve().getByLabelText('Строк на странице · CVE'), { target: { value: '5' } });
+    fireEvent.change(cve().getByLabelText('Строк на странице · Уязвимости'), { target: { value: '5' } });
     await screen.findByText('CVE-2026-1000');
     expect(cve().getByText('Строки 1–5')).toBeVisible();
     expect(lastVulnRequest().searchParams.has('cursor')).toBe(false);
     expect(lastVulnRequest().searchParams.get('limit')).toBe('5');
-    expect(cve().getByRole('button', { name: 'Назад · CVE · сверху' })).toBeDisabled();
+    expect(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' })).toBeDisabled();
   });
   it('uses matched count for checked filtered pagination and whole report for coverage; zero matches is not zero report', async () => {
     mount();
     await screen.findByText('CVE-2026-1000');
-    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические (HIGH + CRITICAL)' }));
-    await waitFor(() => expect(cve().getByText('Совпадений во всём отчёте CVE: 20')).toBeVisible());
-    expect(cve().getByText('Полный итог CVE: 30')).toBeVisible();
+    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические' }));
+    await waitFor(() => expect(cve().getByText('Совпадений во всём отчёте Уязвимости: 20')).toBeVisible());
+    expect(cve().getByText(/Всего находок в проверенной области:/)).toHaveTextContent('30');
     expect(cve().queryAllByRole('navigation')).toHaveLength(0);
-    fireEvent.change(cve().getByLabelText('Уровень опасности (severity) · CVE'), { target: { value: 'UNKNOWN' } });
-    await cve().findByText(/Нет совпадений глобального фильтра CVE/);
-    expect(cve().getByText('Совпадений во всём отчёте CVE: 0')).toBeVisible();
-    expect(cve().queryByText(/0 CVE в выполненной/)).not.toBeInTheDocument();
+    fireEvent.change(cve().getByLabelText('Уровень опасности · Уязвимости'), { target: { value: 'UNKNOWN' } });
+    await cve().findByText(/По выбранному фильтру находок нет/);
+    expect(cve().getByText('Совпадений во всём отчёте Уязвимости: 0')).toBeVisible();
+    expect(cve().queryByText(/0 находок в выполненной/)).not.toBeInTheDocument();
   });
   it('sends independent global SBOM name/ecosystem and meaningful Secrets rule/line/sort controls', async () => {
     const fetchQuery = vi.spyOn(queryClient, 'fetchQuery');
     mount(['secret', 'sbom', 'vuln']);
     await screen.findByText('CVE-2026-1000');
-    const sbom = within(screen.getByRole('region', { name: 'Пакеты SBOM' }));
-    const secrets = within(screen.getByRole('region', { name: 'Результаты Secrets' }));
+    const sbom = within(screen.getByLabelText('Пакеты SBOM'));
+    const secrets = within(screen.getByRole('region', { name: 'Возможные секреты' }));
     await sbom.findByText('package-00');
     await secrets.findByText('ID: secret-0');
-    fireEvent.change(sbom.getByLabelText('Экосистема · SBOM'), { target: { value: 'npm' } });
-    await sbom.findByText('Совпадений во всём отчёте SBOM: 15');
-    fireEvent.change(sbom.getByLabelText('Имя пакета · SBOM'), { target: { value: 'PACKAGE-2' } });
+    fireEvent.change(sbom.getByLabelText('Тип пакетов'), { target: { value: 'npm' } });
+    await sbom.findByText('Совпадений во всём отчёте Пакеты: 15');
+    fireEvent.change(sbom.getByLabelText('Название пакета'), { target: { value: 'PACKAGE-2' } });
     expect(requests.filter(url => url.searchParams.has('name'))).toHaveLength(0);
-    fireEvent.submit(sbom.getByLabelText('Имя пакета · SBOM').closest('form')!);
-    await sbom.findByText('Совпадений во всём отчёте SBOM: 10');
+    fireEvent.submit(sbom.getByLabelText('Название пакета').closest('form')!);
+    await sbom.findByText('Совпадений во всём отчёте Пакеты: 10');
     expect(requests.at(-1)?.searchParams.get('name')).toBe('package-2');
     const sbomKey = fetchQuery.mock.calls.at(-1)![0].queryKey;
     expect(sbomKey.slice(0, 5)).toEqual(['synthetic', 1, 'report-page', status.scanId, 'sbom']);
     expect(sbomKey[5]).toEqual({ view: 'report-v1', limit: 25, sort: 'name:asc', filters: { ecosystem: 'npm', name: 'package-2' } });
     expect(sbomKey.at(-1)).toBeNull();
-    fireEvent.change(secrets.getByLabelText('Номер строки · Secrets'), { target: { value: 'known' } });
-    await secrets.findByText('Совпадений во всём отчёте Secrets: 15');
-    fireEvent.change(secrets.getByLabelText('Rule ID · Secrets'), { target: { value: 'RULE_B' } });
-    fireEvent.submit(secrets.getByLabelText('Rule ID · Secrets').closest('form')!);
-    await secrets.findByText('Совпадений во всём отчёте Secrets: 8');
+    fireEvent.change(secrets.getByLabelText('Номер строки'), { target: { value: 'known' } });
+    await secrets.findByText('Совпадений во всём отчёте Возможные секреты: 15');
+    fireEvent.change(secrets.getByLabelText('Код правила'), { target: { value: 'RULE_B' } });
+    fireEvent.submit(secrets.getByLabelText('Код правила').closest('form')!);
+    await secrets.findByText('Совпадений во всём отчёте Возможные секреты: 8');
     expect(requests.at(-1)?.searchParams.get('ruleId')).toBe('RULE_B');
     const secretKey = fetchQuery.mock.calls.at(-1)![0].queryKey;
     expect(secretKey.slice(0, 5)).toEqual(['synthetic', 1, 'report-page', status.scanId, 'secret']);
@@ -191,15 +200,15 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
       findings: wire.findings.map((finding, index) => index === 0 ? { ...finding, line: 0 } : finding),
     });
     mount(['secret']);
-    const secrets = within(screen.getByRole('region', { name: 'Результаты Secrets' }));
+    const secrets = within(screen.getByRole('region', { name: 'Возможные секреты' }));
     await secrets.findByText('ID: secret-0');
-    expect(secrets.getByText('secret · Строка 0', { exact: true })).toBeVisible();
+    expect(secrets.getByText('Строка 0', { exact: true })).toBeVisible();
     expect(secrets.queryByText('redacted:0', { exact: false })).not.toBeInTheDocument();
   });
   it.each([[400, 'REPORT_CURSOR_QUERY_MISMATCH'], [409, 'REPORT_CURSOR_STALE']])('clears rows/history and retries FIRST on query-bound %s/%s', async (code, errorCode) => {
     mount(); await screen.findByText('CVE-2026-1000');
     overrides.push(() => json({ errorCode }, Number(code)));
-    fireEvent.click(cve().getByRole('button', { name: 'Далее · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
     await cve().findByRole('alert');
     expect(cve().queryByText('CVE-2026-1000')).not.toBeInTheDocument();
     expect(cve().queryAllByRole('navigation')).toHaveLength(0);
@@ -209,15 +218,15 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   it('ordinary503 retains last confirmed rows and retries attempted opaque cursor; selection after error resets first', async () => {
     mount(); await screen.findByText('CVE-2026-1000');
     overrides.push(() => json({}, 503));
-    fireEvent.click(cve().getByRole('button', { name: 'Далее · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
     await cve().findByRole('alert');
     expect(cve().getByText('CVE-2026-1000')).toBeVisible();
     retry(); await screen.findByText('CVE-2026-1025');
     expect(lastVulnRequest().searchParams.get('cursor')).toBe('opaque:25/+==');
     overrides.push(() => json({}, 503));
-    fireEvent.click(cve().getByRole('button', { name: 'Назад · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' }));
     await cve().findByRole('alert');
-    fireEvent.change(cve().getByLabelText('Сортировка · CVE'), { target: { value: 'severity:asc' } });
+    fireEvent.change(cve().getByLabelText('Сортировка · Уязвимости'), { target: { value: 'severity:asc' } });
     await cve().findByText('Строки 1–25');
     expect(lastVulnRequest().searchParams.has('cursor')).toBe(false);
     expect(cve().queryByRole('alert')).not.toBeInTheDocument();
@@ -225,14 +234,14 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   it('C4 remains content-only last-confirmed historical retention; failed recovery retains it, selection discards it', async () => {
     mount(); await screen.findByText('CVE-2026-1000'); await next();
     overrides.push(wire => json({ ...wire, findings: wire.findings.map((item, index) => index === 0 ? { ...item, fixedVersion: '9.9' } : item) }));
-    fireEvent.click(cve().getByRole('button', { name: 'Назад · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' }));
     await cve().findByText(/Сохранён прежний подтверждённый снимок/);
     expect(cve().getByText('CVE-2026-1025')).toBeVisible();
-    expect(cve().getByRole('button', { name: 'Назад · CVE · сверху' })).toBeDisabled();
+    expect(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' })).toBeDisabled();
     overrides.push(() => json({}, 503)); retry(); await cve().findByRole('alert');
     expect(cve().getByText('CVE-2026-1025')).toBeVisible();
     expect(lastVulnRequest().searchParams.has('cursor')).toBe(false);
-    fireEvent.change(cve().getByLabelText('Строк на странице · CVE'), { target: { value: '5' } });
+    fireEvent.change(cve().getByLabelText('Строк на странице · Уязвимости'), { target: { value: '5' } });
     expect(cve().queryByText('CVE-2026-1025')).not.toBeInTheDocument();
     await screen.findByText('CVE-2026-1000');
     expect(cve().queryByText(/Сохранён прежний подтверждённый снимок/)).not.toBeInTheDocument();
@@ -241,7 +250,7 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   it.each(['metadata', 'access', 'stale', 'query', 'invalid-json'])('clears even retained C4 historical snapshot on %s failure', async mode => {
     mount(); await screen.findByText('CVE-2026-1000'); await next();
     overrides.push(wire => json({ ...wire, findings: wire.findings.map((item, index) => index === 0 ? { ...item, fixedVersion: '9.9' } : item) }));
-    fireEvent.click(cve().getByRole('button', { name: 'Назад · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' }));
     await cve().findByText(/Сохранён прежний подтверждённый снимок/);
     overrides.push(wire => mode === 'access' ? json({}, 403) : mode === 'stale' ? json({ errorCode: 'REPORT_CURSOR_STALE' }, 409) : mode === 'query' ? json({ errorCode: 'REPORT_CURSOR_QUERY_MISMATCH' }, 400) : mode === 'invalid-json' ? new Response('{bad-json') : json({ ...wire, page: { ...wire.page, version: 2 } }));
     retry();
@@ -257,7 +266,7 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
     await screen.findByText('CVE-2026-1000');
     overrides.push(wire => json({ ...wire, ...evidence })); await next();
     overrides.push(wire => json({ ...wire, ...evidence, dbPolicy: null }));
-    fireEvent.click(cve().getByRole('button', { name: 'Назад · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' }));
     await cve().findByRole('alert');
     expect(cve().queryByText('CVE-2026-1025')).not.toBeInTheDocument();
     overrides.push(wire => json({ ...wire, ...evidence })); retry(); await screen.findByText('CVE-2026-1000');
@@ -265,7 +274,7 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   });
   it('unchanged Back/forward revisit and subject-remount isolation preserve existing fences', async () => {
     const mounted = mount(); await screen.findByText('CVE-2026-1000'); await next();
-    fireEvent.click(cve().getByRole('button', { name: 'Назад · CVE · сверху' })); await screen.findByText('CVE-2026-1000');
+    fireEvent.click(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' })); await screen.findByText('CVE-2026-1000');
     await next(); expect(cve().queryByRole('alert')).not.toBeInTheDocument();
     mounted.rerender(<ScanReportSections {...mounted.props} scope={['other-synthetic', 2]} />);
     expect(cve().queryByText('CVE-2026-1025')).not.toBeInTheDocument();
@@ -273,28 +282,33 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   });
   it('reapplying the SAME selection resets history even after an error', async () => {
     mount(); await screen.findByText('CVE-2026-1000');
-    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические (HIGH + CRITICAL)' }));
-    await cve().findByText('Совпадений во всём отчёте CVE: 20');
-    fireEvent.change(cve().getByLabelText('Строк на странице · CVE'), { target: { value: '5' } });
+    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические' }));
+    await cve().findByText('Совпадений во всём отчёте Уязвимости: 20');
+    fireEvent.change(cve().getByLabelText('Строк на странице · Уязвимости'), { target: { value: '5' } });
     await cve().findByText('Строки 1–5');
-    fireEvent.click(cve().getByRole('button', { name: 'Далее · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
     await screen.findByText('CVE-2026-1005');
     overrides.push(() => json({}, 503));
-    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические (HIGH + CRITICAL)' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические' }));
     expect(cve().queryByText('CVE-2026-1005')).not.toBeInTheDocument();
     await cve().findByRole('alert');
     expect(cve().queryAllByRole('navigation')).toHaveLength(0);
     expect(lastVulnRequest().searchParams.has('cursor')).toBe(false);
-    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические (HIGH + CRITICAL)' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Высокие и критические' }));
     await screen.findByText('CVE-2026-1000');
-    expect(cve().getByRole('button', { name: 'Назад · CVE · сверху' })).toBeDisabled();
+    expect(cve().getByRole('button', { name: 'Назад · Уязвимости · сверху' })).toBeDisabled();
   });
-  it('disables controls while pending and ignores late old-scope responses', async () => {
+  it('disables controls while pending', async () => {
+      overrides.push(() => new Promise<Response>(() => {}));
+      mount();
+      await waitFor(() => expect(requests).toHaveLength(1));
+      expect(cve().getByLabelText('Строк на странице · Уязвимости')).toBeDisabled();
+    });
+    it('ignores late old-scope responses', async () => {
     let complete!: (response: Response) => void;
     overrides.push(wire => new Promise<Response>(resolve => { complete = response => resolve(response); void wire; }));
     const mounted = mount();
     await waitFor(() => expect(requests).toHaveLength(1));
-    expect(cve().getByLabelText('Строк на странице · CVE')).toBeDisabled();
     mounted.rerender(<ScanReportSections {...mounted.props} scope={['other-synthetic', 2]} />);
     await screen.findByText('CVE-2026-1000');
     await act(async () => complete(json(vulnWire({ findings: vulnRows.slice(0, 25).map((item, index) => index === 0 ? { ...item, cveId: 'CVE-2026-9999' } : item), page: meta({ limit: 25, returnedCount: 25 }), nextCursor: 'opaque:25/+==' }))));
@@ -303,16 +317,18 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   });
   it('same-ID secret line drift uses C4 retention, then line selection clears historical data', async () => {
     mount(['secret']);
-    const secrets = within(screen.getByRole('region', { name: 'Результаты Secrets' }));
+    const secrets = within(screen.getByRole('region', { name: 'Возможные секреты' }));
     await secrets.findByText('ID: secret-0');
-    fireEvent.click(secrets.getByRole('button', { name: 'Далее · Secrets · сверху' }));
+    fireEvent.click(secrets.getByRole('button', { name: 'Далее · Возможные секреты · сверху' }));
     await secrets.findByText('ID: secret-26');
     secretOverride = wire => json({ ...wire, findings: wire.findings.map((item, index) => index === 0 ? { ...item, line: 123 } : item) });
-    fireEvent.click(secrets.getByRole('button', { name: 'Назад · Secrets · сверху' }));
+    fireEvent.click(secrets.getByRole('button', { name: 'Назад · Возможные секреты · сверху' }));
     await secrets.findByText(/Сохранён прежний подтверждённый снимок/);
-    expect(secrets.getByText('ID: secret-26')).toBeVisible();
-    expect(secrets.getByRole('button', { name: 'Назад · Secrets · сверху' })).toBeDisabled();
-    fireEvent.change(secrets.getByLabelText('Номер строки · Secrets'), { target: { value: 'known' } });
+    const retainedId = secrets.getByText('ID: secret-26');
+        fireEvent.click(within(retainedId.closest('li')!).getByText('Подробности · правило и место находки', { selector: 'summary' }));
+        expect(retainedId).toBeVisible();
+    expect(secrets.getByRole('button', { name: 'Назад · Возможные секреты · сверху' })).toBeDisabled();
+    fireEvent.change(secrets.getByLabelText('Номер строки'), { target: { value: 'known' } });
     expect(secrets.queryByText('ID: secret-26')).not.toBeInTheDocument();
     await secrets.findByText('ID: secret-1');
     expect(secrets.queryByText(/Сохранён прежний подтверждённый снимок/)).not.toBeInTheDocument();
@@ -321,7 +337,7 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   it('ordinary network failure retains confirmation and same-cursor retry', async () => {
     mount(); await screen.findByText('CVE-2026-1000');
     overrides.push(() => { throw new TypeError('Synthetic offline'); });
-    fireEvent.click(cve().getByRole('button', { name: 'Далее · CVE · сверху' }));
+    fireEvent.click(cve().getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
     await cve().findByRole('alert');
     expect(cve().getByText('CVE-2026-1000')).toBeVisible();
     retry(); await screen.findByText('CVE-2026-1025');
@@ -330,16 +346,16 @@ describe('actual parser → opt-in HTTP transport → sections / dual cursor pag
   it('unknown nonchecked totals do not become zero or no-match claims', async () => {
     overrides.push(() => json({ outcome: 'failed', coverage: 'image', errorCode: 'SCAN_FAILED', findings: [], nextCursor: null, page: meta({ limit: 25, returnedCount: 0, totalCount: null, matchedCount: null }) }));
     mount(['vuln'], { ...status, perCheck: { vuln: { check: 'vuln', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_FAILED' } } });
-    await cve().findByText(/CVE не проверены: SCAN_FAILED/);
+    await cve().findByText(/Не удалось проверить уязвимости/);
     expect(cve().queryAllByRole('navigation')).toHaveLength(0);
-    expect(cve().queryByText(/Совпадений во всём отчёте CVE: 0/)).not.toBeInTheDocument();
-    expect(cve().queryByText(/Нет совпадений глобального/)).not.toBeInTheDocument();
+    expect(cve().queryByText(/Совпадений во всём отчёте Уязвимости: 0/)).not.toBeInTheDocument();
+    expect(cve().queryByText(/По выбранному фильтру находок нет/)).not.toBeInTheDocument();
   });
   it('labels fixture controls unsupported and never sends view options', async () => {
     render(<ScanReportSections status={{ scanId: 'partial-demo', state: 'partial' }} transport={fixtureScanTransport} scope={['demo']} demo filter="all" onResetFilter={vi.fn()} />);
-    await screen.findByText('SECRET_DETECTED');
+    await screen.findByText('Правило: SECRET_DETECTED · категория: secret');
     expect(screen.getByText('Демонстрационные данные. Фильтры и размер страницы в этом режиме недоступны.')).toBeVisible();
-    expect(screen.queryByLabelText('Строк на странице · Secrets')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Строк на странице · Возможные секреты')).not.toBeInTheDocument();
     expect(requests).toHaveLength(0);
   });
 });

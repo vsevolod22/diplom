@@ -18,15 +18,19 @@ import { checkedAt, meta, scanId, status, sbomRows, sbomWire, secretRows, secret
 // no frontend normalizer generates expected response metadata, no other test imports.
 type Wire = Record<string, unknown>;
 const endpoints = { vuln: 'vuln', sbom: 'sbom', secret: 'results' };
-const labels = { vuln: 'CVE', sbom: 'SBOM', secret: 'Secrets' };
-const regions = { vuln: 'Результаты CVE', sbom: 'Пакеты SBOM', secret: 'Результаты Secrets' };
+const labels = { vuln: 'Уязвимости', sbom: 'Пакеты', secret: 'Возможные секреты' };
+const regions = { vuln: 'Результаты Уязвимости', sbom: 'Пакеты SBOM', secret: 'Возможные секреты' };
 const firstText = { vuln: 'CVE-2026-1000', sbom: 'package-00', secret: 'ID: secret-0' };
 const tailText = { vuln: 'CVE-2026-1025', sbom: 'package-25', secret: 'ID: secret-25' };
 const changedAt = '2026-01-03T00:00:00.000Z';
 const json = (body: unknown, code = 200) => new Response(JSON.stringify(body), { status: code });
 let queryClient: QueryClient;
 function render(ui: ReactNode) {
-  return renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+  const view = renderUi(ui, { wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider> });
+  for (const summary of screen.queryAllByText(/^(Состав образа · найти пакет и его версию|Фильтры и сортировка ·)/, { selector: 'summary' })) {
+    if (!summary.closest('details')!.open) fireEvent.click(summary);
+  }
+  return view;
 }
 let requests: URL[];
 beforeEach(() => {
@@ -69,7 +73,7 @@ function stamped(at: string | undefined, offset = 0): Wire {
 function mount(kind: ReportKind, authorizedStatus: ScanStatus = status) {
   return render(<ScanReportSections status={{ ...authorizedStatus, checks: [kind] }} transport={transport()} scope={['r2-synthetic']} demo={false} filter="all" onResetFilter={vi.fn()} />);
 }
-const section = (kind: ReportKind) => within(screen.getByRole('region', { name: regions[kind] }));
+const section = (kind: ReportKind) => within(kind === 'sbom' ? screen.getByLabelText(regions[kind]) : screen.getByRole('region', { name: regions[kind] }));
 const navigate = (kind: ReportKind, direction: 'Назад' | 'Далее') => fireEvent.click(section(kind).getByRole('button', { name: `${direction} · ${labels[kind]} · сверху` }));
 const retry = (kind: ReportKind) => fireEvent.click(section(kind).getByRole('button', { name: `Повторить загрузку ${labels[kind]}` }));
 const expectCleared = (kind: ReportKind) => {
@@ -105,9 +109,9 @@ describe('R2 canonical query seam with explicit backend-normalized echoes', () =
     const matching = sbomRows.slice(20, 30);
     responses('sbom', [json(wire('sbom')), json(sbomWire({ components: matching, nextCursor: null, page: { ...meta(), limit: 25, returnedCount: 10, matchedCount: 10, sort: 'name:asc', filters: { ecosystem: null, name: 'package-2' } } }))]);
     mount('sbom'); await section('sbom').findByText('package-00');
-    fireEvent.change(section('sbom').getByLabelText('Имя пакета · SBOM'), { target: { value: 'PaCkAgE-2' } });
-    fireEvent.submit(section('sbom').getByLabelText('Имя пакета · SBOM').closest('form')!);
-    await section('sbom').findByText('Совпадений во всём отчёте SBOM: 10');
+    fireEvent.change(section('sbom').getByLabelText('Название пакета'), { target: { value: 'PaCkAgE-2' } });
+    fireEvent.submit(section('sbom').getByLabelText('Название пакета').closest('form')!);
+    await section('sbom').findByText('Совпадений во всём отчёте Пакеты: 10');
     expect(requests.at(-1)?.searchParams.get('name')).toBe('package-2');
     expect(section('sbom').queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -125,7 +129,7 @@ describe('R2 canonical query seam with explicit backend-normalized echoes', () =
   it('Rule ID input validates locally with a fixed message and no query/raw-value echo', () => {
     const change = vi.fn();
     render(<SecretReportControls query={{ view: 'report-v1' }} disabled={false} onChange={change} />);
-    const input = screen.getByLabelText('Rule ID · Secrets');
+    const input = screen.getByLabelText('Код правила');
     expect(input).toHaveAttribute('maxlength', '80');
     fireEvent.change(input, { target: { value: 'rule/path' } });
     fireEvent.submit(input.closest('form')!);
@@ -172,7 +176,9 @@ describe('R2 deterministic HTTP errors and corrupt pagination strictly reset rep
       mount(kind); await section(kind).findByText(firstText[kind]);
       navigate(kind, 'Далее'); await section(kind).findByText(tailText[kind]);
       navigate(kind, 'Назад'); await section(kind).findByText(/Сохранён прежний подтверждённый снимок/);
-      expect(section(kind).getByText(tailText[kind])).toBeVisible();
+      const retained = section(kind).getByText(tailText[kind]);
+      if (kind === 'secret') fireEvent.click(within(retained.closest('li')!).getByText('Подробности · правило и место находки', { selector: 'summary' }));
+      expect(retained).toBeVisible();
       retry(kind); await waitFor(() => expect(section(kind).queryByText(tailText[kind])).not.toBeInTheDocument());
       expectCleared(kind);
       retry(kind); await section(kind).findByText(firstText[kind]);
@@ -198,7 +204,7 @@ describe('R2 deterministic HTTP errors and corrupt pagination strictly reset rep
     navigate('vuln', 'Назад'); await section('vuln').findByText(/Сохранён прежний подтверждённый снимок/);
     retry('vuln'); await section('vuln').findByRole('alert');
     expect(section('vuln').getByText(tailText.vuln)).toBeVisible();
-    expect(section('vuln').getByRole('button', { name: 'Далее · CVE · сверху' })).toBeDisabled();
+    expect(section('vuln').getByRole('button', { name: 'Далее · Уязвимости · сверху' })).toBeDisabled();
     retry('vuln'); await section('vuln').findByText(firstText.vuln);
     expect(requests[4].searchParams.has('cursor')).toBe(false);
     expect(requests[5].searchParams.has('cursor')).toBe(false);

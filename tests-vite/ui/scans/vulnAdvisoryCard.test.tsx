@@ -56,7 +56,7 @@ it('B2 same-source assessments keep ordinal, exact title/description/fix associa
 it('B2 distinguishes temporary Debian advisory identity visibly without claiming CVE', () => {
   const finding = { ...normalized().findings[0], cveId: 'TEMP-1234567-ABCDEF' };
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText('TEMP-1234567-ABCDEF · уведомление Debian (не CVE)')).toBeVisible();
+  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
 });
 
 it('labels the source union as contributors, not origins of LOW, and preserves separate source assessments', () => {
@@ -66,7 +66,7 @@ it('labels the source union as contributors, not origins of LOW, and preserves s
   expect(finding.severity).toBe('LOW');
   expect(finding.severitySources).toEqual(['alpine', 'nvd']);
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
+  expect(screen.getByText(/Опасность требует уточнения\./)).toBeVisible();
   openSourceDetails();
   expect(screen.getByText(/Оценка сканера: LOW\. Источники: alpine, nvd/)).toBeVisible();
   expect(screen.queryByText(/Источник severity: alpine, nvd/)).toBeNull();
@@ -88,8 +88,8 @@ it('marks merged conflicting severity and fix as non-authoritative compatibility
   expect(finding.severity).toBe('HIGH');
   expect(finding.fixedVersion).toBe('1.3');
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
-  expect(screen.getByText(/Указанная версия исправления не является согласованной рекомендацией всех источников/)).toBeVisible();
+  expect(screen.getByText(/Опасность требует уточнения\./)).toBeVisible();
+  expect(screen.getByText(/Версия исправления не подтверждена всеми источниками\./)).toBeVisible();
   openSourceDetails();
   expect(screen.getByText(/Поля с расхождениями: severity, fixedVersion/)).toBeVisible();
   expect(screen.getAllByText(/исправление источника: 1\.[34]/)).toHaveLength(2);
@@ -106,8 +106,8 @@ it('shows known conflicts as well as incomplete assessment warning at the real c
   expect(finding.advisory?.conflictState).toBe('unknown');
   expect(finding.advisory?.limitations).toContain('assessment_limit');
   render(<VulnAdvisoryCard finding={finding} />);
-  expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
-  expect(screen.getByText(/Указанная версия исправления не является согласованной рекомендацией всех источников/)).toBeVisible();
+  expect(screen.getByText(/Опасность требует уточнения\./)).toBeVisible();
+  expect(screen.getByText(/Версия исправления не подтверждена всеми источниками\./)).toBeVisible();
   openSourceDetails();
   expect(screen.getByText(/Поля с расхождениями: severity/)).toBeVisible();
   expect(screen.getByText(/Ограничения источника: assessment_limit/)).toBeVisible();
@@ -136,8 +136,8 @@ it('does not invent a headline authority for legacy or omitted advisory metadata
     conflictState: 'unknown' as const, limitations: ['scan_budget' as const] } }]) {
     const view = render(<VulnAdvisoryCard finding={finding} />);
     expect(screen.queryByText(/Источник severity:/)).toBeNull();
-    expect(screen.getByText(/Уровень опасности требует уточнения: оценки источников неполны или расходятся/)).toBeVisible();
-    expect(screen.getByText(/Указанная версия исправления не является согласованной рекомендацией всех источников/)).toBeVisible();
+    expect(screen.getByText(/Опасность требует уточнения\./)).toBeVisible();
+    expect(screen.getByText(/Версия исправления не подтверждена всеми источниками\./)).toBeVisible();
     expect(screen.getByText('Подробности · описание уязвимости и источники', { selector: 'summary' }).closest('details')).not.toHaveAttribute('open');
     view.unmount();
   }

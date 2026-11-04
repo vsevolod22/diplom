@@ -8,7 +8,8 @@ import {
   useReportPreferences,
 } from '@/shared/api/preferences/reportPreferences';
 import { OpenAiDisclosure } from './OpenAiDisclosure';
-import { LlmFindingDetails } from './LlmFindingDetails';
+import { ReportRemediation } from './ReportRemediation';
+import { ReportSourceLink, type ReportSourceNavigate } from './reportSourceNavigation';
 import { createUsageClient, usageMatchesDisclosure } from '@/shared/api/scans/llmUsageClient';
 import {
   allowAutomationDisclosure,
@@ -39,17 +40,7 @@ import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 
-const sourceLabels: Record<string, string> = {
-  Secrets: 'Секреты',
-  CRITICAL: 'Критическая',
-  HIGH: 'Высокая',
-  MEDIUM: 'Средняя',
-  LOW: 'Низкая',
-  INFO: 'Информационная',
-  UNKNOWN: 'Неизвестна',
-  'Debian advisory (не CVE)': 'Уведомление Debian (не CVE)',
-  'Debian DLA advisory (не CVE)': 'Бюллетень Debian DLA (не CVE)',
-};
+
 const summaryPhases = {
   context: 'Проверяем доступность разбора',
   recovery: 'Ищем сохранённый разбор',
@@ -85,7 +76,7 @@ function SummaryProgress({ phase }: { phase: SummaryPhase }) {
   );
 }
 
-type Props = { status: ScanStatus; transport: ScanTransport; client?: SummaryClient };
+type Props = { status: ScanStatus; transport: ScanTransport; client?: SummaryClient; onNavigateSource?: ReportSourceNavigate };
 const sessionKey = () => JSON.stringify(scanSession());
 export function ScanSummaryPanel(props: Props) {
   const session = useSyncExternalStore(subscribeScanSession, sessionKey, sessionKey);
@@ -132,6 +123,7 @@ function SummaryScope({
   status,
   transport,
   client: providedClient,
+  onNavigateSource,
   preferences,
   onEnableAutomation,
   optInFailed,
@@ -588,7 +580,9 @@ function SummaryScope({
               </p>
             )}
             <p>
-              <a href="#scan-a1-findings">Полный отчёт сканеров · находки и исправления</a>
+              <ReportSourceLink category="all" onNavigate={onNavigateSource ? category => current() && !pending && onNavigateSource(category) : undefined} disabled={pending}>
+                              Полный отчёт сканеров · находки и исправления
+                            </ReportSourceLink>
               {' '}— проверьте все категории и страницы. Объём контекста не зависит от текущего фильтра или страницы.
             </p>
           </div>
@@ -597,22 +591,18 @@ function SummaryScope({
           {result.reply.hypotheses.map((paragraph, index) => (
             <div key={index}>
               <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{paragraph.text}</p>
-              <details>
-                <summary>На чём основан абзац {index + 1} · находок: {paragraph.citations.length}</summary>
+              <div aria-label={`Источники абзаца ${index + 1}`}>
+                <p>На чём основан абзац {index + 1} · находок: {paragraph.citations.length}</p>
                 <ul>
                   {result.sources.filter((source) => paragraph.citations.includes(source.findingId)).map((source) => (
                     <li key={source.findingId}>
-                      <strong style={{ overflowWrap: 'anywhere' }}>
-                        {source.label
-                          .split(' · ')
-                          .map((part) => sourceLabels[part] ?? part)
-                          .join(' · ')}
-                      </strong>
-                      {source.finding ? <LlmFindingDetails finding={source.finding} /> : null}
+                      <ReportRemediation source={source}
+                        onNavigate={onNavigateSource ? category => current() && !pending && onNavigateSource(category) : undefined}
+                        disabled={pending} />
                     </li>
                   ))}
                 </ul>
-              </details>
+              </div>
             </div>
           ))}
           </details>

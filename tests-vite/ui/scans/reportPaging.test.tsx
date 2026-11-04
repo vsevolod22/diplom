@@ -43,7 +43,7 @@ function render(ui: ReactNode) {
   // Integration scenarios inspect the inventory: take the same explicit disclosure action as a user.
   const inventory = screen.queryByLabelText('Пакеты SBOM');
   if (inventory instanceof HTMLDetailsElement && !inventory.open)
-    fireEvent.click(within(inventory).getByText('Состав образа · найти пакет и его версию', { selector: 'summary' }));
+    fireEvent.click(within(inventory).getByText(/^Состав образа · найти пакет и его версию/, { selector: 'summary' }));
   return view;
 }
 afterEach(() => {
@@ -471,7 +471,7 @@ async function openBatch4Controls(user: ReturnType<typeof userEvent.setup>, labe
   const region = label === 'SBOM' ? screen.getByLabelText('Пакеты SBOM')
     : screen.getByRole('region', { name: label === 'CVE' ? 'Результаты Уязвимости' : 'Возможные секреты' });
   if (region instanceof HTMLDetailsElement && !region.open)
-    await user.click(within(region).getByText('Состав образа · найти пакет и его версию', { selector: 'summary' }));
+    await user.click(within(region).getByText(/^Состав образа · найти пакет и его версию/, { selector: 'summary' }));
   const summary = within(region).getByText(`Фильтры и сортировка · ${pageLabel}`, { selector: 'summary' });
   if (!summary.closest('details')?.open) await user.click(summary);
   return { region, pageLabel };
@@ -578,7 +578,7 @@ it.each(['digest', 'platform', 'checkedAt', 'scope', 'scanId', 'count'])(
     await screen.findByText('CVE-2026-1234');
     fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
     await screen.findByText('CVE-2026-1235');
-    const previousKey = fetchQuery.mock.calls[0][0].queryKey;
+    const previousKey = fetchQuery.mock.calls.find(([options]) => options.queryKey[5] === 'vuln')![0].queryKey;
     const slow = deferred<ScanVuln>();
     vi.mocked(transport.vuln).mockImplementationOnce(() => slow.promise);
     const updated = {
@@ -609,7 +609,7 @@ it.each(['digest', 'platform', 'checkedAt', 'scope', 'scanId', 'count'])(
     );
     expect(screen.queryByText('CVE-2026-1235')).toBeNull();
     expect(vi.mocked(transport.vuln).mock.calls[2][1]).toBeUndefined();
-    const currentKey = queryClient.getQueryCache().getAll().find(query => query.state.fetchStatus === 'fetching')!.queryKey;
+    const currentKey = queryClient.getQueryCache().getAll().find(query => query.state.fetchStatus === 'fetching' && query.queryKey[5] === 'vuln')!.queryKey;
     expect(currentKey.slice(0, 3)).toEqual(field === 'scope' ? ['live-scans', 2, 'bob'] : ['live-scans', 1, 'alice']);
     expect(currentKey[4]).toBe(updated.scanId);
     expect(currentKey[5]).toBe('vuln');
@@ -654,7 +654,7 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
     page: reportPage('sbom', 0, 0, null),
   });
   render(sections(transport));
-  await screen.findByText(/Проверка не поддерживается:/);
+  await screen.findByText('Проверка уязвимостей не поддерживается');
   await screen.findByText(/Состав образа не проверен/);
   expect(screen.queryByText(/(Совпадений во всём отчёте|Полный итог) (CVE|SBOM): 0/)).toBeNull();
   expect(screen.getByText('Число Уязвимости неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
@@ -681,7 +681,7 @@ it('failed/unsupported/unknown counts stay unknown, checked zero is distinct', a
   );
   await screen.findByText('Совпадений во всём отчёте Уязвимости: 0');
   expect(screen.getByText('Совпадений во всём отчёте Уязвимости: 0')).toBeTruthy();
-  expect(screen.getByText(/Находок в проверенной области: 0/)).toBeTruthy();
+  expect(screen.getByText(/0 находок в выполненной проверенной области/)).toBeTruthy();
 });
 it('ScanDetail scope remount aborts a late private page and never stores report rows in QueryCache', async () => {
   const transport = fixtureTransport();
