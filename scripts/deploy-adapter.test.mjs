@@ -130,7 +130,7 @@ export async function adapterFixture(t, { failedStart = null, publishedOperation
             return JSON.stringify(rows);
     }
     if(args[0]==='image'){
-      if(args[1]==='ls'){const reference=args.find(a=>a.startsWith('reference='))?.slice(10);return [...allImages.values()].flatMap(i=>i.RepoTags).filter(t=>!reference||t===reference).join('\n');}
+      if(args[1]==='ls'){const reference=args.find(a=>a.startsWith('reference='))?.slice(10),withImage=args.at(-1)==='{{.Repository}}:{{.Tag}}\t{{.ID}}';return [...allImages.values()].flatMap(i=>(i.RepoTags.length?i.RepoTags:['<none>:<none>']).filter(t=>!reference||t===reference).map(t=>withImage?t+'\t'+i.Id:t)).join('\n');}
       assert.equal(args[1],'tag');const image=lookup('image',args[2]);assert.ok(image);image.RepoTags.push(args[3]);return '';
     }
     if(args[0]==='build'){
