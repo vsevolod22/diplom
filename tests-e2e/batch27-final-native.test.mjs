@@ -4,10 +4,11 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { Gate, routePlan, installRoutes as installGuard, bounded, journey, browserIo, modeOf, spend, reviewFingerprint, runOnce, REVIEW_SOURCE, SCAN, MODEL, ORIGIN, BASE } from './batch27-final-native.mjs';
+import { Gate, routePlan, installRoutes as installGuard, bounded, journey, browserIo, modeOf, spend, reviewFingerprint, runOnce, REVIEW_SOURCE, SCAN, MODEL, ORIGIN, BASE,
+  DIRECTORY, RUN_PHASES, FAILURE_CODES, recordFailure, closeRuntimeFence, validateSummary, corpusContracts } from './batch27-final-native.mjs';
 import { contracts, fingerprint, QUESTION } from './native-h7v3-paid-sol.mjs';
 import { diagnosticContracts } from './native-h7v3-finite-diagnostics.mjs';
-import { extraContracts, parseAnswer } from './batch26-native-chat.mjs';
+import { extraContracts, parseAnswer, nativeFinding, replyProof } from './batch26-native-chat.mjs';
 const c = { ...await diagnosticContracts(), ...await extraContracts() }, tools = await contracts();
 // Explicit OFFLINE transport seam for the pre-existing A/C regression matrix.
 // Production runOnce always supplies the fixed receipt/runtime authority handle.
@@ -69,6 +70,138 @@ function fixture(path = 'fresh-summary') {
   };
   return { io, gate, log, calls, events };
 }
+// Ordinary public API DTOs: NO identifierKind/check/fixedVersionReported/advisoryState.
+// Only the validated runner projection adds these LLM-facing fields.
+function ordinaryCorpusFixture() {
+  const rows = Array.from({ length: 440 }, (_, i) => ({ findingId: 'vuln-' + (i + 1).toString(16).padStart(64, '0'),
+    cveId: i < 431 ? `CVE-2026-${1000 + i}` : i < 437 ? `TEMP-${1000000 + i}-ABCDEF` : `DLA-${1000 + i}-1`,
+    ecosystem: 'deb', packageName: 'libc6', installedVersion: '1.0', severity: 'HIGH', fixedVersion: null,
+    severitySources: ['debian'], provenanceRef: 'target-' + (i + 1000).toString(16).padStart(64, '0') }));
+  const dbDigest = 'sha256:' + 'f'.repeat(64), checkedAt = '2026-11-04T12:00:00.000Z';
+  const metadata = { outcome: 'checked', coverage: 'image', profile: 'public-hub-amd64-v1',
+    image: 'registry-1.docker.io/library/nginx@' + binding.digest, platform: 'linux/amd64', findingCount: 440,
+    scannerVersion: '0.69.3', checkedAt, identifierCounts: { cve: 431, debianTemp: 6, debianDla: 3 },
+    db: { envelopeVersion: 1, signer: 'local-db-operator-v1', source: 'ghcr.io/aquasecurity/trivy-db@' + dbDigest, schemaVersion: 2,
+      manifestDigest: dbDigest, artifactSha256: 'a'.repeat(64), metadataSha256: 'b'.repeat(64), dbSha256: 'c'.repeat(64),
+      updatedAt: '2026-11-04T10:00:00.000Z', downloadedAt: '2026-11-04T11:00:00.000Z', nextUpdate: '2026-11-05T10:00:00.000Z' },
+    resultContractVersion: 2, workerCheckedAt: Date.parse(checkedAt),
+    dbPolicy: { version: 2, policy: 'cve-db-updated-at-14d-v2', evaluatedAt: Date.parse(checkedAt), status: 'usable', warnings: [] },
+    usableUntil: '2026-11-18T10:00:00.000000000Z' };
+  const pages = Array.from({ length: 9 }, (_, n) => ({ ...structuredClone(metadata), findings: rows.slice(n * 50, (n + 1) * 50), nextCursor: n === 8 ? null : (n + 1) * 50 }));
+  const snapshot = { ...binding, state: 'completed', perCheck: { secret: { findingCount: 0 }, vuln: { findingCount: 440 } } };
+  const gets = [], log = { requests: 0, postAttempts: 0, dispatched: 0, denied: 0, pageErrors: 0, summaryPosts: 0, chatPosts: 0 };
+  const page = { evaluate: async (_, url) => {
+    gets.push(url);
+    if (url === BASE) return { status: 200, value: structuredClone(snapshot) };
+    const match = url.match(/\/vuln\?cursor=(\d+)&limit=50$/);
+    assert.ok(match, 'offline adapter allows exact corpus GET only');
+    return { status: 200, value: structuredClone(pages[Number(match[1]) / 50]) };
+  } };
+  return { rows, pages, snapshot, gets, log, io: () => browserIo(page, tools, c, log, async () => {}) };
+}
+test('actual frontend parser accepts ordinary absent-kind DTOs; production browser corpus derives exact431/6/3 from9 pages', async () => {
+  const f = ordinaryCorpusFixture(), raw = fingerprint(f.pages), parsers = await corpusContracts();
+  assert.equal(f.rows.every(row => !Object.hasOwn(row, 'identifierKind')), true);
+  for (const page of f.pages) assert.equal(parsers.parseCurrentVuln(page).outcome, 'checked');
+  const corpus = await (await f.io()).corpus();
+  assert.equal(corpus.size, 440); assert.equal(f.gets.length, 10);
+  assert.deepEqual(f.log.corpus, { vulnerabilities: 440, identifiers: { cve: 431, 'debian-temp': 6, 'debian-dla': 3 }, pages: 9 });
+  for (const [i, row] of f.rows.entries()) {
+    const normalized = corpus.get(row.findingId), expected = i < 431 ? 'cve' : i < 437 ? 'debian-temp' : 'debian-dla';
+    assert.equal(normalized.identifierKind, expected); assert.equal(normalized.cveId, row.cveId);
+    assert.equal(nativeFinding(normalized).identifierKind, expected);
+  }
+  assert.equal(fingerprint(f.pages), raw, 'normalization never rewrites raw DTO rows');
+  assert.equal(f.log.postAttempts, 0); assert.equal(f.log.dispatched, 0);
+});
+test('summary and unchanged batch26 nativeFinding/replyProof agree with normalized absent-kind CVE/TEMP/DLA DTOs', async () => {
+  const f = ordinaryCorpusFixture(), corpus = await (await f.io()).corpus();
+  const facts = [0, 431, 437].map(i => nativeFinding(corpus.get(f.rows[i].findingId)));
+  const value = { ...binding, hypotheses: [{ kind: 'hypothesis', text, citations: facts.map(row => row.findingId) }], scannerFacts: facts };
+  assert.deepEqual(validateSummary(value, current(), corpus, tools), value);
+  const answer = { reply: { text, sources: facts.map(row => ({ ...binding, finding: row })) } };
+  assert.equal(replyProof(answer, corpus, c, tools).exactNativeCitationMatch, true);
+  for (const key of ['severitySources', 'provenanceRef', 'cveId', 'installedVersion']) {
+    const changed = structuredClone(value);
+    changed.scannerFacts[0][key] = { severitySources: ['nvd'], provenanceRef: 'target-' + '9'.repeat(64), cveId: 'CVE-2026-9999', installedVersion: '2.0' }[key];
+    assert.throws(() => validateSummary(changed, current(), corpus, tools), /SUMMARY_FACT_CHANGED/);
+  }
+  const changed = structuredClone(answer); changed.reply.sources[1].finding.provenanceRef = 'target-' + '9'.repeat(64);
+  assert.throws(() => replyProof(changed, corpus, c, tools), /NATIVE_CITATION_MISMATCH/);
+});
+test('production browser corpus allows readonly journey to reach a non-dispatching generate sentinel', async () => {
+  const corpus = ordinaryCorpusFixture(), f = fixture(), io = await corpus.io();
+  f.io.corpus = io.corpus; let generates = 0;
+  f.io.generate = async () => { generates++; throw Error('OFFLINE_GENERATE_SENTINEL'); };
+  await assert.rejects(journey(f.io, f.gate, 'fresh-summary', tools, c, f.log), /OFFLINE_GENERATE_SENTINEL/);
+  assert.equal(generates, 1); assert.equal(f.log.dispatched, 0); assert.equal(f.log.postAttempts, 0);
+  assert.deepEqual(f.gate.counts, { summary: 0, chat: 0 });
+  assert.deepEqual(f.log.firstFailure, { phase: 'summary-response', code: 'UNCLASSIFIED_FAILURE' });
+});
+for (const [name, mutate] of [
+  ['unknown profile', f => { f.pages[0].profile = 'other'; }],
+  ['missing public profile', f => { delete f.pages[0].profile; }],
+  ['wrong target image', f => { f.pages[0].image = 'registry-1.docker.io/library/nginx@sha256:' + '9'.repeat(64); }],
+  ['wrong platform', f => { f.pages[0].platform = 'linux/arm64'; }],
+  ['unsupported ecosystem', f => { f.pages[8].findings[31].ecosystem = 'unknown'; }],
+  ['TEMP in npm ecosystem', f => { f.pages[8].findings[31].ecosystem = 'npm'; }],
+  ['DLA in npm ecosystem', f => { f.pages[8].findings[37].ecosystem = 'npm'; }],
+  ['unknown ID must not default to CVE', f => { f.pages[0].findings[0].cveId = 'UNRECOGNIZED-123'; }],
+  ['wire identifierKind injection', f => { f.pages[0].findings[0].identifierKind = 'debian-temp'; }],
+  ['unknown severity source', f => { f.pages[0].findings[0].severitySources = ['untrusted']; }],
+  ['malformed finding provenance', f => { f.pages[0].findings[0].provenanceRef = 'other'; }],
+  ['DB source disagrees with manifest', f => { f.pages[0].db.source = 'ghcr.io/aquasecurity/trivy-db@sha256:' + '9'.repeat(64); }],
+  ['page provenance epoch drift', f => { f.pages[1].scannerVersion = 'other'; }],
+  ['identifier totals drift', f => { f.pages[1].identifierCounts = { cve: 430, debianTemp: 7, debianDla: 3 }; }],
+  ['row duplicate', f => { f.pages[1].findings[0] = structuredClone(f.pages[0].findings[0]); }],
+  ['cursor skips page', f => { f.pages[0].nextCursor = 100; }],
+  ['page total mismatch', f => { f.pages[0].findingCount = 439; }],
+]) test(`ordinary DTO corpus rejects ${name} before paid arming or dispatch`, async () => {
+  const corpus = ordinaryCorpusFixture(); mutate(corpus);
+  const f = fixture(), io = await corpus.io(); f.io.corpus = io.corpus;
+  f.io.generate = async () => assert.fail('invalid corpus cannot generate');
+  await assert.rejects(journey(f.io, f.gate, 'fresh-summary', tools, c, f.log));
+  assert.equal(f.log.dispatched, 0); assert.equal(f.log.postAttempts, 0); assert.deepEqual(f.gate.counts, { summary: 0, chat: 0 });
+  assert.equal(f.calls.length, 0); assert.equal(f.log.firstFailure.phase, 'corpus'); assert.ok(FAILURE_CODES.includes(f.log.firstFailure.code));
+});
+test('fixed future batch31 directory never selects or resets the retained batch27 slot', async () => {
+  assert.equal(DIRECTORY, new URL('../test-results/batch31-final-native-20261104', import.meta.url).pathname);
+  const source = await readFile(new URL('./batch27-final-native.mjs', import.meta.url), 'utf8');
+  assert.equal(source.includes("join(ROOT, 'test-results/batch27-final-native')"), false);
+  assert.equal([...source.matchAll(/writeAggregate\(join\(DIRECTORY, 'aggregate\.json'\), log\)/g)].length, 1, 'one append-only final aggregate publication');
+  const run = source.slice(source.indexOf('export async function runOnce'));
+  assert.ok(run.indexOf("'journey-aggregate.json'") < run.indexOf('await closeRuntimeFence(authority, log)'), 'journey proof stays durable before fence release');
+});
+test('finite first-failure enums preserve earliest cause, never raw errors/payload/uppercase arbitrary strings', () => {
+  const log = { phase: 'corpus' }; recordFailure(log, Error('CORPUS_PAGE_INVALID'));
+  log.phase = 'cleanup'; recordFailure(log, Error('GATE_STOPPED'));
+  assert.deepEqual(log.firstFailure, { phase: 'corpus', code: 'CORPUS_PAGE_INVALID' });
+  const marker = 'PRIVATE_CANARY_RAW_PAYLOAD', untrusted = { phase: marker };
+  const error = Error(marker); error.name = marker; error.payload = marker;
+  recordFailure(untrusted, error); assert.deepEqual(untrusted.firstFailure, { phase: 'unknown', code: 'UNCLASSIFIED_FAILURE' });
+  assert.equal(JSON.stringify(untrusted.firstFailure).includes(marker), false);
+  assert.equal(new Set(RUN_PHASES).size, RUN_PHASES.length); assert.equal(new Set(FAILURE_CODES).size, FAILURE_CODES.length);
+});
+test('runtime fence disposition records privacy-safe failure without replacing original corpus failure or retrying close', async () => {
+  const log = { status: 'BLOCKED_OR_PARTIAL', phase: 'corpus' }; recordFailure(log, Error('CORPUS_MISMATCH'));
+  let closes = 0;
+  await closeRuntimeFence({ close: async success => { closes++; assert.equal(success, false); throw Error('PRIVATE_CANARY'); } }, log);
+  assert.equal(closes, 1); assert.equal(log.runtimeFenceReleased, false); assert.equal(log.status, 'BLOCKED_OR_PARTIAL');
+  assert.deepEqual(log.firstFailure, { phase: 'corpus', code: 'CORPUS_MISMATCH' }); assert.equal(JSON.stringify(log).includes('PRIVATE_CANARY'), false);
+});
+for (const success of [false, true]) test(`owned fence disposition closes exactly once with success=${success}`, async () => {
+  const log = { status: success ? 'NATIVE_WIRE_HISTORY_RELOAD_VERIFIED_SEMANTICS_PENDING' : 'BLOCKED_OR_PARTIAL' }; let closes = 0;
+  await closeRuntimeFence({ close: async value => { closes++; assert.equal(value, success); return { released: true }; } }, log);
+  assert.equal(closes, 1); assert.equal(log.runtimeFenceReleased, true); assert.equal(log.firstFailure, undefined);
+});
+test('future stopped-route denial records only finite first failure and never turns an earlier refusal into PASS', async () => {
+  const f = fixture(); f.log.phase = 'cleanup'; f.gate.stop(); let handler;
+  await installRoutes({ route: async (_, fn) => { handler = fn; }, routeWebSocket: async () => {} }, f.gate, f.log, async () => {});
+  const r = mockRoute(ORIGIN + BASE + '/llm/history', 'GET'); await handler(r);
+  assert.deepEqual(f.log.firstFailure, { phase: 'cleanup', code: 'GATE_STOPPED' }); assert.deepEqual(r.trace, ['abort']);
+  assert.equal(f.log.dispatched, 0); assert.equal(f.log.denied, 1);
+});
+
 test('explicit fresh summary then chat success and GET-only exact history reload with retained liabilities', async () => {
   const f = fixture(); await journey(f.io, f.gate, 'fresh-summary', tools, c, f.log);
   assert.deepEqual(f.calls, ['summary-consent', 'summary', 'disable', 'chat-consent', 'chat', 'reload']);
@@ -104,7 +237,9 @@ test('strict CLI inert default and exact new GO/source binding, no old acknowled
 test('review fingerprint includes the concrete custody, catalog and deployment authority implementation, not only the CLI label', () => {
   for (const path of ['scripts/native-runtime-authority.mjs', 'scripts/test_native_runtime_authority.mjs', 'scripts/deploy-reference-custody.mjs',
     'scripts/deploy-adapter.mjs', 'scripts/deploy-authority.mjs', 'scripts/deploy-adapter-stores.mjs', 'scripts/deploy-core.mjs',
-    'scripts/deploy-supervisor.mjs', 'scripts/public-llm-deployment-catalog.mjs']) assert.equal(REVIEW_SOURCE.includes(path), true, path);
+    'scripts/deploy-supervisor.mjs', 'scripts/public-llm-deployment-catalog.mjs',
+    ...['scanTransport.ts', 'publicVulnerabilityIdentifiers.ts', 'publicImageProfile.ts', 'reportView.ts', 'vulnAdvisory.ts',
+      'cveDbMetadata.ts', 'imageConfigReport.ts', 'imageFailure.ts', 'types.ts'].map(n => 'src/shared/api/scans/' + n)]) assert.equal(REVIEW_SOURCE.includes(path), true, path);
   assert.equal(new Set(REVIEW_SOURCE).size, REVIEW_SOURCE.length);
 });
 test('strict route classification rejects foreign/query/redirect/auth/events/translation/scan/reset mutations', () => {
