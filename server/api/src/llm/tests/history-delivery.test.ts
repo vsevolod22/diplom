@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import type { ServerResponse } from 'node:http';
+import { IncomingMessage, ServerResponse } from 'node:http';
+import { Duplex } from 'node:stream';
+import type { Socket as NetSocket } from 'node:net';
 import { carryDiagnostic, diagnoseGrounding, diagnoseLanguage } from '../provider-diagnostic.js';
 import type { LanguageRejection } from '../language-rejection.js';
 import {
@@ -77,6 +79,187 @@ class Socket extends EventEmitter {
   }
 }
 const frame = (line: string) => JSON.parse(line);
+
+// Real HTTP serialization without a listener, network, database or provider.
+class MemoryHttpSocket extends Duplex {
+  readonly chunks: Buffer[] = [];
+  _read() {}
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+    this.chunks.push(Buffer.from(chunk));
+    callback();
+  }
+  get wire() {
+    return Buffer.concat(this.chunks).toString('utf8');
+  }
+}
+function memoryResponse() {
+  const socket = new MemoryHttpSocket();
+  const request = new IncomingMessage(socket as unknown as NetSocket);
+  request.method = 'POST';
+  request.httpVersion = '1.1';
+  request.httpVersionMajor = 1;
+  request.httpVersionMinor = 1;
+  const response = new ServerResponse(request);
+  response.shouldKeepAlive = false;
+  response.assignSocket(socket as unknown as NetSocket);
+  return { socket, response };
+}
+const completedDelivery: ChatDelivery = {
+  ...outcome,
+  reply: {
+    ...outcome.reply,
+    text: 'Проверьте указанные находки в исходном отчёте.',
+    sources: Array.from({ length: 3 }, (_, index) => ({
+      ...binding,
+      finding: {
+        ...outcome.reply.sources[0].finding,
+        findingId: `secret-0-${index + 1}`,
+        evidenceRef: `result-0-secret-${index + 1}`,
+      },
+    })),
+  },
+};
+
+test('real Node writeHead stages headers without transmitting bytes; destroy can close an empty upstream', () => {
+  const { socket, response } = memoryResponse();
+  response.writeHead(200, { 'content-type': 'application/x-ndjson' });
+  assert.equal(response.headersSent, true);
+  assert.equal(socket.wire, '');
+  response.destroy();
+  assert.equal(response.destroyed, true);
+  assert.equal(socket.wire, '');
+});
+
+test('real Node completed-delivery control emits exact encoded frames and releases once after finish', async (t) => {
+  const { socket, response } = memoryResponse();
+  t.after(() => response.destroy());
+  const before = JSON.stringify(completedDelivery);
+  let guards = 0, releases = 0;
+  await writeDelivery({
+    delivery: completedDelivery,
+    write(action) { guards++; assert.equal(releases, 0); action(); },
+    release() { releases++; assert.equal(response.writableFinished, true); },
+  }, response, new AbortController().signal);
+  assert.equal(guards, encodeDelivery(completedDelivery).lines.length + 2);
+  assert.equal(releases, 1);
+  assert.match(socket.wire, /^HTTP\/1\.1 200 /);
+  for (const line of encodeDelivery(completedDelivery).lines) assert.ok(socket.wire.includes(line));
+  assert.equal(JSON.stringify(completedDelivery), before);
+  assert.doesNotMatch(socket.wire, /X-LLM-/i);
+});
+
+for (const mode of ['post-preflight-guard', 'next-guard', 'deadline', 'abort'] as const) {
+  test(`real Node ${mode} before first frame leaves headers untouched for the finite exception path`, async (t) => {
+    const { socket, response } = memoryResponse();
+    t.after(() => response.destroy());
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    t.after(() => t.mock.timers.reset());
+    const controller = new AbortController();
+    const before = JSON.stringify(completedDelivery);
+    let guards = 0, releases = 0;
+    await assert.rejects(writeDelivery({
+      delivery: completedDelivery,
+      write(action) {
+        guards++;
+        if (mode === 'next-guard' && guards === 2) throw new Error('PRIVATE-authority');
+        action();
+        if (guards === 1) {
+          if (mode === 'post-preflight-guard') throw new Error('PRIVATE-authority');
+          if (mode === 'deadline') t.mock.timers.tick(DELIVERY.timeoutMs + 1);
+          if (mode === 'abort') controller.abort();
+        }
+      },
+      release() { releases++; },
+    }, response, controller.signal));
+    assert.equal(releases, 1);
+    assert.equal(response.headersSent, false);
+    assert.equal(response.destroyed, false);
+    assert.equal(socket.wire, '');
+    assert.equal(JSON.stringify(completedDelivery), before);
+    assert.equal(response.listenerCount('finish'), 0);
+    assert.equal(response.listenerCount('close'), 0);
+    assert.equal(response.listenerCount('error'), 0);
+    // No stale answer/receipt is sent. The existing exception path can still send a finite failure.
+    response.writeHead(503, { 'content-type': 'application/json' });
+    response.end('{"errorCode":"LLM_UNAVAILABLE"}');
+    assert.match(socket.wire, /^HTTP\/1\.1 503 /);
+    assert.doesNotMatch(socket.wire, /PRIVATE|"usage"|"citation"|"delta"|"done"/);
+  });
+}
+
+for (const delivery of [
+  completedDelivery,
+  { ...binding, epoch: outcome.epoch, revision: 2, mutationId: outcome.mutationId, turnId: outcome.turnId,
+    outcome: 'failed', usage: outcome.usage },
+  { ...binding, epoch: outcome.epoch, revision: 2, mutationId: outcome.mutationId, turnId: outcome.turnId,
+    outcome: 'failed', receipt: 'unavailable' },
+  { ...binding, epoch: outcome.epoch, revision: 2, mutationId: outcome.mutationId, turnId: outcome.turnId,
+    outcome: 'duplicate', state: 'completed' },
+] satisfies ChatDelivery[]) {
+  test(`real Node ${delivery.outcome}${'receipt' in delivery ? '-unavailable' : ''} keeps headers unstaged across both authority guards`, async (t) => {
+    const { socket, response } = memoryResponse();
+    t.after(() => response.destroy());
+    const before = JSON.stringify(delivery);
+    let guards = 0, releases = 0;
+    await assert.rejects(writeDelivery({
+      delivery,
+      write(action) {
+        guards++;
+        assert.equal(response.headersSent, false);
+        assert.equal(socket.wire, '');
+        if (guards === 2) throw new Error('PRIVATE-second-guard');
+        action();
+        assert.equal(response.headersSent, false);
+      },
+      release() { releases++; },
+    }, response, new AbortController().signal), /PRIVATE-second-guard/);
+    assert.equal(guards, 2);
+    assert.equal(releases, 1);
+    assert.equal(response.destroyed, false);
+    assert.equal(JSON.stringify(delivery), before);
+  });
+}
+
+test('real Node post-first-frame guard failure may still discard corked bytes; never claim every upstream close repaired', async (t) => {
+  const { socket, response } = memoryResponse();
+  t.after(() => response.destroy());
+  let guards = 0, releases = 0;
+  await writeDelivery({
+    delivery: completedDelivery,
+    write(action) { guards++; action(); if (guards === 2) throw new Error('PRIVATE-post-action'); },
+    release() { releases++; },
+  }, response, new AbortController().signal);
+  assert.equal(guards, 2);
+  assert.equal(releases, 1);
+  assert.equal(response.destroyed, true);
+  assert.equal(socket.wire, '');
+});
+
+test('real Node post-first-frame authority loss never turns a committed delivery into a successful terminal', async (t) => {
+  const { socket, response } = memoryResponse();
+  t.after(() => response.destroy());
+  const before = JSON.stringify(completedDelivery);
+  let guards = 0, releases = 0;
+  await writeDelivery({
+    delivery: completedDelivery,
+    write(action) {
+          guards++;
+          action();
+          if (guards === 2) {
+            // Flush Node's automatic write cork to exercise loss AFTER a frame reached the socket.
+            socket.uncork();
+            throw new Error('PRIVATE-post-action');
+          }
+        },
+    release() { releases++; },
+  }, response, new AbortController().signal);
+  assert.equal(releases, 1);
+  assert.equal(response.destroyed, true);
+  assert.match(socket.wire, /^HTTP\/1\.1 200 /);
+  assert.match(socket.wire, /"type":"usage"/);
+  assert.doesNotMatch(socket.wire, /PRIVATE|"type":"done"|"type":"delta"|"type":"citation"|"type":"error"/);
+  assert.equal(JSON.stringify(completedDelivery), before);
+});
 
 test('grounding carry is header-only on both failed receipt shapes; immutable delivery/body and successful headers stay unchanged', async () => {
   const source = diagnoseGrounding(new Error('synthetic-private-raw-text'), 'version_label', 0,
@@ -594,7 +777,7 @@ test('TASK16 R5 unavailable writer faults/authority/abort/deadline release witho
   for (const mode of [
     'preheader',
     'error-write',
-    'after-header',
+    'before-first-frame',
     'before-end',
     'abort',
     'drain-deadline',
@@ -621,7 +804,7 @@ test('TASK16 R5 unavailable writer faults/authority/abort/deadline release witho
           guards++;
           if (
             mode === 'preheader' ||
-            (mode === 'after-header' && guards === 2) ||
+            (mode === 'before-first-frame' && guards === 2) ||
             (mode === 'before-end' && guards === 3)
           )
             throw new Error('PRIVATE-authority');
@@ -632,8 +815,11 @@ test('TASK16 R5 unavailable writer faults/authority/abort/deadline release witho
       socket.response,
       controller.signal,
     );
-    if (mode === 'preheader') await assert.rejects(writing);
-    else {
+    if (mode === 'preheader' || mode === 'before-first-frame') {
+      await assert.rejects(writing);
+      assert.equal(socket.headers, undefined);
+      assert.equal(socket.destroyed, false);
+    } else {
       if (mode === 'abort') controller.abort();
       if (mode.includes('deadline')) t.mock.timers.tick(DELIVERY.timeoutMs + 1);
       await writing;

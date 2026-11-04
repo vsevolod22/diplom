@@ -238,20 +238,22 @@ export async function writeDelivery(result: DeliveryResult, response: ServerResp
     plan = encodeDelivery(result.delivery, result.outputTokens);
     live();
     timer = setTimeout(abort, Math.max(1, deadline - Date.now()));
-    result.write(() => {
-      live();
-      response.writeHead(200, {
-        'content-type': 'application/x-ndjson; charset=utf-8',
-        'cache-control': 'no-store, no-transform',
-        'x-content-type-options': 'nosniff',
-        ...(result.delivery.outcome === 'failed' ? diagnosticHeaders(result.delivery) : {}),
-      });
-      started = true;
-    });
+    result.write(live);
     for (const line of plan.lines) {
       let drained = false;
       result.write(() => {
         live();
+        // writeHead stages headers even before any bytes reach the socket. Keep it
+        // with the first frame so an intervening guard/deadline failure stays header-free.
+        if (!started) {
+          response.writeHead(200, {
+            'content-type': 'application/x-ndjson; charset=utf-8',
+            'cache-control': 'no-store, no-transform',
+            'x-content-type-options': 'nosniff',
+            ...(result.delivery.outcome === 'failed' ? diagnosticHeaders(result.delivery) : {}),
+          });
+          started = true;
+        }
         drained = response.write(line);
       });
       seq++;

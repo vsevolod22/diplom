@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { Gate, routePlan, installRoutes as installGuard, bounded, journey, browserIo, modeOf, spend, reviewFingerprint, runOnce, REVIEW_SOURCE, SCAN, MODEL, ORIGIN, BASE,
   DIRECTORY, RUN_PHASES, FAILURE_CODES, recordFailure, closeRuntimeFence, validateSummary, corpusContracts } from './batch27-final-native.mjs';
@@ -252,6 +253,89 @@ test('strict route classification rejects foreign/query/redirect/auth/events/tra
   assert.equal(routePlan(ORIGIN + BASE + '/llm/chat', 'POST', true), 'deny');
   for (const method of ['PUT', 'PATCH', 'DELETE', 'HEAD']) assert.equal(routePlan(ORIGIN + BASE + '/llm/chat', method), 'deny');
 });
+// Exercise the installed Playwright serialization/body methods, not a copied implementation.
+// All channel/delegate objects below are memory-only: no browser, listener or network.
+async function installedPlaywrightNetwork() {
+  const require = createRequire(import.meta.url);
+  const playwright = createRequire(require.resolve('@playwright/test'));
+  const core = createRequire(playwright.resolve('playwright')).resolve('playwright-core/package.json');
+  assert.equal(JSON.parse(await readFile(core, 'utf8')).version, '1.59.1');
+  const root = dirname(core);
+  const [client, server, fetch] = await Promise.all([
+    import(join(root, 'lib/client/network.js')),
+    import(join(root, 'lib/server/network.js')),
+    import(join(root, 'lib/client/fetch.js')),
+  ]);
+  return { client, server, fetch };
+}
+for (const explicitBody of [false, true]) test(`installed Playwright HTTP502 ${explicitBody ? 'explicit-body control retains' : 'fetchResponseUid can lose'} observer body after successful fulfillment`, { timeout: 10000 }, async () => {
+  const { client, server, fetch } = await installedPlaywrightNetwork();
+  const f = fixture(); let handler;
+  await installRoutes({ route: async (_, fn) => { handler = fn; }, routeWebSocket: async () => {} }, f.gate, f.log, async () => {});
+  f.gate.arm('chat', current(), before());
+  const url = ORIGIN + BASE + '/llm/chat';
+  const bytes = Buffer.from('<html><body>SYNTHETIC_BAD_GATEWAY</body></html>');
+  const bodies = new Map([['memory-response', bytes]]), trace = [];
+  const connection = {};
+  const api = new fetch.APIResponse({
+    _connection: connection, _platform: {}, _wrapApiCall: action => action(),
+    _channel: {
+      fetchResponseBody: async ({ fetchUid }) => ({ binary: bodies.get(fetchUid) }),
+      disposeAPIResponse: async ({ fetchUid }) => { trace.push('dispose'); bodies.delete(fetchUid); },
+    },
+  }, { fetchUid: 'memory-response', url, status: 502, statusText: 'Bad Gateway', headers: [{ name: 'content-type', value: 'text/html' }] });
+  let reached, resume;
+  const reachedDelegate = new Promise(resolve => { reached = resolve; });
+  const delegateFinished = new Promise(resolve => { resume = resolve; });
+  const serverRequest = {
+    _context: { fetchRequest: { fetchResponses: bodies }, emit() {}, removeRouteInFlight() {} },
+    headerValue: () => undefined,
+  };
+  let fulfilled;
+  const serverRoute = Object.assign(Object.create(server.Route.prototype), {
+    _request: serverRequest,
+    _delegate: { fulfill: async value => { fulfilled = value; trace.push('delegate'); reached(); await delegateFinished; } },
+  });
+  const clientRoute = Object.assign(Object.create(client.Route.prototype), {
+    _connection: connection,
+    _channel: { fulfill: value => serverRoute.fulfill(value) },
+    _raceWithTargetClose: value => value,
+  });
+  const route = mockRoute(url, 'POST', request());
+  route.fetch = async options => { route.fetchOptions.push(options); trace.push('fetch'); return api; };
+  route.fulfill = async ({ response }) => {
+    const options = { response };
+    if (explicitBody) options.body = await response.body();
+    await clientRoute._innerFulfill(options);
+    trace.push('fulfill-complete');
+  };
+  const handling = handler(route);
+  await reachedDelegate;
+  assert.equal(fulfilled.status, 502);
+  assert.equal(Buffer.from(fulfilled.body, 'base64').equals(bytes), true);
+  assert.equal(bodies.has('memory-response'), true);
+  assert.equal(trace.includes('dispose'), false);
+  resume();
+  await handling;
+  assert.deepEqual(trace, ['fetch', 'delegate', 'fulfill-complete', 'dispose']);
+  assert.equal(f.log.denied, 0);
+  assert.equal(f.log.dispatched, 1);
+  assert.equal(f.log.chatPosts, 1);
+  assert.equal(f.gate.counts.chat, 1);
+  assert.deepEqual(route.fetchOptions, [{ maxRedirects: 0, maxRetries: 0, timeout: 150000 }]);
+  assert.equal(bodies.size, 0);
+  assert.equal(Boolean(serverRequest._responseBodyOverride), explicitBody);
+  let browserBodyReads = 0;
+  const observed = Object.assign(Object.create(server.Response.prototype), {
+    _finishedPromise: Promise.resolve(), _status: 502, _request: serverRequest,
+    _getResponseBodyCallback: async () => { browserBodyReads++; throw Error('SYNTHETIC_BROWSER_BODY_UNAVAILABLE'); },
+  });
+  if (explicitBody) assert.equal((await observed.body()).equals(bytes), true);
+  else await assert.rejects(observed.body(), /SYNTHETIC_BROWSER_BODY_UNAVAILABLE/);
+  assert.equal(browserBodyReads, explicitBody ? 0 : 1);
+  assert.equal(fulfilled.status, 502); // Observation failure does not manufacture/reclassify the HTTP status.
+});
+
 function mockRoute(url, method, body, headers = {}, status = 200) {
   const trace = [], fetchOptions = [];
   const result = { status: () => status, url: () => url, dispose: async () => { trace.push('dispose'); } };
