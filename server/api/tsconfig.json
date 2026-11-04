@@ -10,5 +10,10 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/llm/tests/chat-citation-boundaries-batch26.test.ts",
+    "src/llm/tests/chat-real-context-batch25.test.ts",
+    "src/worker/debian-dla-regression.test.ts"
+  ]
 }

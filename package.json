@@ -27,7 +27,7 @@
     "test:broker": "node server/broker/run.mjs test",
     "test:e2e": "playwright test --config tests-e2e/playwright.config.ts",
     "test:report-integration": "node tests-e2e/report-live-api.mjs",
-    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:api && pnpm test:broker && pnpm build && pnpm build:admin",
+    "check": "pnpm typecheck && pnpm --filter @diplom/scan-api typecheck && pnpm lint && pnpm test && pnpm test:api && pnpm test:broker && pnpm build && pnpm build:admin",
     "test:watch": "vitest",
     "preview": "vite preview"
   },

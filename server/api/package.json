@@ -6,7 +6,9 @@
   "scripts": {
     "test": "tsx --test 'src/**/*.test.ts'",
     "start": "tsx src/main.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "pnpm typecheck:server && pnpm typecheck:browser-contract-tests",
+    "typecheck:server": "tsc --project tsconfig.json --noEmit",
+    "typecheck:browser-contract-tests": "tsc --project tsconfig.browser-contract-tests.json --noEmit"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.0",

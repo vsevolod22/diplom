@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "paths": {
+      "@/*": ["../../src/*"]
+    }
+  },
+  "include": [
+    "src/llm/tests/chat-citation-boundaries-batch26.test.ts",
+    "src/llm/tests/chat-real-context-batch25.test.ts",
+    "src/worker/debian-dla-regression.test.ts"
+  ],
+  "exclude": []
+}
