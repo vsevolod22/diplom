@@ -323,7 +323,7 @@ it('standalone usage GET and focus revalidation never grant generation intent; s
       false,
     ),
   );
-  expect(screen.getByRole('region', { name: 'ИИ-отчёт' }).textContent).not.toMatch(/Остаток|токен|бюджет/i);
+  expect(screen.getByRole('region', { name: 'Объяснение ИИ' }).textContent).not.toMatch(/Остаток|токен|бюджет/i);
   expect(screen.queryByRole('checkbox')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
   expect(screen.getByRole('link', { name: 'настройках аккаунта' })).toBeTruthy();

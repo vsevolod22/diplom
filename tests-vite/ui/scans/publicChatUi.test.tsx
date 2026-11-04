@@ -344,17 +344,22 @@ it('publishes a public TEMP citation only after framed completion and matching h
   prepare();
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByText(/Последний ответ/);
-  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).not.toBeVisible();
-  fireEvent.click(screen.getByText('Источники (1)'));
-  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
+  const sources = screen.getByLabelText('Источники ответа');
+  expect(within(sources).getByText('Источники (1)')).toBeVisible();
+  expect(sources.closest('details')).toBeNull();
+  expect(sources.querySelector('details')).toBeNull();
+  expect(within(sources).getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
   const citation = document.getElementById(`chat-${turnId}-${temp.finding.findingId}`);
   expect(citation).toBeVisible();
   expect(citation?.tagName).toBe('LI');
   expect(citation).toHaveAttribute('tabindex', '-1');
   expect(citation).toHaveTextContent('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)');
   expect(citation).toHaveTextContent('Экосистема: deb');
-  expect(citation).toHaveTextContent('Пакет и установленная версия не включены в источник.');
-  expect(citation).toHaveTextContent('Сообщённая исправленная версия: не сообщена.');
+  expect(within(citation!).getByText('Пакет', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Не включён в источник');
+  expect(within(citation!).getByText('Установлено', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Версия не включена в источник');
+  expect(within(citation!).getByText('Исправление по данным сканера', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Исправленная версия неизвестна');
+  expect(citation).toHaveTextContent('Подробности advisory неизвестны. Эти данные не восстанавливаются из текста ИИ.');
+  expect(citation).toHaveTextContent('Подходящий тег и безопасность образа не установлены.');
   expect(citation).toHaveTextContent('Источник текущего отчёта, проверен по результатам сканирования.');
   expect(within(citation!).queryByRole('link')).toBeNull();
   expect(screen.queryByRole('link', { name: /CVERecord|NVD/ })).toBeNull();
@@ -367,9 +372,11 @@ it('publishes a public TEMP citation only after framed completion and matching h
     />,
   );
   await open();
-  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).not.toBeVisible();
-  fireEvent.click(screen.getByText('Источники (1)'));
-  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
+  const reloadedSources = screen.getByLabelText('Источники ответа');
+  expect(reloadedSources.closest('details')).toBeNull();
+  expect(reloadedSources.querySelector('details')).toBeNull();
+  expect(within(reloadedSources).getByText('Источники (1)')).toBeVisible();
+  expect(within(reloadedSources).getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
   expect(document.getElementById(`chat-${turnId}-${temp.finding.findingId}`)).toHaveTextContent(
     'Источник текущего отчёта, проверен по результатам сканирования.',
   );

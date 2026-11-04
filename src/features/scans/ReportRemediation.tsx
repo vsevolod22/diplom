@@ -1,5 +1,6 @@
 import { publicSafeFinding, type LlmFinding } from '@/shared/api/scans/llmFindingContract';
 import type { SummarySource } from '@/shared/api/scans/llmSummaryClient';
+import { LlmFindingDetails } from './LlmFindingDetails';
 import { ReportSourceLink, type ReportSourceNavigate } from './reportSourceNavigation';
 import './ReportRemediation.css';
 
@@ -68,6 +69,7 @@ export function ReportRemediation({
           .map((part) => labels[part] ?? part)
           .join(' · ')}
       </strong>
+      {finding && finding.check !== 'vuln' ? <LlmFindingDetails finding={finding} /> : null}
       {facts ? (
         <>
           {finding?.check === 'vuln' ? (

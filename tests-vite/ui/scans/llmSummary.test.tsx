@@ -8,7 +8,7 @@ import {
 } from '@/shared/api/preferences/reportPreferences';
 import { usage } from './llmChatFixtures';
 import { QueryClient } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ScanSummaryPanel } from '@/features/scans/ScanSummaryPanel';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
@@ -98,17 +98,26 @@ function mockApi(
     }),
   );
 }
+const navigateSource = vi.fn(() => true);
 function mount(sourceTransport = transport(), value = status) {
   return render(
     <>
       <p>Исходный отчёт · checked не означает безопасность</p>
-      <ScanSummaryPanel key={JSON.stringify(value)} status={value} transport={sourceTransport} />
+      <ScanSummaryPanel key={JSON.stringify(value)} status={value} transport={sourceTransport} onNavigateSource={navigateSource} />
     </>,
   );
 }
 const posts = () => requests.filter((request) => request.init?.method === 'POST');
 async function generate() {
   await waitFor(() => expect(posts()).toHaveLength(1));
+}
+function openExplanation() {
+  const toggle = screen.getByText('Прочитать объяснение и проверить его источники');
+  const details = toggle.closest('details')!;
+  expect(details.open).toBe(false);
+  fireEvent.click(toggle);
+  expect(details.open).toBe(true);
+  return details;
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -135,6 +144,7 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   requests.length = 0;
+  navigateSource.mockClear();
   transitionScanSession('alice', new QueryClient(), true);
   saveReportPreferences({ language: 'original', autoSummary: true });
 });
@@ -238,7 +248,7 @@ it.each(['context', 'http', 'generation'] as const)('unsupported legacy report f
   else if (from === 'generation') mockApi(undefined, () => json({ errorCode: 'LLM_SUMMARY_UNSUPPORTED_REPORT' }, 409));
   else mockApi(() => ({ ...context, summaryResultRead: true }), undefined, () => json({ errorCode: 'LLM_SUMMARY_UNSUPPORTED_REPORT' }, 409));
   mount();
-  expect(await screen.findByRole('alert')).toHaveTextContent('ИИ-разбор недоступен для этого формата отчёта. Исходные результаты сканирования доступны ниже.');
+  expect(await screen.findByRole('alert')).toHaveTextContent('ИИ-разбор недоступен для этого формата отчёта. Исходные результаты доступны в разделе «Находки и исправления».');
   expect(screen.queryByRole('button', { name: 'Включить авторазбор' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Повторить разбор' })).toBeNull();
   expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
@@ -318,7 +328,9 @@ it('reports real deferred context, recovery, generation and verification without
   await waitFor(() => expect(readPage).toHaveBeenCalledTimes(2));
   expectProgress('verification', 'Проверяем источники и готовим результат');
   await act(async () => finalContext.resolve(context));
-  expect(await screen.findByText('Проверьте исходную находку')).toBeVisible();
+  await screen.findByText('Проверьте исходную находку');
+  openExplanation();
+  expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
   expect(screen.getByRole('status')).toHaveTextContent('ИИ-разбор готов');
   expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   expect(summary).toHaveBeenCalledTimes(1);
@@ -399,7 +411,9 @@ it('recovered output stays private until deferred source verification finishes a
       coverage: [{ check: 'Secrets', status: 'checked', findingCount: 2 }],
     }),
   );
-  expect(await screen.findByText('Проверьте исходную находку')).toBeVisible();
+  await screen.findByText('Проверьте исходную находку');
+  openExplanation();
+  expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
   expect(screen.getByRole('status')).toHaveTextContent('ИИ-разбор готов');
   expect(posts()).toHaveLength(0);
 });
@@ -465,7 +479,9 @@ it.each(['LLM_INVALID_RESPONSE', 'PRIVATE_PROVIDER_ERROR'])(
     expect(posts()).toHaveLength(1);
     failing = false;
     fireEvent.click(screen.getByRole('button', { name: 'Повторить разбор' }));
-    expect(await screen.findByText('Проверьте исходную находку')).toBeVisible();
+    await screen.findByText('Проверьте исходную находку');
+  openExplanation();
+  expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
     expect(posts()).toHaveLength(2);
     expect(screen.getByRole('status')).toHaveTextContent('ИИ-разбор готов');
   },
@@ -582,18 +598,24 @@ it('renders only actual model paragraphs, with sources collapsed and no duplicat
   mount();
   await screen.findByText(paragraphs[0]);
   const output = screen.getByLabelText('ИИ-разбор отчёта');
-  const blocks = [...output.children].filter(block => block.querySelector(':scope > p'));
+  const details = output.querySelector('details')!;
+  expect(details.open).toBe(false);
+  const blocks = [...details.querySelectorAll(':scope > div')];
   expect(blocks.map(block => block.querySelector(':scope > p')?.textContent)).toEqual(paragraphs);
+  openExplanation();
   for (const [index, block] of blocks.entries()) {
-    const details = block.querySelector<HTMLDetailsElement>(':scope > details')!;
-    expect(details.querySelector('summary')?.textContent).toBe(`Источники абзаца ${index + 1} (1)`);
-    expect(details.open).toBe(false);
-    expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
-    expect(details.querySelector('strong')?.textContent).toBe('rule-0000000000000000 · Секреты');
+    const sources = within(block as HTMLElement).getByLabelText(`Источники абзаца ${index + 1}`);
+    expect(sources.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+    expect(sources.querySelector('strong')?.textContent).toBe('rule-0000000000000000 · Секреты');
+    const link = within(sources).getByRole('link', { name: 'Открыть раздел «Возможные секреты»' });
+    expect(link).toHaveAttribute('href', '#scan-report-secrets');
+    fireEvent.click(link);
+    expect(navigateSource).toHaveBeenLastCalledWith('secret');
   }
+  expect(within(output).getByLabelText('Объём контекста модели')).toHaveTextContent('Полнота охвата не подтверждена');
   expect(screen.queryByRole('region', { name: 'Чат по отчёту' })).toBeNull();
   expect(document.body.textContent).not.toMatch(
-    /модель|маршрутизация|политика|бюджет|квота|receipt|Пункт 1/i,
+    /OpenRouter|dots-studio|atlas-cloud|маршрутизация|политика|бюджет|квота|receipt|Пункт 1/i,
   );
 });
 
@@ -646,17 +668,17 @@ it('automatically generates once with saved authorization, exact consent and ver
   const view = mount(source);
   await screen.findByText('Проверьте исходную находку');
   expect(posts()).toHaveLength(1);
-  expect(screen.getByRole('heading', { name: 'ИИ-отчёт' })).toBeVisible();
-  const citationLabel = screen.getByText('Источники абзаца 1 (1)');
-  const details = citationLabel.closest('details')!;
-  expect(details.parentElement?.querySelector(':scope > p')?.textContent).toBe(reply.hypotheses[0].text);
+  expect(screen.getByRole('heading', { name: 'Объяснение ИИ' })).toBeVisible();
+  const sources = screen.getByLabelText('Источники абзаца 1');
+  expect(sources.parentElement?.querySelector(':scope > p')?.textContent).toBe(reply.hypotheses[0].text);
+  const details = sources.closest('details')!;
   expect(details.open).toBe(false);
   expect(document.body.textContent).not.toMatch(
     /OpenRouter|no-training|ZDR|политика|бюджет|Пункт 1|гипотеза/i,
   );
   expect(screen.queryByRole('region', { name: 'Чат по отчёту' })).toBeNull();
-  fireEvent.click(citationLabel);
-  expect(details.open).toBe(true);
+  openExplanation();
+  expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
   expect(JSON.parse(String(posts()[0].init?.body))).toEqual({
     reportVersion: tuple.reportVersion,
     consent: { accepted: true, policyVersion: context.policyVersion },
@@ -667,8 +689,10 @@ it('automatically generates once with saved authorization, exact consent and ver
   const citedFinding = citedPage.findings[0];
   expect(citedFinding.findingId).toBe(reply.hypotheses[0].citations[0]);
   expect(citedFinding.findingId).toBe('secret-0-1');
-  expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
-  expect(details.querySelector('strong')?.textContent).toBe(`${citedFinding.ruleId} · Секреты`);
+  expect(sources.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+  expect(sources.querySelector('strong')?.textContent).toBe(`${citedFinding.ruleId} · Секреты`);
+  fireEvent.click(within(sources).getByRole('link', { name: 'Открыть раздел «Возможные секреты»' }));
+  expect(navigateSource).toHaveBeenLastCalledWith('secret');
   expect(screen.queryByRole('button', { name: 'Получить сводку' })).toBeNull();
   fireEvent.focus(window);
   fireEvent(window, new Event('online'));
@@ -894,6 +918,7 @@ it('reload/fresh-login recovery reads the owner cache before the retained tab ma
     expect(requests.filter((r) => r.path.endsWith('/summary') && r.init?.method === 'GET')).toHaveLength(2),
   );
   await screen.findByText('Проверьте исходную находку');
+  openExplanation();
   expect(screen.getByText('Проверьте исходную находку')).toBeVisible();
   expect(requests.filter((r) => r.path.endsWith('/summary') && r.init?.method === 'GET')).toHaveLength(2);
   expect(posts()).toHaveLength(1);
@@ -1350,22 +1375,23 @@ it('config hash citation resolves only its paragraph-local source details', asyn
       scannerFacts: [{ findingId: digest, check: 'config', severity: 'MEDIUM' }],
     }),
   );
-  const sources = transport();
-  mount(sources, configStatus);
+  const sourceTransport = transport();
+  mount(sourceTransport, configStatus);
   await generate();
   await screen.findByText('Проверьте исходную находку');
-  const label = screen.getByText('Источники абзаца 1 (1)');
-  const details = label.closest('details')!;
-  expect(details.parentElement?.querySelector(':scope > p')?.textContent).toBe(reply.hypotheses[0].text);
-  expect(details.open).toBe(false);
-  fireEvent.click(label);
-  expect(details.open).toBe(true);
-  expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+  const sources = screen.getByLabelText('Источники абзаца 1');
+  expect(sources.parentElement?.querySelector(':scope > p')?.textContent).toBe(reply.hypotheses[0].text);
+  openExplanation();
+  expect(sources.querySelectorAll(':scope > ul > li')).toHaveLength(1);
   const configFinding = configStatus.config!.findings[0];
   expect(configFinding.findingId).toBe(digest);
-  expect(details.querySelector('strong')?.textContent).toBe(`${configFinding.ruleId} · Средняя`);
-  expect(details).not.toHaveTextContent('Секреты');
-  expect(sources.results).not.toHaveBeenCalled();
+  expect(sources.querySelector('strong')?.textContent).toBe(`${configFinding.ruleId} · Средняя`);
+  expect(sources).not.toHaveTextContent('Секреты');
+  const link = within(sources).getByRole('link', { name: 'Открыть раздел «Настройки образа»' });
+  expect(link).toHaveAttribute('href', '#scan-report-config');
+  fireEvent.click(link);
+  expect(navigateSource).toHaveBeenLastCalledWith('config');
+  expect(sourceTransport.results).not.toHaveBeenCalled();
 });
 it('CVE source collection verifies every page and target, independent of the current category', async () => {
   const sources = transport();

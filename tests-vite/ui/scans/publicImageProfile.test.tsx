@@ -89,7 +89,8 @@ it('public config responses bind allowlisted metadata findings to the pinned man
 it('all reviewed ecosystems have explicit SBOM filter options and use report-v1 lexical sort/query keys', () => {
   const onChange = vi.fn();
   render(<SbomReportControls query={{ view: 'report-v1' }} onChange={onChange} disabled={false} />);
-  const select = screen.getByLabelText('Экосистема · SBOM');
+  fireEvent.click(screen.getByText('Фильтры и сортировка · Пакеты'));
+  const select = screen.getByLabelText('Тип пакетов');
   for (const ecosystem of REPORT_ECOSYSTEMS) {
     fireEvent.change(select, { target: { value: ecosystem } });
     expect(onChange).toHaveBeenLastCalledWith({ view: 'report-v1', ecosystem });
@@ -112,18 +113,19 @@ it('manual canonical entry works without discovery, needs current server eligibi
     return { ok: false, status: 503, json: async () => ({ errorCode: 'UNAVAILABLE' }) };
   }));
   const client = mount();
-  await screen.findByRole('button', { name: 'Запустить скан' });
-  const input = screen.getByRole('textbox', { name: 'Canonical reference Docker Hub' });
+  await screen.findByRole('button', { name: 'Запустить проверку' });
+  fireEvent.click(screen.getByText('Указать адрес вручную'));
+  const input = screen.getByRole('textbox', { name: 'Адрес образа в Docker Hub' });
   fireEvent.change(input, { target: { value: reference } });
   await waitFor(() => expect(preflights).toContain(reference));
   fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-  expect(screen.getByRole('button', { name: 'Запустить скан' }).hasAttribute('disabled')).toBe(true); expect(posts).toHaveLength(0);
+  expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(true); expect(posts).toHaveLength(0);
   available = true;
   fireEvent.click(screen.getByRole('button', { name: 'Проверить допуск снова' }));
   const consent = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement;
   expect(consent.checked).toBe(false);
   fireEvent.click(consent);
-  const submit = screen.getByRole('button', { name: 'Запустить скан' });
+  const submit = screen.getByRole('button', { name: 'Запустить проверку' });
   await waitFor(() => expect(submit.hasAttribute('disabled')).toBe(false));
   const before = preflights.length;
   fireEvent.click(submit);
@@ -148,13 +150,14 @@ it('revoked fresh public preflight does not POST even after an earlier eligible 
     return { ok: false, status: 503, json: async () => ({ errorCode: 'UNAVAILABLE' }) };
   }));
   const client = mount();
-  await screen.findByRole('button', { name: 'Запустить скан' });
-  fireEvent.change(screen.getByRole('textbox', { name: 'Canonical reference Docker Hub' }), { target: { value: reference } });
+  await screen.findByRole('button', { name: 'Запустить проверку' });
+  fireEvent.click(screen.getByText('Указать адрес вручную'));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Адрес образа в Docker Hub' }), { target: { value: reference } });
   await waitFor(() => expect(targetReads).toBe(1));
   fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-  const submit = screen.getByRole('button', { name: 'Запустить скан' });
+  const submit = screen.getByRole('button', { name: 'Запустить проверку' });
   await waitFor(() => expect(submit.hasAttribute('disabled')).toBe(false)); fireEvent.click(submit);
-  await screen.findByText('Актуальный серверный допуск недоступен. Скан не создан.');
+  await screen.findByText('Сервер пока не разрешает запуск. Новый запрос запуска не отправлен.');
   expect(posts).toHaveLength(0); expect(targetReads).toBe(2); client.clear();
 });
 
@@ -169,21 +172,25 @@ it('public search candidates are selectable but never claim scannability or auth
       return json(eligible(body.imageReference, body.checks, false));
     }
     if (path.includes('/images?')) return json({ items: [{ label: 'example/application', reference, scannable: false, eligibility: 'public-hub-profile', allowedCheckSets: sets,
-      reason: 'Кандидат; требуется проверка', kind: 'repository', tagConfirmed: false, checks: { secret: true, sbom: true, vuln: 'conditional' } }],
+      reason: 'Кандидат; требуется проверка', kind: path.includes('repository=') ? 'tag' : 'repository', tagConfirmed: path.includes('repository='), checks: { secret: true, sbom: true, vuln: 'conditional' } }],
       nextCursor: null, state: 'terminal', loaded: 1, pages: 1, policy: { pageSize: 12, maxPages: 5, maxCandidates: 60, maxActivePerProcess: 8, maxActivePerSubject: 2, maxRequestsPerSubject: 30, rateWindowMs: 60000, maxSessions: 1024, maxRateEntries: 1024, scope: 'process-local' } });
     if (path === '/api/v1/browser/scans' && init?.method === 'POST') posts.push(init.body);
     return { ok: false, status: 503, json: async () => ({ errorCode: 'UNAVAILABLE' }) };
   }));
   const client = mount();
-  await screen.findByRole('button', { name: 'Запустить скан' });
+  await screen.findByRole('button', { name: 'Запустить проверку' });
   fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'example' } });
-  const candidate = await screen.findByRole('button', { name: /example\/application.*Кандидат/ });
-  expect(candidate.hasAttribute('disabled')).toBe(false); expect(inspected).toBe(false);
+  const repository = await screen.findByRole('button', { name: /example\/application.*Выбрать версию/ });
+  expect(repository.hasAttribute('disabled')).toBe(false); expect(inspected).toBe(false);
+  fireEvent.click(repository);
+  const candidate = await screen.findByRole('button', { name: /stable.*проверить доступность этой версии/ });
+  expect(inspected).toBe(false);
   fireEvent.click(candidate);
   await waitFor(() => expect(inspected).toBe(true));
   fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-  expect(screen.getByRole('button', { name: 'Запустить скан' }).hasAttribute('disabled')).toBe(true);
-  expect(screen.getByText(/public-hub-resources-v1/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText(/Запуск недоступен: сканер недоступен/)).toBeTruthy();
+  expect(screen.getByText(/Ограничены размер образа и отдельных файлов/)).toBeTruthy();
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
   expect(posts).toHaveLength(0); client.clear();
 });

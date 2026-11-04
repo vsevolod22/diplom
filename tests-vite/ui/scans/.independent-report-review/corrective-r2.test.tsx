@@ -134,7 +134,7 @@ it('R5 archive parity: decoded archive-shaped status rejects mismatched supplied
   await screen.findByRole('alert');
   expect(screen.queryByText('ID: secret-0-0')).toBeNull();
   expect(screen.queryAllByRole('navigation')).toHaveLength(0);
-  fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Secrets' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Возможные секреты' }));
   await screen.findByText('ID: secret-0-0');
   expect(requests).toHaveLength(2);
   expect(requests.every(url => !url.searchParams.has('cursor'))).toBe(true);

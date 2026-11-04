@@ -8,7 +8,7 @@ import { ScanListPage } from '@/pages/scans/ScanListPage';
 import { DemoAuthPage } from '@/pages/auth/DemoAuthPage';
 import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
 import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
-import { transitionScanSession } from '@/shared/api/auth/scanSession';
+import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
 
 class Observer {
   observe() {}
@@ -45,9 +45,9 @@ function reportPage(path: string, payload: Record<string, unknown>) {
       filters: kind === 'vuln' ? { severity: null } : kind === 'sbom' ? { ecosystem: null, name: null } : { ruleId: null, linePresence: null } } };
 }
 async function expectCve(cveId: string) {
-  const id = await screen.findByText(cveId, { selector: '.scan-vuln-row__id' });
+  const id = await screen.findByText(cveId, { selector: '.scan-vuln-row__headline > span' });
   const row = within(id.closest('li')!);
-  expect(row.getByText('HIGH', { exact: true })).toBeTruthy();
+  expect(row.getByText('Высокая оценка', { exact: true })).toBeTruthy();
   return row;
 }
 const imagePage = (items: Array<{ label: string; reference: string; scannable: boolean }>, nextCursor: string | null = null, pages = 1) => ({
@@ -64,16 +64,22 @@ afterEach(() => {
 function mount(path: string, ownEligibility = false) {
   // Runtime has its own contract and must not consume image-search or eligibility responses.
   const scanFetch = fetch;
-  vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => input.startsWith('/api/v1/browser/runtime/')
-    ? Promise.resolve(new Response(JSON.stringify({ errorCode: 'RUNTIME_UNAVAILABLE' }), { status: 503 }))
-    : scanFetch(input, init)));
+  vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+    if (input.startsWith('/api/v1/browser/runtime/')) return Promise.resolve(new Response(JSON.stringify({ errorCode: 'RUNTIME_UNAVAILABLE' }), { status: 503 }));
+    const url = new URL(input, window.location.origin);
+    // Independent repository bootstrap; each discovery case owns only the subsequent tag pages.
+    if (url.pathname.endsWith('/images') && url.searchParams.get('q') === 'fixture-catalog' && !url.searchParams.has('repository')) {
+      return Promise.resolve(json(imagePage([{ label: 'library/alpine', reference: 'registry-1.docker.io/library/alpine:bootstrap', scannable: true }])));
+    }
+    return scanFetch(input, init);
+  }));
   // Existing discovery tests mock Hub pages only. Dispatch the new independent
   // read-only endpoint without consuming those pagination fixtures.
   if (!ownEligibility) {
     const original = fetch;
     vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => input === '/api/v1/browser/scans/images/eligibility'
-      ? Promise.resolve(json({ imageReference: JSON.parse(String(init?.body)).imageReference, eligible: false,
-        eligibility: 'unsupported', allowedCheckSets: [], reason: 'UNSUPPORTED_SCAN' })) : original(input, init)));
+      ? Promise.resolve(json({ imageReference: JSON.parse(String(init?.body)).imageReference, eligible: true,
+        eligibility: 'public-hub-profile', allowedCheckSets: Array.from({ length: 15 }, (_, mask) => ['secret', 'sbom', 'vuln', 'config'].filter((_, bit) => (mask + 1) & (1 << bit))), reason: 'READY' })) : original(input, init)));
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Routes>
@@ -86,6 +92,42 @@ function mount(path: string, ownEligibility = false) {
   return client;
 }
 
+function pinnedButton() {
+  const toggle = screen.getByText('Указать адрес вручную');
+  if (!toggle.closest('details')!.open) fireEvent.click(toggle);
+  const saved = screen.getByText('Сохранённый пример для прежнего профиля');
+  if (!saved.closest('details')!.open) fireEvent.click(saved);
+  return screen.getByRole('button', { name: 'Выбрать закреплённый nginx' });
+}
+
+async function tagSearch() {
+  const search = await screen.findByRole('searchbox', { name: 'Репозиторий Docker Hub' });
+  fireEvent.change(search, { target: { value: 'fixture-catalog' } });
+  fireEvent.click(await screen.findByRole('button', { name: /library\/alpine.*Выбрать версию/ }));
+  return screen.getByRole('searchbox', { name: 'Фильтр тегов' });
+}
+async function selectAlpine() {
+  await screen.findByRole('form', { name: 'Параметры скана' });
+  const toggle = screen.getByText('Указать адрес вручную');
+  if (!toggle.closest('details')!.open) fireEvent.click(toggle);
+  fireEvent.change(screen.getByLabelText('Адрес образа в Docker Hub'), { target: { value: 'registry-1.docker.io/library/alpine:3.21' } });
+  await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.');
+}
+async function launchScan() {
+  const launch = screen.getByRole('button', { name: 'Запустить проверку' });
+  await waitFor(() => expect(launch.hasAttribute('disabled')).toBe(false));
+  fireEvent.click(launch);
+}
+function retainPrivateCache(client: QueryClient) {
+  // List fetches now use gcTime: 0. Seed retained owner-scoped data explicitly to test session eviction too.
+  const session = scanSession();
+  expect(session.subject).not.toBeNull();
+  const key = ['live-scans', session.generation, session.subject, 'retained-test-page'];
+  client.setQueryDefaults(key, { gcTime: Infinity });
+  client.setQueryData(key, { scans: [row] });
+  expect(client.getQueryData(key)).toEqual({ scans: [row] });
+  return key;
+}
 function emulateDisabledBlur(element: HTMLElement) {
   // jsdom also ignores blur() on disabled controls; temporarily enable only to emulate native blur.
   const disabled = element.hasAttribute('disabled');
@@ -99,7 +141,7 @@ describe('LOCAL server-authoritative saved target', () => {
   const sets = [['secret'], ['sbom'], ['vuln'], ['secret','sbom','vuln']];
   const eligibility = (eligible = true, reason = eligible ? 'READY' : 'SCANNER_UNAVAILABLE') => ({ imageReference: reference, eligible,
     eligibility: 'qualified-exact-profile', allowedCheckSets: sets, qualificationId: 'nginx-local-0dcc-v1', reason });
-  beforeEach(() => sessionStorage.clear());
+  beforeEach(() => { sessionStorage.clear(); sessionStorage.setItem('scan-target-v1:alice', reference); });
   afterEach(() => sessionStorage.clear());
 
   it('TASK35 counts slow overlap, settled rerenders and focus TTL without an identity storm', async () => {
@@ -123,14 +165,14 @@ describe('LOCAL server-authoritative saved target', () => {
     fireEvent(window, new Event('focus')); await pause();
     expect(reads).toBe(1);
     await act(async () => finish(json(eligibility())));
-    const card = screen.getByRole('button', { name: /nginx · закреплённый пример/ });
+    const card = pinnedButton();
     fireEvent.click(card);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
     fireEvent(window, new Event('focus')); await pause();
     expect(reads).toBe(1);
     now += 5001;
     fireEvent(window, new Event('focus')); await pause();
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.');
     expect(reads).toBe(2);
   });
 
@@ -154,18 +196,18 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new', true);
-    await screen.findByRole('radio', { name: 'sbom' });
+    await screen.findByRole('radio', { name: 'Состав пакетов (SBOM)' });
     now += 5001; fireEvent(window, new Event('focus'));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
     const debounce = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
-    fireEvent.click(screen.getByRole('radio', { name: 'sbom' })); await debounce();
-    fireEvent.click(screen.getByRole('radio', { name: 'vuln' })); await debounce();
+    fireEvent.click(screen.getByRole('radio', { name: 'Состав пакетов (SBOM)' })); await debounce();
+    fireEvent.click(screen.getByRole('radio', { name: 'Уязвимости' })); await debounce();
     expect(reads).toEqual(['secret', 'secret']);
     expect(activeSignal.aborted).toBe(false);
     await act(async () => finish(json(eligibility())));
-    await waitFor(() => expect(screen.getByRole('button', { name: /nginx · закреплённый пример/ }).hasAttribute('disabled')).toBe(false));
+    await waitFor(() => expect(pinnedButton().hasAttribute('disabled')).toBe(false));
     expect(reads).toEqual(['secret', 'secret', 'vuln']);
-    expect((screen.getByRole('radio', { name: 'vuln' }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('radio', { name: 'Уязвимости' }) as HTMLInputElement).checked).toBe(true);
   });
 
   it('revalidates saved digest without Hub, retains four sets through readiness changes and uses historical copy', async () => {
@@ -180,20 +222,20 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new', true);
-    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
-    await screen.findByRole('radio', { name: 'Secrets + SBOM + CVE' });
-    expect(card.hasAttribute('disabled')).toBe(true);
-    expect(card.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByText(/72 APK.*не гарантия результата/)).toBeTruthy();
-    expect(screen.queryByRole('checkbox', { name: /Image config · OCI/ })).toBeNull();
+    await waitFor(pinnedButton);
+    await screen.findByRole('radio', { name: 'Поиск секретов + Состав пакетов (SBOM) + Уязвимости' });
+    expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(true);
+    expect((screen.getByLabelText('Адрес образа в Docker Hub') as HTMLInputElement).value).toBe(reference);
+    expect(screen.getByText(/Совместимость с прежним профилем тоже требует актуального допуска сервера/)).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: /Настройки ·/ })).toBeNull();
     expect(requests.some(path => path.includes('/images?'))).toBe(false);
     ready = true; now += 5001; fireEvent(window, new Event('focus'));
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
-    fireEvent.click(screen.getByRole('radio', { name: 'Secrets + SBOM + CVE' }));
-    await waitFor(() => expect((screen.getByRole('radio', { name: 'Secrets + SBOM + CVE' }) as HTMLInputElement).checked).toBe(true));
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.');
+    fireEvent.click(screen.getByRole('radio', { name: 'Поиск секретов + Состав пакетов (SBOM) + Уязвимости' }));
+    await waitFor(() => expect((screen.getByRole('radio', { name: 'Поиск секретов + Состав пакетов (SBOM) + Уязвимости' }) as HTMLInputElement).checked).toBe(true));
     expect(screen.getAllByRole('radio')).toHaveLength(4);
     ready = false; now += 5001; fireEvent(window, new Event('focus'));
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(true));
     expect(screen.getAllByRole('radio')).toHaveLength(4);
     expect(sessionStorage.getItem('scan-target-v1:alice')).toBe(reference);
   });
@@ -209,18 +251,19 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new', true);
-    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
-    await screen.findByRole('radio', { name: 'secret' });
+    const card = await waitFor(pinnedButton);
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.'); fireEvent.click(card);
+    await screen.findByRole('radio', { name: 'Поиск секретов' });
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить проверку' }));
     await waitFor(() => expect(posts).toHaveLength(1));
     await screen.findByText(/результат запроса неизвестен/);
     expect(eligibilityRequests).toBe(2);
     ready = false; now += 5001; fireEvent(window, new Event('focus'));
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(true));
+    await screen.findByText(/Запуск недоступен: сканер недоступен/);
+    expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(false);
     const reads = eligibilityRequests;
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить проверку' }));
     await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts[1]).toEqual(posts[0]); expect(eligibilityRequests).toBe(reads);
     expect(posts[0]).toMatchObject({ imageReference: reference, checks: ['secret'] });
@@ -249,19 +292,19 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scanId: id, state: 'queued', result: null });
     }));
     const client = mount('/scans/new', true);
-    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
+    const card = await waitFor(pinnedButton);
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.');
     fireEvent.click(card);
     const consent = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement;
     fireEvent.click(consent);
     holdNext = true;
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить проверку' }));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
     if (change.startsWith('checks')) {
-      fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
-      if (change === 'checks-back') fireEvent.click(screen.getByRole('radio', { name: 'secret' }));
+      fireEvent.click(screen.getByRole('radio', { name: 'Состав пакетов (SBOM)' }));
+      if (change === 'checks-back') fireEvent.click(screen.getByRole('radio', { name: 'Поиск секретов' }));
     } else if (change.startsWith('target')) {
-      const alternative = screen.getByRole('button', { name: /Alpine · latest/ });
+      const alternative = screen.getByRole('button', { name: /Node 18.17.1/ });
       expect(alternative.matches(':disabled')).toBe(true);
       expect(card.matches(':disabled')).toBe(true);
       fireEvent.click(alternative);
@@ -276,13 +319,13 @@ describe('LOCAL server-authoritative saved target', () => {
     if (change.startsWith('target')) {
       await waitFor(() => expect(posts).toHaveLength(1));
       expect(posts[0]).toMatchObject({ imageReference: reference, checks: ['secret'] });
-      expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+      expect(await screen.findByRole('heading', { name: 'Результат проверки образа' })).toBeTruthy();
       expect(posts).toHaveLength(1);
       return;
     }
     expect(posts).toHaveLength(0);
     if (change === 'subject' || change === 'unmount') return;
-    const submit = await screen.findByRole('button', { name: 'Запустить скан' });
+    const submit = await screen.findByRole('button', { name: 'Запустить проверку' });
     if (!consent.checked) fireEvent.click(consent);
     await waitFor(() => expect(submit.hasAttribute('disabled')).toBe(false));
     fireEvent.click(submit);
@@ -291,7 +334,7 @@ describe('LOCAL server-authoritative saved target', () => {
       imageReference: reference,
       checks: change === 'checks' ? ['sbom'] : ['secret'],
     });
-    expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Результат проверки образа' })).toBeTruthy();
   });
 
   it('TASK35 rate wait spans checks, retains consent and never automatically launches or polls eligibility', async () => {
@@ -308,15 +351,15 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     const client = mount('/scans/new', true);
-    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    const card = await waitFor(pinnedButton);
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.'); fireEvent.click(card);
     const consent = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement;
     fireEvent.click(consent);
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить проверку' }));
     await screen.findByRole('status', { name: 'Ожидание сервера' });
     expect(consent.checked).toBe(true); expect(posts).toBe(0); expect(reads).toBe(2);
-    expect(card.getAttribute('aria-pressed')).toBe('true'); expect(screen.getAllByRole('radio')).toHaveLength(4);
-    fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
+    expect((screen.getByLabelText('Адрес образа в Docker Hub') as HTMLInputElement).value).toBe(reference); expect(screen.getAllByRole('radio')).toHaveLength(4);
+    fireEvent.click(screen.getByRole('radio', { name: 'Состав пакетов (SBOM)' }));
     fireEvent(window, new Event('focus'));
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
     expect(reads).toBe(2); expect(posts).toBe(0);
@@ -325,8 +368,8 @@ describe('LOCAL server-authoritative saved target', () => {
     expect(reads).toBe(2); // Expiry is not an automatic request.
     fireEvent.click(screen.getByRole('button', { name: 'Проверить допуск снова' }));
     await waitFor(() => expect(reads).toBe(3));
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false));
-    expect((screen.getByRole('radio', { name: 'sbom' }) as HTMLInputElement).checked).toBe(true);
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.');
+    expect((screen.getByRole('radio', { name: 'Состав пакетов (SBOM)' }) as HTMLInputElement).checked).toBe(true);
     expect(posts).toBe(0);
     now += 5001; fireEvent(window, new Event('focus'));
     await waitFor(() => expect(reads).toBe(4));
@@ -347,7 +390,7 @@ describe('LOCAL server-authoritative saved target', () => {
     }));
     mount('/scans/new', true);
     const message = status === 401 ? /Сессия недействительна/ : /Аккаунту не выдан доступ/;
-    await screen.findByRole('button', { name: message });
+    await screen.findByText(message);
     now += 60_001; fireEvent(window, new Event('focus'));
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
     expect(reads).toBe(1); expect(screen.queryByRole('status', { name: 'Ожидание сервера' })).toBeNull();
@@ -367,10 +410,10 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new', true);
-    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    const card = await waitFor(pinnedButton);
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.'); fireEvent.click(card);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    const submit = screen.getByRole('button', { name: 'Запустить скан' }); fireEvent.click(submit);
+    const submit = screen.getByRole('button', { name: 'Запустить проверку' }); fireEvent.click(submit);
     await screen.findByText(/Сервер пока не принимает новый запуск/);
     expect(screen.getByRole('status', { name: 'Ожидание сервера' }).textContent).toContain('Ожидание допуска запуска');
     expect(submit.hasAttribute('disabled')).toBe(true); fireEvent.click(submit);
@@ -392,11 +435,11 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new', true);
-    const card = await screen.findByRole('button', { name: /nginx · закреплённый пример/ });
-    await waitFor(() => expect(card.hasAttribute('disabled')).toBe(false)); fireEvent.click(card);
+    const card = await waitFor(pinnedButton);
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.'); fireEvent.click(card);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
-    await screen.findByText(/Актуальный серверный допуск недоступен/);
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить проверку' }));
+    await screen.findByText(/Сервер пока не разрешает запуск. Новый запрос запуска не отправлен/);
     expect(posts).toBe(0);
   });
 
@@ -413,16 +456,16 @@ describe('LOCAL server-authoritative saved target', () => {
       return json({ scans: [], nextCursor: null });
     }));
     const client = mount('/scans/new', true);
-    await screen.findByRole('radio', { name: 'sbom' });
-    fireEvent.click(screen.getByRole('radio', { name: 'sbom' }));
+    await screen.findByRole('radio', { name: 'Состав пакетов (SBOM)' });
+    fireEvent.click(screen.getByRole('radio', { name: 'Состав пакетов (SBOM)' }));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
-    if (change === 'checks') fireEvent.click(screen.getByRole('radio', { name: 'vuln' }));
+    if (change === 'checks') fireEvent.click(screen.getByRole('radio', { name: 'Уязвимости' }));
     else {
       act(() => { transitionScanSession('bob', client); client.setQueryData(['demo-auth', 'me'], { id: 'bob', email: 'bob@example.com' }); });
       await waitFor(() => expect(sessionStorage.getItem('scan-target-v1:alice')).toBeNull());
     }
     await act(async () => finish(json(eligibility())));
-    if (change === 'checks') expect(screen.getByRole('button', { name: /nginx · закреплённый пример/ }).hasAttribute('disabled')).toBe(true);
+    if (change === 'checks') expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(true);
     else expect(sessionStorage.getItem('scan-target-v1:alice')).toBeNull();
   });
 });
@@ -438,9 +481,9 @@ describe('cookie-session live scans', () => {
       if (++requests === 1) return json(imagePage([item], 'a'.repeat(48)));
       return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
     }));
-    mount('/scans/new'); const search = await screen.findByRole('searchbox');
-    fireEvent.change(search, { target: { value: 'alpine focused' } });
-    const target = await screen.findByRole('button', { name: /Alpine · focused/ });
+    mount('/scans/new'); const search = await tagSearch();
+    fireEvent.change(search, { target: { value: 'focused' } });
+    const target = await screen.findByRole('button', { name: /focused.*проверить доступность этой версии/ });
     fireEvent.click(target);
     const confirmation = screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }); fireEvent.click(confirmation);
     const more = screen.getByRole('button', { name: 'Показать ещё' });
@@ -473,8 +516,8 @@ describe('cookie-session live scans', () => {
       if (path.includes('&cursor=')) return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
       return json(imagePage([], 'a'.repeat(48)));
     }));
-    const client = mount('/scans/new'); const search = await screen.findByRole('searchbox');
-    fireEvent.change(search, { target: { value: 'alpine old' } });
+    const client = mount('/scans/new'); const search = await tagSearch();
+    fireEvent.change(search, { target: { value: 'old' } });
     const more = await screen.findByRole('button', { name: 'Показать ещё' }); more.focus(); await user.keyboard('{Enter}');
     await waitFor(() => expect(more.hasAttribute('disabled')).toBe(true));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
@@ -500,16 +543,16 @@ describe('cookie-session live scans', () => {
       return restart;
     }));
     mount('/scans/new');
-    fireEvent.change(await screen.findByRole('searchbox'), { target: { value: 'alpine retained' } });
-    fireEvent.click(await screen.findByRole('button', { name: /Alpine · retained/ }));
+    fireEvent.change(await tagSearch(), { target: { value: 'retained' } });
+    fireEvent.click(await screen.findByRole('button', { name: /retained.*проверить доступность этой версии/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
     const more = screen.getByRole('button', { name: 'Показать ещё' }); more.focus();
     await user.keyboard('{Enter}');
     const retry = await screen.findByRole('button', { name: 'Начать новый поиск' });
-    expect(screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }).textContent).toContain(status === 410 ? 'Поиск истёк' : 'Поиск Docker Hub сейчас недоступен');
+    expect(screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }).textContent).toContain(status === 410 ? 'Поиск истёк' : 'Каталог недоступен');
     expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
     expect(document.activeElement).toBe(retry);
-    expect(screen.getByRole('button', { name: /Alpine · retained/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: /retained.*проверить доступность этой версии/ }).getAttribute('aria-pressed')).toBe('true');
     expect((screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }) as HTMLInputElement).checked).toBe(true);
     await user.keyboard('{Enter}');
     await waitFor(() => expect(requests).toHaveLength(3));
@@ -517,11 +560,11 @@ describe('cookie-session live scans', () => {
     const firstUrl = new URL(requests[0], 'http://localhost'); const restartUrl = new URL(requests[2], 'http://localhost');
     expect(restartUrl.searchParams.has('cursor')).toBe(false);
     expect(restartUrl.searchParams.get('generation')).not.toBe(firstUrl.searchParams.get('generation'));
-    expect(screen.getByRole('button', { name: /Alpine · retained/ })).toBeTruthy();
-    expect(screen.getByText(/Предыдущие результаты сохранены как неполные/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /retained.*проверить доступность этой версии/ })).toBeTruthy();
+    expect(screen.getByText(/Предыдущие результаты неполные/)).toBeTruthy();
     await act(async () => finishRestart(json(imagePage([]))));
-    expect(screen.queryByRole('button', { name: /Alpine · retained/ })).toBeNull();
-    expect(screen.getByText(/Выбранная цель.*alpine:retained/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /retained.*проверить доступность этой версии/ })).toBeNull();
+    expect(screen.getByText('registry-1.docker.io/library/alpine:retained')).toBeTruthy();
     expect(document.activeElement).toBe(screen.getByRole('status', { name: 'Состояние поиска Docker Hub' }));
   });
 
@@ -538,9 +581,9 @@ describe('cookie-session live scans', () => {
       return new Promise<ReturnType<typeof json>>(resolve => { finish = resolve; });
     }));
     mount('/scans/new');
-    const search = await screen.findByRole('searchbox');
-    fireEvent.change(search, { target: { value: 'alpine focus' } });
-    await screen.findByRole('button', { name: /Alpine · focus/ });
+    const search = await tagSearch();
+    fireEvent.change(search, { target: { value: 'focus' } });
+    await screen.findByRole('button', { name: /focus.*проверить доступность этой версии/ });
     if (quota) for (let page = 2; page <= 4; page++) {
       const more = screen.getByRole('button', { name: 'Показать ещё' }); more.focus(); await user.keyboard('{Enter}');
       await waitFor(() => expect(pageCalls).toBe(page));
@@ -563,18 +606,18 @@ describe('cookie-session live scans', () => {
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('q=new')) return json(imagePage([{ label: 'new-discovery', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }], 'b'.repeat(48)));
+      if (path.includes('q=new')) return json(imagePage([{ label: 'new-discovery', reference: 'registry-1.docker.io/library/alpine:new-result', scannable: true }], 'b'.repeat(48)));
       if (++calls === 1) return { ok: false, status: 410, json: async () => ({ errorCode: 'IMAGE_SEARCH_EXPIRED' }) };
       return pending;
     }));
-    mount('/scans/new'); const search = await screen.findByRole('searchbox');
+    mount('/scans/new'); const search = await tagSearch();
     fireEvent.change(search, { target: { value: 'old' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Начать новый поиск' }));
     await waitFor(() => expect(calls).toBe(2));
     fireEvent.change(search, { target: { value: 'new' } });
-    expect(await screen.findByRole('button', { name: /new-discovery/ })).toBeTruthy(); search.focus();
+    expect(await screen.findByRole('button', { name: /new-result.*проверить доступность/ })).toBeTruthy(); search.focus();
     await act(async () => { if (lateFailure) rejectRestart(Error('late restart')); else resolveRestart(json(imagePage([]))); });
-    expect(screen.getByRole('button', { name: /new-discovery/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /new-result.*проверить доступность/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Показать ещё' }).hasAttribute('disabled')).toBe(false);
     expect(screen.queryByRole('button', { name: 'Начать новый поиск' })).toBeNull();
     expect(document.activeElement).toBe(search);
@@ -587,9 +630,9 @@ describe('cookie-session live scans', () => {
       requests.push(path);
       return requests.length === 1 ? { ok: false, status: 503, json: async () => ({ errorCode: 'IMAGE_SEARCH_UNAVAILABLE' }) } : json(imagePage([]));
     }));
-    mount('/scans/new'); fireEvent.change(await screen.findByRole('searchbox'), { target: { value: 'nginx' } });
+    mount('/scans/new'); fireEvent.change(await tagSearch(), { target: { value: 'nginx' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Начать новый поиск' }));
-    expect(await screen.findByText('Ничего не найдено в Docker Hub.')).toBeTruthy();
+    expect(await screen.findByText('Тегов по этому фильтру нет. Измените фильтр или вернитесь к репозиториям.')).toBeTruthy();
     expect(new URL(requests[0], 'http://localhost').searchParams.get('generation')).not.toBe(new URL(requests[1], 'http://localhost').searchParams.get('generation'));
   });
   for (const lateFailure of [false, true]) it(`ignores stale ${lateFailure ? 'failure' : 'success'} when abort is ignored`, async () => {
@@ -599,20 +642,20 @@ describe('cookie-session live scans', () => {
     vi.stubGlobal('fetch', vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path.includes('q=old')) return pending;
-      return json(imagePage([{ label: 'new-result', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }], 'b'.repeat(48)));
+      return json(imagePage([{ label: 'new-result', reference: 'registry-1.docker.io/library/alpine:new-result', scannable: true }], 'b'.repeat(48)));
     }));
     mount('/scans/new');
-    const search = await screen.findByRole('searchbox');
+    const search = await tagSearch();
     fireEvent.change(search, { target: { value: 'old' } });
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([path]) => String(path).includes('q=old'))).toBe(true));
     fireEvent.change(search, { target: { value: 'new' } });
-    expect(await screen.findByRole('button', { name: /new-result/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /new-result.*проверить доступность/ })).toBeTruthy();
     await act(async () => { if (lateFailure) rejectOld(Error('late')); else resolveOld(json(imagePage([{ label: 'old-result', reference: 'registry-1.docker.io/library/alpine:old', scannable: true }]))); });
-    expect(screen.queryByRole('button', { name: /old-result/ })).toBeNull();
-    expect(screen.queryByText(/Поиск Docker Hub сейчас недоступен/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /old.*проверить доступность/ })).toBeNull();
+    expect(screen.queryByText(/Каталог недоступен/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Показать ещё' }).hasAttribute('disabled')).toBe(false);
     fireEvent.change(search, { target: { value: '' } });
-    expect(screen.queryByRole('button', { name: /new-result/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /new-result.*проверить доступность/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
   });
 
@@ -621,14 +664,14 @@ describe('cookie-session live scans', () => {
       const pending = new Promise<ReturnType<typeof json>>(resolve => { resolveOld = resolve; });
       vi.stubGlobal('fetch', vi.fn(async (path: string) => path === '/api/v1/auth/me' ? json({ id: 'alice', email: 'alice@example.com' }) : pending));
       const client = mount('/scans/new');
-      const search = await screen.findByRole('searchbox');
+      const search = await tagSearch();
       fireEvent.change(search, { target: { value: 'pending' } });
       await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([path]) => String(path).includes('q=pending'))).toBe(true));
       if (change === 'clear' || change === 'invalid') fireEvent.change(search, { target: { value: change === 'clear' ? '' : 'https://evil.example' } });
       else if (change === 'unmount') cleanup();
       else transitionScanSession(change === 'sign-out' ? null : 'bob', client);
       await act(async () => resolveOld(json(imagePage([{ label: 'stale-result', reference: 'registry-1.docker.io/library/alpine:stale', scannable: true }], 'a'.repeat(48)))));
-      expect(screen.queryByRole('button', { name: /stale-result/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /stale.*проверить доступность/ })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull();
     });
 
@@ -644,12 +687,12 @@ describe('cookie-session live scans', () => {
         return json({ ...imagePage([], null, 3), loaded: 2 });
       }));
       mount('/scans/new');
-      fireEvent.change(await screen.findByRole('searchbox'), { target: { value: 'alpine custom' } });
-      const selected = await screen.findByRole('button', { name: /Alpine · custom-one/ });
+      fireEvent.change(await tagSearch(), { target: { value: 'custom' } });
+      const selected = await screen.findByRole('button', { name: /custom-one.*проверить доступность этой версии/ });
       fireEvent.click(selected); selected.focus();
       fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
-      expect(await screen.findByRole('button', { name: /Alpine · custom-two/ })).toBeTruthy();
-      expect(screen.getAllByRole('button', { name: /Alpine · custom-one/ })).toHaveLength(1);
+      expect(await screen.findByRole('button', { name: /custom-two.*проверить доступность этой версии/ })).toBeTruthy();
+      expect(screen.getAllByRole('button', { name: /custom-one.*проверить доступность этой версии/ })).toHaveLength(1);
       expect(document.activeElement).toBe(selected);
       fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
       await waitFor(() => expect(screen.queryByRole('button', { name: 'Показать ещё' })).toBeNull());
@@ -666,18 +709,18 @@ describe('cookie-session live scans', () => {
       return json(imagePage([first], 'a'.repeat(48)));
     });
     vi.stubGlobal('fetch', fetchMock); mount('/scans/new');
-    const search = await screen.findByRole('searchbox');
-    fireEvent.change(search, { target: { value: 'alpine unique' } });
-    fireEvent.click(await screen.findByRole('button', { name: /Alpine · unique-tag/ }));
+    const search = await tagSearch();
+    fireEvent.change(search, { target: { value: 'unique' } });
+    fireEvent.click(await screen.findByRole('button', { name: /unique-tag.*проверить доступность этой версии/ }));
     expect(fetchMock.mock.calls.filter(([path]) => path.includes('/images')).length).toBe(1);
     fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
-    expect(await screen.findByText(/Поиск Docker Hub сейчас недоступен/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Alpine · unique-tag/ }).getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByText(/Выбранная цель.*unique-tag/)).toBeTruthy();
+    expect(await screen.findByText(/Каталог недоступен/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /unique-tag.*проверить доступность этой версии/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText('registry-1.docker.io/library/alpine:unique-tag')).toBeTruthy();
     fireEvent.change(search, { target: { value: 'unknown' } });
     fetchMock.mockImplementation(async (path: string) => path === '/api/v1/auth/me' ? json({ id: 'alice', email: 'alice@example.com' }) : json({ ...imagePage([first]), items: [{ ...first, eligibility: 'unknown' }] }));
-    await waitFor(() => expect(screen.getByText(/Поиск Docker Hub сейчас недоступен/)).toBeTruthy());
-    expect(screen.queryByRole('button', { name: /Alpine · unique-tag/ })).toBeNull();
+    await waitFor(() => expect(screen.getByText(/Каталог недоступен/)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /unique-tag.*проверить доступность этой версии/ })).toBeNull();
   });
   it('TASK35 GET access fence stops disconnected polling after session rejection', async () => {
     let reads = 0;
@@ -688,7 +731,7 @@ describe('cookie-session live scans', () => {
       return reads === 1 ? json({ scanId: id, state: 'running', checks: ['sbom'], perCheck: { sbom: null }, result: null }) : { ok: false, status: 401 };
     }));
     mount(`/scans/${id}`);
-    await screen.findByText(/^Оценка прогресса: ≈\d+%/);
+    await screen.findByText('Процент выполнения пока неизвестен.');
     await screen.findByText(/Не удалось получить данные скана/, {}, { timeout: 3000 });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 2100)); });
     expect(reads).toBe(2);
@@ -723,7 +766,7 @@ describe('cookie-session live scans', () => {
     mount(`/scans/${id}`);
     await waitFor(() => expect(emit).toBeTypeOf('function'));
     expect(screen.getByText('Этап: не предоставлен')).toBeTruthy();
-    expect(screen.getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
+    expect(screen.getByText('Процент выполнения пока неизвестен.')).toBeTruthy();
     const pending = screen.getByRole('list', { name: 'Проверки без подтверждённого результата' });
     expect(pending.textContent).not.toContain('Пропущено');
     expect(pending.textContent).toContain('Поиск секретов: ожидаем подтверждённый результат');
@@ -734,7 +777,7 @@ describe('cookie-session live scans', () => {
     await waitFor(() => expect(finish).toBeTypeOf('function'), { timeout: 2000 });
     act(() => { for (let index = 0; index < 20; index++) emit('scan', { scanId: id, state: 'completed', percent: null }); });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
-    expect(reads).toBe(2); expect(screen.getByText(/^Оценка прогресса: ≈\d+%/)).toBeTruthy();
+    expect(reads).toBe(2); expect(screen.getByText('Процент выполнения пока неизвестен.')).toBeTruthy();
     // SSE terminal hints cannot authorize summary availability before a confirmed GET snapshot.
     expect(fetchMock.mock.calls.filter(([path]) => path === contextUrl)).toHaveLength(0);
     expect(fetchMock.mock.calls.filter(([path, init]) => path === `${statusUrl}/llm/summary` && init?.method === 'POST')).toHaveLength(0);
@@ -811,36 +854,42 @@ describe('cookie-session live scans', () => {
     vi.stubGlobal('fetch', fetchMock);
     const client = mount('/scans');
     expect(await screen.findByText('private/alpine')).toBeTruthy();
-    expect(screen.getAllByRole('link', { name: /Новый скан/ }).some(link => link.getAttribute('href') === '/scans/new')).toBe(true);
+    expect(screen.getAllByRole('link', { name: /Новая проверка/ }).some(link => link.getAttribute('href') === '/scans/new')).toBe(true);
     expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('Authorization');
     expect(fetchMock.mock.calls.every(([, options]) => options?.credentials === 'same-origin')).toBe(true);
     cleanup();
     client.clear();
     mount(`/scans/${id}`);
-    expect(await screen.findByText(/0 находок в выполненной проверенной области/)).toBeTruthy();
+    expect(await screen.findByText(/В выполненной проверке секретов находок нет/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
     expect(screen.queryByText('Отмена недоступна в текущем состоянии.')).toBeNull();
     expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/results?view=report-v1&limit=25&sort=ruleId%3Aasc`)).toBe(true);
   });
 
-  it('shows remote Docker Hub results but does not allow unsupported repositories to launch', async () => {
+  it('lets users inspect remote repositories and tags without treating discovery as launch authority', async () => {
+    const reference = 'registry-1.docker.io/library/nginx:latest';
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path.includes('/images?q=nginx')) return json(imagePage([{ label: 'nginx', reference: 'registry-1.docker.io/library/nginx:latest', scannable: false }]));
-      if (path.includes('/images?q=alpine%203.16')) return json(imagePage([{ label: 'Alpine · 3.16.9', reference: 'registry-1.docker.io/library/alpine:3.16.9', scannable: true }]));
-      return json({ scanId: id, state: 'queued', result: null });
+      if (path.endsWith('/images/eligibility')) return json({ imageReference: reference, eligible: false, eligibility: 'unsupported', allowedCheckSets: [], reason: 'UNSUPPORTED_SCAN' });
+      const url = new URL(path, window.location.origin);
+      if (url.pathname.endsWith('/images')) {
+        const page = imagePage([{ label: 'nginx', reference, scannable: false }]);
+        return json({ ...page, items: page.items.map(item => ({ ...item,
+          kind: url.searchParams.has('repository') ? 'tag' : 'repository', tagConfirmed: url.searchParams.has('repository') })) });
+      }
+      throw new Error(`Unexpected discovery request: ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    mount('/scans/new');
-    const search = await screen.findByRole('searchbox', { name: 'Поиск по доступным образам' });
-    fireEvent.change(search, { target: { value: 'nginx' } });
-    const nginx = await screen.findByRole('button', { name: /nginx.*сканирование пока недоступно/ });
-    expect(nginx.hasAttribute('disabled')).toBe(true);
-    fireEvent.change(search, { target: { value: 'Alpine 3.16' } });
-    const alpine = await screen.findByRole('button', { name: /Alpine · 3.16.9/ });
-    expect(alpine.hasAttribute('disabled')).toBe(false);
-    fireEvent.click(alpine);
-    expect(screen.getByText(/Выбранная цель.*registry-1.docker.io\/library\/alpine:3.16.9/)).toBeTruthy();
+    mount('/scans/new', true);
+    fireEvent.change(await screen.findByRole('searchbox', { name: 'Репозиторий Docker Hub' }), { target: { value: 'nginx' } });
+    fireEvent.click(await screen.findByRole('button', { name: /library\/nginx.*Выбрать версию/ }));
+    expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/images/eligibility'))).toBe(false);
+    fireEvent.click(await screen.findByRole('button', { name: /latest.*проверить доступность/ }));
+    await screen.findByText(/Запуск недоступен: образ или набор проверок не поддерживается/);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
+    expect(screen.getByRole('button', { name: 'Запустить проверку' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText(reference)).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/browser/scans')).toBe(false);
   });
 
   for (const tag of ['3.16.9', '3.21.3']) it(`submits server-discovered Alpine ${tag} outside presets, retaining selection after pagination failure`, async () => {
@@ -860,16 +909,16 @@ describe('cookie-session live scans', () => {
       return json({ scanId: id, state: 'queued', result: null });
     }));
     mount('/scans/new');
-    fireEvent.change(await screen.findByRole('searchbox'), { target: { value: `alpine ${tag}` } });
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(`Alpine · ${tag.replaceAll('.', '\\.')}`) }));
+    fireEvent.change(await tagSearch(), { target: { value: tag } });
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(`${tag.replaceAll('.', '\\.')}`) }));
     fireEvent.click(screen.getByRole('button', { name: 'Показать ещё' }));
-    await screen.findByText(/Поиск Docker Hub сейчас недоступен/);
+    await screen.findByText(/Каталог недоступен/);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await launchScan();
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toEqual({ imageReference: reference, scope: 'image', checks: ['secret'], idempotencyKey: expect.any(String) });
     expect(posts[0].idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
-    expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Результат проверки образа' })).toBeTruthy();
   });
 
   it('selects the verified old Alpine digest without substituting a mutable tag', async () => {
@@ -880,12 +929,13 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount('/scans/new');
-    fireEvent.change(await screen.findByRole('searchbox', { name: 'Поиск по доступным образам' }), { target: { value: '3.16' } });
-    fireEvent.click(screen.getByRole('button', { name: /Alpine · 3.16/ }));
-    expect(screen.getByText(/локальная DB нашла 4 CVE/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('checkbox', { name: /CVE · доступно/ }));
+    await screen.findByRole('form', { name: 'Параметры скана' });
+    fireEvent.click(screen.getByRole('button', { name: /Alpine 3.16 · точная сборка/ }));
+    await screen.findByText('Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.');
+    expect(document.body.textContent).not.toContain('нашла 4 CVE');
+    fireEvent.click(screen.getByRole('checkbox', { name: /Уязвимости ·/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await launchScan();
     await waitFor(() => expect(fetchMock.mock.calls.some(([path, options]) => path === '/api/v1/browser/scans' && options?.method === 'POST')).toBe(true));
     const request = fetchMock.mock.calls.find(([path, options]) => path === '/api/v1/browser/scans' && options?.method === 'POST');
     expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({ imageReference: 'registry-1.docker.io/library/alpine@sha256:0db9d004361b106932f8c7632ae54d56e92c18281e2dd203127d77405020abf6', scope: 'image', checks: ['secret', 'vuln'] });
@@ -899,21 +949,17 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount('/scans/new');
-    const button = await screen.findByRole('button', { name: 'Запустить скан' });
+    const button = await screen.findByRole('button', { name: 'Запустить проверку' });
     expect(button.hasAttribute('disabled')).toBe(true);
-    const search = screen.getByRole('searchbox', { name: 'Поиск по доступным образам' });
-    fireEvent.change(search, { target: { value: 'ubuntu' } });
-    expect(screen.queryByRole('button', { name: /Alpine · 3.21/ })).toBeNull();
+    expect(screen.getByLabelText('Адрес образа в Docker Hub')).toHaveProperty('value', '');
+    await selectAlpine();
     expect(button.hasAttribute('disabled')).toBe(true);
-    fireEvent.change(search, { target: { value: '3.21' } });
-    fireEvent.click(screen.getByRole('button', { name: /Alpine · 3.21/ }));
-    expect(screen.queryByRole('button', { name: /Alpine · latest/ })).toBeNull();
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(button);
+    await launchScan();
     await waitFor(() => expect(fetchMock.mock.calls.some(([path, options]) => path === '/api/v1/browser/scans' && options?.method === 'POST')).toBe(true));
     const post = fetchMock.mock.calls.find(([path]) => path === '/api/v1/browser/scans');
     expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({ imageReference: 'registry-1.docker.io/library/alpine:3.21', scope: 'image', checks: ['secret'] });
-    expect(await screen.findByText(/ID \/ 00000000/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Результат проверки образа' })).toBeTruthy();
     await waitFor(() => expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}`)).toBe(true));
     expect(fetchMock.mock.calls.every(([path]) => !path.startsWith('/api/v1/scans'))).toBe(true);
   });
@@ -926,17 +972,18 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount('/scans/new');
-    fireEvent.click(await screen.findByRole('button', { name: /Alpine · 3.21/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /Secrets · проверка образа/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ }));
-    expect(screen.getByRole('checkbox', { name: /CVE · доступно/ }).hasAttribute('disabled')).toBe(false);
+    await selectAlpine();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Возможные секреты ·/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Состав образа ·/ }));
+    expect(screen.getByRole('checkbox', { name: /Уязвимости ·/ }).hasAttribute('disabled')).toBe(false);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await launchScan();
     await waitFor(() => expect(fetchMock.mock.calls.some(([path, options]) => path === '/api/v1/browser/scans' && options?.method === 'POST')).toBe(true));
     const body = JSON.parse(String(fetchMock.mock.calls.find(([path]) => path === '/api/v1/browser/scans')?.[1]?.body));
     expect(body).toMatchObject({ checks: ['sbom'], scope: 'image' });
     expect(typeof body.idempotencyKey).toBe('string');
-    expect(await screen.findByText(/Тип проверки пока не указан/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Результат проверки образа' })).toBeTruthy();
+    expect(await screen.findAllByText('Неизвестно, запрашивалось ли')).toHaveLength(4);
     expect(fetchMock.mock.calls.some(([path]) => path.includes('/sbom?') || path.includes('/results?'))).toBe(false);
   });
   it('submits all checks canonically and reports missing CVE DB as unavailable', async () => {
@@ -950,21 +997,21 @@ describe('cookie-session live scans', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new');
-    fireEvent.click(await screen.findByRole('button', { name: /Alpine · 3.21/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /CVE · доступно/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ }));
-    expect(screen.getByRole('checkbox', { name: /Host · отдельный opt-in не подключён/ }).hasAttribute('disabled')).toBe(true);
+    await selectAlpine();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Уязвимости ·/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Состав образа ·/ }));
+    expect(screen.queryByRole('checkbox', { name: /Host|хост/i })).toBeNull();
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await launchScan();
     await waitFor(() => expect(posts).toEqual([['secret', 'sbom', 'vuln']]));
-    expect((await within(screen.getByRole('form', { name: 'Параметры скана' })).findByRole('alert')).textContent).toMatch(/база уязвимостей не настроена или недоступна/);
+    expect((await within(screen.getByRole('form', { name: 'Параметры скана' })).findByRole('alert')).textContent).toMatch(/Сервис проверки или хранилище образов сейчас недоступны/);
     expect(screen.queryByText(/0 CVE/)).toBeNull();
   });
   it('renders independent partial outcomes and paginates subject-scoped CVE findings', async () => {
     const secret = { check: 'secret', coverage: 'image', outcome: 'checked', findingCount: 0, scannerVersion: '0.69.3', errorCode: null };
     const failedSbom = { check: 'sbom', coverage: 'image', outcome: 'failed', errorCode: 'SCAN_TIMEOUT' };
     const checkedVuln = { check: 'vuln', coverage: 'image', outcome: 'checked', findingCount: 6, scannerVersion: '0.69.3', checkedAt: 'today' };
-    const finding = (n: number) => ({ findingId: `vuln-${n}`, cveId: `CVE-2026-${n}`, ecosystem: 'apk', packageName: 'busybox', installedVersion: '1', severity: 'HIGH', fixedVersion: null });
+    const finding = (n: number) => ({ findingId: `vuln-${n}`, cveId: `CVE-2026-${String(n).padStart(4, '0')}`,  ecosystem: 'apk', packageName: 'busybox', installedVersion: '1', severity: 'HIGH', fixedVersion: null });
     const fetchMock = vi.fn(async (path: string) => {
       if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
       if (path.includes('/results?')) return json(reportPage(path, { findings: [], nextCursor: null, coverage: secret }));
@@ -974,13 +1021,13 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount(`/scans/${id}`);
-    await expectCve('CVE-2026-1');
-    expect(screen.getByText(/SBOM не проверен: SCAN_TIMEOUT/)).toBeTruthy();
-    expect(screen.getByText(/Находок в проверенной области: 6/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Строк на странице · CVE'), { target: { value: '5' } });
+    await expectCve('CVE-2026-0001');
+    expect(screen.getByText(/Состав образа не проверен. Число пакетов неизвестно/)).toBeTruthy();
+    expect(screen.getByText('Совпадений во всём отчёте Уязвимости: 6')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Строк на странице · Уязвимости'), { target: { value: '5' } });
     await screen.findByText('Строки 1–5');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
-    await expectCve('CVE-2026-6');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
+    await expectCve('CVE-2026-0006');
     expect(fetchMock.mock.calls.some(([path]) => path === `/api/v1/browser/scans/${id}/vuln?view=report-v1&limit=5&sort=severity%3Adesc&cursor=fixture%3A5`)).toBe(true);
   });
   it.each(['partial', 'failed'])('renders DB_UNAVAILABLE and unknown CVE count for %s and remount', async state => {
@@ -995,7 +1042,7 @@ describe('cookie-session live scans', () => {
     }));
     for (let visit = 0; visit < 2; visit++) {
       mount(`/scans/${id}`);
-      expect(await screen.findByText(/CVE не проверены: DB_UNAVAILABLE/)).toBeTruthy();
+      expect(await screen.findByText('Не удалось проверить уязвимости')).toBeTruthy();
       expect(screen.getByText(/Число уязвимостей неизвестно/)).toBeTruthy();
       expect(screen.queryByText(/Находок в проверенной области:/)).toBeNull();
       cleanup();
@@ -1009,9 +1056,9 @@ describe('cookie-session live scans', () => {
       return json({ scanId: id, state: 'completed', digest, platform: 'linux/amd64', checks: ['vuln'], perCheck: { vuln: checkedVuln }, result: checkedVuln });
     }));
     mount(`/scans/${id}`);
-    expect(await screen.findByText(/Идентичность или версия отчёта изменилась/)).toBeTruthy();
-        expect(screen.queryByText(/Полный итог CVE/)).toBeNull();
-        expect(screen.queryByRole('navigation', { name: /Пагинация CVE/ })).toBeNull();
+    expect(await screen.findByText(/Прежние данные скрыты/)).toBeTruthy();
+        expect(screen.queryByText(/Полный итог Уязвимости/)).toBeNull();
+        expect(screen.queryByRole('navigation', { name: /Пагинация Уязвимости/ })).toBeNull();
     expect(screen.queryByText(/Находок в проверенной области:/)).toBeNull();
   });
   it('does not call a 503 CVE response a clean result', async () => {
@@ -1022,9 +1069,9 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount(`/scans/${id}`);
-    expect(await screen.findByText(/Не удалось подтвердить страницу CVE/)).toBeTruthy();
-        expect(screen.getByText('Число CVE неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
-        expect(screen.getByRole('button', { name: 'Повторить загрузку CVE' })).toBeTruthy();
+    expect(await screen.findByText(/Не удалось подтвердить страницу Уязвимости/)).toBeTruthy();
+        expect(screen.getByText('Число Уязвимости неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' })).toBeTruthy();
     expect(screen.queryByText(/Находок в проверенной области:/)).toBeNull();
   });
   it('rotates the attempt key on check change after a rejected request', async () => {
@@ -1038,14 +1085,14 @@ describe('cookie-session live scans', () => {
       return json({ scans: [], nextCursor: null });
     }));
     mount('/scans/new');
-    fireEvent.click(await screen.findByRole('button', { name: /Alpine · 3.21/ }));
+    await selectAlpine();
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await launchScan();
     await waitFor(() => expect(posts).toHaveLength(1));
-    fireEvent.click(screen.getByRole('checkbox', { name: /SBOM · перечень пакетов/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Состав образа ·/ }));
     expect(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }).hasAttribute('checked')).toBe(false);
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
+    await launchScan();
     await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts.map(post => post.checks)).toEqual([['secret'], ['secret', 'sbom']]);
     expect(posts[1].idempotencyKey).not.toBe(posts[0].idempotencyKey);
@@ -1062,15 +1109,15 @@ describe('cookie-session live scans', () => {
     const client = mount(`/scans/${id}`);
     expect(await screen.findByText('busybox')).toBeTruthy();
     expect(screen.getByText(/ОС alpine 3.21/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Строк на странице · SBOM'), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText('Строк на странице · Пакеты'), { target: { value: '5' } });
     await screen.findByText('Строки 1–5');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · SBOM · сверху' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Пакеты · сверху' }));
     expect(await screen.findByText('musl')).toBeTruthy();
     expect(screen.getByText('Строки 6–6')).toBeTruthy();
     expect(fetchMock.mock.calls.some(([path]) => path.includes('/results?'))).toBe(false);
     failed = true;
     await client.invalidateQueries({ queryKey: ['live-scans'] });
-    expect(await screen.findByText(/SBOM не проверен/)).toBeTruthy();
+    expect(await screen.findByText(/Состав образа не проверен/)).toBeTruthy();
     expect(screen.queryByText('musl')).toBeNull();
     expect(document.body.textContent).not.toContain('0 CVE');
   });
@@ -1083,10 +1130,12 @@ describe('cookie-session live scans', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     mount('/scans/new');
-    fireEvent.click(await screen.findByRole('button', { name: /Alpine · 3.21/ }));
+    await selectAlpine();
     fireEvent.click(screen.getByRole('checkbox', { name: /Подтверждаю выбранную цель/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Запустить скан' }));
-    await waitFor(() => expect(within(screen.getByRole('form', { name: 'Параметры скана' })).getByRole('alert')).toHaveProperty('textContent', 'Сервер отклонил цель или параметры сканирования. Скан не создан.'));
+    await launchScan();
+    const error = await within(screen.getByRole('form', { name: 'Параметры скана' })).findByRole('alert');
+    expect(error.querySelector('p')?.textContent).toBe('Сервер отклонил цель или параметры сканирования. Скан не создан.');
+    expect(within(error).getByRole('link', { name: 'Проверить список перед повтором' }).getAttribute('href')).toBe('/scans');
   });
 
   it('shows logout on real scans, revokes the server cookie and clears private cache without opening account', async () => {
@@ -1099,7 +1148,7 @@ describe('cookie-session live scans', () => {
     vi.stubGlobal('fetch', fetchMock);
     const client = mount('/scans');
     expect(await screen.findByText('private/alpine')).toBeTruthy();
-    const privateKey = client.getQueryCache().findAll({ queryKey: ['live-scans'] })[0].queryKey;
+    const privateKey = retainPrivateCache(client);
     fireEvent.click(screen.getByRole('button', { name: 'Выйти' }));
     expect(await screen.findByRole('heading', { name: 'Вход' })).toBeTruthy();
     expect(fetchMock.mock.calls.some(([path, options]) => path === '/api/v1/auth/logout' && options?.method === 'POST')).toBe(true);
@@ -1116,7 +1165,7 @@ describe('cookie-session live scans', () => {
     vi.stubGlobal('fetch', fetchMock);
     const client = mount('/scans');
     expect(await screen.findByText('private/alpine')).toBeTruthy();
-    const privateKey = client.getQueryCache().findAll({ queryKey: ['live-scans'] })[0].queryKey;
+    const privateKey = retainPrivateCache(client);
     valid = false;
     await client.invalidateQueries({ queryKey: ['demo-auth', 'me'] });
     expect(await screen.findByText(/Для доступа к сканам/)).toBeTruthy();
@@ -1157,7 +1206,7 @@ describe('cookie-session live scans', () => {
     vi.stubGlobal('fetch', fetchMock);
     const client = mount('/scans');
     expect(await screen.findByText('alice')).toBeTruthy();
-    const previous = client.getQueryCache().findAll({ queryKey: ['live-scans'] })[0].queryKey;
+    const previous = retainPrivateCache(client);
     subject = 'bob';
     await client.invalidateQueries({ queryKey: ['demo-auth', 'me'] });
     expect(await screen.findByText('bob')).toBeTruthy();
@@ -1166,15 +1215,17 @@ describe('cookie-session live scans', () => {
   });
 
   it('clears live caches on logout and subject change', async () => {
+    let loggedIn = true;
     const fetchMock = vi.fn(async (path: string, options?: RequestInit) => {
       void options;
-      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
-      if (path === '/api/v1/auth/logout') return json({});
+      if (path === '/api/v1/auth/me') return loggedIn ? json({ id: 'alice', email: 'alice@example.com' }) : { ok: false, status: 401 };
+      if (path === '/api/v1/auth/logout') { loggedIn = false; return json({}); }
       return json({ scans: [row], nextCursor: null });
     });
     vi.stubGlobal('fetch', fetchMock);
     const client = mount('/scans');
     expect(await screen.findByText('private/alpine')).toBeTruthy();
+    retainPrivateCache(client);
     const old = client.getQueryCache().findAll({ queryKey: ['live-scans'] });
     expect(old.length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('link', { name: 'Аккаунт' }));
@@ -1237,7 +1288,13 @@ describe('durable cancellation detail', () => {
     await screen.findByText('ID: saved-secret', {}, { timeout: 3000 });
     expect(screen.getByText(/Сканирование отменено\. Сохранены результаты завершённых проверок/)).toBeTruthy();
     expect(screen.getByText('Скан отменён; realtime остановлен')).toBeTruthy();
-    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(2);
+    const missing = screen.getByRole('list', { name: 'Проверки без подтверждённого результата', hidden: true });
+    expect(within(missing).getAllByRole('listitem', { hidden: true }).map(item => item.textContent)).toEqual([
+      'Состав пакетов (SBOM): завершение не подтверждено; сохранённого результата нет',
+      'Уязвимости: завершение не подтверждено; сохранённого результата нет',
+    ]);
+    expect(screen.getByText('Состав пакетов не сохранён до отмены. Число пакетов неизвестно.')).toBeTruthy();
+    expect(screen.getByText('Уязвимости: завершённый результат не сохранён. Число уязвимостей неизвестно.')).toBeTruthy();
     expect(screen.queryByText(/без публикации промежуточных результатов/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Отменить скан' })).toBeNull();
     await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
@@ -1258,7 +1315,11 @@ describe('durable cancellation detail', () => {
     }));
     const client = mount(`/scans/${id}`);
     await screen.findByText(/Сканирование отменено\. Сохранённых результатов завершённых проверок нет/);
-    expect(screen.getAllByText(/завершённый результат не сохранён/)).toHaveLength(3);
+    const missing = screen.getByRole('list', { name: 'Проверки без подтверждённого результата', hidden: true });
+    expect(within(missing).getAllByRole('listitem', { hidden: true })).toHaveLength(3);
+    expect(missing.textContent).toContain('Поиск секретов: завершение не подтверждено; сохранённого результата нет');
+    expect(missing.textContent).toContain('Состав пакетов (SBOM): завершение не подтверждено; сохранённого результата нет');
+    expect(missing.textContent).toContain('Уязвимости: завершение не подтверждено; сохранённого результата нет');
     expect(screen.queryByText(/Полный итог|0 CVE|0 находок/)).toBeNull();
     cleanup(); client.clear();
   });
@@ -1296,12 +1357,12 @@ describe('Stage2 unified Findings detail', () => {
     }));
     mount(`/scans/${id}`);
     const row = await expectCve('CVE-2026-1234');
-    fireEvent.click(row.getByText('Подробности CVE-2026-1234 · описание, CVSS и ссылки'));
-    const findings = screen.getByRole('region', { name: 'Отчёт' });
-    expect(screen.getAllByRole('heading', { name: 'Отчёт' })).toHaveLength(1);
+    fireEvent.click(row.getByText('Подробности · описание уязвимости и источники'));
+    const findings = screen.getByRole('region', { name: 'Находки и исправления' });
+    expect(screen.getAllByRole('heading', { name: 'Находки и исправления' })).toHaveLength(1);
     expect(within(findings).getAllByText(/Bounds 1 < 2 & comparison/)).toHaveLength(2);
     expect(within(findings).getAllByText(/Язык источника: не указан/)).toHaveLength(2);
-    expect(within(findings).getByText(/Источники расходятся: severity/)).toBeTruthy();
+    expect(within(findings).getByText(/Поля с расхождениями: severity/)).toBeTruthy();
     expect(within(findings).getAllByText(/оценка источника: 0/)).toHaveLength(2);
     expect(within(findings).getAllByText(/Текст сокращён/)).toHaveLength(2);
     expect(within(findings).getByText(/наличие записи и её содержимое не проверены/)).toBeTruthy();
@@ -1334,29 +1395,29 @@ describe('Stage2 unified Findings detail', () => {
     }));
     mount(`/scans/${id}`);
     await expectCve('CVE-2026-0001');
-    await screen.findByText('secret-rule-1');
-    for (const [label, region] of [['CVE', 'Результаты CVE'], ['Secrets', 'Результаты Secrets']]) {
+    await screen.findByText(/Правило: secret-rule-1 ·/);
+    for (const [label, region] of [['Уязвимости', 'Результаты Уязвимости'], ['Возможные секреты', 'Возможные секреты']]) {
       fireEvent.change(screen.getByLabelText(`Строк на странице · ${label}`), { target: { value: '50' } });
       await within(screen.getByRole('region', { name: region })).findByText('Строки 1–50');
     }
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
     await expectCve('CVE-2026-0051');
-    expect(screen.getByText('secret-rule-1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets · сверху' }));
-    await screen.findByText('secret-rule-51');
+    expect(screen.getByText(/Правило: secret-rule-1 ·/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Возможные секреты · сверху' }));
+    await screen.findByText(/Правило: secret-rule-51 ·/);
     const beforeFilter = requests.length;
-    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'cve' } });
-    expect(screen.queryByRole('region', { name: 'Результаты Secrets' })).toBeNull();
-    expect(screen.getByRole('region', { name: 'Результаты CVE' })).toBeTruthy();
-    expect(screen.getByText('CVE-2026-0051', { selector: '.scan-vuln-row__id' })).toBeTruthy();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'secret' } });
-    expect(screen.queryByRole('region', { name: 'Результаты CVE' })).toBeNull();
-    expect(screen.getByRole('region', { name: 'Результаты Secrets' })).toBeTruthy();
-    expect(screen.getByText('secret-rule-51')).toBeTruthy();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'all' } });
-    expect(screen.getByText('CVE-2026-0051', { selector: '.scan-vuln-row__id' })).toBeTruthy();
-    expect(screen.getByText('Полный итог CVE: 51')).toBeTruthy();
-    expect(screen.getByText('Полный итог Secrets: 52')).toBeTruthy();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Показать находки' }), { target: { value: 'cve' } });
+    expect(screen.queryByRole('region', { name: 'Возможные секреты' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Результаты Уязвимости' })).toBeTruthy();
+    expect(screen.getByText('CVE-2026-0051', { selector: '.scan-vuln-row__headline > span' })).toBeTruthy();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Показать находки' }), { target: { value: 'secret' } });
+    expect(screen.queryByRole('region', { name: 'Результаты Уязвимости' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Возможные секреты' })).toBeTruthy();
+    expect(screen.getByText(/Правило: secret-rule-51 ·/)).toBeTruthy();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Показать находки' }), { target: { value: 'all' } });
+    expect(screen.getByText('CVE-2026-0051', { selector: '.scan-vuln-row__headline > span' })).toBeTruthy();
+    expect(screen.getByText('Совпадений во всём отчёте Уязвимости: 51')).toBeTruthy();
+    expect(screen.getByText('Совпадений во всём отчёте Возможные секреты: 52')).toBeTruthy();
     expect(document.body.textContent).not.toContain('103');
     expect(requests).toHaveLength(beforeFilter);
   });
@@ -1370,8 +1431,8 @@ describe('Stage2 unified Findings detail', () => {
     }));
     mount(`/scans/${id}`);
     await expectCve('CVE-2026-0001');
-    await screen.findByText('Полный итог Secrets: 0');
-    expect(screen.getByText(/0 находок в выполненной проверенной области Secrets/)).toBeTruthy();
+    await screen.findByText('Совпадений во всём отчёте Возможные секреты: 0');
+    expect(screen.getByText(/В выполненной проверке секретов находок нет/)).toBeTruthy();
     expect(screen.getByText(/исторический отчёт без advisory/)).toBeTruthy();
     expect(screen.queryByRole('link', { name: /FIRST/ })).toBeNull();
   });
@@ -1386,13 +1447,13 @@ describe('Stage2 unified Findings detail', () => {
     }));
     mount(`/scans/${id}`);
     await expectCve('CVE-2026-0001');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
-    await within(screen.getByRole('region', { name: 'Результаты CVE' })).findByText(/Показана предыдущая подтверждённая страница/);
-    expect(screen.getByText('Полный итог CVE: 51')).toBeTruthy();
-    expect(screen.getByText('secret-rule-1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets · сверху' }));
-    await within(screen.getByRole('region', { name: 'Результаты Secrets' })).findByText(/Показана предыдущая подтверждённая страница/);
-    expect(screen.getByText('Полный итог Secrets: 52')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
+    await within(screen.getByRole('region', { name: 'Результаты Уязвимости' })).findByText(/Показана предыдущая подтверждённая страница/);
+    expect(screen.getByText('Совпадений во всём отчёте Уязвимости: 51')).toBeTruthy();
+    expect(screen.getByText(/Правило: secret-rule-1 ·/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Возможные секреты · сверху' }));
+    await within(screen.getByRole('region', { name: 'Возможные секреты' })).findByText(/Показана предыдущая подтверждённая страница/);
+    expect(screen.getByText('Совпадений во всём отчёте Возможные секреты: 52')).toBeTruthy();
   });
 
   it('keeps unknown schema and nonchecked Secrets outcomes unknown, with no raw fallback', async () => {
@@ -1405,10 +1466,10 @@ describe('Stage2 unified Findings detail', () => {
             return json({ ...snapshot, perCheck: { ...snapshot.perCheck, secret: failed } });
     }));
     mount(`/scans/${id}`);
-    await within(await screen.findByRole('region', { name: 'Результаты CVE' })).findByText(/Прежние данные и cursors сброшены/);
-    expect(screen.getByText('Число Secrets неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
+    await within(await screen.findByRole('region', { name: 'Результаты Уязвимости' })).findByText(/Прежние данные скрыты/);
+    expect(screen.getByText('Число Возможные секреты неизвестно до подтверждения выполненной проверки.')).toBeTruthy();
     expect(document.body.textContent).not.toContain('DO_NOT_RENDER_RAW');
-    expect(screen.queryByText(/Полный итог CVE:|Полный итог Secrets:/)).toBeNull();
+    expect(screen.queryByText(/Совпадений во всём отчёте Уязвимости:|Совпадений во всём отчёте Возможные секреты:/)).toBeNull();
     expect(screen.queryByText(/0 находок/)).toBeNull();
   });
 
@@ -1435,13 +1496,13 @@ describe('Stage2 unified Findings detail', () => {
       <Routes><Route path="/scans/:scanId" element={<LiveScanSession><ScanDetailPage /></LiveScanSession>} /></Routes>
     </MemoryRouter></QueryClientProvider>);
     await expectCve('CVE-2026-0001');
-    fireEvent.change(screen.getByLabelText('Строк на странице · Secrets'), { target: { value: '50' } });
-    await within(screen.getByRole('region', { name: 'Результаты Secrets' })).findByText('Строки 1–50');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · Secrets · сверху' }));
-    await screen.findByText('secret-rule-51');
-    fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
+    fireEvent.change(screen.getByLabelText('Строк на странице · Возможные секреты'), { target: { value: '50' } });
+    await within(screen.getByRole('region', { name: 'Возможные секреты' })).findByText('Строки 1–50');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Возможные секреты · сверху' }));
+    await screen.findByText(/Правило: secret-rule-51 ·/);
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
     await waitFor(() => expect(finish).toBeTypeOf('function'));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Категория' }), { target: { value: 'secret' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Показать находки' }), { target: { value: 'secret' } });
     changed = true;
     const boundary = requests.length;
     if (change === 'route') fireEvent.click(screen.getByRole('link', { name: 'Другой скан' }));
@@ -1450,14 +1511,14 @@ describe('Stage2 unified Findings detail', () => {
       transitionScanSession(subject, client, change === 'session');
       client.setQueryData(['demo-auth', 'me'], { id: subject, email: `${subject}${change === 'session' ? '+renewed' : ''}@example.com` });
     });
-    await screen.findByText('Полный итог CVE: 1');
-    expect((screen.getByRole('combobox', { name: 'Категория' }) as HTMLSelectElement).value).toBe('all');
-    expect(screen.getByText('secret-rule-1')).toBeTruthy();
+    await screen.findByText('Совпадений во всём отчёте Уязвимости: 1');
+    expect((screen.getByRole('combobox', { name: 'Показать находки' }) as HTMLSelectElement).value).toBe('all');
+    expect(screen.getByText(/Правило: secret-rule-1 ·/)).toBeTruthy();
     await act(async () => finish(json(vulnPage(pendingPath))));
-    expect(screen.queryByText('CVE-2026-0026', { selector: '.scan-vuln-row__id' })).toBeNull();
-    expect(screen.queryByText('secret-rule-51')).toBeNull();
-    expect(screen.getByText('Полный итог CVE: 1')).toBeTruthy();
-    expect(screen.queryByRole('navigation', { name: /Пагинация CVE/ })).toBeNull();
+    expect(screen.queryByText('CVE-2026-0026', { selector: '.scan-vuln-row__headline > span' })).toBeNull();
+    expect(screen.queryByText(/Правило: secret-rule-51 ·/)).toBeNull();
+    expect(screen.getByText('Совпадений во всём отчёте Уязвимости: 1')).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: /Пагинация Уязвимости/ })).toBeNull();
     expect(requests.slice(boundary).some(path => path.includes('cursor='))).toBe(false);
   });
 });

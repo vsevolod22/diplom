@@ -318,7 +318,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                   <div><dt>ID сканирования</dt><dd>ID / {scanId}</dd></div>
                   </dl>
                 </details>
-                {!staleSnapshot ? <ScanStatusAnnouncement scan={scan.data} /> : null}
+
                 {!demo && scan.data.state === 'cancelled' ? (
                   <Alert tone="neutral">
                     {liveCoverage?.length
@@ -416,6 +416,10 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
             </div>
           ) : null}
         </div>
+        {/* Keep transition history outside statusDetails, which moves after findings at completion. */}
+        {showSnapshot && !staleSnapshot && scan.data ? (
+          <ScanStatusAnnouncement key={JSON.stringify([demo, scope, scanId])} scan={scan.data} />
+        ) : null}
         {!enabled ? (
           <Alert tone="neutral">
             Деталь недоступна без защищённой авторизованной сессии; scanId в адресе не подтверждает доступ.

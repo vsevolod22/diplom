@@ -20,10 +20,11 @@ it('renders Russian report-control labels while preserving every option value an
     <SbomReportControls query={{ view: 'report-v1' }} disabled={false} onChange={onSbom} />
     <SecretReportControls query={{ view: 'report-v1' }} disabled={false} onChange={onSecret} />
   </>);
+  for (const toggle of screen.getAllByText(/^Фильтры и сортировка ·/)) fireEvent.click(toggle);
   const cases = [
     { label: 'CVE', change: onVuln, sorts: [['severity:desc', 'Сначала критические'], ['severity:asc', 'Сначала низкие']] },
-    { label: 'SBOM', change: onSbom, sorts: [['name:asc', 'Имя: А → Я'], ['name:desc', 'Имя: Я → А'], ['ecosystem:asc', 'Экосистема: А → Я'], ['ecosystem:desc', 'Экосистема: Я → А']] },
-    { label: 'Secrets', change: onSecret, sorts: [['ruleId:asc', 'Правило: А → Я'], ['ruleId:desc', 'Правило: Я → А'], ['line:asc', 'Строка: по возрастанию'], ['line:desc', 'Строка: по убыванию']] },
+    { label: 'Пакеты', change: onSbom, sorts: [['name:asc', 'Имя: А → Я'], ['name:desc', 'Имя: Я → А'], ['ecosystem:asc', 'Экосистема: А → Я'], ['ecosystem:desc', 'Экосистема: Я → А']] },
+    { label: 'Возможные секреты', change: onSecret, sorts: [['ruleId:asc', 'Правило: А → Я'], ['ruleId:desc', 'Правило: Я → А'], ['line:asc', 'Строка: по возрастанию'], ['line:desc', 'Строка: по убыванию']] },
   ];
   for (const { label, change, sorts } of cases) {
     const sort = screen.getByLabelText(`Сортировка · ${label}`);
@@ -39,23 +40,23 @@ it('renders Russian report-control labels while preserving every option value an
       expect(change).toHaveBeenLastCalledWith({ view: 'report-v1', limit: Number(value) });
     }
   }
-  const severity = screen.getByLabelText('Уровень опасности (severity) · CVE');
+  const severity = screen.getByLabelText('Уровень опасности · CVE');
   const severities = [
     ['', 'Все уровни опасности'],
-    ['HIGH,CRITICAL', 'Высокие и критические (HIGH + CRITICAL)'],
-    ['UNKNOWN', 'Не определён (UNKNOWN)'],
-    ['LOW', 'Низкий (LOW)'],
-    ['MEDIUM', 'Средний (MEDIUM)'],
-    ['HIGH', 'Высокий (HIGH)'],
-    ['CRITICAL', 'Критический (CRITICAL)'],
+    ['HIGH,CRITICAL', 'Высокие и критические'],
+    ['UNKNOWN', 'Не определён'],
+    ['LOW', 'Низкий'],
+    ['MEDIUM', 'Средний'],
+    ['HIGH', 'Высокий'],
+    ['CRITICAL', 'Критический'],
   ];
   expect(within(severity).getAllByRole('option').map(option => [(option as HTMLOptionElement).value, option.textContent])).toEqual(severities);
   for (const [value] of severities) {
     fireEvent.change(severity, { target: { value } });
     expect(onVuln).toHaveBeenLastCalledWith({ view: 'report-v1', severity: value ? value.split(',') : null });
   }
-  fireEvent.click(screen.getByRole('button', { name: 'Высокие и критические (HIGH + CRITICAL)' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Высокие и критические' }));
   expect(onVuln).toHaveBeenLastCalledWith({ view: 'report-v1', severity: ['HIGH', 'CRITICAL'] });
-  expect(screen.getByText('Находки с неизвестным уровнем опасности — в конце списка.')).toBeVisible();
+  expect(screen.getByText(/Находки с неизвестным уровнем опасности — в конце списка/)).toBeVisible();
   expect(screen.queryByText(/\/page/)).not.toBeInTheDocument();
 });

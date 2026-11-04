@@ -1,9 +1,10 @@
 import '@testing-library/jest-dom/vitest';
 import userEvent from '@testing-library/user-event';
 import { QueryClient } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ScanChatPanel } from '@/features/scans/ScanChatPanel';
+import type { ReportSourceNavigate } from '@/features/scans/reportSourceNavigation';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
 import {
   readReportPreferences,
@@ -36,7 +37,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
-function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher) {
+function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher, onNavigateSource?: ReportSourceNavigate) {
   const transport = sourceTransport();
   const client = createChatClient(scanSession(), fetcher);
   return {
@@ -46,7 +47,7 @@ function mount(api = chatApi(), fetcher: typeof fetch = api.fetcher) {
     view: render(
       <>
         <p>Исходный отчёт · UNKNOWN coverage · findings сохранны</p>
-        <ScanChatPanel status={status} transport={transport} client={client} />
+        <ScanChatPanel status={status} transport={transport} client={client} onNavigateSource={onNavigateSource} />
       </>,
     ),
   };
@@ -194,14 +195,14 @@ it('uses the current question without a consent checkbox, submits once, verifies
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByText(/Последний ответ: входных токенов 100/);
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
-  expect(screen.getByText('Источники (1)').closest('details')).not.toHaveAttribute('open');
-  expect(screen.getByText(/Источник текущего отчёта/)).not.toBeVisible();
-  fireEvent.click(screen.getByText('Источники (1)'));
-  const details = screen.getByText('Источники (1)').closest('details')!;
+  const sources = screen.getByLabelText('Источники ответа');
+  expect(within(sources).getByText('Источники (1)')).toBeVisible();
+  expect(sources.closest('details')).toBeNull();
+  expect(sources.querySelector('details')).toBeNull();
+  expect(screen.getByText(/Источник текущего отчёта/)).toBeVisible();
   const row = document.getElementById(`chat-${turnId}-${source.finding.findingId}`)!;
-  expect(details.open).toBe(true);
-  expect(details.querySelectorAll(':scope > ul > li')).toHaveLength(1);
-  expect(details.contains(row)).toBe(true);
+  expect(sources.querySelectorAll(':scope > ul > li')).toHaveLength(1);
+  expect(sources.contains(row)).toBe(true);
   expect(row).toBeVisible();
   if (source.finding.check !== 'secret') throw new Error('Expected secret source fixture');
   expect([...row.querySelectorAll('code')].map(code => code.textContent)).toEqual([
@@ -475,12 +476,22 @@ it('discard invalid current-report citation; historical sources are marked unres
       },
     ],
   };
-  const { view, transport, client } = mount(api);
+  const onNavigateSource = vi.fn(() => true);
+  const { view, transport, client } = mount(api, api.fetcher, onNavigateSource);
   await open();
   await screen.findByText('Источники (1)');
-  expect(screen.getByText(/Исторический источник/)).not.toBeVisible();
-  fireEvent.click(screen.getByText('Источники (1)'));
-  expect(screen.getByText(/Исторический источник/)).toBeVisible();
+  const sources = screen.getByLabelText('Источники ответа');
+  const historical = document.getElementById(`chat-${turnId}-${source.finding.findingId}`)!;
+  expect(sources.closest('details')).toBeNull();
+  expect(sources.contains(historical)).toBe(true);
+  expect(historical).toBeVisible();
+  expect(within(historical).getByText(/Исторический источник/)).toBeVisible();
+  expect(historical).not.toHaveTextContent('Источник текущего отчёта, проверен по результатам сканирования.');
+  expect(within(historical).queryByRole('link')).toBeNull();
+  const unavailable = within(historical).getByText('Открыть раздел «Возможные секреты» · переход сейчас недоступен');
+  fireEvent.click(unavailable);
+  expect(onNavigateSource).not.toHaveBeenCalled();
+  expect(api.requests.filter(request => request.init.method === 'POST')).toHaveLength(0);
   view.unmount();
   api.head = {
     ...history,
@@ -496,9 +507,10 @@ it('discard invalid current-report citation; historical sources are marked unres
       },
     ],
   };
-  render(<ScanChatPanel status={status} transport={transport} client={client} />);
+  render(<ScanChatPanel status={status} transport={transport} client={client} onNavigateSource={onNavigateSource} />);
   await screen.findByRole('alert');
   expect(screen.queryByText('Исторический вопрос')).toBeNull();
+  expect(onNavigateSource).not.toHaveBeenCalled();
 });
 it('cancel suppresses a late response, requires history refresh and never resends automatically', async () => {
   const api = chatApi();

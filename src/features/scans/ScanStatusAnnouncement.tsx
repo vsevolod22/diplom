@@ -12,7 +12,7 @@ export function ScanStatusAnnouncement({ scan }: { scan: ScanStatus }) {
     const last = previous.current;
     if (last?.scanId === scan.scanId) {
       const enteredTerminal = terminalStates.has(scan.state) && !terminalStates.has(last.state);
-      const changedStage = scan.stage && scan.stage !== last.stage;
+      const changedStage = !terminalStates.has(scan.state) && scan.stage && scan.stage !== last.stage;
       const message = enteredTerminal ? `Итог скана: ${stateLabels[scan.state]}` : changedStage ? `Этап скана: ${scan.stage}` : '';
       if (message && region.current) region.current.textContent = message;
     } else if (region.current) {

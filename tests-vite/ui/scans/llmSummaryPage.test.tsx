@@ -304,10 +304,10 @@ function mount(demo = false) {
   );
   return { ...view, client };
 }
-const summary = () => screen.getByRole('region', { name: 'ИИ-отчёт' });
+const summary = () => screen.getByRole('region', { name: 'Объяснение ИИ' });
 async function loaded() {
-  await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByText(paragraphs[0]);
-  await screen.findByText('Задайте вопрос по отчёту.');
+  await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByText(paragraphs[0]);
+  await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
 }
 
 it.each([
@@ -321,39 +321,39 @@ it.each([
   preferencesClient.clear();
   const api = mockApi(); api.languageFailure = failure;
   const view = mount();
-  if (failure) await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByRole('alert');
-  else await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByText(paragraphs[0]);
-  await screen.findByText('Задайте вопрос по отчёту.');
+  if (failure) await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByRole('alert');
+  else await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByText(paragraphs[0]);
+  await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
   const chat = within(screen.getByRole('region', { name: 'Чат по отчёту' }));
   fireEvent.change(chat.getByRole('textbox', { name: 'Вопрос чату' }), { target: { value: 'Что проверить?' } });
   fireEvent.click(chat.getByRole('button', { name: 'Отправить вопрос' }));
   if (failure) await chat.findByRole('alert');
   else await chat.findByText('Проверьте обновление пакета, затем пересоберите образ.');
   fireEvent.focus(window); fireEvent(window, new Event('online'));
-  await act(async () => { await view.client.invalidateQueries({ queryKey: ['live-scans'] }); });
+  await act(async () => { await view.client.invalidateQueries({ predicate: query => query.queryKey[0] === 'live-scans' }); });
   expect(api.summaryPosts()).toHaveLength(1); expect(api.chatPosts()).toHaveLength(1);
   expect(api.requests.filter(request => request.path.includes('/llm/translation'))).toEqual([]);
   expect(screen.queryByRole('region', { name: /^Перевод / })).not.toBeInTheDocument();
 });
 
-it('autoloads exactly once only after queued becomes completed, before coverage/findings, with independent chat', async () => {
+it('autoloads exactly once only after queued becomes completed, after coverage/findings, with independent chat', async () => {
   const api = mockApi();
   api.state = 'queued';
   const view = mount();
-  await screen.findByRole('heading', { name: 'Отчёт сканирования' });
+  await screen.findByRole('heading', { name: 'Результат проверки образа' });
   await screen.findByRole('navigation', { name: 'Разделы отчёта' });
-  expect(screen.queryByRole('region', { name: 'ИИ-отчёт' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Объяснение ИИ' })).toBeNull();
   expect(screen.queryByRole('region', { name: 'Чат по отчёту' })).toBeNull();
   expect(api.requests.some((r) => r.path.includes('/llm/'))).toBe(false);
   api.state = 'completed';
   await act(async () => {
-    await view.client.invalidateQueries({ queryKey: ['live-scans'] });
+    await view.client.invalidateQueries({ predicate: query => query.queryKey[0] === 'live-scans' });
   });
   await loaded();
-  const coveragePanel = screen.getByRole('region', { name: 'Проверки' });
-  const findings = screen.getByRole('region', { name: 'Отчёт' });
-  expect(summary().compareDocumentPosition(coveragePanel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(summary().compareDocumentPosition(findings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const coveragePanel = screen.getByText('Подробности · что удалось проверить').closest('details')!;
+  const findings = screen.getByRole('region', { name: 'Находки и исправления' });
+  expect(coveragePanel.compareDocumentPosition(summary()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(findings.compareDocumentPosition(summary()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(api.summaryPosts()).toHaveLength(1);
   expect(api.summaryPosts()[0].body).toEqual({
     reportVersion: tuple.reportVersion,
@@ -364,24 +364,25 @@ it('autoloads exactly once only after queued becomes completed, before coverage/
   fireEvent.focus(window);
   fireEvent(window, new Event('online'));
   await act(async () => {
-    await view.client.invalidateQueries({ queryKey: ['live-scans'] });
+    await view.client.invalidateQueries({ predicate: query => query.queryKey[0] === 'live-scans' });
   });
   expect(api.summaryPosts()).toHaveLength(1);
   expect(api.chatPosts()).toHaveLength(0);
 });
 
-it('has three live navigation links, actual paragraphs and closed sources, without a technical AI wall', async () => {
+it('has four live navigation links, actual collapsed paragraphs and sources, without a technical AI wall', async () => {
   mockApi();
   mount();
   await loaded();
   const nav = screen.getByRole('navigation', { name: 'Разделы отчёта' });
   expect([...nav.querySelectorAll('a')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
-    ['ИИ-отчёт', '#scan-a1-ai'],
-    ['Находки', '#scan-a1-findings'],
-    ['Чат по отчёту', '#scan-report-chat'],
+    ['Находки и исправления', '#scan-a1-findings'],
+    ['Что проверено', '#scan-a1-coverage'],
+    ['Объяснение ИИ', '#scan-a1-ai'],
+    ['Задать вопрос', '#scan-report-chat'],
   ]);
   expect(
-    [...summary().querySelectorAll('[aria-label="ИИ-разбор отчёта"] > p')].map((p) => p.textContent),
+    [...summary().querySelectorAll('.scan-summary-explanation > div > p')].map((p) => p.textContent),
   ).toEqual(paragraphs);
   expect(summary().querySelector('details')?.open).toBe(false);
   expect(summary().textContent).not.toMatch(
@@ -390,7 +391,7 @@ it('has three live navigation links, actual paragraphs and closed sources, witho
   expect(summary().textContent).not.toContain(tuple.reportVersion);
   expect(summary().textContent).not.toContain(context.policyVersion);
   expect(within(summary()).queryByRole('button', { name: /Получить|Обновить условия/ })).toBeNull();
-  const details = screen.getByText('Данные сканирования').closest('details');
+  const details = screen.getByText('Подробности · точный образ и данные сканирования').closest('details');
   expect(details?.open).toBe(false);
   expect(details?.textContent).toContain(id);
   expect(details?.textContent).toContain(digest);
@@ -414,11 +415,13 @@ it('keeps findings and an operational separate chat when AI summary fails; only 
   api.failSummary = true;
   mount();
   expect(
-    await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByRole('alert'),
+    await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByRole('alert'),
   ).toHaveTextContent('Не удалось получить разбор ИИ');
-  await screen.findByText(row.cveId, { selector: '.scan-vuln-row__id' });
-  expect(screen.getByRole('region', { name: 'Проверки' })).toBeVisible();
-  await screen.findByText('Задайте вопрос по отчёту.');
+  await screen.findByText(row.cveId, { selector: '.scan-vuln-row__headline > span' });
+  const coverage = screen.getByText('Подробности · что удалось проверить');
+  fireEvent.click(coverage);
+  expect(within(coverage.closest('details')!).getByText('Уязвимости')).toBeVisible();
+  await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
   const chat = within(screen.getByRole('region', { name: 'Чат по отчёту' }));
   fireEvent.change(chat.getByRole('textbox', { name: 'Вопрос чату' }), {
     target: { value: 'Что исправить первым?' },
@@ -440,8 +443,8 @@ it('keeps a successful summary and findings visible if the independent chat cann
   const api = mockApi();
   api.chatAvailable = false;
   mount();
-  await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByText(paragraphs[0]);
-  await screen.findByText(row.cveId, { selector: '.scan-vuln-row__id' });
+  await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByText(paragraphs[0]);
+  await screen.findByText(row.cveId, { selector: '.scan-vuln-row__headline > span' });
   expect(screen.getByRole('textbox', { name: 'Вопрос чату' })).toBeVisible();
   await waitFor(() =>
     expect(screen.getByRole('status', { name: 'Состояние подключения чата' })).not.toHaveTextContent(
@@ -459,12 +462,17 @@ it.each([row.fixedVersion, null])(
     api.fixedVersion = fixedVersion;
     mount();
     const text = summaryReply(tuple, fixedVersion).hypotheses[0].text;
-    await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByText(text);
-    fireEvent.click(within(summary()).getByText(/Находки — источники разбора/));
-    const link = within(summary()).getByRole('link', { name: `Находка ${findingId}` });
-    expect(
-      document.getElementById(decodeURIComponent(link.getAttribute('href')!.slice(1))),
-    ).toHaveTextContent(row.cveId);
+    await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByText(text);
+    const toggle = within(summary()).getByText('Прочитать объяснение и проверить его источники');
+    expect(toggle.closest('details')?.open).toBe(false);
+    fireEvent.click(toggle);
+    const sources = within(summary()).getByLabelText('Источники абзаца 1');
+    expect(sources.querySelector('[data-finding-id]')).toHaveAttribute('data-finding-id', findingId);
+    const link = within(sources).getByRole('link', { name: 'Открыть раздел «Уязвимости пакетов»' });
+    expect(link).toHaveAttribute('href', '#scan-report-vulnerabilities');
+    fireEvent.click(link);
+    await waitFor(() => expect(document.getElementById('scan-report-vulnerabilities-heading')).toHaveFocus());
+    expect(document.getElementById('scan-report-vulnerabilities')).toHaveTextContent(row.cveId);
     expect(api.requests.some((r) => r.path.endsWith('/vuln?limit=50'))).toBe(true);
     expect(api.summaryPosts()).toHaveLength(1);
   },
@@ -491,9 +499,9 @@ it.each(['partial-trio', 'credential-name', 'invalid-version', 'foreign-source',
       ],
     });
     mount();
-    await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByRole('alert');
-    await screen.findByText(row.cveId, { selector: '.scan-vuln-row__id' });
-    await screen.findByText('Задайте вопрос по отчёту.');
+    await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByRole('alert');
+    await screen.findByText(row.cveId, { selector: '.scan-vuln-row__headline > span' });
+    await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
     expect(within(summary()).queryByText(paragraphs[0])).toBeNull();
     expect(document.body.textContent).not.toContain('PRIVATE_CANARY');
     expect(api.summaryPosts()).toHaveLength(1);
@@ -513,7 +521,7 @@ it('does not migrate old consent or generate until one explicit enable click sav
   mount();
   const enable = await screen.findByRole('button', { name: 'Включить авторазбор' });
   await waitFor(() => expect(enable).toBeEnabled());
-  await screen.findByText('Задайте вопрос по отчёту.');
+  await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
   expect(within(summary()).getAllByRole('button')).toHaveLength(1);
   expect(within(summary()).getByText(/Находки отчёта, имена пакетов и версии/)).toBeVisible();
   expect(localStorage.getItem('report-preferences:v1:alice')).toBe(raw);
@@ -542,10 +550,10 @@ it('generates once for each new report scope, without sending a chat question au
   mount();
   await loaded();
   fireEvent.click(screen.getByRole('link', { name: 'Другой скан' }));
-  await within(await screen.findByRole('region', { name: 'ИИ-отчёт' })).findByText(
+  await within(await screen.findByRole('region', { name: 'Объяснение ИИ' })).findByText(
     'Приоритет другого отчёта: проверьте исходную находку.',
   );
-  await screen.findByText('Задайте вопрос по отчёту.');
+  await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
   expect(api.summaryPosts().map((r) => r.path)).toEqual([
     `/api/v1/browser/scans/${id}/llm/summary`,
     `/api/v1/browser/scans/${other}/llm/summary`,
@@ -554,12 +562,12 @@ it('generates once for each new report scope, without sending a chat question au
   expect(api.chatPosts()).toHaveLength(0);
 });
 
-it('demo navigation contains only findings and makes no LLM requests even with saved opt-in', async () => {
+it('demo navigation contains findings and coverage and makes no LLM requests even with saved opt-in', async () => {
   const api = mockApi();
   mount(true);
   const nav = await screen.findByRole('navigation', { name: 'Разделы отчёта' });
-  expect([...nav.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Находки']);
-  expect(screen.queryByRole('region', { name: 'ИИ-отчёт' })).toBeNull();
+  expect([...nav.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Находки и исправления', 'Что проверено']);
+  expect(screen.queryByRole('region', { name: 'Объяснение ИИ' })).toBeNull();
   expect(screen.queryByRole('region', { name: 'Чат по отчёту' })).toBeNull();
   expect(api.requests).toHaveLength(0);
 });

@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { webcrypto } from 'node:crypto';
 import { StrictMode } from 'react';
 import { QueryClient } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   AdvisoryTranslationPanel,
@@ -290,7 +290,8 @@ it('collapsed cards do no I/O; opening translates automatically once and focus/r
     fireEvent.focus(window);
   });
   expect(api.requests).toHaveLength(0);
-  const summary = screen.getByText(`Подробности ${finding.cveId} · описание, CVSS и ссылки`);
+  const card = screen.getByText(finding.cveId, { exact: true }).closest('li')!;
+    const summary = within(card).getByText('Подробности · описание уязвимости и источники', { selector: 'summary' });
   fireEvent.click(summary);
   await translated();
   expect(posts(api)).toHaveLength(1);
@@ -625,8 +626,8 @@ it('TEMP stays a Debian advisory and malicious translated fields never become ma
   const api = translationApi(temp);
   const view = mount(api, temp);
   await translated();
-  expect(screen.getByText('Advisory ID: TEMP-1234567-ABCDEF')).toBeVisible();
-  expect(screen.getByText('Debian advisory (не CVE)')).toBeVisible();
+  expect(screen.getByText('TEMP-1234567-ABCDEF · Уведомление Debian (не CVE)')).toBeVisible();
+  expect(screen.getByText('Уведомление Debian (не CVE): TEMP-1234567-ABCDEF')).toBeVisible();
   view.unmount();
   const malicious = translationApi();
   malicious.post = async () =>

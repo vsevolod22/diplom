@@ -91,14 +91,14 @@ it('shows warnings/saved clocks visibly and publication vs usableUntil in metada
 });
 it('fails closed when page receipt differs from confirmed status, including valid independently evaluated metadata', async () => {
   mountV2({ dbPolicy: { ...metadata.dbPolicy, evaluatedAt: clock + 1 } });
-  await screen.findByText(/Прежние данные и cursors сброшены/);
+  await screen.findByText(/Прежние данные скрыты/);
   expect(screen.queryByText('CVE-2026-1234')).toBeNull();
 });
 it('clears confirmed rows on cross-page v2 receipt drift, not the content-only stale exception', async () => {
   mountV2({ dbPolicy: { ...metadata.dbPolicy, evaluatedAt: clock + 1 } }, true);
   await screen.findByText('CVE-2026-1234');
-  fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
-  await screen.findByText(/Прежние данные и cursors сброшены/);
+  fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
+  await screen.findByText(/Прежние данные скрыты/);
   expect(screen.queryByText('CVE-2026-1234')).toBeNull();
   expect(screen.queryByText('CVE-2026-1235')).toBeNull();
   expect(screen.queryByText(/Сохранён прежний подтверждённый снимок/)).toBeNull();
@@ -161,12 +161,12 @@ async function mountAuthorized(reply: (cursor: string | null, call: number) => R
   return { cursors, fetchMock, changeSubject: () => { subject = 'bob'; } };
 }
 const response = (page: unknown, status = 200) => new Response(JSON.stringify(page), { status });
-const next = () => fireEvent.click(screen.getByRole('button', { name: 'Далее · CVE · сверху' }));
-const back = () => fireEvent.click(screen.getByRole('button', { name: 'Назад · CVE · сверху' }));
-const retry = () => fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку CVE' }));
+const next = () => fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости · сверху' }));
+const back = () => fireEvent.click(screen.getByRole('button', { name: 'Назад · Уязвимости · сверху' }));
+const retry = () => fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
 async function expectStrictReset() {
-  await screen.findByText(/Прежние данные и cursors сброшены/);
-  expect(screen.queryByRole('list', { name: 'Находки CVE' })).toBeNull();
+  await screen.findByText(/Прежние данные скрыты/);
+  expect(screen.queryByRole('list', { name: 'Находки Уязвимости' })).toBeNull();
   expect(screen.queryByRole('navigation')).toBeNull();
   expect(screen.queryByText(/Сохранён прежний подтверждённый снимок/)).toBeNull();
   expect(screen.queryByText(/(Совпадений во всём отчёте|Полный итог) CVE:/)).toBeNull();
@@ -195,7 +195,7 @@ it('P2 clears C4 retained historical rows too when first-cursor recovery rejects
   next(); await screen.findByText('CVE-2026-1231'); back();
   await screen.findByText(/Сохранён прежний подтверждённый снимок/);
   expect(screen.getByText('CVE-2026-1231')).toBeTruthy();
-  for (const button of screen.getAllByRole('button', { name: /^(Назад|Далее) · CVE/ })) expect(button.hasAttribute('disabled')).toBe(true);
+  for (const button of screen.getAllByRole('button', { name: /^(Назад|Далее) · Уязвимости/ })) expect(button.hasAttribute('disabled')).toBe(true);
   retry(); await expectStrictReset(); retry(); await screen.findByText('CVE-2026-1230');
   expect(cursors).toEqual([null, reportCursor, null, null, null]);
 });
@@ -223,7 +223,7 @@ it.each(['403', 'session'] as const)('P2 control clears confirmed rows/navigatio
   if (mode === 'session') changeSubject();
   next(); await screen.findByText(/Доступ к отчёту утрачен/);
   expect(screen.queryByText('CVE-2026-1230')).toBeNull(); expect(screen.queryByRole('navigation')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Повторить загрузку CVE' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Повторить загрузку Уязвимости' })).toBeNull();
   expect(cursors).toEqual(mode === 'session' ? [null] : [null, reportCursor]);
 });
 it.each(['503', '403', 'session'] as const)('P2 C4 historical recovery control preserves or clears only as appropriate: %s', async mode => {
@@ -238,7 +238,7 @@ it.each(['503', '403', 'session'] as const)('P2 C4 historical recovery control p
     await screen.findByText(/Показана предыдущая подтверждённая страница/);
     expect(screen.getByText('CVE-2026-1231')).toBeTruthy();
     expect(screen.getByText(/Сохранён прежний подтверждённый снимок/)).toBeTruthy();
-    for (const button of screen.getAllByRole('button', { name: /^(Назад|Далее) · CVE/ })) expect(button.hasAttribute('disabled')).toBe(true);
+    for (const button of screen.getAllByRole('button', { name: /^(Назад|Далее) · Уязвимости/ })) expect(button.hasAttribute('disabled')).toBe(true);
     retry(); await screen.findByText('CVE-2026-1230'); expect(cursors).toEqual([null, reportCursor, null, null, null]);
   } else {
     await screen.findByText(/Доступ к отчёту утрачен/);

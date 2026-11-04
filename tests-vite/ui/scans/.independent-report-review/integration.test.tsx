@@ -99,7 +99,7 @@ it('R4 regression: inter-page duplicate IDs clear data/navigation and retry the 
   expect(screen.queryByText('vuln-005')).toBeNull();
   expect(screen.queryByRole('navigation')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Далее · CVE · сверху' })).toBeNull();
-  expect(screen.getByRole('alert').textContent).toMatch(/Прежние данные и cursors сброшены/);
+  expect(screen.getByRole('alert').textContent).toContain('Не удалось подтвердить, что ответ относится к текущему отчёту. Прежние данные скрыты; повторите загрузку с первой страницы.');
   fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку CVE' }));
   await screen.findByText('vuln-000');
   await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
