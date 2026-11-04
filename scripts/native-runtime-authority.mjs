@@ -9,7 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual as equal } from 'node:util';
 import { completionReferences, validateReferenceCustody, custodyCompletionReferences, deploymentRecordLimit, candidateSourceEquivalence } from './deploy-reference-custody.mjs';
-import { capturePublicLlmRetentions } from './public-llm-stand.mjs';
+import { capturePublicLlmRetentions, capturePublicLlmSource } from './public-llm-stand.mjs';
 import { readEngineJournal } from './deploy-authority.mjs';
 import { captureDeploymentCatalog, archiveDirectory, archiveFile } from './public-llm-deployment-catalog.mjs';
 
@@ -18,7 +18,8 @@ export const NATIVE_PROJECT = 'dip-public-images';
 export const NATIVE_ORIGIN = 'http://127.0.0.1:8081';
 const ROLES = Object.freeze(['api', 'auth-volume-init', 'egress', 'llm-egress', 'openai-egress', 'scan-volume-init', 'web', 'worker']);
 const TARGETS = ROLES.filter(n => !n.endsWith('volume-init'));
-const ENTRIES = ['deploy.mjs', 'deploy-core.mjs', 'deploy-adapter-stores.mjs', 'public-llm-stand.mjs', 'deploy-supervisor.mjs', 'deploy-authority.mjs'];
+// Current deploy producer order. Only legacy completev2 predates the custody entry.
+const ENTRIES = Object.freeze(['deploy.mjs', 'deploy-core.mjs', 'deploy-adapter-stores.mjs', 'public-llm-stand.mjs', 'deploy-supervisor.mjs', 'deploy-authority.mjs', 'deploy-reference-custody.mjs']);
 const hex = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 const nonce = v => typeof v === 'string' && /^[a-f0-9]{32}$/.test(v);
 const image = v => typeof v === 'string' && /^sha256:[a-f0-9]{64}$/.test(v);
@@ -142,8 +143,10 @@ function targetedPreflight(r, deployment) {
   const migration = 'history-reservations-v4-to-v5';
   need(a?.version === 3 && a.project === NATIVE_PROJECT && a.nonce === deployment &&
     Array.isArray(a.authority?.containers) && equal(a.authority.containers.map(c => c.role).sort(), ROLES), 'RUNTIME_PREFLIGHT_REQUIRED');
+  // `verified` records optional --verify, not the mandatory migration/preservation
+  // qualification. Both boolean outcomes still require all sealed proofs below.
   need(q.migration === false && q.historyVersion === 4 && q.historyMigration === migration && p.migration === false &&
-    p.historyMigration === migration && p.verified === true && equal(p.interruptedServices, ['api', 'web', 'worker']) &&
+    p.historyMigration === migration && typeof p.verified === 'boolean' && equal(p.interruptedServices, ['api', 'web', 'worker']) &&
     equal(q.interruptedServices, p.interruptedServices), 'RUNTIME_MIGRATION_UNQUALIFIED');
   need(m?.version === 1 && m.migration === migration && m.from === 4 && m.to === 5 && m.source === i.source &&
     m.candidateImage === b.candidates.api.image && done?.version === 1 && done.candidateImage === m.candidateImage &&
@@ -464,15 +467,13 @@ export function createNativeRuntimeObserver(status, run, root, home) {
     return { status: current, epochs, referenceImages };
   };
 }
-export async function openNativeRuntimeAuthority(selection, readReview) {
-  const [{ createDeployAdapter }, { capturePublicLlmSource }, { acquireLock, runIsolatedDocker }] = await Promise.all([
-    import('./deploy-adapter.mjs'), import('./public-llm-stand.mjs'), import('./public-image-stand.mjs'),
-  ]);
-  const { homedir } = await import('node:os');
-  const adapter = createDeployAdapter({ root: ROOT });
-  const acquire = () => acquireNativeRuntimeLease(ROOT, () => acquireLock(ROOT), selection);
-  const captureSource = records => {
-    const source = capturePublicLlmSource(ROOT, { openai: true }), proofs = [];
+// Source-only seam: tests exercise the production file fences without opening
+// an operator lease or constructing a deploy adapter. No serialized attestation.
+export function captureNativeRuntimeSource(root, records, captureBuildSource = capturePublicLlmSource) {
+    const version = records?.complete?.version;
+    need([2, 3, 4].includes(version), 'RUNTIME_RECEIPT_BRANCH_UNSUPPORTED');
+    need(resolve(root) === root && fs.realpathSync(root) === root);
+    const source = captureBuildSource(root, { openai: true }), proofs = [];
     const read = path => {
       const s = fs.lstatSync(path); need(s.isFile() && !s.isSymbolicLink() && s.nlink === 1 && s.uid === process.getuid() && !(s.mode & 0o022) && s.size <= 1024 ** 2);
       const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -488,8 +489,15 @@ export async function openNativeRuntimeAuthority(selection, readReview) {
     };
     const files = source.manifest.files.map(f => ({ path: f.path, digest: f.digest }));
     return { build: hash(JSON.stringify(files)), files,
-      adapter: read(join(ROOT, 'scripts/deploy-adapter.mjs')), entries: [...ENTRIES, ...([3, 4].includes(records.complete.version) ? ['deploy-reference-custody.mjs'] : [])].map(n => read(join(ROOT, 'scripts', n))), verify() { source.verify(); proofs.forEach(p => p()); } };
-  };
+      adapter: read(join(root, 'scripts/deploy-adapter.mjs')), entries: (version === 2 ? ENTRIES.slice(0, -1) : ENTRIES).map(n => read(join(root, 'scripts', n))), verify() { source.verify(); proofs.forEach(p => p()); } };
+}
+export async function openNativeRuntimeAuthority(selection, readReview) {
+  const [{ createDeployAdapter }, { acquireLock, runIsolatedDocker }] = await Promise.all([
+    import('./deploy-adapter.mjs'), import('./public-image-stand.mjs'),
+  ]);
+  const { homedir } = await import('node:os');
+  const adapter = createDeployAdapter({ root: ROOT });
+  const acquire = () => acquireNativeRuntimeLease(ROOT, () => acquireLock(ROOT), selection);
   const observe = createNativeRuntimeObserver(() => adapter.status(), runIsolatedDocker, ROOT, homedir());
-  return createNativeRuntimeAuthority({ records: n => captureNativeDeploymentRecords(ROOT, n), captureSource, readReview, acquire, observe })(selection);
+  return createNativeRuntimeAuthority({ records: n => captureNativeDeploymentRecords(ROOT, n), captureSource: r => captureNativeRuntimeSource(ROOT, r), readReview, acquire, observe })(selection);
 }

@@ -5,11 +5,13 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { captureNativeDeploymentRecords, captureNativeReferenceOrigins, createNativeRuntimeAuthority, createNativeRuntimeObserver, acquireNativeRuntimeLease, NATIVE_PROJECT, NATIVE_ORIGIN, NATIVE_EPOCH_FORMAT, NATIVE_REFERENCE_FORMAT } from './native-runtime-authority.mjs';
+import { captureNativeDeploymentRecords, captureNativeReferenceOrigins, captureNativeRuntimeSource, createNativeRuntimeAuthority, createNativeRuntimeObserver, acquireNativeRuntimeLease, NATIVE_PROJECT, NATIVE_ORIGIN, NATIVE_EPOCH_FORMAT, NATIVE_REFERENCE_FORMAT } from './native-runtime-authority.mjs';
 import { installRoutes } from '../tests-e2e/batch27-final-native.mjs';
 import { BASE } from '../tests-e2e/native-h7v3-paid-sol.mjs';
 import { custodyCompletionReferences, RECOVERY_AUTHORITY_RECORD_LIMIT, candidateSourceEquivalence } from './deploy-reference-custody.mjs';
+import { normalizeOptions } from './deploy-core.mjs';
 
 const hash = b => createHash('sha256').update(b).digest('hex');
 const roles = ['api', 'auth-volume-init', 'egress', 'llm-egress', 'openai-egress', 'scan-volume-init', 'web', 'worker'];
@@ -316,6 +318,160 @@ for (const kind of ['byte-change', 'same-bytes-replacement', 'symlink', 'hardlin
   assert.throws(() => captureNativeDeploymentRecords(root, deployment));
 });
 
+// Derive expected hashes independently from BOTH frozen producer initializers;
+// never import the adapter, its runtime, or the native reader's entry list.
+function actualProducerEntries() {
+  const root = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '');
+  const producer = fs.readFileSync(join(root, 'scripts/deploy-adapter.mjs'), 'utf8');
+  const lists = [...producer.matchAll(/const entryProofs=(\[[^\]\n]+\])\.map\(/g)].map(m => JSON.parse(m[1].replaceAll("'", '"')));
+  assert.equal(lists.length, 2, 'capture both prepare and recovery producer orders');
+  assert.deepEqual(lists[0], ['deploy.mjs', 'deploy-core.mjs', 'deploy-adapter-stores.mjs', 'public-llm-stand.mjs', 'deploy-supervisor.mjs', 'deploy-authority.mjs', 'deploy-reference-custody.mjs']);
+  assert.deepEqual(lists[1], lists[0]);
+  return { root, names: lists[0], entries: lists[0].map(n => hash(fs.readFileSync(join(root, 'scripts', n)))), adapter: hash(Buffer.from(producer)) };
+}
+function producerSourceFixture() {
+  const f = prebuiltFixture(), producer = actualProducerEntries(), r = f.records;
+  // Build manifest is synthetic; entry bytes are the actual public producer files.
+  const source = captureNativeRuntimeSource(producer.root, r, () => ({ manifest: { files: f.source.files }, verify: () => f.source.verify() }));
+  r.intent.adapter = producer.adapter; r.intent.entrySources = [...producer.entries];
+  const proof = candidateSourceEquivalence({ originalSource: f.candidateOriginal.intent.source, files: f.source.files,
+    originalAdapter: f.candidateOriginal.intent.adapter, originalEntrySources: f.candidateOriginal.intent.entrySources,
+    currentAdapter: producer.adapter, currentEntrySources: producer.entries });
+  for (const record of [r.complete, r.intent, r.built, r.recovery, r.published]) record.candidateReuse = proof;
+  r.reuse.source = proof;
+  return { f, producer, source };
+}
+for (const version of [1, 5, '4']) test(`source capture refuses unsupported receipt version ${JSON.stringify(version)} before reading build sources`, () => {
+  assert.throws(() => captureNativeRuntimeSource('/unused-synthetic-root', { complete: { version } }, () => assert.fail('unsupported version must not read sources')), /RUNTIME_RECEIPT_BRANCH_UNSUPPORTED/);
+});
+for (const version of [2, 3, 4]) test(`production source capture matches independent frozen producer order for completev${version}`, () => {
+  const producer = actualProducerEntries(); let verified = 0;
+  const source = captureNativeRuntimeSource(producer.root, { complete: { version } }, (root, options) => {
+    assert.equal(root, producer.root); assert.deepEqual(options, { openai: true });
+    return { manifest: { files: [{ path: 'synthetic.ts', digest: id(801) }] }, verify() { verified++; } };
+  });
+  assert.deepEqual(source.entries, version === 2 ? producer.entries.slice(0, 6) : producer.entries);
+  assert.equal(source.adapter, producer.adapter); source.verify(); assert.equal(verified, 1);
+});
+function nonVerifyProducerFixture() {
+  const f = producerSourceFixture();
+  const options = normalizeOptions({ mode: 'app', apply: true, services: ['api', 'web'], migrateHistoryV4ToV5: true });
+  assert.equal(options.verify, false);
+  // The actual producer copies options.verify into ctx.receipt, then published.json.
+  const core = fs.readFileSync(new URL('./deploy-core.mjs', import.meta.url), 'utf8');
+  assert.match(core, /verified: options\.verify, healthy: true/);
+  f.f.records.published.verified = options.verify;
+  return f;
+}
+async function readonlyMigrationAdmission(f, source, expected = 'READONLY_ADMISSION_REACHED') {
+  const m = metadataFixture(true, true, f); let admissions = 0, observations = 0;
+  await assert.rejects(createNativeRuntimeAuthority({ records: () => captureNativeDeploymentRecords(m.root, deployment), captureSource: () => source,
+    readReview: async () => review,
+    acquire: () => { admissions++; throw Error('READONLY_ADMISSION_REACHED'); },
+    observe: async () => { observations++; assert.fail('readonly admission must never observe runtime/network or dispatch'); },
+    wall: () => Date.parse('2026-11-04T02:00:00Z') })(selected), { message: expected });
+  assert.equal(admissions, expected === 'READONLY_ADMISSION_REACHED' ? 1 : 0); assert.equal(observations, 0);
+  assert.equal(fs.existsSync(join(m.root, '.local-public-images/native-runtime-v1')), false);
+  assert.equal(fs.existsSync(join(m.root, '.local-public-images/.operation.lock')), false);
+  assert.equal(fs.existsSync(join(m.root, 'attempt.spent')), false);
+}
+test('normal producer non--verify readonly metadata reaches admission sentinel without observation or dispatch', async () => {
+  const { f, source } = nonVerifyProducerFixture();
+  assert.equal(f.records.published.verified, false);
+  await readonlyMigrationAdmission(f, source);
+});
+test('optional --verify true still accepts the same mandatory migration proof in readonly admission', async () => {
+  const { f, source } = nonVerifyProducerFixture(); f.records.published.verified = true;
+  await readonlyMigrationAdmission(f, source);
+});
+for (const flag of [null, undefined, 'false', 0, 1, {}, []]) test(`optional verified field must remain boolean: ${JSON.stringify(flag)}`, async () => {
+  const { f, source } = nonVerifyProducerFixture(); f.records.published.verified = flag;
+  await readonlyMigrationAdmission(f, source, 'RUNTIME_MIGRATION_UNQUALIFIED');
+});
+for (const [name, mutate] of [
+  ['missing intent', r => { r.migrationIntent = null; }],
+  ['missing completion', r => { r.migrationComplete = null; }],
+  ['missing expected proof', r => { delete r.migrationIntent.expected; }],
+  ['missing completed proof', r => { delete r.migrationComplete.proof; }],
+  ['missing published proof', r => { delete r.published.historyProof; }],
+  ['missing published stores', r => { delete r.published.stores; }],
+  ['wrong intent source', r => { r.migrationIntent.source = id(999); }],
+  ['wrong intent candidate', r => { r.migrationIntent.candidateImage = image(999); }],
+  ['wrong completed candidate', r => { r.migrationComplete.candidateImage = image(999); }],
+  ['baseline differs', r => { r.migrationIntent.baseline = { ...r.migrationIntent.baseline, changed: true }; }],
+  ['expected proof differs', r => { r.migrationIntent.expected = { ...r.migrationIntent.expected, after: id(999) }; }],
+  ['published proof differs', r => { r.published.historyProof = { ...r.published.historyProof, after: id(999) }; }],
+  ['before schema wrong', r => { r.migrationComplete.before.historyVersion = 3; }],
+  ['after schema wrong', r => { r.migrationComplete.after.historyVersion = 4; }],
+  ['published schema wrong', r => { r.published.stores.historyVersion = 4; }],
+  ['before rows differ', r => { r.migrationComplete.before.llm.history = id(999); }],
+  ['after rows differ', r => { r.migrationComplete.after.llm.history = id(999); }],
+  ['all receipts agree on rows NOT preserved', r => { r.migrationIntent.expected.allRowsPreserved = false; }],
+  ['all receipts agree on wrong migration', r => { r.migrationIntent.expected.migration = 'other'; }],
+  ['all receipts agree on wrong from', r => { r.migrationIntent.expected.from = 3; }],
+  ['all receipts agree on wrong to', r => { r.migrationIntent.expected.to = 6; }],
+  ['all receipts agree on malformed row hash', r => { r.migrationIntent.expected.before = 'not-a-hash'; }],
+]) test(`non--verify mandatory migration proof refuses ${name} before readonly admission`, async () => {
+  const { f, source } = nonVerifyProducerFixture(); mutate(f.records);
+  await readonlyMigrationAdmission(f, source, 'RUNTIME_MIGRATION_UNQUALIFIED');
+});
+
+test('independent actual seven-entry producer intent passes fixed sealed reader and production source capture before offline admission', async () => {
+  const { f, producer, source } = producerSourceFixture(), m = metadataFixture(true, true, f);
+  const records = captureNativeDeploymentRecords(m.root, deployment);
+  assert.deepEqual(records.intent.entrySources, producer.entries); assert.equal(records.intent.entrySources.length, 7);
+  assert.notEqual(records.intent.entrySources[6], records.intent.entrySources[5]);
+  let acquired = 0;
+  const a = await createNativeRuntimeAuthority({ records: () => records, captureSource: () => source, readReview: async () => review,
+    acquire: () => { acquired++; return { verify() {}, record() {}, release() {} }; }, observe: async () => f.observed,
+    wall: () => Date.parse('2026-11-04T02:00:00Z') })(selected);
+  assert.equal(acquired, 1); assert.deepEqual(a.qualification.updatedRoles, ['api', 'web']);
+  await a.close(false); // No transport, provider, browser, spent file or real lease.
+});
+for (const attack of ['six-only', 'wrong-seventh', 'seventh-reordered', 'extra-eighth', 'wrong-adapter', 'wrong-build', 'legacy-v2-seven']) test(`actual producer/reader source mismatch ${attack} refuses before lease or observation`, async () => {
+  const { f, producer, source } = producerSourceFixture(); let candidate = f, captured = source;
+  if (attack === 'six-only') f.records.intent.entrySources = f.records.intent.entrySources.slice(0, 6);
+  if (attack === 'wrong-seventh') f.records.intent.entrySources[6] = id(999);
+  if (attack === 'seventh-reordered') [f.records.intent.entrySources[5], f.records.intent.entrySources[6]] = [f.records.intent.entrySources[6], f.records.intent.entrySources[5]];
+  if (attack === 'extra-eighth') f.records.intent.entrySources.push(id(999));
+  if (attack === 'wrong-adapter') f.records.intent.adapter = id(999);
+  if (attack === 'wrong-build') f.records.intent.source = id(999);
+  if (attack === 'legacy-v2-seven') {
+    // Explicit old grammar, not a new seven-entry receipt masquerading as legacy.
+    candidate = fixture();
+    Object.assign(candidate.records.intent, { source: source.build, adapter: producer.adapter, entrySources: [...producer.entries] });
+    captured = captureNativeRuntimeSource(producer.root, candidate.records, () => ({ manifest: { files: f.source.files }, verify() {} }));
+  }
+  const m = metadataFixture(attack !== 'legacy-v2-seven', attack !== 'legacy-v2-seven', candidate);
+  const records = captureNativeDeploymentRecords(m.root, deployment);
+  if (attack !== 'wrong-build') assert.equal(records.intent.source, captured.build);
+  if (attack !== 'wrong-adapter') assert.equal(records.intent.adapter, captured.adapter);
+  let acquired = 0, observed = 0;
+  await assert.rejects(createNativeRuntimeAuthority({ records: () => records, captureSource: () => captured, readReview: async () => review,
+    acquire: () => { acquired++; assert.fail('no lease on source mismatch'); }, observe: async () => { observed++; assert.fail('no runtime/network observation'); },
+    wall: () => Date.parse('2026-11-04T02:00:00Z') })(selected), /RUNTIME_BUILD_SOURCE_MISMATCH/);
+  assert.equal(acquired, 0); assert.equal(observed, 0);
+});
+for (const attack of ['missing', 'symlink', 'hardlink', 'writable', 'changed-bytes', 'replaced-inode']) test(`production seventh entry file fence refuses ${attack} in synthetic source root`, t => {
+  const producer = actualProducerEntries(), root = fs.mkdtempSync(join(tmpdir(), 'native-entry-source-synthetic-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(join(root, 'scripts'), { mode: 0o700 });
+  for (const name of ['deploy-adapter.mjs', ...producer.names]) fs.copyFileSync(join(producer.root, 'scripts', name), join(root, 'scripts', name));
+  const path = join(root, 'scripts/deploy-reference-custody.mjs');
+  const capture = () => captureNativeRuntimeSource(root, { complete: { version: 4 } }, () => ({ manifest: { files: [] }, verify() {} }));
+  if (attack === 'changed-bytes' || attack === 'replaced-inode') {
+    const source = capture();
+    if (attack === 'changed-bytes') fs.appendFileSync(path, '\n');
+    else { fs.renameSync(path, path + '.preserved'); fs.copyFileSync(path + '.preserved', path); }
+    assert.throws(() => source.verify()); return;
+  }
+  if (attack === 'missing') fs.unlinkSync(path);
+  if (attack === 'symlink') { fs.renameSync(path, path + '.preserved'); fs.symlinkSync(path + '.preserved', path); }
+  if (attack === 'hardlink') fs.linkSync(path, path + '.linked');
+  if (attack === 'writable') fs.chmodSync(path, 0o666);
+  assert.throws(capture);
+});
+
 test('completev4 borrowed-prebuilt candidates retain distinct original provenance without pretending this attempt rebuilt them', async () => {
   const f = prebuiltFixture(), a = await f.open(selected); let sends = 0;
   assert.deepEqual(a.qualification.rebuiltRoles, []); assert.deepEqual(a.qualification.updatedRoles, ['api', 'web']);
@@ -446,7 +602,7 @@ for (const [name, mutate] of [
   ['initializer unexpectedly restarted', f => { f.records.starts['auth-volume-init'] = {}; }],
   ['auth migration not allowed', f => { f.records.recovery.migration = true; }],
   ['history3 not admitted', f => { f.records.recovery.historyVersion = 3; }],
-  ['history migration unverified', f => { f.records.published.verified = false; }],
+  ['optional verification flag malformed', f => { f.records.published.verified = 'false'; }],
   ['missing explicit history intent', f => { delete f.records.migrationIntent; }],
   ['wrong migration source', f => { f.records.migrationIntent.source = id(999); }],
   ['wrong migration candidate', f => { f.records.migrationComplete.candidateImage = image(999); }],
