@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { captureNativeDeploymentRecords, captureNativeReferenceOrigins, createNativeRuntimeAuthority, createNativeRuntimeObserver, acquireNativeRuntimeLease, NATIVE_PROJECT, NATIVE_ORIGIN, NATIVE_EPOCH_FORMAT, NATIVE_REFERENCE_FORMAT } from './native-runtime-authority.mjs';
 import { installRoutes } from '../tests-e2e/batch27-final-native.mjs';
 import { BASE } from '../tests-e2e/native-h7v3-paid-sol.mjs';
-import { custodyCompletionReferences } from './deploy-reference-custody.mjs';
+import { custodyCompletionReferences, RECOVERY_AUTHORITY_RECORD_LIMIT, candidateSourceEquivalence } from './deploy-reference-custody.mjs';
 
 const hash = b => createHash('sha256').update(b).digest('hex');
 const roles = ['api', 'auth-volume-init', 'egress', 'llm-egress', 'openai-egress', 'scan-volume-init', 'web', 'worker'];
@@ -224,14 +224,48 @@ test('actual installed handler uses receipt authority for summary, then rejects 
   assert.deepEqual(order, ['spent-summary', 'published', 'fetch-summary', 'fulfill', 'dispose', 'spent-chat', 'published', 'abort']);
   await handler(route('chat')); assert.equal(log.dispatched, 1); assert.equal(f.released, 0);
 });
-function metadataFixture(targeted = false, borrowed = false) {
-  const f = fixture(targeted, borrowed), root = fs.mkdtempSync(join(tmpdir(), 'native-authority-synthetic-'));
+function prebuiltFixture() {
+  const f = fixture(true, true), r = f.records, originalNonce = 'e'.repeat(32);
+  f.source.files = [{ path: 'server/api/src/main.ts', digest: id(801) }, { path: 'src/app.tsx', digest: id(802) }];
+  f.source.build = hash(JSON.stringify(f.source.files)); r.intent.source = f.source.build; r.migrationIntent.source = f.source.build;
+  r.intent.backendSource = id(803);
+  const oldCustody = { version: 1, old: structuredClone(r.custody.old), candidates: ['api', 'web'].map(name => ({ name, tag: `dip-deploy-${name}:candidate-${originalNonce}` })) };
+  const oldCandidates = Object.fromEntries(['api', 'web'].map(name => [name, { ...r.built.candidates[name], tag: `dip-deploy-${name}:candidate-${originalNonce}` }]));
+  const intent = { ...structuredClone(r.intent), nonce: originalNonce, adapter: id(901), entrySources: [911, 912, 913, 914, 915, 916, 917].map(id), referenceCustody: oldCustody };
+  const built = { ...structuredClone(r.built), nonce: originalNonce, candidates: oldCandidates, referenceCustody: oldCustody };
+  const recovery = { ...structuredClone(r.recovery), nonce: originalNonce, referenceCustody: oldCustody };
+  const files = { 'intent.json': intent, 'built.json': built, 'recovery.json': recovery, 'reference-custody.json': oldCustody,
+    'failure-preparerecovery.json': { code: 'JOURNAL_SIZE' },
+    'engine.jsonl': JSON.stringify({ seq: 1, state: 'submitted', code: 'CANDIDATE_IMAGE_INSPECT_FAILED' }) + '\n' + JSON.stringify({ seq: 1, state: 'settled', exit: 0 }) + '\n' };
+  const complete = { version: 3, nonce: originalNonce, project: NATIVE_PROJECT, outcome: 'pre-mutation-aborted', referenceCustody: oldCustody,
+    ...custodyCompletionReferences(oldCustody, originalNonce, oldCandidates), evidence: Object.entries(files).map(([path, value]) => {
+      const bytes = Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)); return { path, bytes: bytes.length, sha256: hash(bytes) };
+    }) };
+  const origin = { kind: 'adapter-completion', nonce: originalNonce, sha256: hash(JSON.stringify(complete)) };
+  const custody = { version: 2, old: oldCustody.old, candidates: ['api', 'web'].map(name => ({ name, tag: oldCandidates[name].tag, image: oldCandidates[name].image, ownership: 'borrowed', origin })) };
+  const proof = candidateSourceEquivalence({ originalSource: intent.source, files: f.source.files, originalAdapter: intent.adapter,
+    originalEntrySources: intent.entrySources, currentAdapter: f.source.adapter, currentEntrySources: f.source.entries });
+  for (const record of [r.intent, r.built, r.recovery, r.published]) Object.assign(record, { referenceCustody: custody, candidateReuse: proof, reuseOrigin: origin });
+  r.built.candidates = structuredClone(oldCandidates);
+  Object.assign(r.complete, { version: 4, referenceCustody: custody, candidateReuse: proof, reuseOrigin: origin, ...custodyCompletionReferences(custody, deployment, r.built.candidates) });
+  r.custody = custody; r.origins = structuredClone(r.complete.borrowedReferences);
+  r.reuse = { version: 1, origin, source: proof, qualification: { typescript: true, bundle: true, openai: true }, referenceCustody: custody };
+  f.candidateOriginal = { origin, intent, built, recovery, custody: oldCustody, complete };
+  f.candidateOriginalFiles = files; r.candidateOrigins = [f.candidateOriginal];
+  f.references = [...r.complete.references, ...r.complete.borrowedReferences];
+  f.observed.referenceImages = f.references.map(v => ({ image: v.image, tags: [v.tag] }));
+  return f;
+}
+
+function metadataFixture(targeted = false, borrowed = false, provided = null) {
+  const f = provided ?? fixture(targeted, borrowed), root = fs.mkdtempSync(join(tmpdir(), 'native-authority-synthetic-'));
   const parent = join(root, '.local-public-images/deploy-adapter-v1'), dir = join(parent, deployment);
   fs.mkdirSync(join(dir, 'operation.lock'), { recursive: true, mode: 0o700 });
   const files = { 'intent.json': f.records.intent, 'built.json': f.records.built, 'published.json': f.records.published, 'recovery.json': f.records.recovery,
     ...Object.fromEntries(Object.entries(f.records.starts).map(([n, v]) => [`start-${n}-complete.json`, v])),
     ...(targeted ? { 'authority-v3.json': f.records.authority, 'history-migration-intent.json': f.records.migrationIntent, 'history-migration-complete.json': f.records.migrationComplete } : {}),
-        ...(borrowed ? { 'reference-custody.json': f.records.custody } : {}) };
+        ...(borrowed ? { 'reference-custody.json': f.records.custody } : {}),
+            ...(f.records.reuse ? { 'candidate-reuse.json': f.records.reuse } : {}) };
   const write = (name, value) => fs.writeFileSync(join(dir, name), JSON.stringify(value), { mode: 0o600 });
   for (const [name, value] of Object.entries(files)) write(name, value);
   const evidence = Object.entries(files).map(([path, value]) => { const bytes = Buffer.from(JSON.stringify(value)); return { path, bytes: bytes.length, sha256: hash(bytes) }; });
@@ -243,7 +277,15 @@ function metadataFixture(targeted = false, borrowed = false) {
     fs.writeFileSync(join(originDir, 'complete.json'), JSON.stringify(original), { mode: 0o600 });
     fs.writeFileSync(join(originDir, 'operation.lock/deploy-adapter-owner.json'), JSON.stringify({ version: 2, nonce: original.nonce, kind: 'preserving-deployment' }), { mode: 0o600 });
   }
-  return { root, dir, write, originDir, f };
+  let candidateOriginDir;
+  if (f.candidateOriginal) {
+    const o = f.candidateOriginal; candidateOriginDir = join(parent, o.origin.nonce);
+    fs.mkdirSync(join(candidateOriginDir, 'operation.lock'), { recursive: true, mode: 0o700 });
+    for (const [name, value] of Object.entries(f.candidateOriginalFiles)) fs.writeFileSync(join(candidateOriginDir, name), typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
+    fs.writeFileSync(join(candidateOriginDir, 'complete.json'), JSON.stringify(o.complete), { mode: 0o600 });
+    fs.writeFileSync(join(candidateOriginDir, 'operation.lock/deploy-adapter-owner.json'), JSON.stringify({ version: 2, nonce: o.origin.nonce, kind: 'preserving-deployment' }), { mode: 0o600 });
+  }
+  return { root, dir, write, originDir, candidateOriginDir, f };
 }
 test('real fixed-path receipt reader verifies sealed metadata without opening private snapshots', () => {
   const { root, dir } = metadataFixture();
@@ -272,6 +314,113 @@ for (const kind of ['byte-change', 'same-bytes-replacement', 'symlink', 'hardlin
   if (kind === 'extra-owner-entry') write('operation.lock/other.json', {});
   if (kind === 'parent-symlink') { const parent = join(root, '.local-public-images'); fs.renameSync(parent, join(root, 'preserved-state')); fs.symlinkSync('preserved-state', parent); }
   assert.throws(() => captureNativeDeploymentRecords(root, deployment));
+});
+
+test('completev4 borrowed-prebuilt candidates retain distinct original provenance without pretending this attempt rebuilt them', async () => {
+  const f = prebuiltFixture(), a = await f.open(selected); let sends = 0;
+  assert.deepEqual(a.qualification.rebuiltRoles, []); assert.deepEqual(a.qualification.updatedRoles, ['api', 'web']);
+  assert.equal(a.qualification.candidateArtifactBasis, 'borrowed-prebuilt');
+  assert.equal(a.qualification.artifactProvenance.borrowedNew[0].origin.nonce, 'e'.repeat(32));
+  assert.equal(a.qualification.artifactProvenance.retainedOld[0].origin.nonce, 'c'.repeat(32));
+  await a.dispatch('chat', async () => { sends++; }); assert.equal(sends, 1); await a.close(true);
+});
+test('real sealed pre-mutation-aborted candidate provenance is authenticated separately from retained old references', async () => {
+  const f = prebuiltFixture(), m = metadataFixture(true, true, f), r = captureNativeDeploymentRecords(m.root, deployment);
+  r.verify(); assert.equal(r.candidateOrigins.length, 1); assert.equal(r.candidateOrigins[0].complete.outcome, 'pre-mutation-aborted');
+  const open = createNativeRuntimeAuthority({ records: () => r, captureSource: () => f.source, readReview: async () => review,
+    acquire: () => ({ verify() {}, record() {}, release() {} }), observe: async () => f.observed, wall: () => Date.parse('2026-11-04T02:00:00Z') });
+  const a = await open(selected); await a.dispatch('chat', async () => {}); await a.close(true);
+});
+test('offline completev4 composition: sealed origins, production command seam and installed route fence borrowed candidates without retag/build', async () => {
+  const f = prebuiltFixture(), m = metadataFixture(true, true, f), commands = [];
+  const records = captureNativeDeploymentRecords(m.root, deployment);
+  const observe = createNativeRuntimeObserver(async () => f.observed.status, async args => {
+    commands.push(args);
+    if (args[0] === 'context') return JSON.stringify('unix:///synthetic.sock');
+    if (args[0] === 'info') return JSON.stringify(f.observed.status.daemon);
+    if (args[0] === 'container') {
+      assert.deepEqual(args, ['container', 'inspect', ...roles.map(n => `${NATIVE_PROJECT}-${n}-1`), '--format', NATIVE_EPOCH_FORMAT]);
+      return f.observed.epochs.map(e => JSON.stringify(e)).join('\n');
+    }
+    assert.deepEqual(args, ['image', 'inspect', ...f.references.map(r => r.tag), '--format', NATIVE_REFERENCE_FORMAT]);
+    return f.observed.referenceImages.map(e => JSON.stringify(e)).join('\n');
+  }, m.root, '/synthetic-home');
+  const open = createNativeRuntimeAuthority({ records: () => records, captureSource: () => f.source, readReview: async () => review,
+    acquire: () => ({ verify() {}, record(phase) { f.events.push(phase); }, release() { f.released++; } }), observe,
+    wall: () => Date.parse('2026-11-04T02:00:00Z') });
+  const authority = await open(selected);
+  let handler, sends = 0, aborted = 0;
+  const gate = { stopped: false, async consume() { return true; }, stop() { this.stopped = true; } };
+  const log = { requests: 0, denied: 0, postAttempts: 0, dispatched: 0, summaryPosts: 0, chatPosts: 0 };
+  await installRoutes({ route: async (_, fn) => { handler = fn; }, routeWebSocket: async () => {} }, gate, log, async () => {}, authority.dispatch);
+  const route = kind => {
+    const url = NATIVE_ORIGIN + BASE + '/llm/' + kind;
+    return { request: () => ({ url: () => url, method: () => 'POST', redirectedFrom: () => null, postDataJSON: () => ({}),
+      headerValue: async key => key === 'content-type' ? 'application/json' : 'application/x-ndjson' }),
+    fetch: async options => { sends++; assert.deepEqual(options, { maxRedirects: 0, maxRetries: 0, timeout: 150000 });
+      return { status: () => 200, url: () => url, dispose: async () => {} }; },
+    fulfill: async () => {}, abort: async () => { aborted++; } };
+  };
+  await handler(route('summary')); assert.equal(sends, 1); assert.equal(gate.stopped, false);
+  assert.equal(commands.filter(c => c[0] === 'image').length, 3); // admission, pre-send, post-send
+  assert.equal(records.complete.references.length, 0);
+  assert.equal(f.references.every(r => !r.tag.endsWith(deployment)), true);
+  f.observed.referenceImages.find(r => r.image === records.built.candidates.web.image).tags = [];
+  await handler(route('chat')); assert.equal(sends, 1); assert.equal(aborted, 1); assert.equal(log.chatPosts, 0);
+  assert.equal(gate.stopped, true); assert.deepEqual(await authority.close(false), { released: false });
+  assert.equal(f.released, 0); assert.equal(f.events.includes('retained-unknown'), true);
+  assert.equal(commands.every(c => ['context', 'info', 'container', 'image'].includes(c[0])), true);
+});
+for (const [name, mutate] of [
+  ['missing reuse proof', f => { delete f.records.reuse; }],
+  ['wrong origin nonce', f => { f.records.reuse.origin = { ...f.records.reuse.origin, nonce: 'f'.repeat(32) }; }],
+  ['missing original candidate metadata', f => { f.records.candidateOrigins = []; }],
+  ['original failure not aborted', f => { f.candidateOriginal.complete.outcome = 'published'; }],
+  ['original runtime differs', f => { f.candidateOriginal.recovery.old = []; }],
+  ['original backend differs', f => { f.candidateOriginal.intent.backendSource = id(999); }],
+  ['original candidate image differs', f => { f.candidateOriginal.built.candidates.api = { ...f.candidateOriginal.built.candidates.api, image: image(999) }; }],
+  ['current source differs', f => { f.source.files = [...f.source.files, { path: 'server/api/src/added.ts', digest: id(999) }]; }],
+  ['old orchestration substituted', f => { f.candidateOriginal.intent.adapter = id(999); }],
+  ['new orchestration substituted', f => { f.records.reuse.source = { ...f.records.reuse.source, currentAdapter: id(999) }; }],
+  ['publication proof differs', f => { f.records.published.candidateReuse = {}; }],
+  ['legacyv3 cannot claim reused candidate tag', f => { f.records.complete.version = 3; }],
+]) test(`borrowed-prebuilt candidate refuses ${name}`, async () => {
+  const f = prebuiltFixture(); mutate(f); await assert.rejects(f.open(selected)); assert.equal(f.acquired, 0);
+});
+for (const attack of ['failure-unsealed', 'engine-unsettled', 'engine-mutation', 'origin-byte-drift', 'origin-replaced', 'lifecycle-record', 'origin-custody-tamper']) test(`borrowed candidate original evidence attack ${attack}`, () => {
+  const m = metadataFixture(true, true, prebuiltFixture()), path = m.candidateOriginDir;
+  if (attack === 'failure-unsealed') fs.writeFileSync(join(path, 'failure-preparerecovery.json'), '{"code":"OTHER_FAILURE"}');
+  if (attack === 'engine-unsettled') fs.writeFileSync(join(path, 'engine.jsonl'), JSON.stringify({ seq: 1, state: 'submitted', code: 'CANDIDATE_IMAGE_INSPECT_FAILED' }) + '\n');
+  if (attack === 'engine-mutation') fs.writeFileSync(join(path, 'engine.jsonl'), JSON.stringify({ seq: 1, state: 'submitted', code: 'STOP_DISPATCH_FAILED' }) + '\n' + JSON.stringify({ seq: 1, state: 'settled', exit: 0 }) + '\n');
+  if (attack === 'lifecycle-record') fs.writeFileSync(join(path, 'stop-api-submission.json'), '{}', { mode: 0o600 });
+  if (attack === 'origin-custody-tamper') fs.appendFileSync(join(path, 'reference-custody.json'), ' ');
+  if (attack === 'origin-byte-drift' || attack === 'origin-replaced') {
+    const r = captureNativeDeploymentRecords(m.root, deployment), file = join(path, 'built.json'), bytes = fs.readFileSync(file);
+    if (attack === 'origin-byte-drift') fs.appendFileSync(file, ' ');
+    else { fs.renameSync(file, join(path, 'saved-built.json')); fs.writeFileSync(file, bytes, { mode: 0o600 }); }
+    assert.throws(() => r.verify()); return;
+  }
+  assert.throws(() => captureNativeDeploymentRecords(m.root, deployment));
+});
+
+function replaceSealedMetadata(f, name, value) {
+  f.write(name, value);
+  const bytes = fs.readFileSync(join(f.dir, name));
+  const complete = JSON.parse(fs.readFileSync(join(f.dir, 'complete.json')));
+  complete.evidence = complete.evidence.filter(row => row.path !== name);
+  complete.evidence.push({ path: name, bytes: bytes.length, sha256: hash(bytes) });
+  f.write('complete.json', complete);
+}
+for (const size of [262145, RECOVERY_AUTHORITY_RECORD_LIMIT, RECOVERY_AUTHORITY_RECORD_LIMIT + 1]) test(`new bounded sealed authority size ${size} with no legacy record rewrite`, () => {
+  const f = metadataFixture(true), value = { ...f.f.records.authority, boundedSyntheticPadding: '' };
+  value.boundedSyntheticPadding = 'x'.repeat(size - Buffer.byteLength(JSON.stringify(value)));
+  assert.equal(Buffer.byteLength(JSON.stringify(value)), size); replaceSealedMetadata(f, 'authority-v3.json', value);
+  if (size > RECOVERY_AUTHORITY_RECORD_LIMIT) assert.throws(() => captureNativeDeploymentRecords(f.root, deployment));
+  else { const r = captureNativeDeploymentRecords(f.root, deployment); r.verify(); fs.appendFileSync(join(f.dir, 'authority-v3.json'), ' '); assert.throws(() => r.verify()); }
+});
+test('authority record bound does not enlarge intent or other regular evidence bounds', () => {
+  const f = metadataFixture(true); replaceSealedMetadata(f, 'intent.json', { ...f.f.records.intent, synthetic: 'x'.repeat(262144) });
+  assert.throws(() => captureNativeDeploymentRecords(f.root, deployment));
 });
 
 for (const borrowed of [false, true, 'mixed']) test(`targeted actual web/api history4→5 qualified path; borrowed=${borrowed}`, async () => {

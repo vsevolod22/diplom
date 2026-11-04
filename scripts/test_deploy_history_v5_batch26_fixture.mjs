@@ -62,7 +62,7 @@ function child(root, code, input) {
     cwd:join(root,'server/api'),env:{PATH:'/usr/bin:/bin'},input:JSON.stringify(input),encoding:'utf8',timeout:10000,maxBuffer:65536});
   assert.equal(result.error,undefined); assert.equal(result.status,0,'fixture constructor/helper failed: '+result.stderr); return result;
 }
-export async function adapterFixture(t, { historyVersion = 4, migrationFault = null, tamper = null, helperTamper = null, failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null, helperTransition = null, lifecycleStdout = 'id', helperLifecycleFault = null, engineHook = null, clockHook = null } = {}) {
+export async function adapterFixture(t, { historyVersion = 4, migrationFault = null, tamper = null, helperTamper = null, failedStart = null, publishedOperations = false, stopStdout = 'id', stopFault = null, helperTransition = null, lifecycleStdout = 'id', helperLifecycleFault = null, engineHook = null, clockHook = null, qualificationHook = null } = {}) {
   // Reuse metadata constructors only. Synthetic release files are not activated;
   // reset to the non-CVE profile before invoking any new adapter method.
   const f=fixture(t), root=f.root, home=temporary(t); sources(root);
@@ -285,7 +285,7 @@ export async function adapterFixture(t, { historyVersion = 4, migrationFault = n
           diagnostics.push({fakeEngineFailure:error.message}); callback(error, error.stdout ?? '', 'synthetic fake-engine failure');
         });
     });
-    const freshAdapter=()=>createDeployAdapter({root,home,run:transport,now:()=>{clockHook?.();return performance.now();},Database:DB,checkSource:async()=>({typescript:true,bundle:true,openai:true}),
+    const freshAdapter=()=>createDeployAdapter({root,home,run:transport,now:()=>{clockHook?.();return performance.now();},Database:DB,checkSource:async()=>{qualificationHook?.();return {typescript:true,bundle:true,openai:true};},
     http:async url=>{assert.ok(url.startsWith('http://127.0.0.1:8081/'));return {status:new URL(url).pathname==='/'?200:401,body:{cancel:async()=>{}}};}});
     const actual=freshAdapter();
   // Keep the real implementation and its finite diagnostics, translating exactly

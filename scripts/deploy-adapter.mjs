@@ -24,12 +24,16 @@ import { createAdapterSnapshots, qualifyAdapterStoreCopies } from './deploy-adap
 import { requireDeploySupervisor, inspectDeploySupervisor } from './deploy-supervisor.mjs';
 import { deploymentAuthority, deploymentFileIdentity, createEngineJournal, readEngineJournal } from './deploy-authority.mjs';
 import { completionReferences, retainedReferenceHistory, referenceUnion, createReferenceCustody,
-  validateReferenceCustody, custodyCompletionReferences, parseImageInventory, assertImageCapacity, referenceCustodyDiagnostic } from './deploy-reference-custody.mjs';
+  validateReferenceCustody, custodyCompletionReferences, parseImageInventory, assertImageCapacity, referenceCustodyDiagnostic,
+    boundedDeploymentRecord, deploymentRecordLimit, precheckRecoveryRecordCapacity, candidateSourceEquivalence } from './deploy-reference-custody.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROLES = Object.freeze(['api','worker','web','egress','llm-egress','openai-egress']);
 const AUTH_SOURCE = Object.freeze(['src/auth/auth.store.ts','src/auth/auth.controller.ts']);
 const RECORDS = 'deploy-adapter-v1';
+// Prior independently reviewed builder with the mandatory source qualifier.
+// This is code provenance, not an incident/nonce permission or a caller grant.
+const SEALED_CANDIDATE_BUILD_ADAPTER = '0c3d478139d33f1f8d8b2c81649d2141c331971e8402b214647cf8acf2e18742';
 const diagnostics = new WeakMap(), authQualifications = new WeakSet(), historyQualifications = new WeakSet();
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const role = c => c.Config?.Labels?.['com.docker.compose.service'];
@@ -113,17 +117,17 @@ function captureBuildHistory(root, own = null, legacy = []) {
   for(const nonce of names){
     const dir=join(parent,nonce);guards.push(protectedDirectory(dir));
     const proof=captureFile(join(dir,'complete.json'),{limit:262144}),r=JSON.parse(proof.bytes);guards.push(proof.verify);
-    need([2,3].includes(r.version)&&r.nonce===nonce&&r.project===PROJECT&&['published','old-restored','pre-mutation-aborted'].includes(r.outcome)&&Array.isArray(r.references)&&Array.isArray(r.evidence),'ADAPTER_HISTORY_INCOMPLETE');
+    need([2,3,4].includes(r.version)&&r.nonce===nonce&&r.project===PROJECT&&['published','old-restored','pre-mutation-aborted'].includes(r.outcome)&&Array.isArray(r.references)&&Array.isArray(r.evidence),'ADAPTER_HISTORY_INCOMPLETE');
     need(equal(evidenceIndex(dir),r.evidence),'ADAPTER_HISTORY_EVIDENCE_CHANGED');
     const owner=captureFile(join(dir,'operation.lock/deploy-adapter-owner.json'));
     need(equal(JSON.parse(owner.bytes),{version:2,nonce,kind:'preserving-deployment'}),'ADAPTER_HISTORY_OWNER_MISMATCH');guards.push(owner.verify);
     need(equal(fs.readdirSync(join(dir,'operation.lock')),['deploy-adapter-owner.json']),'ADAPTER_HISTORY_LOCK_ARCHIVE_INVALID');
     completionReferences(r,nonce);
-        if(r.version===3&&r.referenceCustody!==null){
+        if(r.version>=3&&r.referenceCustody!==null){
           const custody=captureFile(join(dir,'reference-custody.json'),{limit:262144});guards.push(custody.verify);
           need(equal(JSON.parse(custody.bytes),r.referenceCustody),'ADAPTER_HISTORY_CUSTODY_CHANGED');
         }
-        completions.push({nonce,sha256:digest(proof.bytes),record:r});
+        completions.push({nonce,sha256:digest(proof.bytes),record:r,dir});
     // Capture metadata after full byte validation; retained history is never changed by this attempt.
     const rootEntries=fs.readdirSync(dir).sort();guards.push(()=>need(equal(fs.readdirSync(dir).sort(),rootEntries),'ADAPTER_HISTORY_CHANGED'));
         const stamps=r.evidence.map(e=>{const path=join(dir,e.path),s=fs.lstatSync(path);return {path,stamp:[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]};});
@@ -132,7 +136,7 @@ function captureBuildHistory(root, own = null, legacy = []) {
   const references=retainedReferenceHistory({legacy,completions});
     need(references.length<=DEPLOYMENT_RETAINED_REFERENCE_LIMIT,'IMAGE_REFERENCE_CAPACITY');
   const verify=()=>{guards.forEach(g=>g());need(equal(exists(parent)?fs.readdirSync(parent).filter(n=>n!==own).sort():[],names),'ADAPTER_HISTORY_CHANGED');};
-  verify();return {references,verify,count:names.length};
+  verify();return {references,verify,completions,count:names.length};
 }
 function legacyReferenceOrigins(catalog,retentions) {
   return retentions.receipts.flatMap(receipt=>{
@@ -412,11 +416,10 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         need(values.length===1&&values[0].Id===ref.image&&values[0].RepoTags?.includes(ref.tag),'RETAINED_IMAGE_CHANGED');validatePublicLlmImage(values[0],ref.name);}
       need(before.containers.filter(c=>!role(c).endsWith('volume-init')).every(healthy),'OLD_SITE_NOT_HEALTHY');
       const custodyNonce=owned?.nonce??randomBytes(16).toString('hex');
-      const referenceCustody=createReferenceCustody({nonce:custodyNonce,targets,
+      let referenceCustody=createReferenceCustody({nonce:custodyNonce,targets,
         published:Object.fromEntries(targets.map(n=>[n,config.pins.services[n].image])),
         runtime:Object.fromEntries(targets.map(n=>[n,before.containers.find(c=>role(c)===n).Image])),references:history.references});
-      const inventory=parseImageInventory(await request(['image','ls','--no-trunc','--filter',`label=${IMAGE_LABEL}=${PROJECT}`,'--format','{{.Repository}}:{{.Tag}}\t{{.ID}}'],connection.options,'IMAGE_REFERENCES_FAILED'));
-      assertImageCapacity(inventory,history.references,[...referenceCustody.candidates,...referenceCustody.old.filter(r=>r.ownership==='owned')].map(r=>r.tag));
+
       const plan={mode,targets,config,next,source,self,entryProofs,contract,catalog,retentions,history,connection,before,referenceCustody,custodyNonce,phase:'prepared',apiReady:true,
               ...(owned?{lease,lock:owned.lock,nonce:owned.nonce,audit:owned.audit,record:owned.record,proofs:owned.proofs,owner:owned.owner}:{}),
               peers:new Map(before.containers.map(c=>[role(c),c])),authorities:new Map(before.containers.map(c=>[role(c),{model:config.model,selection:config.selection}]))};
@@ -443,50 +446,106 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         const proof=JSON.parse(await request(['container','exec',api.Id,'node','-e',WEB_BACKEND_SOURCE_PROBE],connection.options,'BACKEND_SOURCE_PROBE_FAILED',5000));
         need(plain(proof)&&equal(Object.keys(proof).sort(),['source','version'])&&proof.version===1&&proof.source===contract.digest,'WEB_BACKEND_A3_COMPATIBILITY_UNPROVEN');
       }
-      await stable(plan);const token=Object.freeze({version:2,mode,services:targets,interruptedServices:Object.freeze(mode==='web'?['web']:[...new Set([...targets,'web','api','worker'])].sort()),
-              referenceCustody:structuredClone(referenceCustody),newReferenceCount:referenceCustody.candidates.length+referenceCustody.old.filter(r=>r.ownership==='owned').length,
+      plan.candidateReuse=await selectCandidateReuse(plan);
+            if(plan.candidateReuse){referenceCustody=createReferenceCustody({nonce:custodyNonce,targets,
+              published:Object.fromEntries(targets.map(n=>[n,config.pins.services[n].image])),
+              runtime:Object.fromEntries(targets.map(n=>[n,before.containers.find(c=>role(c)===n).Image])),references:history.references,
+              candidateReferences:plan.candidateReuse.references});plan.referenceCustody=referenceCustody;}
+            const inventory=parseImageInventory(await request(['image','ls','--no-trunc','--filter',`label=${IMAGE_LABEL}=${PROJECT}`,'--format','{{.Repository}}:{{.Tag}}\t{{.ID}}'],connection.options,'IMAGE_REFERENCES_FAILED'));
+            assertImageCapacity(inventory,history.references,[...referenceCustody.candidates.filter(r=>r.ownership!=='borrowed'),...referenceCustody.old.filter(r=>r.ownership==='owned')].map(r=>r.tag));
+            if(plan.historyMigration!=='none')plan.recoveryRecordCapacity=recoveryRecordPrecheck(plan);
+            await stable(plan);const token=Object.freeze({version:2,mode,services:targets,interruptedServices:Object.freeze(mode==='web'?['web']:[...new Set([...targets,'web','api','worker'])].sort()),
+              referenceCustody:structuredClone(referenceCustody),newReferenceCount:referenceCustody.candidates.filter(r=>r.ownership!=='borrowed').length+referenceCustody.old.filter(r=>r.ownership==='owned').length,
                             migration:plan.migration,historyMigration:plan.historyMigration,historyVersion:plan.historyVersion,...(config.next.operations?{operations:config.next.operations}:{}),upgradeOperations,rollbackSafe:mode==='web',old:Object.freeze({images:Object.fromEntries(targets.map(n=>[n,before.images[n].Id]))}),
               availableCapabilities:Object.freeze([contract.name]),backendContract:contract.name,lifecycleSupported:true});plans.set(token,plan);plan.token=token;return token;
     }catch(error){throw safeError('PREFLIGHT_REFUSED',error);}
   }
-  async function buildCandidate(token) {
+  async function selectCandidateReuse(p) {
+      if(p.mode!=='app'||p.migration||p.historyMigration!=='history-reservations-v4-to-v5'||!equal(p.targets,['api','web'])||!equal(p.config.selection,p.config.next))return null;
+      for(const origin of [...p.history.completions].reverse()){
+        if(origin.record.version!==3||origin.record.outcome!=='pre-mutation-aborted')continue;
+        const path=origin.dir,names=fs.readdirSync(path).sort();
+        if(!names.includes('failure-preparerecovery.json')||!names.includes('built.json')||!names.includes('recovery.json'))continue;
+        const read=name=>JSON.parse(captureFile(join(path,name),{limit:deploymentRecordLimit(name)}).bytes);
+        const failure=read('failure-preparerecovery.json');if(!equal(failure,{code:'JOURNAL_SIZE'}))continue;
+        need(!names.some(n=>/^(stop-|start-|restore-|fenced|snapshot|helper|qualification|history-migration|history-v5-prestart|preservation|publication|published|recovery-v5)/.test(n)),'CANDIDATE_REUSE_MUTATED_ORIGIN');
+        const intent=read('intent.json'),built=read('built.json'),recovery=read('recovery.json'),custody=read('reference-custody.json');
+        need(intent.version===2&&intent.kind==='preserving-deployment'&&intent.project===PROJECT&&intent.nonce===origin.nonce&&intent.mode==='app'&&
+          equal(intent.services,p.targets)&&built.version===1&&built.nonce===origin.nonce&&built.outcome==='candidate-built-old-site-unchanged'&&built.lifecycle===false&&
+          recovery.version===2&&recovery.project===PROJECT&&recovery.nonce===origin.nonce&&recovery.migration===false&&recovery.historyVersion===4&&
+          recovery.historyMigration===p.historyMigration&&equal(recovery.services,p.targets)&&
+          intent.daemon===p.connection.initial.id&&recovery.daemon===intent.daemon,'CANDIDATE_REUSE_ORIGIN_SCOPE');
+        need(equal(custody,origin.record.referenceCustody)&&equal(custody,intent.referenceCustody)&&equal(custody,built.referenceCustody)&&equal(custody,recovery.referenceCustody),'CANDIDATE_REUSE_CUSTODY');
+        const owned=custodyCompletionReferences(custody,origin.nonce,built.candidates);
+        need(equal(owned.references,origin.record.references)&&equal(owned.borrowedReferences,origin.record.borrowedReferences)&&owned.references.length===p.targets.length&&
+          owned.references.every(r=>r.tag===`dip-deploy-${r.name}:candidate-${origin.nonce}`),'CANDIDATE_REUSE_DIRECT_OWNER');
+        need(equal(recovery.old,p.before.containers.map(c=>({role:role(c),id:c.Id,image:c.Image,startedAt:c.State.StartedAt})))&&
+          equal(intent.old,p.targets.map(n=>({role:n,id:p.before.containers.find(c=>role(c)===n).Id,image:p.before.images[n].Id})))&&
+          intent.backendSource===p.contract.digest,'CANDIDATE_REUSE_RUNTIME_DRIFT');
+        const journal=readEngineJournal(join(path,'engine.jsonl'));
+        need(!journal.codes.some(code=>/STOP|START|RESUME|RECREATE|HELPER|SNAPSHOT|MIGRAT|PUBLICATION/.test(code)),'CANDIDATE_REUSE_ENGINE_MUTATION');
+        need([SEALED_CANDIDATE_BUILD_ADAPTER,digest(p.self.bytes)].includes(intent.adapter),'CANDIDATE_REUSE_ADAPTER_UNQUALIFIED');
+              const source=candidateSourceEquivalence({originalSource:intent.source,files:p.source.manifest.files.map(f=>({path:f.path,digest:f.digest})),
+          originalAdapter:intent.adapter,originalEntrySources:intent.entrySources,currentAdapter:digest(p.self.bytes),currentEntrySources:p.entryProofs.map(f=>digest(f.bytes))});
+        const images={...p.before.images},references=[];
+        for(const name of p.targets){const row=built.candidates[name],ref=p.history.references.find(r=>r.name===name&&r.tag===row.tag&&r.image===row.image&&r.origin?.nonce===origin.nonce&&r.origin.sha256===origin.sha256);
+          need(ref&&row.oldImage===p.before.images[name].Id&&row.oldTag===custody.old.find(r=>r.name===name)?.tag,'CANDIDATE_REUSE_IMAGE_BINDING');
+          const rows=JSON.parse(await request(['image','inspect',ref.tag],p.connection.options,'REUSED_CANDIDATE_INSPECT_FAILED'));
+          need(rows.length===1&&rows[0].Id===ref.image&&rows[0].RepoTags?.includes(ref.tag),'CANDIDATE_REUSE_IMAGE_CHANGED');
+          validatePublicLlmImage(rows[0],name);assertNoOpenAiDockerSecret(rows[0].Config);images[name]=rows[0];references.push(ref);
+        }
+        need(equal(read('recipe-old.json'),recipe(p.config.model,p.before.images))&&equal(read('recipe-candidate.json'),recipe(p.next,images)),'CANDIDATE_REUSE_RECIPE_DRIFT');
+        p.history.verify();p.source.verify();p.config.verify();
+        return {origin:{kind:'adapter-completion',nonce:origin.nonce,sha256:origin.sha256},references,source,images};
+      }
+      return null;
+    }
+    async function buildCandidate(token) {
     const plan=planFor(token);need(plan.phase==='prepared','ATTEMPT_NOT_REPLAYABLE');
     try {ownedLease(plan.lease);await stable(plan);plan.phase='building';plan.buildMutation=false;
       const {nonce,record,proofs}=plan;
+      if(plan.historyMigration!=='none')plan.recoveryRecordCapacity=recoveryRecordPrecheck(plan);
       const sourceManifest=plan.source.manifest.files.map(f=>({path:f.path,digest:f.digest}));
       need(plan.custodyNonce===nonce,'CUSTODY_NONCE_MISMATCH');
       validateReferenceCustody(plan.referenceCustody,nonce,plan.history.references);
       record('reference-custody.json',plan.referenceCustody);
       record('intent.json',{version:2,kind:'preserving-deployment',project:PROJECT,nonce,mode:plan.mode,services:plan.targets,
         daemon:plan.connection.initial.id,source:digest(JSON.stringify(sourceManifest)),adapter:digest(plan.self.bytes),entrySources:plan.entryProofs.map(p=>digest(p.bytes)),backendSource:plan.contract.digest,
-        old:plan.targets.map(n=>({role:n,id:plan.before.containers.find(c=>role(c)===n).Id,image:plan.before.images[n].Id})),referenceCustody:plan.referenceCustody,lifecycle:false});
+        old:plan.targets.map(n=>({role:n,id:plan.before.containers.find(c=>role(c)===n).Id,image:plan.before.images[n].Id})),referenceCustody:plan.referenceCustody,
+                ...(plan.candidateReuse?{candidateReuse:plan.candidateReuse.source,reuseOrigin:plan.candidateReuse.origin}:{}),lifecycle:false});
       // Compilation/COPY qualification belongs to build, never read-only planning.
       const qualification=await checkSource(root,{openai:plan.config.next});
       need(qualification?.typescript===true&&qualification.bundle===true&&qualification.openai===true,'SOURCE_BUILD_QUALIFICATION');await stable(plan);
+            if(plan.historyMigration!=='none')plan.recoveryRecordCapacity=recoveryRecordPrecheck(plan);
+            if(plan.candidateReuse)record('candidate-reuse.json',{version:1,origin:plan.candidateReuse.origin,source:plan.candidateReuse.source,
+              qualification:{typescript:true,bundle:true,openai:true},referenceCustody:plan.referenceCustody});
       const end=now()+30*60*1000,candidates={};plan.candidates=candidates;plan.candidateImages={...plan.before.images};
       const call=async(args,code,requested=30000)=>{await stable(plan);plan.owner.verify();proofs.forEach(p=>p.verify());
         const timeout=Math.floor(Math.min(requested,end-now()));need(timeout>0,'BUILD_DEADLINE');
         const result=await request(args,plan.connection.options,code,timeout);await stable(plan);return result;};
       for(const name of plan.targets){
-        const old=plan.referenceCustody.old.find(r=>r.name===name),oldTag=old.tag,tag=`dip-deploy-${name}:candidate-${nonce}`;
-        for(const ref of [tag,...(old.ownership==='owned'?[oldTag]:[])])need((await call(['image','ls','--filter',`reference=${ref}`,'--format','{{.ID}}'],'IMAGE_TAG_CHECK_FAILED')).trim()==='','IMAGE_TAG_ALREADY_PRESENT');
+        const old=plan.referenceCustody.old.find(r=>r.name===name),candidate=plan.referenceCustody.candidates.find(r=>r.name===name),oldTag=old.tag,tag=candidate.tag;
+        for(const ref of [...(candidate.ownership==='borrowed'?[]:[tag]),...(old.ownership==='owned'?[oldTag]:[])])need((await call(['image','ls','--filter',`reference=${ref}`,'--format','{{.ID}}'],'IMAGE_TAG_CHECK_FAILED')).trim()==='','IMAGE_TAG_ALREADY_PRESENT');
         if(old.ownership==='owned'){
           record(`retain-${name}-submission.json`,{role:name,image:old.image,tag:oldTag});
           plan.buildMutation=true;await call(['image','tag',old.image,oldTag],'OLD_IMAGE_RETENTION_FAILED');
         }else record(`borrow-${name}.json`,old);
         const retained=JSON.parse(await call(['image','inspect',oldTag],'OLD_IMAGE_VERIFY_FAILED'));
         need(retained.length===1&&retained[0].Id===plan.before.images[name].Id&&retained[0].RepoTags?.includes(oldTag)&&equal(retained[0].Config,plan.before.images[name].Config),'OLD_IMAGE_CHANGED');
-        record(`build-${name}-submission.json`,{role:name,tag,oldTag,lifecycle:false});
+        if(candidate.ownership!=='borrowed')record(`build-${name}-submission.json`,{role:name,tag,oldTag,lifecycle:false});
         const build=plan.next.services[name].build;need(build?.context===root&&typeof build.dockerfile==='string'&&!build.dockerfile.includes('..'),'BUILD_SPEC_INVALID');
-        plan.buildMutation=true;
-                await call(['build','--pull=false','--file',join(root,build.dockerfile),'--label',`${LABEL}=v1`,'--label',`${IMAGE_LABEL}=${PROJECT}`,'--tag',tag,root],'CANDIDATE_BUILD_FAILED',20*60*1000);
+        if(candidate.ownership==='borrowed')record(`reuse-${name}.json`,candidate);
+        else {plan.buildMutation=true;
+          await call(['build','--pull=false','--file',join(root,build.dockerfile),'--label',`${LABEL}=v1`,'--label',`${IMAGE_LABEL}=${PROJECT}`,'--tag',tag,root],'CANDIDATE_BUILD_FAILED',20*60*1000);
+        }
         const rows=JSON.parse(await call(['image','inspect',tag],'CANDIDATE_IMAGE_INSPECT_FAILED'));
-        need(rows.length===1,'CANDIDATE_IMAGE_CARDINALITY');validatePublicLlmImage(rows[0],name);assertNoOpenAiDockerSecret(rows[0].Config);
+        need(rows.length===1&&rows[0].RepoTags?.includes(tag)&&(!candidate.image||rows[0].Id===candidate.image),'CANDIDATE_IMAGE_CARDINALITY');validatePublicLlmImage(rows[0],name);assertNoOpenAiDockerSecret(rows[0].Config);
         plan.candidateImages[name]=rows[0];candidates[name]=Object.freeze({image:rows[0].Id,tag,oldImage:plan.before.images[name].Id,oldTag});
         record(`built-${name}.json`,{role:name,...candidates[name]});
       }
       await stable(plan);custodyCompletionReferences(plan.referenceCustody,nonce,candidates);
-            record('built.json',{version:1,nonce,outcome:'candidate-built-old-site-unchanged',candidates,referenceCustody:plan.referenceCustody,lifecycle:false});
+            record('built.json',{version:1,nonce,outcome:'candidate-built-old-site-unchanged',candidates,referenceCustody:plan.referenceCustody,
+                    ...(plan.candidateReuse?{candidateReuse:plan.candidateReuse.source,reuseOrigin:plan.candidateReuse.origin}:{}),lifecycle:false});
       plan.phase='built';plan.candidates=candidates;return Object.freeze({version:1,attempt:nonce,mode:plan.mode,candidates:Object.freeze(candidates),lifecycle:false,lockRetained:true});
     }catch(error){plan.phase=plan.buildMutation?'hold':'prebuild-failed';const failure=safeError(plan.buildMutation?'BUILD_HOLD':'BUILD_REFUSED',error);
       try{plan.record?.('failure.json',{version:1,...deployAdapterDiagnostic(failure),lifecycle:false});}catch{/* Keep uncertain lock/evidence. */}
@@ -520,8 +579,8 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const owner=captureFile(join(lock.path,'deploy-adapter-owner.json')),auditGuard=protectedDirectory(audit),proofs=[];
     const record=(name,value)=>{lock.verify();owner.verify();auditGuard();proofs.forEach(p=>p.verify());
       need(/^[a-z][a-z0-9-]{0,79}\.json$/.test(name),'JOURNAL_NAME_INVALID');
-      const bytes=JSON.stringify(value);need(Buffer.byteLength(bytes)<=262144,'JOURNAL_SIZE');
-      writeExclusive(join(audit,name),bytes,0o600);syncDirectory(audit);proofs.push(captureFile(join(audit,name),{limit:262144}));};
+      const bytes=boundedDeploymentRecord(name,value);
+      writeExclusive(join(audit,name),bytes,0o600);syncDirectory(audit);proofs.push(captureFile(join(audit,name),{limit:deploymentRecordLimit(name)}));};
     record('lease.json',{version:2,project:PROJECT,nonce});
     const token=Object.freeze({version:2,nonce});
     const state={lock,nonce,audit,owner,proofs,record,released:false,supervisor};leases.set(token,state);
@@ -557,7 +616,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       for(let i=0;i<refs.length;i++){const ref=refs[i],image=rows[i];need(image.Id===ref.image&&image.RepoTags?.includes(ref.tag)&&(!ref.config||equal(image.Config,ref.config)),'RETAINED_IMAGE_CHANGED');validatePublicLlmImage(image,ref.name);}
     }
     const inventory=parseImageInventory(await request(['image','ls','--no-trunc','--filter',`label=${IMAGE_LABEL}=${PROJECT}`,'--format','{{.Repository}}:{{.Tag}}\t{{.ID}}'],p.connection.options,'IMAGE_REFERENCE_CENSUS_FAILED'));
-    const planned=p.referenceCustody?[...p.referenceCustody.candidates,...p.referenceCustody.old.filter(r=>r.ownership==='owned')]:[];
+    const planned=p.referenceCustody?[...p.referenceCustody.candidates.filter(r=>r.ownership!=='borrowed'),...p.referenceCustody.old.filter(r=>r.ownership==='owned')]:[];
     for(const old of p.referenceCustody?.old??[])if(inventory.concrete.has(old.tag))need(inventory.concrete.get(old.tag)===old.image,'OLD_IMAGE_CHANGED');
     assertImageCapacity(inventory,refs,planned.filter(r=>!inventory.concrete.has(r.tag)).map(r=>r.tag));fence();
   }
@@ -611,7 +670,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       p.jwt=captureFile(join(root,STATE,'scan-jwt'),{limit:96});need(/^[a-f0-9]{96}$/.test(p.jwt.bytes.toString()),'JWT_FORMAT');
       need(p.peers.get('api').Config.Env.includes('SCAN_JWT_SECRET='+p.jwt.bytes.toString()),'JWT_BINDING_CHANGED');
     }
-    save(p,'recovery.json',{version:2,nonce:p.nonce,project:PROJECT,daemon:p.connection.initial.id,services:p.targets,interruptedServices:p.token.interruptedServices,referenceCustody:p.referenceCustody,
+    save(p,'recovery.json',{version:2,nonce:p.nonce,project:PROJECT,daemon:p.connection.initial.id,services:p.targets,interruptedServices:p.token.interruptedServices,referenceCustody:p.referenceCustody,...(p.candidateReuse?{candidateReuse:p.candidateReuse.source,reuseOrigin:p.candidateReuse.origin}:{}),
       oldRecipe:'recipe-old.json',candidateRecipe:'recipe-candidate.json',old:p.before.containers.map(c=>({role:role(c),id:c.Id,image:c.Image,startedAt:c.State.StartedAt})),
       migration:p.migration,historyMigration:p.historyMigration,historyVersion:p.historyVersion,
       historyRecovery:'guarded-hold-no-automatic-resume',oldBinaryAfterHistoryV5:false,automaticDatabaseRollback:false});
@@ -783,7 +842,18 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       catalog:{active:p.catalog.active,archived:p.catalog.archived,records:p.catalog.records},
       references:p.history.references.map(({name,tag,image,origin})=>({name,tag,image,origin})),referenceCustody:p.referenceCustody};
   }
-  function operationIdentity(path) {
+  function recoveryRecordPrecheck(p) {
+      const nonce=p.nonce??p.custodyNonce,files=recoveryFileSet({...p,nonce}),authority=deploymentAuthority(p.before);
+      const identity={dev:Number.MAX_SAFE_INTEGER,ino:Number.MAX_SAFE_INTEGER},supervisor={identity,session:'f'.repeat(64)};
+      const original={version:3,project:PROJECT,nonce,supervisor:identity,files,authority};
+      const checkpoint={version:3,kind:'history-v5-prestart',project:PROJECT,nonce,supervisor,
+        operation:p.lock?operationIdentity(p.lock.path):{...identity,owner:{stamp:Array(8).fill(Number.MAX_SAFE_INTEGER),sha256:'f'.repeat(64)}},
+        daemon:p.connection.initial,source:digest(JSON.stringify(p.source.manifest.files.map(f=>({path:f.path,digest:f.digest})))),
+        adapter:digest(p.self.bytes),entrySources:p.entryProofs.map(f=>digest(f.bytes)),services:p.targets,referenceCustody:p.referenceCustody,
+        files,authority,evidence:[],engine:{count:10000,bytes:4*1024**2,sha256:'f'.repeat(64)},before:null,after:null,proof:null};
+      return precheckRecoveryRecordCapacity(original,checkpoint);
+    }
+    function operationIdentity(path) {
     const s=fs.lstatSync(path);protectedDirectory(path);
     return {dev:s.dev,ino:s.ino,owner:deploymentFileIdentity(join(path,'deploy-adapter-owner.json'))};
   }
@@ -792,7 +862,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     await boundary(p);p.snapshots.verify();
     need(['web','api','worker'].every(n=>cleanStopped(p.peers.get(n))),'PRESTART_WRITERS');
     const authority=deploymentAuthority(await namespace(p.config,p.connection,p));
-    const initial=JSON.parse(captureFile(join(p.audit,'authority-v3.json'),{limit:262144}).bytes);
+    const initial=JSON.parse(captureFile(join(p.audit,'authority-v3.json'),{limit:deploymentRecordLimit('authority-v3.json')}).bytes);
     const files=recoveryFileSet(p);need(equal(files,initial.files),'PRESTART_FILE_DRIFT');
     const lease=ownedLease(p.lease),engine=engineJournal.checkpoint();
     const evidence=evidenceIndex(p.audit).filter(e=>e.path!=='engine.jsonl');
@@ -898,7 +968,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     }
     p.config=loadConfiguration(root,home,false);need(equal(p.config.selection,p.nextSelection??p.authorities.get('api').selection),'PUBLISHED_SELECTION_MISMATCH');
     await boundary(p);need(ctx.receipt?.healthy===true&&typeof ctx.receipt.verified==='boolean'&&Number.isFinite(Date.parse(ctx.receipt.completedAt)),'RECEIPT_INVALID');
-        save(p,'published.json',{version:2,project:PROJECT,nonce:p.nonce,mode:p.mode,services:p.targets,interruptedServices:p.token.interruptedServices,referenceCustody:p.referenceCustody,
+        save(p,'published.json',{version:2,project:PROJECT,nonce:p.nonce,mode:p.mode,services:p.targets,interruptedServices:p.token.interruptedServices,referenceCustody:p.referenceCustody,...(p.candidateReuse?{candidateReuse:p.candidateReuse.source,reuseOrigin:p.candidateReuse.origin}:{}),
           migration:p.migration,historyMigration:p.historyMigration,historyProof:p.historyProof??null,verified:ctx.receipt.verified,healthy:true,completedAt:ctx.receipt.completedAt,pins,stores:p.after??null});p.phase='published';return {published:true};
   }
   async function reconcileWebRollback(p) {
@@ -945,7 +1015,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const hasCandidates=Object.keys(p?.candidates??{}).length>0;
     const referenceCustody=hasCandidates?p.referenceCustody:null;
     const refs=hasCandidates?custodyCompletionReferences(referenceCustody,state.nonce,p.candidates):{references:[],borrowedReferences:[]};
-    const complete={version:3,project:PROJECT,nonce:state.nonce,outcome:p?.phase==='published'?'published':p?.phase==='restored-healthy'?'old-restored':'pre-mutation-aborted',...refs,referenceCustody,evidence:evidenceIndex(state.audit)};
+    const complete={version:referenceCustody?.version===2?4:3,project:PROJECT,nonce:state.nonce,...(p?.candidateReuse?{candidateReuse:p.candidateReuse.source,reuseOrigin:p.candidateReuse.origin}:{}),outcome:p?.phase==='published'?'published':p?.phase==='restored-healthy'?'old-restored':'pre-mutation-aborted',...refs,referenceCustody,evidence:evidenceIndex(state.audit)};
     completionReferences(complete,state.nonce);state.record('complete.json',complete);
     ownedLease(ctx.lease);need(!exists(join(state.audit,'operation.lock')),'LOCK_ARCHIVE_COLLISION');
     fs.renameSync(state.lock.path,join(state.audit,'operation.lock'));syncDirectory(state.audit);syncDirectory(join(root,STATE));state.released=true;leaseDeadline=null;engineJournal=null;return {released:true};
@@ -958,7 +1028,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const owner=captureFile(join(lockPath,'deploy-adapter-owner.json'));
     need(equal(JSON.parse(owner.bytes),{version:2,nonce,kind:'preserving-deployment'})&&equal(fs.readdirSync(lockPath),['deploy-adapter-owner.json']),'RECOVERY_OWNER_MISMATCH');
     need(!exists(join(audit,'recovery-v5'))&&!exists(join(audit,'complete.json')),'RECOVERY_ALREADY_ATTEMPTED');
-    const checkpoint=captureFile(join(audit,'history-v5-prestart.json'),{limit:262144});
+    const checkpoint=captureFile(join(audit,'history-v5-prestart.json'),{limit:deploymentRecordLimit('history-v5-prestart.json')});
     const cp=JSON.parse(checkpoint.bytes),checkpointDigest=digest(checkpoint.bytes);
     need(cp.version===3&&cp.kind==='history-v5-prestart'&&cp.project===PROJECT&&cp.nonce===nonce,'RECOVERY_CHECKPOINT_REQUIRED');
     need(options.checkpoint===undefined||options.checkpoint===checkpointDigest,'RECOVERY_CHECKPOINT_MISMATCH');
@@ -982,7 +1052,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const evidence=evidenceIndex(audit).filter(e=>!['engine.jsonl','history-v5-prestart.json','failure-switchservices.json'].includes(e.path));
     need(equal(evidence,cp.evidence),'RECOVERY_EVIDENCE_DRIFT');
     const originalEvidence=evidenceIndex(audit),proofs=[owner,checkpoint];
-    const read=name=>{const f=captureFile(join(audit,name),{limit:262144});proofs.push(f);return JSON.parse(f.bytes);};
+    const read=name=>{const f=captureFile(join(audit,name),{limit:deploymentRecordLimit(name)});proofs.push(f);return JSON.parse(f.bytes);};
     const authority=read('authority-v3.json'),intent=read('intent.json'),recovery=read('recovery.json'),built=read('built.json');
     const completion=read('history-migration-complete.json'),migration=read('history-migration-intent.json');
     need(equal(read('lease.json'),{version:2,project:PROJECT,nonce})&&
@@ -1020,6 +1090,22 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         need(equal(referenceCustody,intent.referenceCustody)&&equal(referenceCustody,built.referenceCustody)&&
           equal(referenceCustody,recovery.referenceCustody)&&equal(referenceCustody,cp.referenceCustody),'RECOVERY_CUSTODY_DRIFT');
         custodyCompletionReferences(referenceCustody,nonce,built.candidates);
+    let candidateReuse=null;
+    if(referenceCustody.version===2){
+      const proof=read('candidate-reuse.json');
+      const origin=history.completions.find(r=>r.nonce===proof.origin?.nonce&&r.sha256===proof.origin?.sha256);
+      need(origin,'RECOVERY_CANDIDATE_ORIGIN_MISSING');
+      const originalIntent=JSON.parse(captureFile(join(origin.dir,'intent.json'),{limit:262144}).bytes);
+      need([SEALED_CANDIDATE_BUILD_ADAPTER,digest(self.bytes)].includes(originalIntent.adapter),'RECOVERY_CANDIDATE_ADAPTER_UNQUALIFIED');
+      const expectedSource=candidateSourceEquivalence({originalSource:originalIntent.source,files:source.manifest.files.map(f=>({path:f.path,digest:f.digest})),
+        originalAdapter:originalIntent.adapter,originalEntrySources:originalIntent.entrySources,currentAdapter:digest(self.bytes),currentEntrySources:entryProofs.map(f=>digest(f.bytes))});
+      need(equal(proof.source,expectedSource),'RECOVERY_CANDIDATE_SOURCE_PROOF');
+      need(proof.version===1&&equal(proof.referenceCustody,referenceCustody)&&equal(proof.qualification,{typescript:true,bundle:true,openai:true})&&
+        equal(proof.source,intent.candidateReuse)&&equal(proof.source,built.candidateReuse)&&equal(proof.origin,intent.reuseOrigin)&&equal(proof.origin,built.reuseOrigin)&&
+        proof.source.currentSource===cp.source&&proof.source.currentAdapter===cp.adapter&&equal(proof.source.currentEntrySources,cp.entrySources)&&
+        referenceCustody.candidates.every(r=>equal(r.origin,proof.origin)),'RECOVERY_CANDIDATE_REUSE_PROOF');
+      candidateReuse={source:proof.source,origin:proof.origin};
+    }
     need(contract.digest===intent.backendSource,'RECOVERY_CONTRACT_DRIFT');
     const shell={nonce,config,catalog,history,referenceCustody};need(equal(recoveryFileSet(shell),cp.files),'RECOVERY_FILE_IDENTITY_DRIFT');
     const verifyOriginal=()=>{
@@ -1035,13 +1121,13 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       before.containers.filter(c=>!['web','api','worker'].includes(role(c))&&!role(c).endsWith('volume-init')).every(healthy),'RECOVERY_PEERS_NOT_STOPPED');
     const candidateImages={...before.images};
     for(const name of targets){
-      const row=built.candidates[name],old=referenceCustody.old.find(r=>r.name===name);need(imageId(row.image)&&row.oldImage===before.images[name].Id&&row.oldImage===config.pins.services[name].image&&row.tag===`dip-deploy-${name}:candidate-${nonce}`&&row.oldTag===old.tag&&old.image===row.oldImage,'RECOVERY_IMAGE_BINDING');
+      const row=built.candidates[name],old=referenceCustody.old.find(r=>r.name===name);need(imageId(row.image)&&row.oldImage===before.images[name].Id&&row.oldImage===config.pins.services[name].image&&row.tag===referenceCustody.candidates.find(r=>r.name===name)?.tag&&row.oldTag===old.tag&&old.image===row.oldImage,'RECOVERY_IMAGE_BINDING');
       const images=JSON.parse(await request(['image','inspect',row.image],connection.options,'RECOVERY_IMAGE_INSPECT_FAILED'));
       need(images.length===1&&images[0].Id===row.image,'RECOVERY_IMAGE_CARDINALITY');validatePublicLlmImage(images[0],name);assertNoOpenAiDockerSecret(images[0].Config);candidateImages[name]=images[0];
     }
     const oldRecipe=join(audit,'recipe-old.json'),newRecipe=join(audit,'recipe-candidate.json');
     need(equal(read('recipe-old.json'),recipe(config.model,before.images))&&equal(read('recipe-candidate.json'),recipe(next,candidateImages)),'RECOVERY_RECIPE_CHANGED');
-    const p={mode:'app',nonce,audit,targets,config,next,source,self,entryProofs,contract,catalog,retentions,history,connection,before,referenceCustody,custodyNonce:nonce,
+    const p={mode:'app',nonce,audit,targets,config,next,source,self,entryProofs,contract,catalog,retentions,history,connection,before,referenceCustody,custodyNonce:nonce,candidateReuse,
       peers:new Map(before.containers.map(c=>[role(c),c])),authorities:new Map(before.containers.map(c=>[role(c),{model:config.model,selection:config.selection}])),
       images:{...before.images},candidateImages,candidates:built.candidates,oldRecipe,newRecipe,apiReady:false,mutated:true,
       migration:false,historyMigration:recovery.historyMigration,historyVersion:4,historyConsent:true,
@@ -1069,14 +1155,14 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const lock={path:join(root,STATE,'.operation.lock'),verify:lockGuard};
     const record=(name,value)=>{
       supervisor.verify();lock.verify();owner.verify();auditGuard();proofs.forEach(f=>f.verify());p.extraGuard();
-      need(/^[a-z][a-z0-9-]{0,79}\.json$/.test(name),'RECOVERY_RECORD_NAME');const bytes=JSON.stringify(value);need(Buffer.byteLength(bytes)<=262144,'RECOVERY_RECORD_SIZE');
-      writeExclusive(join(audit,name),bytes,0o600);syncDirectory(audit);proofs.push(captureFile(join(audit,name),{limit:262144}));
+      need(/^[a-z][a-z0-9-]{0,79}\.json$/.test(name),'RECOVERY_RECORD_NAME');const bytes=boundedDeploymentRecord(name,value);
+      writeExclusive(join(audit,name),bytes,0o600);syncDirectory(audit);proofs.push(captureFile(join(audit,name),{limit:deploymentRecordLimit(name)}));
     };
     record('adoption.json',{version:3,nonce:p.nonce,checkpoint:checkpointDigest,supervisor:{identity:supervisor.identity,session:supervisor.session},phase:'v5-committed-prestart'});
     engineJournal=createEngineJournal(join(audit,'engine.jsonl'),()=>{supervisor.verify();lock.verify();owner.verify();p.extraGuard();});
     const lease=Object.freeze({version:3,nonce:p.nonce,recovery:true});leaseDeadline=now()+3600000;
     const state={lock,nonce:p.nonce,audit:originalAudit,owner,proofs,supervisor,engineJournal,released:false,plan:p,
-      record(name,value){need(name==='complete.json','RECOVERY_ROOT_WRITE_FORBIDDEN');p.extraGuard();supervisor.verify();writeExclusive(join(originalAudit,name),JSON.stringify(value),0o600);syncDirectory(originalAudit);}};
+      record(name,value){need(name==='complete.json','RECOVERY_ROOT_WRITE_FORBIDDEN');p.extraGuard();supervisor.verify();writeExclusive(join(originalAudit,name),boundedDeploymentRecord(name,value),0o600);syncDirectory(originalAudit);}};
     leases.set(lease,state);Object.assign(p,{lease,lock,owner,record,audit,phase:'qualified'});
     const token=Object.freeze({version:3,mode:'app',services:p.targets,interruptedServices:['api','web','worker']});p.token=token;plans.set(token,p);
     p.jwt=captureFile(join(root,STATE,'scan-jwt'),{limit:96});need(/^[a-f0-9]{96}$/.test(p.jwt.bytes.toString())&&p.peers.get('api').Config.Env.includes('SCAN_JWT_SECRET='+p.jwt.bytes.toString()),'RECOVERY_JWT_BINDING');

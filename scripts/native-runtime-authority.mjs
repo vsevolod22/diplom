@@ -8,8 +8,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual as equal } from 'node:util';
-import { completionReferences, validateReferenceCustody, custodyCompletionReferences } from './deploy-reference-custody.mjs';
+import { completionReferences, validateReferenceCustody, custodyCompletionReferences, deploymentRecordLimit, candidateSourceEquivalence } from './deploy-reference-custody.mjs';
 import { capturePublicLlmRetentions } from './public-llm-stand.mjs';
+import { readEngineJournal } from './deploy-authority.mjs';
 import { captureDeploymentCatalog, archiveDirectory, archiveFile } from './public-llm-deployment-catalog.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -44,11 +45,11 @@ export function captureNativeDeploymentRecords(root, deployment, captureOrigins 
   const cache = new Map();
   const read = name => {
     need(['complete.json', 'intent.json', 'built.json', 'published.json', 'recovery.json', 'operation.lock/deploy-adapter-owner.json',
-      'authority-v3.json', 'history-migration-intent.json', 'history-migration-complete.json', 'reference-custody.json',
+      'authority-v3.json', 'history-migration-intent.json', 'history-migration-complete.json', 'reference-custody.json', 'candidate-reuse.json',
       ...TARGETS.map(n => `start-${n}-complete.json`)].includes(name));
     if (cache.has(name)) return cache.get(name).value;
     const path = join(directory, name), s = fs.lstatSync(path);
-    need(s.isFile() && !s.isSymbolicLink() && s.nlink === 1 && s.uid === process.getuid() && (s.mode & 0o7777) === 0o600 && s.size <= 262144);
+    need(s.isFile() && !s.isSymbolicLink() && s.nlink === 1 && s.uid === process.getuid() && (s.mode & 0o7777) === 0o600 && s.size <= deploymentRecordLimit(name));
     const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     let bytes;
     try { need(equal(stamp(s), stamp(fs.fstatSync(fd)))); bytes = fs.readFileSync(fd); need(equal(stamp(s), stamp(fs.fstatSync(fd)))); }
@@ -67,8 +68,9 @@ export function captureNativeDeploymentRecords(root, deployment, captureOrigins 
   };
   const complete = read('complete.json'), intent = read('intent.json'), built = read('built.json'), published = read('published.json'), recovery = read('recovery.json');
   const owner = read('operation.lock/deploy-adapter-owner.json');
-  const custody = complete.version === 3 ? read('reference-custody.json') : null;
-  const origins = complete.version === 3 ? captureOrigins(root, complete.borrowedReferences) : { references: [], verify() {} };
+  const custody = [3, 4].includes(complete.version) ? read('reference-custody.json') : null;
+  const reuse = complete.version === 4 ? read('candidate-reuse.json') : null;
+  const origins = [3, 4].includes(complete.version) ? captureOrigins(root, complete.borrowedReferences, complete.version === 4 ? custody.candidates : []) : { references: [], candidates: [], verify() {} };
   const authority = names.includes('authority-v3.json') ? read('authority-v3.json') : null;
   const migrationIntent = names.includes('history-migration-intent.json') ? read('history-migration-intent.json') : null;
   const migrationComplete = names.includes('history-migration-complete.json') ? read('history-migration-complete.json') : null;
@@ -83,14 +85,14 @@ export function captureNativeDeploymentRecords(root, deployment, captureOrigins 
       need(rows.length === 1 && exact(rows[0], ['path', 'bytes', 'sha256']) && rows[0].bytes === proof.bytes.length && rows[0].sha256 === proof.digest);
     }
   };
-  verify(); return { complete, intent, built, published, recovery, owner, starts, authority, migrationIntent, migrationComplete, custody, origins: origins.references, verify };
+  verify(); return { complete, intent, built, published, recovery, owner, starts, authority, migrationIntent, migrationComplete, custody, origins: origins.references, reuse, candidateOrigins: origins.candidates, verify };
 }
 
 // Borrowing authenticates the ORIGINAL owning receipt, not another borrower's
 // assertion. Existing retention/catalog validators read metadata only, no stores.
-export function captureNativeReferenceOrigins(root, borrowed) {
-  need(Array.isArray(borrowed) && borrowed.length <= TARGETS.length, 'RUNTIME_BORROWED_ORIGIN_INVALID');
-  const proofs = [], references = [];
+export function captureNativeReferenceOrigins(root, borrowed, candidates = []) {
+  need(Array.isArray(borrowed) && borrowed.length <= TARGETS.length * 2 && Array.isArray(candidates) && candidates.length <= TARGETS.length, 'RUNTIME_BORROWED_ORIGIN_INVALID');
+  const proofs = [], references = [], candidateOrigins = new Map();
   let retentions, catalog;
   for (const row of borrowed) {
     const origin = row.origin; need(origin && hex(origin.sha256), 'RUNTIME_BORROWED_ORIGIN_INVALID');
@@ -113,10 +115,26 @@ export function captureNativeReferenceOrigins(root, borrowed) {
       const original = completionReferences(c, origin.nonce).owned;
       need(original.some(v => v.name === row.name && v.tag === row.tag && v.image === row.image), 'RUNTIME_BORROWED_ORIGIN_INVALID');
       proofs.push(parent, directory, lock, file, owner);
+      if (candidates.some(v => v.name === row.name && v.tag === row.tag && equal(v.origin, origin)) && !candidateOrigins.has(origin.nonce)) {
+        need(c.version === 3 && c.outcome === 'pre-mutation-aborted' && Array.isArray(c.evidence) && c.evidence.length <= 256 &&
+          !directory.names.some(n => /^(stop-|start-|restore-|fenced|snapshot|helper|qualification|history-migration|history-v5-prestart|preservation|publication|published|recovery-v5)/.test(n)), 'RUNTIME_CANDIDATE_ORIGIN_MUTATED');
+        const read = name => {
+          const proof = archiveFile(join(directory.path, name), deploymentRecordLimit(name)); proofs.push(proof);
+          const rows = c.evidence.filter(v => v.path === name);
+          need(rows.length === 1 && exact(rows[0], ['path', 'bytes', 'sha256']) && rows[0].sha256 === proof.digest && rows[0].bytes === proof.bytes.length, 'RUNTIME_CANDIDATE_ORIGIN_UNSEALED');
+          return name === 'engine.jsonl' ? proof : JSON.parse(proof.bytes);
+        };
+        need(equal(read('failure-preparerecovery.json'), { code: 'JOURNAL_SIZE' }), 'RUNTIME_CANDIDATE_ORIGIN_FAILURE');
+        const intent = read('intent.json'), built = read('built.json'), recovery = read('recovery.json'), custody = read('reference-custody.json');
+        read('engine.jsonl');
+        const journal = readEngineJournal(join(directory.path, 'engine.jsonl'));
+        need(!journal.codes.some(code => /STOP|START|RESUME|RECREATE|HELPER|SNAPSHOT|MIGRAT|PUBLICATION/.test(code)), 'RUNTIME_CANDIDATE_ORIGIN_MUTATED');
+        candidateOrigins.set(origin.nonce, { origin: structuredClone(origin), intent, built, recovery, custody, complete: c });
+      }
     }
     references.push(structuredClone(row));
   }
-  return { references, verify() { retentions?.verify(); catalog?.verify(); proofs.forEach(p => p.verify()); } };
+  return { references, candidates: [...candidateOrigins.values()], verify() { retentions?.verify(); catalog?.verify(); proofs.forEach(p => p.verify()); } };
 }
 
 function targetedPreflight(r, deployment) {
@@ -149,9 +167,36 @@ function targetedPreflight(r, deployment) {
   return preflight;
 }
 
+function qualifyCandidateReuse(r, source, deployment) {
+  const { complete: c, intent: i, built: b, recovery: q, published: p, custody, reuse } = r;
+  need(equal(i.services, ['api', 'web']) && custody.version === 2 && custody.candidates.every(v => v.ownership === 'borrowed') &&
+    exact(reuse, ['version', 'origin', 'source', 'qualification', 'referenceCustody']) && reuse.version === 1 && equal(reuse.referenceCustody, custody) &&
+    equal(reuse.qualification, { typescript: true, bundle: true, openai: true }) && Array.isArray(r.candidateOrigins) && r.candidateOrigins.length === 1,
+  'RUNTIME_CANDIDATE_REUSE_UNQUALIFIED');
+  const original = r.candidateOrigins[0], origin = original.origin, old = original.intent, oldBuild = original.built, oldRecovery = original.recovery;
+  need(origin?.kind === 'adapter-completion' && origin.nonce !== deployment && equal(origin, reuse.origin) &&
+    custody.candidates.every(v => equal(v.origin, origin)), 'RUNTIME_CANDIDATE_REUSE_ORIGIN');
+  for (const record of [c, i, b, q, p]) need(equal(record.reuseOrigin, origin) && equal(record.candidateReuse, reuse.source), 'RUNTIME_CANDIDATE_REUSE_BINDING');
+  need(original.complete?.version === 3 && original.complete.project === NATIVE_PROJECT && original.complete.nonce === origin.nonce && original.complete.outcome === 'pre-mutation-aborted' &&
+    old?.version === 2 && old.kind === 'preserving-deployment' && old.project === NATIVE_PROJECT && old.nonce === origin.nonce && old.mode === 'app' && old.lifecycle === false && equal(old.services, i.services) &&
+    oldBuild?.version === 1 && oldBuild.nonce === origin.nonce && oldBuild.outcome === 'candidate-built-old-site-unchanged' && oldBuild.lifecycle === false &&
+    oldRecovery?.version === 2 && oldRecovery.project === NATIVE_PROJECT && oldRecovery.nonce === origin.nonce && oldRecovery.migration === false && oldRecovery.historyVersion === 4 &&
+    oldRecovery.historyMigration === q.historyMigration && equal(oldRecovery.services, i.services) && old.daemon === i.daemon && oldRecovery.daemon === i.daemon &&
+    equal(oldRecovery.old, q.old) && equal(old.old, i.old) && old.backendSource === i.backendSource, 'RUNTIME_CANDIDATE_REUSE_RUNTIME_DRIFT');
+  need(equal(original.custody, original.complete.referenceCustody) && equal(original.custody, old.referenceCustody) &&
+    equal(original.custody, oldBuild.referenceCustody) && equal(original.custody, oldRecovery.referenceCustody), 'RUNTIME_CANDIDATE_REUSE_ORIGIN');
+  const owned = custodyCompletionReferences(original.custody, origin.nonce, oldBuild.candidates);
+  need(equal(owned.references, original.complete.references) && equal(owned.borrowedReferences, original.complete.borrowedReferences) && owned.references.length === i.services.length &&
+    i.services.every(name => equal(oldBuild.candidates[name], b.candidates[name]) && owned.references.some(v => v.name === name && v.image === b.candidates[name].image &&
+      v.tag === b.candidates[name].tag && v.tag === `dip-deploy-${name}:candidate-${origin.nonce}`)), 'RUNTIME_CANDIDATE_REUSE_ORIGIN');
+  const recomputed = candidateSourceEquivalence({ originalSource: old.source, files: source.files, originalAdapter: old.adapter,
+    originalEntrySources: old.entrySources, currentAdapter: source.adapter, currentEntrySources: source.entries });
+  need(equal(recomputed, reuse.source) && recomputed.currentSource === source.build, 'RUNTIME_CANDIDATE_SOURCE_MISMATCH');
+}
+
 function receiptIdentities(r, deployment, source, wall) {
   const { complete: c, intent: i, built: b, published: p, recovery: q, owner, starts } = r;
-  need([2, 3].includes(c?.version) && c.project === NATIVE_PROJECT && c.nonce === deployment && c.outcome === 'published');
+  need([2, 3, 4].includes(c?.version) && c.project === NATIVE_PROJECT && c.nonce === deployment && c.outcome === 'published');
   need(equal(owner, { version: 2, nonce: deployment, kind: 'preserving-deployment' }));
   need(i?.version === 2 && i.kind === 'preserving-deployment' && i.project === NATIVE_PROJECT && i.nonce === deployment && i.mode === 'app' && i.lifecycle === false);
   const targeted = equal(i.services, ['api', 'web']);
@@ -165,23 +210,25 @@ function receiptIdentities(r, deployment, source, wall) {
   need(exact(p.pins, ['services']) && exact(p.pins.services, ROLES));
   const preflight = targeted ? targetedPreflight(r, deployment) : null;
   let custody = null;
-  if (c.version === 3) {
+  if ([3, 4].includes(c.version)) {
     need(Array.isArray(r.origins) && equal(r.origins, c.borrowedReferences), 'RUNTIME_BORROWED_ORIGIN_INVALID');
     custody = validateReferenceCustody(r.custody, deployment, r.origins);
     need(equal(custody, c.referenceCustody) && equal(custody, i.referenceCustody) && equal(custody, b.referenceCustody) &&
       equal(custody, p.referenceCustody) && equal(custody, q.referenceCustody) && equal(custody.old.map(v => v.name), i.services), 'RUNTIME_CUSTODY_MISMATCH');
+    need(c.version === (custody.version === 2 ? 4 : 3), 'RUNTIME_CUSTODY_MISMATCH');
     const refs = custodyCompletionReferences(custody, deployment, b.candidates);
     completionReferences(c, deployment);
     need(equal(c.references, refs.references) && equal(c.borrowedReferences, refs.borrowedReferences), 'RUNTIME_REFERENCES_MISMATCH');
   }
+  if (c.version === 4) qualifyCandidateReuse(r, source, deployment);
   const references = [], ids = [];
   const expected = Object.fromEntries(ROLES.map(name => {
     const old = q.old.find(v => v.role === name); need(hex(old.id) && image(old.image) && Number.isFinite(Date.parse(old.startedAt)));
     let row = old;
     if (i.services.includes(name)) {
       const candidate = b.candidates[name], start = starts[name];
-      need(exact(candidate, ['image', 'tag', 'oldImage', 'oldTag']) && image(candidate.image) && candidate.oldImage === old.image && candidate.tag === `dip-deploy-${name}:candidate-${deployment}` && candidate.oldTag === (custody ? custody.old.find(v => v.name === name).tag : `dip-deploy-${name}:old-${deployment}`));
-      references.push({ name, tag: candidate.tag, image: candidate.image });
+      need(exact(candidate, ['image', 'tag', 'oldImage', 'oldTag']) && image(candidate.image) && candidate.oldImage === old.image && candidate.tag === (custody ? custody.candidates.find(v => v.name === name).tag : `dip-deploy-${name}:candidate-${deployment}`) && candidate.oldTag === (custody ? custody.old.find(v => v.name === name).tag : `dip-deploy-${name}:old-${deployment}`));
+      if (c.version !== 4) references.push({ name, tag: candidate.tag, image: candidate.image });
       if (!custody || custody.old.find(v => v.name === name).ownership === 'owned') references.push({ name, tag: candidate.oldTag, image: candidate.oldImage });
       need(exact(start, ['role', 'id', 'image', 'startedAt']) && start.role === name && hex(start.id) && start.id !== old.id && start.image === candidate.image && Number.isFinite(Date.parse(start.startedAt)));
       row = start;
@@ -199,9 +246,11 @@ function receiptIdentities(r, deployment, source, wall) {
               ...(name !== 'worker' ? { pid: preflight[name].process[4] } : {}) } : {}) }];
   }));
   need(new Set(ids).size === ROLES.length && equal(c.references, references), 'RUNTIME_REFERENCES_MISMATCH');
-  return { expected, daemon: i.daemon, references: [...c.references, ...(c.version === 3 ? c.borrowedReferences : [])], qualification: Object.freeze({
-    rebuiltRoles: Object.freeze([...i.services]), retainedRoles: Object.freeze(ROLES.filter(n => !i.services.includes(n))),
+  return { expected, daemon: i.daemon, references: [...c.references, ...([3, 4].includes(c.version) ? c.borrowedReferences : [])], qualification: Object.freeze({
+    rebuiltRoles: Object.freeze(c.version === 4 ? [] : [...i.services]), retainedRoles: Object.freeze(ROLES.filter(n => !i.services.includes(n))),
     retainedRolesCurrentSourceClaim: false, historyMigration: q.historyMigration ?? 'none',
+        ...(c.version === 4 ? { updatedRoles: Object.freeze([...i.services]), candidateArtifactBasis: 'borrowed-prebuilt',
+          artifactProvenance: structuredClone({ retainedOld: custody.old, borrowedNew: custody.candidates }) } : {}),
   }) };
 }
 
@@ -437,8 +486,9 @@ export async function openNativeRuntimeAuthority(selection, readReview) {
         need(equal(stamp(s), stamp(fs.lstatSync(path))));
       }); return hash(bytes);
     };
-    return { build: hash(JSON.stringify(source.manifest.files.map(f => ({ path: f.path, digest: f.digest })))),
-      adapter: read(join(ROOT, 'scripts/deploy-adapter.mjs')), entries: [...ENTRIES, ...(records.complete.version === 3 ? ['deploy-reference-custody.mjs'] : [])].map(n => read(join(ROOT, 'scripts', n))), verify() { source.verify(); proofs.forEach(p => p()); } };
+    const files = source.manifest.files.map(f => ({ path: f.path, digest: f.digest }));
+    return { build: hash(JSON.stringify(files)), files,
+      adapter: read(join(ROOT, 'scripts/deploy-adapter.mjs')), entries: [...ENTRIES, ...([3, 4].includes(records.complete.version) ? ['deploy-reference-custody.mjs'] : [])].map(n => read(join(ROOT, 'scripts', n))), verify() { source.verify(); proofs.forEach(p => p()); } };
   };
   const observe = createNativeRuntimeObserver(() => adapter.status(), runIsolatedDocker, ROOT, homedir());
   return createNativeRuntimeAuthority({ records: n => captureNativeDeploymentRecords(ROOT, n), captureSource, readReview, acquire, observe })(selection);

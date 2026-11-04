@@ -1,9 +1,29 @@
 // Pure custody contracts. Callers must independently authenticate receipt bytes,
 // their original owner/evidence and fresh engine metadata before using these values.
 import { isDeepStrictEqual as equal } from 'node:util';
+import { createHash } from 'node:crypto';
 
 export const REFERENCE_CUSTODY_VERSION = 1;
 export const REFERENCE_COMPLETION_VERSION = 3;
+export const CANDIDATE_CUSTODY_VERSION = 2;
+export const CANDIDATE_COMPLETION_VERSION = 4;
+export const DEPLOY_RECORD_LIMIT = 262144;
+export const RECOVERY_AUTHORITY_RECORD_LIMIT = 8 * 1024 ** 2;
+// Existing store/proof/evidence records are individually bounded at256KiB.
+// Reserve four such records plus process/engine envelope growth before build.
+export const RECOVERY_FUTURE_RECORD_RESERVE = 4 * DEPLOY_RECORD_LIMIT + 65536;
+export function deploymentRecordLimit(name) {
+  return ['authority-v3.json','history-v5-prestart.json'].includes(name) ? RECOVERY_AUTHORITY_RECORD_LIMIT : DEPLOY_RECORD_LIMIT;
+}
+export function boundedDeploymentRecord(name,value) {
+  const bytes=JSON.stringify(value);need(typeof bytes==='string'&&Buffer.byteLength(bytes)<=deploymentRecordLimit(name),'JOURNAL_SIZE');return bytes;
+}
+export function precheckRecoveryRecordCapacity(authority,checkpoint) {
+  const a=Buffer.byteLength(boundedDeploymentRecord('authority-v3.json',authority));
+  const c=Buffer.byteLength(boundedDeploymentRecord('history-v5-prestart.json',checkpoint));
+  need(c+RECOVERY_FUTURE_RECORD_RESERVE<=RECOVERY_AUTHORITY_RECORD_LIMIT,'RECOVERY_RECORD_CAPACITY');
+  return {version:1,authorityBytes:a,checkpointBytes:c,futureBytes:RECOVERY_FUTURE_RECORD_RESERVE,limit:RECOVERY_AUTHORITY_RECORD_LIMIT};
+}
 export const IMAGE_REFERENCE_LIMIT = 128;
 export const UNTAGGED_IMAGE_LIMIT = 16;
 export const IMAGE_INVENTORY_ROW_LIMIT = IMAGE_REFERENCE_LIMIT + UNTAGGED_IMAGE_LIMIT;
@@ -42,22 +62,23 @@ export function referenceUnion(references) {
 }
 
 export function completionReferences(record, nonce) {
-  need(plain(record) && [2,REFERENCE_COMPLETION_VERSION].includes(record.version) && record.nonce === nonce && nonceValid(nonce) &&
+  need(plain(record) && [2,REFERENCE_COMPLETION_VERSION,CANDIDATE_COMPLETION_VERSION].includes(record.version) && record.nonce === nonce && nonceValid(nonce) &&
     Array.isArray(record.references) && record.references.length <= ROLES.length * 2, 'COMPLETION_REFERENCE_SCOPE');
   for (const r of record.references) need((record.version===2 || keys(r,['name','tag','image'])) && refValid(r) &&
     ['old','candidate'].some(kind => r.tag === ownTag(r.name,kind,nonce)), 'OWNED_REFERENCE_INVALID');
   need(new Set(record.references.map(r=>r.tag)).size === record.references.length,'OWNED_REFERENCE_DUPLICATE');
   if (record.version === 2) return {owned:record.references,borrowed:[]};
-  need(Array.isArray(record.borrowedReferences) && record.borrowedReferences.length <= ROLES.length,'BORROWED_REFERENCE_SCOPE');
+  need(Array.isArray(record.borrowedReferences) && record.borrowedReferences.length <= ROLES.length * (record.version===4?2:1),'BORROWED_REFERENCE_SCOPE');
   for (const r of record.borrowedReferences) need(keys(r,['name','tag','image','origin']) && refValid(r) && originValid(r.origin),'BORROWED_REFERENCE_INVALID');
   need(new Set(record.borrowedReferences.map(r=>r.tag)).size === record.borrowedReferences.length,'BORROWED_REFERENCE_DUPLICATE');
   if (record.referenceCustody === null) need(record.references.length === 0 && record.borrowedReferences.length === 0,'EMPTY_CUSTODY_REQUIRED');
   else {
     const custody = validateReferenceCustody(record.referenceCustody,nonce);
-    const borrowed = custody.old.filter(r=>r.ownership==='borrowed').map(({origin,...r})=>({...base(r),origin}));
+    need(record.version===(custody.version===2?4:3),'COMPLETION_CUSTODY_VERSION');
+        const borrowed = [...custody.old,...(custody.version===2?custody.candidates:[])].filter(r=>r.ownership==='borrowed').map(r=>({...base(r),origin:r.origin}));
     need(equal(record.borrowedReferences,borrowed),'COMPLETION_BORROWED_MISMATCH');
     const expected = [...custody.old.filter(r=>r.ownership==='owned').map(base),
-      ...custody.candidates.map(r=>record.references.find(v=>v.name===r.name&&v.tag===r.tag))];
+      ...custody.candidates.filter(r=>r.ownership!=='borrowed').map(r=>record.references.find(v=>v.name===r.name&&v.tag===r.tag))];
     need(expected.every(Boolean) && equal(referenceUnion(expected).map(base),referenceUnion(record.references).map(base)),'COMPLETION_OWNED_MISMATCH');
   }
   return {owned:record.references,borrowed:record.borrowedReferences};
@@ -84,7 +105,7 @@ export function retainedReferenceHistory({legacy=[],completions=[]}={}) {
   return union;
 }
 
-export function createReferenceCustody({nonce,targets,published,runtime,references}) {
+export function createReferenceCustody({nonce,targets,published,runtime,references,candidateReferences=null}) {
   need(nonceValid(nonce) && Array.isArray(targets) && targets.length > 0 && targets.length <= ROLES.length &&
     new Set(targets).size===targets.length && targets.every(n=>ROLES.includes(n)), 'CUSTODY_TARGETS');
   const union = referenceUnion(references);
@@ -94,10 +115,17 @@ export function createReferenceCustody({nonce,targets,published,runtime,referenc
     if (match) need(originValid(match.origin),'CUSTODY_ORIGIN_REQUIRED');
     return {name,image:published[name],tag:match?.tag ?? ownTag(name,'old',nonce),ownership:match?'borrowed':'owned',...(match?{origin:match.origin}:{})};
   });
-  return validateReferenceCustody({version:REFERENCE_CUSTODY_VERSION,old,candidates:targets.map(name=>({name,tag:ownTag(name,'candidate',nonce)}))},nonce);
+  if(candidateReferences){
+      need(candidateReferences.length===targets.length,'CANDIDATE_REUSE_SCOPE');
+      const candidates=targets.map(name=>{const row=candidateReferences.find(r=>r.name===name);
+        need(row&&row.origin?.kind==='adapter-completion'&&references.some(r=>r.name===name&&r.tag===row.tag&&r.image===row.image&&equal(r.origin,row.origin)),'CANDIDATE_REUSE_ORIGIN');
+        return {...base(row),ownership:'borrowed',origin:row.origin};});
+      return validateReferenceCustody({version:CANDIDATE_CUSTODY_VERSION,old,candidates},nonce,references);
+    }
+    return validateReferenceCustody({version:REFERENCE_CUSTODY_VERSION,old,candidates:targets.map(name=>({name,tag:ownTag(name,'candidate',nonce)}))},nonce);
 }
 export function validateReferenceCustody(custody,nonce,references=null) {
-  need(nonceValid(nonce) && keys(custody,['version','old','candidates']) && custody.version===REFERENCE_CUSTODY_VERSION &&
+  need(nonceValid(nonce) && keys(custody,['version','old','candidates']) && [REFERENCE_CUSTODY_VERSION,CANDIDATE_CUSTODY_VERSION].includes(custody.version) &&
     Array.isArray(custody.old) && custody.old.length>0 && custody.old.length<=ROLES.length && Array.isArray(custody.candidates) &&
     custody.candidates.length===custody.old.length,'CUSTODY_INVALID');
   const names = new Set();
@@ -111,7 +139,9 @@ export function validateReferenceCustody(custody,nonce,references=null) {
       if (references) need(references.some(v=>v.name===r.name&&v.tag===r.tag&&v.image===r.image&&equal(v.origin,r.origin)),'BORROWED_ORIGIN_MISMATCH');
     }
   }
-  need(custody.candidates.every((r,i)=>keys(r,['name','tag']) && r.name===custody.old[i].name && r.tag===ownTag(r.name,'candidate',nonce)),'CUSTODY_CANDIDATE_INVALID');
+  need(custody.candidates.every((r,i)=>r.name===custody.old[i].name && (custody.version===1 ? keys(r,['name','tag'])&&r.tag===ownTag(r.name,'candidate',nonce) :
+      keys(r,['name','tag','image','ownership','origin'])&&refValid(r)&&r.ownership==='borrowed'&&originValid(r.origin)&&r.origin.kind==='adapter-completion'&&
+      r.origin.nonce!==nonce&&r.tag===ownTag(r.name,'candidate',r.origin.nonce)&&(!references||references.some(v=>v.name===r.name&&v.tag===r.tag&&v.image===r.image&&equal(v.origin,r.origin))))),'CUSTODY_CANDIDATE_INVALID');
   need(new Set([...custody.old,...custody.candidates].map(r=>r.tag)).size===custody.old.length*2,'CUSTODY_TAG_DUPLICATE');
   return structuredClone(custody);
 }
@@ -122,11 +152,32 @@ export function custodyCompletionReferences(custody,nonce,candidates) {
   for (const old of custody.old) {
     const row = candidates[old.name], expected = custody.candidates.find(r=>r.name===old.name);
     need(plain(row) && imageValid(row.image) && row.tag===expected.tag && row.oldTag===old.tag && row.oldImage===old.image,'CUSTODY_BUILD_BINDING');
-    references.push({name:old.name,tag:row.tag,image:row.image});
+    if(expected.ownership==='borrowed'){
+          need(row.image===expected.image,'CUSTODY_CANDIDATE_IMAGE');borrowedReferences.push({...base(expected),origin:expected.origin});
+        }else references.push({name:old.name,tag:row.tag,image:row.image});
     if (old.ownership==='owned') references.push(base(old));
     else borrowedReferences.push({...base(old),origin:old.origin});
   }
+  const order=[...custody.old,...(custody.version===2?custody.candidates:[])].map(r=>r.tag);
+  borrowedReferences.sort((a,b)=>order.indexOf(a.tag)-order.indexOf(b.tag));
   return {references,borrowedReferences};
+}
+
+// A sealed historical intent commits ordered path/digests, not the old file
+// identities or current orchestration. Equality is recomputed, never asserted.
+export function candidateSourceEquivalence({originalSource,files,originalAdapter,originalEntrySources,currentAdapter,currentEntrySources}) {
+  need(shaValid(originalSource)&&Array.isArray(files)&&files.length>0&&files.length<=4096&&
+    files.every(r=>keys(r,['path','digest'])&&typeof r.path==='string'&&r.path.length<=512&&!r.path.startsWith('/')&&!r.path.split('/').some(p=>!p||p==='.'||p==='..')&&shaValid(r.digest))&&
+    new Set(files.map(r=>r.path)).size===files.length,'CANDIDATE_SOURCE_PROOF');
+  const source=createHash('sha256').update(JSON.stringify(files)).digest('hex');
+  need(source===originalSource,'CANDIDATE_SOURCE_EQUIVALENCE_UNPROVEN');
+  need([originalAdapter,currentAdapter].every(shaValid)&&[originalEntrySources,currentEntrySources].every(rows=>Array.isArray(rows)&&rows.length===7&&rows.every(shaValid)),'CANDIDATE_ORCHESTRATION_PROOF');
+  // Conservative build/COPY-input superset: extra deployment build inputs may
+  // be included, but no source can be excluded from the original commitment.
+  const shippedFiles=files.filter(r=>/^(src\/|public\/|server\/api\/|server\/runtime\/|server\/deploy\/)|^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|index\.html|admin\.html|vite\.config\.ts|tsconfig\.json)$/.test(r.path));
+  return {version:1,basis:'exact-sealed-ordered-source-path-digests',originalSource,currentSource:source,
+    originalAdapter,originalEntrySources,currentAdapter,currentEntrySources,shippedFiles,
+    shippedSource:createHash('sha256').update(JSON.stringify(shippedFiles)).digest('hex')};
 }
 
 // --no-trunc engine output is intentionally bounded BEFORE deduplication. Dangling
