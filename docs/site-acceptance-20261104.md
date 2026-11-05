@@ -1,4 +1,4 @@
-# Site acceptance — current outcome, 2026-11-04
+# Site acceptance — 2026-11-04, operational update 2026-11-05
 
 ## Scope and provenance
 
@@ -10,11 +10,15 @@ Historical Git audit baseline: `b47ee7676b3195322aad165ca0dd13ef9e4bf0ba` (not r
 
 ## Latest operational update — coordinator follow-up
 
-Docker is currently unavailable: `docker --context desktop-linux version` cannot connect to the daemon, and the loopback 8081 probe cannot connect. The previously observed healthy deployment and native acceptance results below are historical evidence, not current availability. No daemon restart, resource change, lock removal, or deployment was performed after that refusal.
+The owner started Docker. The coordinator then completed API-only deployment `fd4122b0af8bbb2f526930b64cfebcfb`: `new-healthy`, `ready:true`, `locked:false`, root HTTP200, anonymous `/api/v1/auth/me` HTTP401. History remains schema5; no auth/history/operations migration. Web and worker were briefly interrupted for preserving snapshots and resumed without rebuilding; gateways were not rebuilt.
 
-Delivery repair is committed as `126a18f`; targeted paging-test maintenance is committed as `24341e9`. Neither commit is claimed deployed. The prepared/commit diagnostic-fence retirement protocol passed narrow independent source review; actual prepare/commit is NOT_RUN while Docker is unavailable. Original lock, failed attempts, UNKNOWN liabilities and provider no-retry boundary remain preserved.
+Delivery repair `126a18f` is now deployed: running `history-delivery.ts` SHA256 `9821728d1d0c038d4e5d79e3fda0d1c3fa4f7a881c735c7f8038ea616dfa6a14` matches the reviewed host file. Fresh targeted delivery tests:32/32 PASS. Postdeploy authenticated eight-GET check passed with stable stored history/usage, no pending turn, held0, unchanged session file and providerPOST0. All four database snapshot files are byte-identical across fenced/before-api/after-api (12 snapshots). Journal creation to publication took251.2s; this is not total session time or an instant-deployment claim.
 
-Per the owner's latest instruction, subsequent predeploy validation is limited to changed slices and related failures; no mandatory full-site/full-suite rerun. Deployment preservation and identity gates remain mandatory. Next concrete prerequisites are Docker availability, exact qualified fence disposition, and resolving image-reference headroom without deleting retained obligations or raising limits arbitrarily.
+The exact abandoned native fence was archived whole, with owner and evidence, by separately authorized owner-Docker prepare/commit attempt02. Original failed stages, wire HTTP502 FAIL and UNKNOWN correlation/receipt/liabilities remain preserved; no accounting mutation, refund or retry authorization. One unused and unretained `dip-public-images-api:local` alias was removed to free a reference slot: its immutable image and four retained aliases remain, all eight peers were unchanged by that alias operation. No prune, retained-image deletion or cap increase.
+
+Targeted paging-test maintenance is committed as `24341e9`; operator requalification fixes as `54265d3`. No new paid-response generation was performed, so new wire-delivery acceptance and exact causation of the historical502 remain unverified. The historical tables below retain their original evidence scope and are superseded only for current availability, fence disposition and delivery deployment by this update.
+
+Per the owner's latest instruction, subsequent predeploy validation is limited to changed slices and related failures; no mandatory full-site/full-suite rerun. Deployment preservation and identity gates remain mandatory. Docker availability, exact qualified fence disposition and the current API release's image-reference headroom were resolved for this rollout. Future releases still require bounded reference-capacity admission; no standing permission to delete retained obligations or raise limits was introduced.
 
 ## Previously delivered outcome
 
