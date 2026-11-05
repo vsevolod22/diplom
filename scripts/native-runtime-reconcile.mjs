@@ -455,6 +455,29 @@ export function qualifyAbandonedRuntime(observed, receipt) {
   }
   return fingerprint({ epochs, references: referenceImages, daemon: status.daemon, provenance: receipt.provenance });
 }
+// Retirement ONLY after the operator explicitly started Docker. Container IDs
+// bind Docker's immutable Created field; where the old receipt records Created
+// it must also match literally. Never fabricate missing historical target PIDs.
+export function qualifyOwnerDockerRestart(observed, receipt) {
+  need(Array.isArray(observed?.epochs) && equal(observed.epochs.map(e => e.name).sort(), ABANDON_ROLES), 'ABANDON_RUNTIME_EPOCH_CHANGED');
+  const expected = structuredClone(receipt.expected), starts = [];
+  for (const epoch of observed.epochs) {
+    const old = receipt.expected[epoch.name], start = Date.parse(epoch.startedAt), created = Date.parse(epoch.created), prior = Date.parse(old.startedAt);
+    need(epoch.id === old.id && epoch.image === old.image && Number.isFinite(created) && created <= prior &&
+      (!old.created || epoch.created === old.created), 'ABANDON_RUNTIME_EPOCH_CHANGED');
+    if (epoch.name.endsWith('volume-init')) need(epoch.startedAt === old.startedAt && epoch.pid === 0, 'ABANDON_RUNTIME_EPOCH_CHANGED');
+    else {
+      need(Number.isFinite(start) && start > prior && Number.isSafeInteger(epoch.pid) && epoch.pid > 0, 'ABANDON_RUNTIME_EPOCH_CHANGED');
+      starts.push(start); expected[epoch.name] = { ...old, created: epoch.created, startedAt: epoch.startedAt, pid: epoch.pid };
+    }
+  }
+  const first = Math.min(...starts), last = Math.max(...starts);
+  need(starts.length === 6 && first > Math.max(...Object.values(receipt.expected).map(e => Date.parse(e.startedAt))) && last - first <= 60000, 'ABANDON_RUNTIME_EPOCH_CHANGED');
+  const digest = qualifyAbandonedRuntime(observed, { ...receipt, expected });
+  return { digest, restart: { kind: 'OWNER_STARTED_DOCKER_ABANDONED_LEASE_ONLY', epochs: structuredClone(observed.epochs),
+    window: { first, last, spreadMs: last - first, maximumSpreadMs: 60000 }, createdBasis: 'SAME_IMMUTABLE_CONTAINER_IDS_CREATED_BEFORE_OLD_START_RECORDED_CREATED_MATCHES',
+    nativeAuthorityAdopted: false } };
+}
 export function captureAbandonedDeployment(root, selection) {
   try { const records = captureNativeDeploymentRecords(root, selection.deployment); return { records, receipt: qualifyAbandonedDeployment(records, selection) }; }
   catch (error) {
@@ -595,6 +618,12 @@ const abandonedQuiescence = createAbandonedDirectQuiescence();
 function quietEnvelope(quiet, directOnly = false) {
   return Object.entries(ABANDONED_TRUTH).every(([k, v]) => equal(quiet?.[k], v)) && quiet.currentObservation?.basis === 'FRESH_CONCURRENCY_PIN_NOT_HISTORICAL_CORRELATION' &&
     (equal(quiet.readonly, DIRECT_READONLY) || !directOnly && equal(quiet.readonly, { nonGet: 0, denied: 0, pageErrors: 0, browserClosed: true, sessionUnchanged: true }));
+}
+function prepareObservationAllowed(quiet, historical) {
+  if (!quietEnvelope(quiet, true)) return false;
+  const prior = historical.currentObservation, fresh = quiet.currentObservation;
+  return equal(quiet, { ...historical, currentObservation: { ...prior, window: fresh.window,
+    user: { ...prior.user, used: fresh.user.used }, scan: { ...prior.scan, used: fresh.scan.used } } }) && fresh.window.start >= prior.window.start;
 }
 export function captureFailedReadonlyStage(root, selection, failedReview, original) {
   selectionValid(selection); need(SHA.test(failedReview), 'ABANDON_FAILED_STAGE_UNQUALIFIED');
@@ -842,15 +871,16 @@ function abandonedPinPaths(root, selection, sourcePaths) {
   if (fs.existsSync(redeploys)) for (const name of fs.readdirSync(redeploys)) for (const role of ['auth', 'ledger']) paths.add(join(redeploys, name, 'backups', role + '.sqlite'));
   return [...paths];
 }
-async function prepareAbandonedRuntime(root, selection, original, review, getReview, clock) {
+async function prepareAbandonedRuntime(root, selection, original, review, getReview, clock, ownerDocker = false) {
   need(await getReview() === review, 'RECONCILE_SOURCE_CHANGED'); original.verify();
   const { records, receipt } = captureAbandonedDeployment(root, selection);
   const [{ createDeployAdapter }, { runIsolatedDocker }, { homedir }] = await Promise.all([import('./deploy-adapter.mjs'), import('./public-image-stand.mjs'), import('node:os')]);
   const observer = createNativeRuntimeObserver(() => createDeployAdapter({ root }).status(), runIsolatedDocker, root, homedir());
   return { verify: records.verify, async observe() {
-    const observedAt = clock(), digest = qualifyAbandonedRuntime(await observer(receipt), receipt);
+    const observedAt = clock(), observed = await observer(receipt);
+    const proof = ownerDocker ? qualifyOwnerDockerRestart(observed, receipt) : { digest: qualifyAbandonedRuntime(observed, receipt) };
     need(clock() >= observedAt && clock() - observedAt < 15000, 'ABANDON_RUNTIME_PROOF_EXPIRED');
-    return { observedAt, digest, provenance: receipt.provenance };
+    return { observedAt, ...proof, provenance: receipt.provenance };
   } };
 }
 const ATTEMPT_NAMES = ['intent.json', 'prepared.json', 'commit-intent.json', 'disposition.json', 'failure.json'];
@@ -880,9 +910,10 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
   return async options => {
     let own, ownFence, pins, lease, renameAttempted = false, phase = 'admission', original;
     try {
-      const committing = options?.mode === 'abandon-requalify-commit';
+      const ownerDocker = ['abandon-requalify-docker-prepare', 'abandon-requalify-docker-commit'].includes(options?.mode);
+      const committing = ['abandon-requalify-commit', 'abandon-requalify-docker-commit'].includes(options?.mode);
       need(keys(options, ['mode', 'selection', 'review', 'failedReview', 'failedArchiveReview', 'failedArchiveEvidence', 'failedDirectReview', 'failedDirectEvidence',
-        'failedParallelReview', 'failedParallelEvidence', 'ordinal', 'prepared']) && ['abandon-requalify-prepare', 'abandon-requalify-commit'].includes(options.mode) &&
+        'failedParallelReview', 'failedParallelEvidence', 'ordinal', 'prepared']) && ['abandon-requalify-prepare', 'abandon-requalify-commit', 'abandon-requalify-docker-prepare', 'abandon-requalify-docker-commit'].includes(options.mode) &&
         ['review', 'failedReview', 'failedArchiveReview', 'failedArchiveEvidence', 'failedDirectReview', 'failedDirectEvidence', 'failedParallelReview', 'failedParallelEvidence'].every(k => SHA.test(options[k])) &&
         Number.isInteger(options.ordinal) && options.ordinal >= 1 && options.ordinal <= 3 && (committing ? SHA.test(options.prepared) : options.prepared === null), 'ABANDON_REQUALIFICATION_UNQUALIFIED');
       selectionValid(options.selection); options = structuredClone(options); directEnvironment(process.env);
@@ -894,7 +925,8 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
       directoryFence(attempts);
       const history = requalificationHistory(attempts, options.ordinal, original, options, committing), path = join(attempts, String(options.ordinal).padStart(2, '0'));
       const intent = { version: 1, kind: 'abandoned-fence-requalification-intent', selection: options.selection, review: options.review, ordinal: options.ordinal,
-        originalEvidence: original.seal, failedParallelEvidence: failed.evidenceSha256, previousAttempts: history };
+        originalEvidence: original.seal, failedParallelEvidence: failed.evidenceSha256, previousAttempts: history,
+                ...(ownerDocker ? { retirementOnly: 'EXPLICIT_OWNER_STARTED_DOCKER_SAME_CONTAINERS_NO_NATIVE_ADOPTION' } : {}) };
       const destination = join(path, 'abandoned-operation.lock'), target = ABANDONED_PARALLEL_SLOT + '/requalification/' + String(options.ordinal).padStart(2, '0') + '/abandoned-operation.lock';
       if (!committing) {
         phase = 'prepare'; io.mkdirSync(path, { mode: 0o700 }); own = path; ownFence = directoryFence(path); syncDirectory(attempts);
@@ -902,6 +934,20 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
         // Old eligibility is ONLY an immutable comparison constraint. No timestamp
         // here represents a new GET/runtime observation or fresh authority.
         const candidate = { runtime: failed.eligible.runtime, provenance: failed.eligible.provenance, quiescence: failed.eligible.quiescence };
+        if (ownerDocker) {
+          const runtime = await prepareRuntime(root, options.selection, original, options.review, getReview, clock, true); runtime.verify();
+          lease = acquireSupervisor(root); lease.verify();
+          const current = await runtime.observe();
+          need(SHA.test(current.digest) && current.restart?.kind === 'OWNER_STARTED_DOCKER_ABANDONED_LEASE_ONLY' && equal(current.provenance, candidate.provenance), 'ABANDON_RUNTIME_CHANGED');
+          candidate.runtime = current.digest; candidate.restart = current.restart;
+          const quiet = structuredClone(await inPhase('direct-http', () => quiescence(original))), observedAt = quiet.observedAt; delete quiet.observedAt;
+          // Current window/used are observations, not historical forgiveness.
+          need(prepareObservationAllowed(quiet, failed.eligible.quiescence), 'ABANDON_CURRENT_OBSERVATION_CHANGED');
+          need(Number.isFinite(observedAt) && clock() >= observedAt && clock() - observedAt < 15000, 'ABANDON_RUNTIME_PROOF_EXPIRED');
+          candidate.quiescence = quiet;
+          candidate.observationBasis = 'FRESH_PREPARE_TWO_DIRECT_GET_SAMPLES_NOT_HISTORICAL_USAGE';
+          lease.verify(); lease.close(); lease = undefined;
+        }
         need(await getReview() === options.review, 'RECONCILE_SOURCE_CHANGED'); failed.verify();
         const prepared = { version: 1, kind: 'abandoned-fence-prepared-constraint', intent, preparedAt: now(), candidate, destination: target, ...ABANDONED_TRUTH };
         const digest = writeRecord(path, 'prepared.json', prepared);
@@ -912,7 +958,9 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
       const intentFile = archiveFile(join(path, 'intent.json'), 262144), preparedFile = archiveFile(join(path, 'prepared.json'), 262144), prepared = JSON.parse(preparedFile.bytes);
       need(equal(JSON.parse(intentFile.bytes), intent) && preparedFile.digest === options.prepared &&
         equal(prepared, { version: 1, kind: 'abandoned-fence-prepared-constraint', intent, preparedAt: prepared.preparedAt,
-          candidate: { runtime: failed.eligible.runtime, provenance: failed.eligible.provenance, quiescence: failed.eligible.quiescence }, destination: target, ...ABANDONED_TRUTH }), 'ABANDON_REQUALIFICATION_UNQUALIFIED');
+          candidate: { runtime: ownerDocker ? prepared.candidate?.runtime : failed.eligible.runtime, provenance: failed.eligible.provenance, quiescence: ownerDocker ? prepared.candidate?.quiescence : failed.eligible.quiescence,
+                      ...(ownerDocker ? { restart: prepared.candidate?.restart, observationBasis: 'FRESH_PREPARE_TWO_DIRECT_GET_SAMPLES_NOT_HISTORICAL_USAGE' } : {}) }, destination: target, ...ABANDONED_TRUTH }) &&
+                  (!ownerDocker || SHA.test(prepared.candidate.runtime) && prepareObservationAllowed(prepared.candidate.quiescence, failed.eligible.quiescence) && prepared.candidate.restart?.kind === 'OWNER_STARTED_DOCKER_ABANDONED_LEASE_ONLY'), 'ABANDON_REQUALIFICATION_UNQUALIFIED');
       const preparedFresh = () => need(Number.isSafeInteger(prepared.preparedAt) && now() >= prepared.preparedAt && now() - prepared.preparedAt <= 300000, 'ABANDON_PREPARED_EXPIRED');
       // Exclusive commit intent also serializes duplicate commits of this ordinal.
       writeRecord(path, 'commit-intent.json', { version: 1, ordinal: options.ordinal, preparedSha256: options.prepared, review: options.review, ...ABANDONED_TRUTH }); own = path;
@@ -923,7 +971,7 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
       // Pin BEFORE all last slow byte/hash/schema checks, after own journal writes.
       pins = pinAbandonedPaths(root, abandonedPinPaths(root, options.selection, sourcePaths), io);
       phase = 'final-fence'; need(await getReview() === options.review, 'RECONCILE_SOURCE_CHANGED'); failed.verify(); intentFile.verify(); preparedFile.verify();
-      const runtime = await prepareRuntime(root, options.selection, original, options.review, getReview, clock); runtime.verify();
+      const runtime = await prepareRuntime(root, options.selection, original, options.review, getReview, clock, ownerDocker); runtime.verify();
       pins.verify(); preparedFresh();
       lease = acquireSupervisor(root); // BEFORE any fresh runtime/GET, held until commit/uncertainty is durably recorded.
       lease.verify(); pins.verify();
@@ -935,6 +983,7 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
       phase = 'final-fence';
       need(quietEnvelope(quiet, true) && equal(quiet, prepared.candidate.quiescence), 'ABANDON_CURRENT_OBSERVATION_CHANGED');
       need(before.digest === prepared.candidate.runtime && after.digest === before.digest && equal(before.provenance, prepared.candidate.provenance) && equal(after.provenance, before.provenance), 'ABANDON_RUNTIME_CHANGED');
+      if (ownerDocker) need(equal(before.restart, prepared.candidate.restart) && equal(after.restart, before.restart), 'ABANDON_RUNTIME_CHANGED');
       directEnvironment(process.env); lease.verify(); pins.verify();
       need(!alive(original.intent.pid), 'ABANDON_ATTEMPT_BLOCKED'); preparedFresh();
       need(!io.existsSync(destination) && equal(stamp(io.lstatSync(original.lockPath)), original.lockIdentity) && equal(io.readdirSync(original.lockPath), ['native-runtime-owner.json']), 'ABANDON_PIN_CHANGED');
@@ -956,6 +1005,13 @@ export function createAbandonedRequalification({ root, capture = captureAbandone
   };
 }
 function requalificationMode(args) {
+  const ownerDocker = ['--prepare-abandoned-owner-docker-requalification', '--commit-abandoned-owner-docker-requalification'].includes(args[0]);
+  if (ownerDocker) {
+    need(args[4] === '--ack-owner-started-docker-same-containers-no-native-adoption', 'ABANDON_REQUALIFICATION_UNQUALIFIED');
+    const commit = args[0] === '--commit-abandoned-owner-docker-requalification';
+    const result = requalificationMode([commit ? '--commit-abandoned-requalification' : '--prepare-abandoned-requalification', ...args.slice(1, 4), ...args.slice(5)]);
+    return { ...result, mode: commit ? 'abandon-requalify-docker-commit' : 'abandon-requalify-docker-prepare' };
+  }
   const commit = args[0] === '--commit-abandoned-requalification';
   need(args[1] === (commit ? '--ack-new-coordinator-requalification-commit-go' : '--ack-new-coordinator-requalification-prepare-go') &&
     args[2] === '--ack-unknown-liabilities-no-provider-retry' && args[3] === '--ack-batch36-append-only-max-three', 'ABANDON_REQUALIFICATION_UNQUALIFIED');
@@ -1009,7 +1065,7 @@ function directReadonlyMode(args) {
 export function reconcileMode(args) {
   if (!args.length) return { mode: 'inert' };
   if (equal(args, ['--fingerprint'])) return { mode: 'fingerprint' };
-  if (['--prepare-abandoned-requalification', '--commit-abandoned-requalification'].includes(args[0])) return requalificationMode(args);
+  if (['--prepare-abandoned-requalification', '--commit-abandoned-requalification', '--prepare-abandoned-owner-docker-requalification', '--commit-abandoned-owner-docker-requalification'].includes(args[0])) return requalificationMode(args);
   if (['--verify-abandoned-native-fence', '--archive-abandoned-native-fence'].includes(args[0])) return abandonedMode(args);
   if (['--diagnose-abandoned-readonly', '--continue-abandoned-readonly', '--archive-continued-abandoned-native-fence'].includes(args[0])) return failedReadonlyMode(args);
   if (['--diagnose-abandoned-direct', '--verify-abandoned-direct', '--archive-abandoned-direct', '--verify-abandoned-parallel', '--archive-abandoned-parallel'].includes(args[0])) return directReadonlyMode(args);

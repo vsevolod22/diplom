@@ -17,7 +17,7 @@ import { captureNativeReconcileEvidence, qualifyDurableCommit, createNativeRecon
   verifyReadonlyQuiescentIo, createAbandonedFenceDisposer, closeReadonlyBrowser, readonlyFailure, READONLY_FAILURE_PHASES, READONLY_FAILURE_CODES,
   ABANDONED_CONTINUATION_SLOT, createAbandonedReadonlyDiagnostic, captureFailedReadonlyStage, ABANDONED_DIRECT_SLOT,
     DIRECT_GET_PATHS, DIRECT_READONLY, directGetAllowed, createAbandonedDirectQuiescence, captureFailedArchiveStage,
-      ABANDONED_PARALLEL_SLOT, captureFailedFreshnessStage, captureFailedParallelStage, createAbandonedRequalification, acquireAbandonedSupervisor, pinAbandonedPaths } from './native-runtime-reconcile.mjs';
+      ABANDONED_PARALLEL_SLOT, captureFailedFreshnessStage, captureFailedParallelStage, createAbandonedRequalification, acquireAbandonedSupervisor, pinAbandonedPaths, qualifyOwnerDockerRestart } from './native-runtime-reconcile.mjs';
 import { contracts, fingerprint, SCAN, BASE, QUESTION } from '../tests-e2e/native-h7v3-paid-sol.mjs';
 import { extraContracts } from '../tests-e2e/batch26-native-chat.mjs';
 import { diagnosticContracts } from '../tests-e2e/native-h7v3-finite-diagnostics.mjs';
@@ -1086,6 +1086,83 @@ test('requalification CLI exact prepare/commit GO, fixedBatch36, ordinal01..03, 
   assert.equal(reconcileMode(commit).mode, 'abandon-requalify-commit');
   for (let i = 0; i < args.length; i++) { const next = [...args]; next[i] = 'wrong'; assert.throws(() => reconcileMode(next)); }
   for (const extra of ['--slot', '--cookie', '--freshness-ms', '--retry-paid']) assert.throws(() => reconcileMode([...args, extra]));
+});
+function ownerDockerRestart(deployment) {
+  const observed = structuredClone(deployment.observed); let index = 0;
+  for (const epoch of observed.epochs) if (!epoch.name.endsWith('volume-init')) {
+    epoch.startedAt = new Date(Date.parse('2026-11-05T09:00:00.000Z') + index++ * 1000).toISOString(); epoch.pid += 1000;
+  }
+  return observed;
+}
+test('owner Docker restart qualifies all6 newer coherent starts with same8 immutable IDs/images/Created, init unchanged; original exact epoch branch still refuses', t => {
+  const f = fixture(t), deployment = deploymentFixture(f), { receipt } = deployment.capture(), prior = structuredClone(receipt), observed = ownerDockerRestart(deployment);
+  const result = qualifyOwnerDockerRestart(observed, receipt);
+  assert.equal(result.restart.window.spreadMs, 5000); assert.equal(result.restart.epochs.length, 8);
+  assert.equal(result.restart.nativeAuthorityAdopted, false); assert.deepEqual(receipt, prior);
+  assert.throws(() => qualifyAbandonedRuntime(observed, receipt), /ABANDON_RUNTIME_EPOCH_CHANGED/);
+});
+for (const attack of ['replacement', 'retarget', 'created', 'partial-restart', 'init-restarted', 'noncoherent', 'restart-count', 'daemon', 'unhealthy'])
+  test(`owner Docker restart refuses ${attack} without any epoch waiver`, t => {
+    const f = fixture(t), deployment = deploymentFixture(f), { receipt } = deployment.capture(), observed = ownerDockerRestart(deployment);
+    const gateway = observed.epochs.find(e => e.name === 'egress'), service = observed.status.services.find(e => e.name === 'egress');
+    if (attack === 'replacement') { gateway.id = id(999); service.id = gateway.id; }
+    if (attack === 'retarget') { gateway.image = 'sha256:' + id(999); service.image = gateway.image; }
+    if (attack === 'created') gateway.created = '2026-11-04T00:00:00.000Z';
+    if (attack === 'partial-restart') gateway.startedAt = receipt.expected.egress.startedAt;
+    if (attack === 'init-restarted') observed.epochs.find(e => e.name === 'auth-volume-init').startedAt = gateway.startedAt;
+    if (attack === 'noncoherent') gateway.startedAt = '2026-11-05T09:02:00.000Z';
+    if (attack === 'restart-count') { gateway.restartCount = 1; service.restartCount = 1; }
+    if (attack === 'daemon') observed.status.daemon = 'different-daemon';
+    if (attack === 'unhealthy') service.healthy = false;
+    assert.throws(() => qualifyOwnerDockerRestart(observed, receipt));
+  });
+for (const drift of [false, true, 'window-rollover', 'window-drift']) test(`owner Docker restart prepared protocol ${drift === true ? 'rejects CURRENT epoch drift' : drift || 'pins independent CURRENT epochs and commits only matching repeated reads'}`, async t => {
+  const w = await requalificationFixture(t), observed = ownerDockerRestart(w.deployment), options = { ...w.options, mode: 'abandon-requalify-docker-prepare' };
+  const run = w.run({ prepareRuntime: async (...args) => {
+    assert.equal(args[6], true); const { records, receipt } = w.deployment.capture(); let samples = 0;
+    return { verify: records.verify, observe: async () => {
+      assert.equal(w.state.held, true); assert.throws(() => inspectDeploySupervisor(w.f.root));
+      const proof = qualifyOwnerDockerRestart(observed, receipt); w.state.observations++;
+      if (++samples === 2) w.state.final = true;
+      return { ...proof, observedAt: w.state.clock, provenance: receipt.provenance };
+    } };
+  } });
+  let ordinal = 1;
+  if (typeof drift === 'string') {
+    const first = await run(options), firstPath = join(w.stage, 'requalification/01/prepared.json'), firstBytes = fs.readFileSync(firstPath);
+    w.f.first.usage.window.start += 86400000; w.f.first.usage.window.end += 86400000;
+    for (const scope of ['user', 'scan']) {
+      const usage = w.f.first.usage[scope]; usage.used = { input: 123, output: 45, costMicros: 67 };
+      usage.remaining.input = usage.limits.input - usage.used.input - usage.carried.input;
+      usage.remaining.output = usage.limits.output - usage.used.output - usage.carried.output;
+    }
+    await assert.rejects(run({ ...w.commit(first), mode: 'abandon-requalify-docker-commit' }), /ABANDON_CURRENT_OBSERVATION_CHANGED/);
+    assert.equal(JSON.parse(fs.readFileSync(join(w.stage, 'requalification/01/failure.json'))).renameAttempted, false);
+    assert.deepEqual(fs.readFileSync(firstPath), firstBytes); ordinal = 2;
+  }
+  const prepared = await run({ ...options, ordinal }), path = join(w.stage, 'requalification', String(ordinal).padStart(2, '0'), 'prepared.json'), constraint = JSON.parse(fs.readFileSync(path));
+  assert.deepEqual(constraint.candidate.restart.epochs, observed.epochs); assert.ok(fs.existsSync(w.f.lock));
+  assert.equal(constraint.candidate.observationBasis, 'FRESH_PREPARE_TWO_DIRECT_GET_SAMPLES_NOT_HISTORICAL_USAGE');
+  assert.equal(constraint.candidate.quiescence.currentObservation.window.start, w.f.first.usage.window.start);
+  assert.deepEqual(constraint.candidate.quiescence.currentObservation.user.used, w.f.first.usage.user.used);
+  if (drift === true) observed.epochs.find(e => e.name === 'api').pid++;
+  if (drift === 'window-drift') { w.f.first.usage.window.start += 86400000; w.f.first.usage.window.end += 86400000; }
+  const commit = { ...w.commit(prepared, ordinal), mode: 'abandon-requalify-docker-commit' };
+  if (drift === true || drift === 'window-drift') { await assert.rejects(run(commit), drift === true ? /ABANDON_RUNTIME_CHANGED/ : /ABANDON_CURRENT_OBSERVATION_CHANGED/); assert.ok(fs.existsSync(w.f.lock)); }
+  else { const result = await run(commit); assert.equal(result.providerRetryAuthorized, false); assert.equal(result.accountingMutation, 'NONE'); assert.equal(w.state.reads, ordinal === 1 ? 16 : 32); assert.equal(w.state.renamed, true); }
+  assert.equal(w.state.held, false); for (const row of w.files) assert.deepEqual(fs.readFileSync(row.path), row.bytes);
+});
+test('owner Docker restart CLI requires distinct mode AND exact owner-started acknowledgement, never a caller epoch JSON grant', () => {
+  const pairs = ['--deployment', selection.deployment, '--native-attempt', selection.attempt, '--original-review', selection.originalReview, '--review', review,
+    '--failed-review', failedReview, '--failed-archive-review', review, '--failed-archive-evidence-sha256', id(901), '--failed-direct-review', review,
+    '--failed-direct-evidence-sha256', id(902), '--failed-parallel-review', review, '--failed-parallel-evidence-sha256', id(903), '--attempt', '01'];
+  const args = ['--prepare-abandoned-owner-docker-requalification', '--ack-new-coordinator-requalification-prepare-go', '--ack-unknown-liabilities-no-provider-retry',
+    '--ack-batch36-append-only-max-three', '--ack-owner-started-docker-same-containers-no-native-adoption', ...pairs];
+  assert.equal(reconcileMode(args).mode, 'abandon-requalify-docker-prepare');
+  const commit = ['--commit-abandoned-owner-docker-requalification', '--ack-new-coordinator-requalification-commit-go', ...args.slice(2), '--prepared-sha256', id(904)];
+  assert.equal(reconcileMode(commit).mode, 'abandon-requalify-docker-commit');
+  assert.throws(() => reconcileMode(args.filter((_, i) => i !== 4)));
+  for (const extra of ['--epochs', '--window-ms', '--adopt-native', '--retry-paid']) assert.throws(() => reconcileMode([...args, extra]));
 });
 test('inert executable and fingerprint touch source only; separate reconciler files are reviewed without rewriting original review list', async () => {
   const file = new URL('./native-runtime-reconcile.mjs', import.meta.url).pathname;
