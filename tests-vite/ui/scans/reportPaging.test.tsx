@@ -1088,61 +1088,66 @@ function changeC4Row(row: VulnFinding, field: (typeof c4Changes)[number]) {
       break;
   }
 }
-it.each(['Back', 'forward'] as const)(
-  'C4 same-ID %s replay rejects every normalized display-content change and retains last confirmed page',
-  async (direction) => {
-    for (const field of c4Changes) {
-      const first = c4Page(0);
-      const second = c4Page(1);
-      const altered = structuredClone(direction === 'Back' ? first : second);
-      changeC4Row(altered.findings[0], field);
-      const transport = fixtureTransport();
-      const sequence = direction === 'Back' ? [first, second, altered] : [first, second, first, altered];
-      transport.vuln = vi.fn();
-      for (const page of sequence) vi.mocked(transport.vuln).mockResolvedValueOnce(page);
-      vi.mocked(transport.vuln)
-        .mockRejectedValueOnce(new Error('retry offline'))
-        .mockResolvedValueOnce(first);
-      const view = render(sections(transport, { ...status, checks: ['vuln'] }));
+// Each mutation is an independent scenario, not thirteen scenarios sharing one test timeout.
+it.each(
+  (['Back', 'forward'] as const).flatMap(direction =>
+    c4Changes.map(field => [direction, field] as const),
+  ),
+)(
+  'C4 same-ID %s replay rejects normalized display-content change (%s) and retains last confirmed page',
+  async (direction, field) => {
+    const first = c4Page(0);
+    const second = c4Page(1);
+    const altered = structuredClone(direction === 'Back' ? first : second);
+    changeC4Row(altered.findings[0], field);
+    const transport = fixtureTransport();
+    const sequence = direction === 'Back' ? [first, second, altered] : [first, second, first, altered];
+    transport.vuln = vi.fn();
+    for (const page of sequence) vi.mocked(transport.vuln).mockResolvedValueOnce(page);
+    vi.mocked(transport.vuln)
+      .mockRejectedValueOnce(new Error('retry offline'))
+      .mockResolvedValueOnce(first);
+    const view = render(sections(transport, { ...status, checks: ['vuln'] }));
+    await screen.findByText('c4-package-0');
+    fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
+    await screen.findByText('c4-package-1');
+    if (direction === 'forward') {
+      fireEvent.click(screen.getByRole('button', { name: 'Назад · Уязвимости' }));
       await screen.findByText('c4-package-0');
-      fireEvent.click(screen.getByRole('button', { name: 'Далее · Уязвимости' }));
-      await screen.findByText('c4-package-1');
-      if (direction === 'forward') {
-        fireEvent.click(screen.getByRole('button', { name: 'Назад · Уязвимости' }));
-        await screen.findByText('c4-package-0');
-      }
-      const retainedIndex = direction === 'Back' ? 1 : 0;
-      const retainedRow = c4Page(retainedIndex).findings[0];
-      const before = screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent;
-      fireEvent.click(
-        screen.getByRole('button', { name: direction === 'Back' ? 'Назад · Уязвимости' : 'Далее · Уязвимости' }),
-      );
-      await screen.findByText(/Содержимое отчёта изменилось/);
-      expect(screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent, field).toBe(before);
-      expect(screen.getByText(retainedRow.packageName), field).toBeTruthy();
-      expect(screen.getByText(retainedIndex === 0 ? 'Строки 1–25' : 'Строки 26–26'), field).toBeTruthy();
-      expect(screen.getByText(`Страница ${retainedIndex + 1}`), field).toBeTruthy();
-      expect(screen.getByText(/Сохранён прежний подтверждённый снимок/), field).toBeTruthy();
-      expect(screen.queryByText('LOW', { exact: true }), field).toBeNull();
-      expect(screen.queryByText('1.1', { exact: true }), field).toBeNull();
-      expect(screen.getByRole('button', { name: 'Назад · Уязвимости' }).hasAttribute('disabled')).toBe(true);
-      expect(screen.getByRole('button', { name: 'Далее · Уязвимости' }).hasAttribute('disabled')).toBe(true);
-      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
-      await screen.findByText(/Не удалось подтвердить страницу Уязвимости/);
-      expect(screen.getByText(/Показана предыдущая подтверждённая страница/)).toBeTruthy();
-      expect(screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent).toBe(before);
-      fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
-      await screen.findByText('Страница 1');
-      await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-      expect(
-        vi
-          .mocked(transport.vuln)
-          .mock.calls.slice(-2)
-          .map((call) => call[1]),
-      ).toEqual([undefined, undefined]);
-      expect(screen.getByRole('button', { name: 'Далее · Уязвимости' }).hasAttribute('disabled')).toBe(false);
-      view.unmount();
     }
+    const retainedIndex = direction === 'Back' ? 1 : 0;
+    const retainedRow = c4Page(retainedIndex).findings[0];
+    const before = screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent;
+    fireEvent.click(
+      screen.getByRole('button', { name: direction === 'Back' ? 'Назад · Уязвимости' : 'Далее · Уязвимости' }),
+    );
+    await screen.findByText(/Содержимое отчёта изменилось/);
+    expect(screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent, field).toBe(before);
+    expect(screen.getByText(retainedRow.packageName), field).toBeTruthy();
+    expect(screen.getByText(retainedIndex === 0 ? 'Строки 1–25' : 'Строки 26–26'), field).toBeTruthy();
+    expect(screen.getByText(`Страница ${retainedIndex + 1}`), field).toBeTruthy();
+    expect(screen.getByText(/Сохранён прежний подтверждённый снимок/), field).toBeTruthy();
+    expect(screen.queryByText('LOW', { exact: true }), field).toBeNull();
+    expect(screen.queryByText('1.1', { exact: true }), field).toBeNull();
+    expect(screen.getByRole('button', { name: 'Назад · Уязвимости' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Далее · Уязвимости' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
+    await screen.findByText(/Не удалось подтвердить страницу Уязвимости/);
+    expect(screen.getByText(/Показана предыдущая подтверждённая страница/)).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Находки Уязвимости' }).textContent).toBe(before);
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить загрузку Уязвимости' }));
+    await screen.findByText('Страница 1');
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(
+      vi
+        .mocked(transport.vuln)
+        .mock.calls.slice(-2)
+        .map((call) => call[1]),
+    ).toEqual([undefined, undefined]);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Далее · Уязвимости' }).hasAttribute('disabled')).toBe(false),
+    );
+    view.unmount();
   },
 );
 it('C4 accepts benign stable normalized content on Back and forward replay with reordered row keys', async () => {
