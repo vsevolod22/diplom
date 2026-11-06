@@ -35,11 +35,12 @@ function Location() {
   return (
     <>
       <output aria-label="location">{value.pathname}</output>
+      <output aria-label="return destination">{value.state?.returnTo ?? ''}</output>
       <Link to="/elsewhere">Leave screen</Link>
     </>
   );
 }
-function mount(path = '/account', strict = false) {
+function mount(path = '/account', strict = false, state?: { returnTo?: unknown; extra?: string }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   clients.push(client);
   client.setQueryData(['unrelated'], { keep: true });
@@ -55,13 +56,13 @@ function mount(path = '/account', strict = false) {
       </Routes>
     </>
   );
-  if (path.startsWith('/reset-password')) window.history.replaceState(null, '', path);
+  if (path.startsWith('/reset-password')) window.history.replaceState(state ? { usr: state, key: 'reset-test', idx: 0 } : null, '', path);
   const tree = (
     <QueryClientProvider client={client}>
       {path.startsWith('/reset-password') ? (
         <BrowserRouter>{routes}</BrowserRouter>
       ) : (
-        <MemoryRouter initialEntries={[path]}>{routes}</MemoryRouter>
+        <MemoryRouter initialEntries={[{ pathname: path, state }]}>{routes}</MemoryRouter>
       )}
     </QueryClientProvider>
   );
@@ -304,6 +305,44 @@ it.each(['navigation', 'owner'] as const)(
     }
   },
 );
+it.each(['/scans', '/scans/new', '/scans/00000000-0000-4000-8000-000000000038'])(
+  'preserves a safe login destination through password recovery: %s', async returnTo => {
+    const calls = api(async () => { throw Error('POST forbidden'); }, () => json({ errorCode: 'AUTH_REQUIRED' }, 401), false);
+    mount('/login', false, { returnTo });
+    fireEvent.click(await screen.findByRole('link', { name: 'Забыли пароль?' }));
+    await screen.findByRole('heading', { name: 'Восстановить доступ' });
+    expect(screen.getByLabelText('return destination')).toHaveTextContent(returnTo);
+    fireEvent.click(screen.getByRole('link', { name: 'Вернуться ко входу' }));
+    await screen.findByRole('heading', { name: 'Вход' });
+    expect(screen.getByLabelText('return destination')).toHaveTextContent(returnTo);
+    expect(posts(calls)).toHaveLength(0);
+  },
+);
+
+it.each(['https://evil.invalid', '//evil.invalid', '/scans?token=not-allowed', '/scans/new#not-allowed'])(
+  'does not forward an unsafe recovery destination: %s', async returnTo => {
+    const calls = api(async () => { throw Error('POST forbidden'); }, () => json({ errorCode: 'AUTH_REQUIRED' }, 401), false);
+    mount('/forgot-password', false, { returnTo });
+    await screen.findByRole('heading', { name: 'Восстановить доступ' });
+    fireEvent.click(screen.getByRole('link', { name: 'Ко входу' }));
+    await screen.findByRole('heading', { name: 'Вход' });
+    expect(screen.getByLabelText('return destination')).toHaveTextContent('/account');
+    expect(posts(calls)).toHaveLength(0);
+  },
+);
+
+it('retains only a safe return destination while scrubbing a reset token', async () => {
+  const calls = api(async () => { throw Error('POST forbidden'); });
+  mount(`/reset-password#token=${token}`, false, { returnTo: '/scans/new', extra: 'must-not-survive' });
+  await waitFor(() => expect(window.location.hash).toBe(''));
+  expect(window.history.state.usr).toEqual({ returnTo: '/scans/new' });
+  expect(JSON.stringify(window.history.state)).not.toContain(token);
+  fireEvent.click(screen.getByRole('link', { name: 'Ко входу' }));
+  await screen.findByRole('heading', { name: 'Вход' });
+  expect(screen.getByLabelText('return destination')).toHaveTextContent('/scans/new');
+  expect(posts(calls)).toHaveLength(0);
+});
+
 it('TASK54 unavailable recovery is truthful, disabled, GET-only manual retry and never claims mail delivery', async () => {
   const calls = api(
     async () => {
@@ -383,7 +422,7 @@ it.each([true, false])(
       async () => new Response(null, { status: 204 }),
       () => json({}, 401),
     );
-    const { client } = mount(`/reset-password#token=${token}`, strict);
+    const { client } = mount(`/reset-password#token=${token}`, strict, { returnTo: '/scans/new' });
     await waitFor(() =>
       expect(window.location.pathname + window.location.search + window.location.hash).toBe(
         '/reset-password',
@@ -408,6 +447,7 @@ it.each([true, false])(
     fireEvent.change(screen.getByLabelText('Повторите новый пароль'), { target: { value: newPassword } });
     fireEvent.click(button);
     await waitFor(() => expect(screen.getByLabelText('location')).toHaveTextContent('/login'));
+    expect(screen.getByLabelText('return destination')).toHaveTextContent('/scans/new');
     expect(JSON.parse(String(posts(calls)[0].init.body))).toEqual({ token, newPassword });
     expect(calls.every((call) => !call.path.includes(token))).toBe(true);
     expect(posts(calls)).toHaveLength(1);

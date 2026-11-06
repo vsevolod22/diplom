@@ -15,6 +15,7 @@ import {
 } from '@/shared/api/auth/accountSecurity';
 import { invalidateConfirmedBrowserSession, revalidateBrowserSession } from '@/shared/api/auth/revalidateBrowserSession';
 import { scanSession } from '@/shared/api/auth/scanSession';
+import { safeAuthReturnTo } from '@/shared/api/auth/authReturnTo';
 import './demo-auth.css';
 
 type Mode = 'request' | 'confirm';
@@ -23,6 +24,7 @@ type Mode = 'request' | 'confirm';
 export function PasswordResetPage({ mode }: { mode: Mode }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const returnTo = safeAuthReturnTo(location.state?.returnTo);
   const client = useQueryClient();
   const mounted = useRef(false);
   const operation = useRef<symbol | null>(null);
@@ -58,9 +60,9 @@ export function PasswordResetPage({ mode }: { mode: Mode }) {
     setAccepted(false);
     if (location.hash || location.search) {
       scrubbing.current = true;
-      navigate(location.pathname, { replace: true, state: null });
+      navigate(location.pathname, { replace: true, state: { returnTo } });
     }
-  }, [location.hash, location.search, location.key, location.pathname, mode, navigate]);
+  }, [location.hash, location.search, location.key, location.pathname, mode, navigate, returnTo]);
 
   const readiness = useQuery({
     queryKey: ['auth', 'password-reset', 'status'],
@@ -109,7 +111,7 @@ export function PasswordResetPage({ mode }: { mode: Mode }) {
       const invalidated = current() && scanSession().generation === initial.generation
         ? await invalidateConfirmedBrowserSession(client) : false;
       if (current() && invalidated) {
-        navigate('/login', { replace: true, state: { sessionNotice: 'Пароль изменён, прежние сессии этого аккаунта завершены. Войдите с новым паролем.' } });
+        navigate('/login', { replace: true, state: { returnTo, sessionNotice: 'Пароль изменён, прежние сессии этого аккаунта завершены. Войдите с новым паролем.' } });
       } else {
         await revalidateBrowserSession(client);
         if (current()) setError('Пароль изменён. Сессия браузера изменилась; перейдите ко входу.');
@@ -144,7 +146,7 @@ export function PasswordResetPage({ mode }: { mode: Mode }) {
       <div className="demo-auth__frame">
         <header className="demo-auth__header">
           <Link className="demo-auth__brand" to="/">OCI / VISION</Link>
-          <Link to="/login">Ко входу</Link>
+          <Link to="/login" state={{ returnTo }}>Ко входу</Link>
         </header>
         <section className="demo-auth__panel demo-auth__recovery" aria-labelledby="recovery-title">
           <h1 id="recovery-title">{mode === 'request' ? 'Восстановить доступ' : 'Задать новый пароль'}</h1>
@@ -156,7 +158,7 @@ export function PasswordResetPage({ mode }: { mode: Mode }) {
               : 'Оператору сайта нужно настроить и проверить доставку ссылок восстановления.'} Письмо не отправлено.</p>
           ) : null}
           {!ready ? <button className="demo-auth__submit" type="button" disabled={busy || readiness.isFetching} onClick={() => void checkAvailability()}>Повторить проверку доступности</button> : null}
-          {mode === 'confirm' && !hasToken ? <p>Действительная ссылка не найдена. Откройте ссылку из письма или <Link to="/forgot-password">запросите новую</Link>. После перезагрузки страницы ссылку нужно открыть заново.</p> : null}
+          {mode === 'confirm' && !hasToken ? <p>Действительная ссылка не найдена. Откройте ссылку из письма или <Link to="/forgot-password" state={{ returnTo }}>запросите новую</Link>. После перезагрузки страницы ссылку нужно открыть заново.</p> : null}
           {accepted ? (
             <p role="status">Запрос принят. Если адрес подходит для восстановления и доставка сработает, вы получите инструкции. Это не подтверждение отправки или доставки письма.</p>
           ) : (
@@ -183,7 +185,7 @@ export function PasswordResetPage({ mode }: { mode: Mode }) {
             </form>
           )}
           {error ? <p role="alert" className="demo-auth__error">{error}</p> : null}
-          <p><Link to="/login">Вернуться ко входу</Link></p>
+          <p><Link to="/login" state={{ returnTo }}>Вернуться ко входу</Link></p>
         </section>
       </div>
     </main>

@@ -616,7 +616,7 @@ function AuthPageScope({ mode }: { mode: Mode }) {
               </form>
               {mode === 'login' ? (
                 <p>
-                  <Link to="/forgot-password">Забыли пароль?</Link>
+                  <Link to="/forgot-password" state={authState}>Забыли пароль?</Link>
                 </p>
               ) : null}
               <p className="demo-auth__switch">
