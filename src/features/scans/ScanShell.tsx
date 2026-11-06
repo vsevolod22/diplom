@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowUpRight, ScanLine } from 'lucide-react';
 import { NavListCard } from './NavListCard';
@@ -15,20 +15,26 @@ export function ScanShell({ demo, children, compact = false }: { demo: boolean; 
   const queryClient = useQueryClient();
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   async function logout() {
     if (loggingOut) return;
     setLoggingOut(true);
     setLogoutError(false);
     try {
       await logoutDemoUser();
+      const redirect = mounted.current;
       transitionScanSession(null, queryClient, true);
+      if (redirect) navigate('/login');
       await queryClient.cancelQueries();
       queryClient.clear();
-      navigate('/login');
     } catch {
-      setLogoutError(true);
+      if (mounted.current) setLogoutError(true);
     } finally {
-      setLoggingOut(false);
+      if (mounted.current) setLoggingOut(false);
     }
   }
   const reducedMotion = useReducedMotion();

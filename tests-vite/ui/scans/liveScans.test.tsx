@@ -83,6 +83,7 @@ function mount(path: string, ownEligibility = false) {
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Routes>
+    <Route path="/" element={<h1>Главная тестовая страница</h1>} />
     <Route path="/account" element={<DemoAuthPage mode="account" />} />
     <Route path="/login" element={<DemoAuthPage mode="login" />} />
     <Route path="/scans" element={<LiveScanSession><ScanListPage /></LiveScanSession>} />
@@ -1136,6 +1137,29 @@ describe('cookie-session live scans', () => {
     const error = await within(screen.getByRole('form', { name: 'Параметры скана' })).findByRole('alert');
     expect(error.querySelector('p')?.textContent).toBe('Сервер отклонил цель или параметры сканирования. Скан не создан.');
     expect(within(error).getByRole('link', { name: 'Проверить список перед повтором' }).getAttribute('href')).toBe('/scans');
+  });
+
+  it('does not redirect away from another page when a previous scan logout finishes late', async () => {
+    let finish!: (value: { ok: boolean; status: number }) => void;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/v1/auth/me') return json({ id: 'alice', email: 'alice@example.com' });
+      if (path === '/api/v1/auth/logout') return new Promise<{ ok: boolean; status: number }>(resolve => { finish = resolve; });
+      return json({ scans: [row], nextCursor: null });
+    }));
+    const client = mount('/scans');
+    await screen.findByText('private/alpine');
+    const privateKey = retainPrivateCache(client);
+    fireEvent.click(screen.getByRole('button', { name: 'Выйти' }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    const home = screen.getAllByRole('link').find(link => link.getAttribute('href') === '/');
+    expect(home).toBeTruthy();
+    fireEvent.click(home!);
+    await screen.findByRole('heading', { name: 'Главная тестовая страница' });
+    await act(async () => finish({ ok: true, status: 204 }));
+    expect(screen.getByRole('heading', { name: 'Главная тестовая страница' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Вход' })).toBeNull();
+    expect(client.getQueryData(privateKey)).toBeUndefined();
+    expect(scanSession().subject).toBeNull();
   });
 
   it('shows logout on real scans, revokes the server cookie and clears private cache without opening account', async () => {

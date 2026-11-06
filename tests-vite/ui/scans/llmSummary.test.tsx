@@ -662,6 +662,21 @@ it.each([403, 404])(
   },
 );
 
+it('explains a missing saved summary and rechecks with GET only when automation is off', async () => {
+  saveReportPreferences({ language: 'original', autoSummary: false });
+  mockApi(() => ({ ...context, summaryResultRead: true }));
+  mount();
+  await screen.findByText(/Сохранённого ИИ-разбора пока нет/);
+  expect(posts()).toHaveLength(0);
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Проверить сохранённый разбор' }));
+  await waitFor(() => expect(requests.filter(r => r.path.endsWith('/summary') && r.init?.method === 'GET')).toHaveLength(2));
+  await screen.findByText(/Сохранённого ИИ-разбора пока нет/);
+  expect(posts()).toHaveLength(0);
+  expect(sessionStorage.getItem('report-automation-v1:attempts')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Создать платный ИИ-разбор' })).toBeNull();
+});
+
 it('automatically generates once with saved authorization, exact consent and verified late-page sources', async () => {
   mockApi();
   const source = transport();

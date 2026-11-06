@@ -284,15 +284,21 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
       if (current() && activation) focusHandoff.current = { activation, generation, subject, epoch };
     };
     if (restart) handoff();
+    let deadline: number | undefined;
     const timer = window.setTimeout(async () => {
       if (!current()) return;
       try {
-        const response = await fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}${repository ? `&repository=${encodeURIComponent(repository)}` : ''}&generation=${encodeURIComponent(serverGeneration)}${cursor ? `&cursor=${cursor}` : ''}`, {
-          credentials: 'same-origin', signal: controller.signal, headers: { accept: 'application/json' },
-        });
+        const response = await Promise.race([
+          fetch(`/api/v1/browser/scans/images?q=${encodeURIComponent(query)}${repository ? `&repository=${encodeURIComponent(repository)}` : ''}&generation=${encodeURIComponent(serverGeneration)}${cursor ? `&cursor=${cursor}` : ''}`, {
+            credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal, headers: { accept: 'application/json' },
+          }).then(async response => ({ ok: response.ok, status: response.status, data: await response.json() as unknown })),
+          new Promise<never>((_, reject) => {
+            deadline = window.setTimeout(() => reject(new Error('Image catalog read timed out')), 15_000);
+          }),
+        ]);
         if (!response.ok) {
           let code: unknown;
-          try { code = z.object({ errorCode: z.string().max(64) }).parse(await response.json()).errorCode; } catch { /* Never display upstream error details. */ }
+          try { code = z.object({ errorCode: z.string().max(64) }).parse(response.data).errorCode; } catch { /* Never display upstream error details. */ }
           if (!current()) return;
           discovery.current.cursor = null;
           setNextCursor(null); setPageState(null); setRetainedResults(true);
@@ -300,8 +306,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
           handoff();
           return;
         }
-        const data: unknown = await response.json();
-        const page = searchPageSchema.parse(data);
+        const page = searchPageSchema.parse(response.data);
         if (page.items.some(item => !repositoryFromReference(item.reference) || repository !== null &&
           (item.kind !== 'tag' || !item.tagConfirmed || tagFromReference(item.reference) === null || repositoryFromReference(item.reference) !== repository)))
           throw new Error('Discovery repository mismatch');
@@ -322,9 +327,12 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
           setNextCursor(null); setPageState(null); setRetainedResults(true); setSearchState('error');
           handoff();
         }
+      } finally {
+        window.clearTimeout(deadline);
+        controller.abort();
       }
     }, append ? 0 : 350);
-    return () => { controller.abort(); window.clearTimeout(timer); activation?.stop(); };
+    return () => { controller.abort(); window.clearTimeout(timer); window.clearTimeout(deadline); activation?.stop(); };
   }, [search, repository, tagFilter, demo, subject, epoch, sessionIdentity, pageRequest, setValue]);
   useLayoutEffect(() => {
     if (!focusPicker.current) return;

@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { REPORT_ECOSYSTEMS, reportEcosystem } from '@/shared/api/scans/publicImageProfile';
 import type { ReactNode } from 'react';
 import { REPORT_LIMITS, REPORT_RULE_ID_PATTERN, REPORT_SEVERITIES } from '@/shared/api/scans/reportView';
 import type { ReportLimit, SbomReportQuery, SecretReportQuery, VulnReportQuery } from '@/shared/api/scans/reportView';
+
+const REPORT_NAME_PATTERN = /^[A-Za-z0-9@._+:/-]{1,128}$/;
 
 const SORT_LABELS: Record<string, string> = {
   'severity:desc': 'Сначала критические',
@@ -75,6 +77,8 @@ export function VulnReportControls({ query, onChange, disabled, label = 'CVE' }:
 }
 export function SbomReportControls({ query, onChange, disabled }: { query: SbomReportQuery; onChange: (query: SbomReportQuery) => void; disabled: boolean }) {
   const [name, setName] = useState(query.name ?? '');
+  const [nameError, setNameError] = useState(false);
+  const nameId = useId();
   return <Controls label="Пакеты" limit={query.limit ?? 25} sort={query.sort ?? 'name:asc'} sorts={['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc']} disabled={disabled}
     onLimit={limit => onChange({ ...query, limit })} onSort={sort => onChange({ ...query, sort: sort as SbomReportQuery['sort'] })}>
     <label>Тип пакетов
@@ -82,19 +86,29 @@ export function SbomReportControls({ query, onChange, disabled }: { query: SbomR
         <option value="">Все типы</option>{REPORT_ECOSYSTEMS.map(ecosystem => <option key={ecosystem} value={ecosystem}>{ecosystem}</option>)}
       </select>
     </label>
-    <form onSubmit={event => { event.preventDefault(); onChange({ ...query, name: name || null }); }}>
+    <form noValidate onSubmit={event => {
+      event.preventDefault();
+      if (disabled) return;
+      if (name && !REPORT_NAME_PATTERN.test(name)) { setNameError(true); return; }
+      setNameError(false);
+      onChange({ ...query, name: name || null });
+    }}>
       <label>Название пакета
-        <input value={name} maxLength={128} pattern={'[A-Za-z0-9@._+:\\/\\-]{1,128}'} onChange={event => setName(event.target.value)} placeholder="Например, openssl" />
+        <input value={name} maxLength={128} pattern={'[A-Za-z0-9@._+:\\/\\-]{1,128}'} aria-invalid={nameError}
+          aria-describedby={`${nameId}-help${nameError ? ` ${nameId}-error` : ''}`}
+          onChange={event => { setName(event.target.value); setNameError(false); }} placeholder="Например, openssl" />
       </label>
+      {nameError ? <p id={`${nameId}-error`} role="alert">Название пакета: от 1 до 128 символов — латинские буквы, цифры и @ . _ + : / - без пробелов.</p> : null}
       <button type="submit">Найти пакет</button>
-      <button type="button" onClick={() => { setName(''); onChange({ ...query, name: null }); }}>Сбросить название</button>
-      <small>Введите название или его часть.</small>
+      <button type="button" onClick={() => { setName(''); setNameError(false); onChange({ ...query, name: null }); }}>Сбросить название</button>
+      <small id={`${nameId}-help`}>Введите название или его часть.</small>
     </form>
   </Controls>;
 }
 export function SecretReportControls({ query, onChange, disabled }: { query: SecretReportQuery; onChange: (query: SecretReportQuery) => void; disabled: boolean }) {
   const [ruleId, setRuleId] = useState(query.ruleId ?? '');
   const [ruleError, setRuleError] = useState(false);
+  const ruleIdPrefix = useId();
   return <Controls label="Возможные секреты" limit={query.limit ?? 25} sort={query.sort ?? 'ruleId:asc'} sorts={['ruleId:asc', 'ruleId:desc', 'line:asc', 'line:desc']} disabled={disabled}
     onLimit={limit => onChange({ ...query, limit })} onSort={sort => onChange({ ...query, sort: sort as SecretReportQuery['sort'] })}>
     <label>Номер строки
@@ -102,17 +116,20 @@ export function SecretReportControls({ query, onChange, disabled }: { query: Sec
         <option value="">Все строки</option><option value="known">Известен</option><option value="unknown">Неизвестен</option>
       </select>
     </label>
-    <form onSubmit={event => {
+    <form noValidate onSubmit={event => {
       event.preventDefault();
+      if (disabled) return;
       if (ruleId && !REPORT_RULE_ID_PATTERN.test(ruleId)) { setRuleError(true); return; }
       setRuleError(false);
       onChange({ ...query, ruleId: ruleId || null });
     }}>
-      <label>Код правила<input value={ruleId} maxLength={80} pattern={'[A-Za-z0-9._\\-]{1,80}'} aria-invalid={ruleError} onChange={event => { setRuleId(event.target.value); setRuleError(false); }} /></label>
-      {ruleError ? <p role="alert">Код правила: от 1 до 80 символов — буквы, цифры, точка, подчёркивание или дефис.</p> : null}
+      <label>Код правила<input value={ruleId} maxLength={80} pattern={'[A-Za-z0-9._\\-]{1,80}'} aria-invalid={ruleError}
+        aria-describedby={`${ruleIdPrefix}-help${ruleError ? ` ${ruleIdPrefix}-error` : ''}`}
+        onChange={event => { setRuleId(event.target.value); setRuleError(false); }} /></label>
+      {ruleError ? <p id={`${ruleIdPrefix}-error`} role="alert">Код правила: от 1 до 80 символов — буквы, цифры, точка, подчёркивание или дефис.</p> : null}
       <button type="submit">Найти по правилу</button>
       <button type="button" onClick={() => { setRuleId(''); setRuleError(false); onChange({ ...query, ruleId: null }); }}>Сбросить правило</button>
-      <small>Поиск по точному коду правила. Значения секретов не показываются.</small>
+      <small id={`${ruleIdPrefix}-help`}>Поиск по точному коду правила. Значения секретов не показываются.</small>
     </form>
   </Controls>;
 }

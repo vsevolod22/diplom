@@ -148,6 +148,7 @@ function SummaryScope({
   const [phase, setPhase] = useState<SummaryPhase>('context');
   const [message, setMessage] = useState('');
   const [unsupportedReport, setUnsupportedReport] = useState(false);
+    const [missingResult, setMissingResult] = useState(false);
   const [result, setResult] = useState<{
     reply: SummaryReply;
     sources: SummarySource[];
@@ -181,6 +182,7 @@ function SummaryScope({
     const version = ++generation.current;
     setPending(true);
     setPhase('context');
+    setMissingResult(false);
     setMessage('');
     setUnsupportedReport(false);
     let timedOut = false;
@@ -240,6 +242,7 @@ function SummaryScope({
           stopped,
         ]);
         if (!live()) return;
+        setMissingResult(value === null);
         if (value) {
           setResult(value);
           setMessage('');
@@ -333,6 +336,7 @@ function SummaryScope({
     request.current = controller;
 
     setPending(true);
+    setMissingResult(false);
     setPhase('waiting');
     setResult(null);
     setMessage('');
@@ -492,7 +496,20 @@ function SummaryScope({
       {context?.disclosure?.provider === 'OpenAI' ? (
         <OpenAiDisclosure disclosure={context.disclosure} />
       ) : null}
-      {!authorized && !result && !unsupportedReport ? (
+      {missingResult && !pending && !result && !failure ? (
+              <div>
+                <p role="status">Сохранённого ИИ-разбора пока нет. Результаты сканеров доступны ниже; отсутствие разбора не означает, что образ безопасен.</p>
+                <Button type="button" variant="secondary" disabled={!current()} onClick={() => void refresh()}>
+                  Проверить сохранённый разбор
+                </Button>
+                {authorized ? (
+                  <Button type="button" disabled={!current() || !context?.enabled} onClick={() => void refresh(true, true)}>
+                    {context?.disclosure?.provider === 'OpenAI' ? 'Создать платный ИИ-разбор' : 'Создать ИИ-разбор'}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {!authorized && !result && !unsupportedReport ? (
         <div>
           <p id="scan-summary-send-help">
             {context?.disclosure?.provider === 'OpenAI'

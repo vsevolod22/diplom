@@ -86,6 +86,9 @@ describe('summary recovery client', () => {
 
   it.each([
     [404, 'SCAN_NOT_FOUND'],
+        [500, 'LLM_SUMMARY_MISSING'],
+        [503, 'LLM_SUMMARY_MISSING'],
+        [401, 'LLM_SUMMARY_MISSING'],
     [401, 'AUTH_REQUIRED'],
     [403, 'FORBIDDEN'],
     [409, 'LLM_STALE_REPORT'],

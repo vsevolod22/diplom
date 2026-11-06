@@ -169,7 +169,7 @@ export type SummaryClient = Omit<ReturnType<typeof createSummaryClient>, 'existi
   existing?: ReturnType<typeof createSummaryClient>['existing'];
 };
 export class SummaryError extends Error {
-  constructor(readonly code: string) {
+  constructor(readonly code: string, readonly httpStatus?: number) {
     super('ИИ-сводка недоступна');
   }
 }
@@ -291,7 +291,7 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
       if (!current() || controller.signal.aborted) throw new SummaryError('SESSION');
       if (!response.ok) {
         const code = z.object({ errorCode: z.string().regex(/^[A-Z_]{1,64}$/) }).safeParse(value);
-        throw new SummaryError(code.success ? code.data.errorCode : 'UNAVAILABLE');
+        throw new SummaryError(code.success ? code.data.errorCode : 'UNAVAILABLE', response.status);
       }
       return value;
     };
@@ -316,7 +316,7 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
       try {
         value = await request(context.scanId, 'summary', signal);
       } catch (error) {
-        if (error instanceof SummaryError && error.code === 'LLM_SUMMARY_MISSING') return null;
+        if (error instanceof SummaryError && error.code === 'LLM_SUMMARY_MISSING' && error.httpStatus === 404) return null;
         throw error;
       }
       const reply = summaryReplySchema.parse(value);
