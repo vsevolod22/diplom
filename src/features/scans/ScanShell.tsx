@@ -82,24 +82,24 @@ export function ScanShell({ demo, children, compact = false }: { demo: boolean; 
             </Badge>
           </div>
           {compact ? <nav className="scan-shell__compact-nav" aria-label="Разделы сканирования">
-            <Link to={demo ? '/demo/scans' : '/scans'}>Мои проверки</Link>
-            <Link to={newScanPath}>Новая проверка</Link>
+            <Link to={demo ? '/demo/scans' : '/scans'} aria-current={pathname === (demo ? '/demo/scans' : '/scans') ? 'page' : undefined}>Мои проверки</Link>
+            <Link to={newScanPath} aria-current={pathname === newScanPath ? 'page' : undefined}>Новая проверка</Link>
           </nav> : <NavListCard
             items={[
               {
                 label: 'Мои проверки',
                 description: 'Результаты и история',
-                to: '/scans',
+                to: demo ? '/demo/scans' : '/scans',
                 icon: <ArrowUpRight size={18} />,
-                current: pathname === '/scans',
+                current: pathname === (demo ? '/demo/scans' : '/scans'),
               },
-              {
+              ...(!demo ? [{
                 label: 'Демо',
                 description: 'Вымышленные записи',
                 to: '/demo/scans',
                 icon: <ArrowUpRight size={18} />,
                 current: pathname === '/demo/scans',
-              },
+              }] : []),
               {
                 label: 'Новая проверка',
                 description: demo ? 'Форма без запуска' : 'Выбрать и проверить образ',

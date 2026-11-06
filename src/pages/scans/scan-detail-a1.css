@@ -37,6 +37,13 @@
   border-bottom: 1px solid var(--a1-line);
 }
 
+.scan-a1__chapter-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
 .scan-a1__chapter a,
 .scan-a1-detail .scan-a1__link {
   display: inline-flex;

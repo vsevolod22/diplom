@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { LiveScanSession } from '@/features/scans/LiveScanSession';
@@ -9,6 +9,7 @@ import { DemoAuthPage } from '@/pages/auth/DemoAuthPage';
 import { ScanCreatePage } from '@/pages/scans/ScanCreatePage';
 import { ScanDetailPage } from '@/pages/scans/ScanDetailPage';
 import { scanSession, transitionScanSession } from '@/shared/api/auth/scanSession';
+import { safeAuthReturnTo } from '@/shared/api/auth/authReturnTo';
 
 class Observer {
   observe() {}
@@ -136,6 +137,56 @@ function emulateDisabledBlur(element: HTMLElement) {
   element.blur();
   if (disabled) element.setAttribute('disabled', '');
 }
+
+function LoginReturnDestination() {
+  const location = useLocation();
+  return <output aria-label="Login return destination">{JSON.stringify({
+    returnTo: location.state?.returnTo,
+    safeReturnTo: safeAuthReturnTo(location.state?.returnTo),
+  })}</output>;
+}
+
+describe('scan login return destinations', () => {
+  const destinations = ['/scans/new', '/scans', `/scans/${id}`];
+  const cases = destinations.flatMap(destination => [
+    { path: `${destination}/`, destination },
+    { path: `${destination}/?next=https://example.invalid/#private-fragment`, destination },
+  ]);
+
+  describe.each(['anonymous', 'session error'] as const)('%s', sessionState => {
+    it.each(cases)('passes the canonical route through login state and the safe helper: $path', async ({ path, destination }) => {
+      const fetcher = vi.fn(async (input: string) => {
+        if (input !== '/api/v1/auth/me') throw new Error(`Unexpected request: ${input}`);
+        return { ...json(null), ok: false, status: sessionState === 'anonymous' ? 401 : 503 };
+      });
+      vi.stubGlobal('fetch', fetcher);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+      render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Routes>
+        <Route path="/scans/new" element={<LiveScanSession><p>Private create page</p></LiveScanSession>} />
+        <Route path="/scans" element={<LiveScanSession><p>Private history page</p></LiveScanSession>} />
+        <Route path="/scans/:scanId" element={<LiveScanSession><p>Private report page</p></LiveScanSession>} />
+        <Route path="/login" element={<LoginReturnDestination />} />
+      </Routes></MemoryRouter></QueryClientProvider>);
+
+      fireEvent.click(await screen.findByRole('link', { name: sessionState === 'anonymous' ? 'войдите' : 'Перейти ко входу' }));
+      const forwarded = await screen.findByLabelText('Login return destination');
+      expect(JSON.parse(forwarded.textContent!)).toEqual({ returnTo: destination, safeReturnTo: destination });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('keeps the raw safe-helper allowlist strict for hostile paths, query strings, fragments and trailing slashes', () => {
+    for (const destination of destinations) {
+      expect(safeAuthReturnTo(destination)).toBe(destination);
+      for (const suffix of ['/', '?next=/account', '#private-fragment', '%2f', '/..', '\\']) {
+        expect(safeAuthReturnTo(`${destination}${suffix}`)).toBe('/account');
+      }
+    }
+    for (const path of ['//example.invalid/scans', 'https://example.invalid/scans', '/scans/%2e%2e/account', '/scans/not-a-uuid', null, undefined]) {
+      expect(safeAuthReturnTo(path)).toBe('/account');
+    }
+  });
+});
 
 describe('LOCAL server-authoritative saved target', () => {
   const reference = 'registry-1.docker.io/library/nginx@sha256:0dcc88822d45581e65ae329f8be769762bf628d3b2bb7d2a077d4aa5c98b30e3';

@@ -27,6 +27,7 @@ export function SiteLayout({ children }: { children: ReactNode }) {
   const content = useRef<HTMLDivElement>(null);
   const previousPath = useRef(pathname);
   const title = pageTitle(pathname);
+  const trimmed = pathname.replace(/\/+$/, '') || '/';
 
   useEffect(() => {
     document.title = `${title} — OCI / VISION`;
@@ -72,10 +73,10 @@ export function SiteLayout({ children }: { children: ReactNode }) {
           </p>
         </div>
         <nav aria-label="Навигация внизу страницы">
-          <Link to="/">Главная</Link>
-          <Link to="/scans">Мои проверки</Link>
-          <Link to="/demo/scans">Демо без входа</Link>
-          <Link to="/account">Аккаунт</Link>
+          <Link to="/" aria-current={trimmed === '/' ? 'page' : undefined}>Главная</Link>
+          <Link to="/scans" aria-current={trimmed === '/scans' || trimmed.startsWith('/scans/') ? 'page' : undefined}>Мои проверки</Link>
+          <Link to="/demo/scans" aria-current={trimmed === '/demo/scans' || trimmed.startsWith('/demo/scans/') ? 'page' : undefined}>Демо без входа</Link>
+          <Link to="/account" aria-current={trimmed === '/account' ? 'page' : undefined}>Аккаунт</Link>
         </nav>
         <p>Демо содержит вымышленные данные. Реальные проверки требуют входа и разрешения сервера.</p>
       </footer>

@@ -79,7 +79,9 @@ export function SbomReportControls({ query, onChange, disabled }: { query: SbomR
   const [name, setName] = useState(query.name ?? '');
   const [nameError, setNameError] = useState(false);
   const nameId = useId();
-  return <Controls label="Пакеты" limit={query.limit ?? 25} sort={query.sort ?? 'name:asc'} sorts={['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc']} disabled={disabled}
+  return <>
+    {query.name ? <p className="scan-a1__muted">Применённое название пакета: {query.name}</p> : null}
+    <Controls label="Пакеты" limit={query.limit ?? 25} sort={query.sort ?? 'name:asc'} sorts={['name:asc', 'name:desc', 'ecosystem:asc', 'ecosystem:desc']} disabled={disabled}
     onLimit={limit => onChange({ ...query, limit })} onSort={sort => onChange({ ...query, sort: sort as SbomReportQuery['sort'] })}>
     <label>Тип пакетов
       <select value={query.ecosystem ?? ''} onChange={event => onChange({ ...query, ecosystem: reportEcosystem.safeParse(event.target.value).data ?? null })}>
@@ -103,7 +105,8 @@ export function SbomReportControls({ query, onChange, disabled }: { query: SbomR
       <button type="button" onClick={() => { setName(''); setNameError(false); onChange({ ...query, name: null }); }}>Сбросить название</button>
       <small id={`${nameId}-help`}>Введите название или его часть.</small>
     </form>
-  </Controls>;
+  </Controls>
+  </>;
 }
 export function SecretReportControls({ query, onChange, disabled }: { query: SecretReportQuery; onChange: (query: SecretReportQuery) => void; disabled: boolean }) {
   const [ruleId, setRuleId] = useState(query.ruleId ?? '');

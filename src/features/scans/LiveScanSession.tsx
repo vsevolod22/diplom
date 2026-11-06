@@ -13,7 +13,7 @@ import { LiveScanContext } from './liveScanContext';
 export function LiveScanSession({ children }: { children: ReactNode }) {
   const client = useQueryClient();
   const location = useLocation();
-  const authState = { returnTo: safeAuthReturnTo(location.pathname) };
+  const authState = { returnTo: safeAuthReturnTo(location.pathname.replace(/\/+$/, '')) };
   const session = useQuery({
     queryKey: ['demo-auth', 'me'],
     queryFn: async ({ signal }) => {

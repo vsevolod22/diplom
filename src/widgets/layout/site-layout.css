@@ -52,6 +52,11 @@
   outline: 3px solid #d5fb57;
   outline-offset: 3px;
 }
+.site-footer a[aria-current="page"] {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
 .route-message {
   min-height: 55vh;
   padding: clamp(24px, 6vw, 80px);

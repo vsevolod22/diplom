@@ -388,9 +388,14 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
       <section className="scan-a1-detail" aria-labelledby="scan-detail">
         <div className="scan-a1__chapter">
           <span>Отчёт</span>
-          <Link to={demo ? '/demo/scans' : '/scans'}>
-            <ArrowLeft size={17} aria-hidden="true" /> К списку
-          </Link>
+          <span className="scan-a1__chapter-links">
+            <Link to={demo ? '/demo/scans' : '/scans'}>
+              <ArrowLeft size={17} aria-hidden="true" /> К списку
+            </Link>
+            <Link to={demo ? '/demo/scans/new' : '/scans/new'}>
+              + Новая проверка
+            </Link>
+          </span>
         </div>
         <div className="scan-a1__lead">
           <div className="scan-a1__lead-copy">

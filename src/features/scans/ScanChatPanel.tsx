@@ -277,10 +277,11 @@ function ChatScope({
     } catch (error) {
       if (
         error instanceof ChatError &&
-        ['SESSION', 'ACCESS', 'REPORT_UNAVAILABLE', 'STALE', 'ABORTED', 'TIMEOUT'].includes(error.code)
+        ['SESSION', 'ACCESS', 'REPORT_UNAVAILABLE', 'STALE', 'ABORTED'].includes(error.code)
       )
         throw error;
-      // A malformed/offline readiness is unknown, never a generation permission; history may still work.
+      if (signal.aborted) throw error;
+      // A malformed/offline/timed-out readiness is unknown, never a generation permission; history may still work.
       return null;
     }
   }
@@ -395,16 +396,32 @@ function ChatScope({
     }
   }
 
+  function retainedDecisionSources(previous: Snapshot | null, next: Snapshot, ids: string[]) {
+    if (
+      !previous ||
+      policyFence(previous.context) !== policyFence(next.context) ||
+      previous.context.epoch !== next.context.epoch ||
+      next.context.revision < previous.context.revision
+    ) return [];
+    return ids.filter(id => {
+      const before = previous.sources.find(source => source.findingId === id);
+      const after = next.sources.find(source => source.findingId === id);
+      return before && after && JSON.stringify(before) === JSON.stringify(after);
+    });
+  }
+
   function refresh() {
     if (request.current || !current()) return;
     setReadiness(null);
     setMessage('');
-    setSelectedIds([]);
     // Keep only this mounted session/report's last confirmed view while reading.
     // Any contradictory context or failed read clears it; it never authorizes a mutation.
     const previous = snapshot;
     void operate('read', 45_000, async (signal, publish) => {
-      const discardPrevious = () => publish(() => setSnapshot(null));
+      const discardPrevious = () => publish(() => {
+        setSnapshot(null);
+        setSelectedIds([]);
+      });
       const observeContext = (value: ChatContext) => {
         if (
           previous &&
@@ -417,7 +434,8 @@ function ChatScope({
       // Keep setup diagnostics available even if the history-backed context cannot be read.
       let ready = publicReport ? await readReadiness(signal) : null;
       publish(() => setReadiness(ready));
-      if (publicReport && (!ready || (previous && !readinessMatchesContext(ready, previous.context))))
+      if (publicReport && !ready) publish(() => setSnapshot(null));
+      else if (publicReport && ready && previous && !readinessMatchesContext(ready, previous.context))
         discardPrevious();
       const next = await readSnapshot(signal, observeContext);
       if (!publicReport && next.context.disclosure?.provider === 'OpenAI') {
@@ -428,7 +446,10 @@ function ChatScope({
         publish(() => setReadiness(null));
         throw new ChatError('STALE');
       }
-      publish(() => setSnapshot(next));
+      publish(() => {
+        setSnapshot(next);
+        setSelectedIds(ids => retainedDecisionSources(previous, next, ids));
+      });
     });
   }
   useEffect(() => {
@@ -534,7 +555,7 @@ function ChatScope({
         throw new ChatError('INVALID');
       publish(() => {
         setSnapshot(next);
-        setSelectedIds([]);
+        setSelectedIds(ids => kind === 'decision' ? [] : retainedDecisionSources(accepted, next, ids));
         if (kind === 'chat') setQuestion('');
         else setDecision('');
         if ('reply' in result) setReceipt(result.usage);
