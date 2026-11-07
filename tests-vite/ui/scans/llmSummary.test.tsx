@@ -536,6 +536,59 @@ it('original summary POST diagnostics are safe, passive to expand and scoped to 
   expect(posts()).toHaveLength(1);
 });
 
+it.each([undefined, 'rate_limit_exceeded', 'insufficient_quota', 'private-provider-code'])(
+  'provider 429 with fits admission explains the service limit and requires manual retry: %s', async (providerErrorCode) => {
+    let failing = true;
+    mockApi(undefined, () => failing ? new Response(JSON.stringify({
+      errorCode: 'LLM_PROVIDER_UNAVAILABLE', message: 'private-provider-body',
+    }), { status: 502, headers: {
+      'Content-Type': 'application/json',
+      'X-LLM-Failure-Phase': 'headers', 'X-LLM-Failure-Reason': 'http_error',
+      'X-LLM-Provider-Status': '429',
+      ...(providerErrorCode ? { 'X-LLM-Provider-Error-Code': providerErrorCode } : {}),
+    } }) : json(reply));
+    const view = mount(transport(), publicStatus);
+    const alert = await screen.findByRole('alert');
+    expect(usage).toHaveProperty('admission.status', 'fits');
+    expect(requests.some(request => request.path.endsWith('/usage'))).toBe(true);
+    expect(alert).toHaveTextContent('Провайдер ИИ ограничил запрос (HTTP 429)');
+    expect(alert).toHaveTextContent('точная причина не подтверждена');
+    expect(alert).toHaveTextContent('не означает, что локальный бюджет вашего аккаунта исчерпан');
+    expect(alert).toHaveTextContent('Оператору нужно проверить лимиты и состояние аккаунта сервиса у провайдера');
+    expect(alert).toHaveTextContent('Автоматического повтора нет');
+    if (providerErrorCode && providerErrorCode !== 'private-provider-code')
+      expect(alert).toHaveTextContent(`Код провайдера: ${providerErrorCode}.`);
+    else expect(alert).not.toHaveTextContent('Код провайдера:');
+    expect(screen.getByText(/Кнопка «Повторить разбор» сначала проверит сохранённый результат/))
+      .toHaveTextContent('Отсутствие сохранённого разбора не объясняет отказ провайдера на POST');
+    expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+    expect(document.body.textContent).not.toMatch(/private-provider-(?:body|code)|LLM_SUMMARY_MISSING/);
+    expect(screen.queryByText('ИИ-разбор готов')).toBeNull();
+    expect(screen.queryByText(/Локальная квота ИИ: новая отправка остановлена/)).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    const details = screen.getByText('Технические сведения запроса summary').closest('details')!;
+    fireEvent.click(screen.getByText('Технические сведения запроса summary'));
+    expect(within(details).getByText('Ответ на POST /llm/summary: HTTP 502')).toBeVisible();
+    expect(within(details).getByText('HTTP провайдера: 429')).toBeVisible();
+    expect(within(details).queryByText(/^Параметр запроса:/)).toBeNull();
+    fireEvent(window, new Event('focus'));
+    fireEvent(window, new Event('online'));
+    view.unmount();
+    mount(transport(), publicStatus);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Провайдер ИИ ограничил запрос (HTTP 429)');
+    expect(posts()).toHaveLength(1);
+    failing = false;
+    const recoveryReads = requests.filter(request => request.path.endsWith('/summary') && request.init?.method === 'GET').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить разбор' }));
+    await screen.findByText('ИИ-разбор готов');
+    expect(posts()).toHaveLength(2);
+    expect(requests.filter(request => request.path.endsWith('/summary') && request.init?.method === 'GET'))
+      .toHaveLength(recoveryReads + 1);
+    expect(screen.queryByText(/Кнопка «Повторить разбор»/)).toBeNull();
+    expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+  },
+);
+
 it.each([
   { status: false, code: false, param: false },
   { status: true, code: false, param: false },

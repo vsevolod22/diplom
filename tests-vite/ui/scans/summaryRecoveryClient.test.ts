@@ -267,6 +267,44 @@ describe('summary POST failure diagnostics', () => {
     expect(fetcher.mock.calls[0][1]?.method).toBe('POST');
   });
 
+  it.each([undefined, 'rate_limit_exceeded', 'insufficient_quota', 'private-provider-code'])(
+    'explains upstream 429 separately from local budget without inventing its cause: %s', async (providerErrorCode) => {
+      const { fetcher, pending } = failedPost({
+        'X-LLM-Failure-Phase': 'headers',
+        'X-LLM-Failure-Reason': 'http_error',
+        'X-LLM-Provider-Status': '429',
+        ...(providerErrorCode ? { 'X-LLM-Provider-Error-Code': providerErrorCode } : {}),
+      });
+      const error = await pending.catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(SummaryError);
+      expect(error).toMatchObject({ code: 'LLM_PROVIDER_UNAVAILABLE', httpStatus: 502,
+        diagnostic: { providerStatus: 429, phase: 'headers', reason: 'http_error' } });
+      const message = summaryErrorMessage(error);
+      expect(message).toContain('Провайдер ИИ ограничил запрос (HTTP 429)');
+      expect(message).toContain('точная причина не подтверждена');
+      expect(message).toContain('не означает, что локальный бюджет вашего аккаунта исчерпан');
+      expect(message).toContain('Автоматического повтора нет');
+      expect(message).toContain('Отчёт сканеров доступен');
+      if (providerErrorCode && providerErrorCode !== 'private-provider-code')
+        expect(message).toContain(`Код провайдера: ${providerErrorCode}.`);
+      else expect(message).not.toContain('Код провайдера:');
+      expect(message).not.toMatch(/private-provider-code|LLM_SUMMARY_MISSING/);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not infer an upstream 429 from application status or local quota errors', () => {
+    for (const code of ['LLM_QUOTA_EXCEEDED', 'LLM_QUOTA_UNAVAILABLE', 'LLM_BUDGET_EXCEEDED', 'LLM_PROVIDER_UNAVAILABLE']) {
+      const message = summaryErrorMessage(new SummaryError(code, 429));
+      expect(message).not.toContain('Провайдер ИИ ограничил запрос');
+      expect(message).not.toContain('HTTP 429');
+    }
+    const limited = summaryErrorMessage(new SummaryError('LLM_PROVIDER_RATE_LIMITED', 503));
+    expect(limited).toContain('Провайдер ИИ ограничил запрос');
+    expect(limited).not.toContain('HTTP 429');
+    expect(limited).not.toContain('Код провайдера:');
+  });
+
   it.each([
     'invalid_json_schema', 'invalid_request_error', 'unsupported_parameter', 'unsupported_value',
     'invalid_value', 'context_length_exceeded', 'model_not_found', 'rate_limit_exceeded',

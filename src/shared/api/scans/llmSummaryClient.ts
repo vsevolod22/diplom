@@ -250,8 +250,14 @@ export function summaryErrorMessage(error: unknown): string {
     return 'Локальная квота ИИ не допускает новый разбор. Проверьте остаток и резервы; отчёт сканеров доступен.';
   if (code === 'LLM_QUOTA_UNAVAILABLE')
     return 'Не удалось проверить учёт ИИ. Генерация остановлена; остаток неизвестен. Отчёт сканеров доступен.';
+  const diagnostic = error instanceof SummaryError ? error.diagnostic : undefined;
+  if (diagnostic?.providerStatus === 429 || code === 'LLM_PROVIDER_RATE_LIMITED') {
+    const providerStatus = diagnostic?.providerStatus === 429 ? ' (HTTP 429)' : '';
+    const providerCode = diagnostic?.providerErrorCode ? ` Код провайдера: ${diagnostic.providerErrorCode}.` : '';
+    return `Провайдер ИИ ограничил запрос${providerStatus}.${providerCode} Возможно временное ограничение запросов или ограничение аккаунта сервиса у провайдера; точная причина не подтверждена. Это не означает, что локальный бюджет вашего аккаунта исчерпан. Оператору нужно проверить лимиты и состояние аккаунта сервиса у провайдера. Автоматического повтора нет; повторить вручную можно позднее. Отчёт сканеров доступен.`;
+  }
   if (
-    ['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED', 'LLM_PROVIDER_RATE_LIMITED'].includes(code)
+    ['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED'].includes(code)
   )
     return 'ИИ-разбор временно недоступен. Попробуйте позднее; отчёт сканеров доступен.';
   if (['TIMEOUT', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
