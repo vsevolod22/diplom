@@ -5,6 +5,21 @@
 
 ## Текущая готовность — 07.11.2026
 
+### Lifetime budget $5/account — опубликован 19:59 UTC
+
+- По явному решению пользователя вместо дальнейшего расширения токеновых квот включён `LLM_QUOTA_LIFETIME_USER_COST_MICROS=5000000`: оценочный бюджет аккаунта за всё время. Учитываются все сохранённые settled и reserved/dispatched/fault расходы владельца по любым датам/сканам/политикам. Неизвестные обязательства не обнулены; суточные token caps больше не являются admission gate в этом режиме, request token/byte/time/concurrency bounds сохранены.
+- `2f6a34a` добавляет backend atomic lifetime admission, запрет удаления settled rows даже при выключенном lifetime, совместимый optional usage/disclosure контракт и UI, exact consent-vs-usage lifetime matching. Перезапуск/смена суток/параллельные запросы/смена режима/граница $5 проверены целевыми тестами. Положительные расходы текущей БД сверены с26 сохранёнными quota snapshots: missing0/settled disagreements0. Самая ранняя paid запись Nov1; к Nov7 прежняя strict8day cleanup ещё не могла её удалить. Это проверка истории оценок, не сверка invoice OpenAI.
+- Descriptor updater с общим operation lock и Python directory flock добавляет только согласованный lifetime field, сохраняет исходник и старые токеновые значения. Targeted descriptor/updater77 PASS, frontend212 coordinator PASS (затем strict binding follow-up231 PASS lane), backend целевые suites/typecheck PASS, root typecheck/scoped lint/build/diff-check PASS. Ни новых provider calls, ни автоматических платных retries.
+- Штатный all-six app apply завершился `2026-11-07T19:59:16.099Z`, new-healthy, lock released, без migrations/operations upgrade; four-store preservation passed. Postflight ready/unlocked, root200/auth401, опубликован label lifetime в `ScanDetailPage-CW2BzSQ8.js`.
+- Проверка реального runtime snapshot для проблемного scan: limit5000000, settled19287, held383217, remaining4597496 micros; reason ready, user/scan exhausted=false. Passive snapshot не изменил quota_attempt rows. Это подтверждение бюджета, **не успешности генерации**: предыдущее headers/http_error upstream ещё не атрибутировано точному статусу/коду; не называть LLM исправленным по изменению бюджета. Новая policy требует свежего согласия в UI. Flownix MCP `server shut down`, задачи не закрывались.
+
+### Квота увеличена и опубликована — 19:14 UTC
+
+- Фактический API environment после успешного all-six app rollout: `LLM_QUOTA_USER_OUTPUT=131072`, `LLM_QUOTA_SCAN_OUTPUT=16384`, monetary mode `uncapped`. Менялся только согласованный user-output лимит; оригинальный nonsecret descriptor сохранён рядом с настройками. Provider generation не запускалась; новая версия политики может потребовать нового согласия в UI.
+- Rollout completion `2026-11-07T19:14:37.032Z`: new-healthy, lock released, no migrations/operations upgrade; штатная four-store preservation пройдена. Postflight ready/unlocked, root200, anonymous auth401.
+- Предыдущий attempt `b97d0c7d07f30071df7b2c7dbf425f51` был прерван terminal timeout600s после чистой остановки old writers. Точные old IDs восстановлены без DB rollback; затем отдельный terminalizer выпустил совместимый old-restored completion и архивировал locks, не подделывая последнюю незавершённую readonly запись engine journal. Recovery tools/tests находятся в scripts/deploy-exact-*b97d0c7*. Следующий rollout запускался с timeout2400000ms и завершился.
+- Bounded reference capacity256 (untagged16, исходные evidence/record/deadline/history guards сохранены): targeted custody79 и adapter/history67 PASS. Protected references не удалялись. Config updater использует общий operation lock и Python directory flock;13 isolated tests PASS. Recovery52, terminalization22 targeted tests PASS. Это не полный suite и не native paid acceptance.
+
 ### Backend repair выложен — 07.11, 16:04 UTC
 
 - По запросу пользователя `429f9a9` выложен штатным `node scripts/deploy.mjs app --services api --apply`: `new-healthy`, lock released, completion `2026-11-07T16:04:30.181Z`. Обновлён только API; web и worker временно прерывались. Миграций и upgrade operations не было; штатная проверка сохранности stores прошла. После выкладки ready/unlocked, root200, anonymous auth401. Новых paid/provider вызовов не было; реальная генерация не проверена.
