@@ -219,8 +219,12 @@ export function summaryErrorMessage(error: unknown): string {
     return 'Для разбора недостаточно находок. Это не означает, что образ безопасен.';
   if (['LLM_STALE_REPORT', 'LLM_STALE_POLICY', 'STALE'].includes(code))
     return 'Отчёт или условия разбора изменились. Повторите разбор вручную.';
+  if (code === 'LLM_QUOTA_EXCEEDED')
+    return 'Локальная квота ИИ не допускает новый разбор. Проверьте остаток и резервы; отчёт сканеров доступен.';
+  if (code === 'LLM_QUOTA_UNAVAILABLE')
+    return 'Не удалось проверить учёт ИИ. Генерация остановлена; остаток неизвестен. Отчёт сканеров доступен.';
   if (
-    ['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED', 'LLM_QUOTA_EXCEEDED', 'LLM_PROVIDER_RATE_LIMITED'].includes(code)
+    ['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED', 'LLM_PROVIDER_RATE_LIMITED'].includes(code)
   )
     return 'ИИ-разбор временно недоступен. Попробуйте позднее; отчёт сканеров доступен.';
   if (['TIMEOUT', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))

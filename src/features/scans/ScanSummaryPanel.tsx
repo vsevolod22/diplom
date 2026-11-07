@@ -10,7 +10,7 @@ import {
 import { OpenAiDisclosure } from './OpenAiDisclosure';
 import { ReportRemediation } from './ReportRemediation';
 import { ReportSourceLink, type ReportSourceNavigate } from './reportSourceNavigation';
-import { createUsageClient, usageMatchesDisclosure } from '@/shared/api/scans/llmUsageClient';
+import { createUsageClient, usageMatchesDisclosure, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
 import {
   allowAutomationDisclosure,
   allowSummaryAutomation,
@@ -149,6 +149,7 @@ function SummaryScope({
   const [phase, setPhase] = useState<SummaryPhase>('context');
   const [message, setMessage] = useState('');
   const [postFailure, setPostFailure] = useState<SummaryFailureDiagnostic | null>(null);
+  const [quotaBlock, setQuotaBlock] = useState<Extract<LlmUsage, { available: true }> | null>(null);
   const [unsupportedReport, setUnsupportedReport] = useState(false);
     const [missingResult, setMissingResult] = useState(false);
   const [result, setResult] = useState<{
@@ -171,12 +172,31 @@ function SummaryScope({
     setPending(false);
     setResult(null);
     setPostFailure(null);
+    setQuotaBlock(null);
   }
   function checkContext(next: SummaryContext) {
     if (next.scanId !== status.scanId || next.digest !== status.digest || next.platform !== status.platform)
       throw new SummaryError('STALE');
     if (next.unavailableReason === 'LLM_SUMMARY_UNSUPPORTED_REPORT')
       throw new SummaryError(next.unavailableReason);
+  }
+  async function checkUsage(usage: LlmUsage, accepted: SummaryContext, signal: AbortSignal, recheck = false) {
+    setQuotaBlock(null);
+    if (!usage.available || !usage.integrationEnabled || !usage.quotaEnabled ||
+      !usageMatchesDisclosure(usage, accepted.disclosure))
+      throw new SummaryError('LLM_QUOTA_UNAVAILABLE');
+    const blocked = usage.user.exhausted || usage.scan.exhausted || usage.reason === 'policy_fault' ||
+      usage.admission.status === 'insufficient' || usage.admission.status === 'policy_fault';
+    if (blocked || recheck) {
+      const after = await client.context(status.scanId, signal);
+      checkContext(after);
+      if (signal.aborted || !current() || contextFence(after) !== contextFence(accepted))
+        throw new SummaryError('STALE');
+    }
+    if (blocked) {
+      setQuotaBlock(usage);
+      throw new SummaryError('LLM_QUOTA_EXCEEDED');
+    }
   }
   async function refresh(automate = false, retry = false) {
     if (request.current || !current()) return;
@@ -187,6 +207,7 @@ function SummaryScope({
     setPhase('context');
     setMissingResult(false);
     setMessage('');
+    setQuotaBlock(null);
     setUnsupportedReport(false);
     let timedOut = false;
     const deadline = setTimeout(() => {
@@ -215,6 +236,7 @@ function SummaryScope({
       if (contextRef.current && contextFence(next) !== contextFence(contextRef.current)) {
         setResult(null);
         setPostFailure(null);
+        setQuotaBlock(null);
       }
       contextRef.current = next;
       setContext(next);
@@ -251,9 +273,19 @@ function SummaryScope({
         setMissingResult(value === null);
         if (value) {
           setResult(value);
+          setQuotaBlock(null);
           setMessage('');
           recovered = true;
         }
+      }
+      if (!automate && !recovered && quotaBlock) {
+        const usage = await Promise.race([
+          runReportMetadata(JSON.stringify(['summary-usage', status, contextFence(next)]), controller.signal,
+            signal => createUsageClient().get(next, signal)),
+          stopped,
+        ]);
+        if (!live()) return;
+        await Promise.race([checkUsage(usage, next, controller.signal, true), stopped]);
       }
     } catch (error) {
       accepted = null;
@@ -347,6 +379,7 @@ function SummaryScope({
     setPhase('waiting');
     setResult(null);
     setPostFailure(null);
+    setQuotaBlock(null);
     setMessage('');
     let timedOut = false;
     const deadline = setTimeout(() => {
@@ -379,18 +412,7 @@ function SummaryScope({
       const usage = await createUsageClient().get(before, controller.signal);
       if (controller.signal.aborted || !current() || generation.current !== version)
         throw new SummaryError('STALE');
-      if (
-        !usage.available ||
-        !usageMatchesDisclosure(usage, before.disclosure) ||
-        !usage.integrationEnabled ||
-        !usage.quotaEnabled ||
-        usage.user.exhausted ||
-        usage.scan.exhausted ||
-        usage.reason === 'policy_fault' ||
-        usage.admission.status === 'insufficient' ||
-        usage.admission.status === 'policy_fault'
-      )
-        throw new SummaryError('LLM_QUOTA_EXCEEDED');
+      await checkUsage(usage, before, controller.signal);
       if (!allowSummaryAutomation(preferences, before)) throw new ReportAutomationError('DISCLOSURE');
       if (controller.signal.aborted || !automationCurrent() || generation.current !== version)
         throw new SummaryError('STALE');
@@ -577,7 +599,47 @@ function SummaryScope({
           <Alert role="alert" tone="warning">
             {failure}
           </Alert>
-          {!unsupportedReport ? (
+          {quotaBlock && current() ? (
+            <div>
+              <p>Локальная квота ИИ: новая отправка остановлена до обращения к модели.</p>
+              {quotaBlock.monetaryLimit === 'uncapped' ? (
+                <p>Денежный режим — без локального денежного лимита. Технические лимиты токенов остаются отдельными.</p>
+              ) : null}
+              {(['user', 'scan'] as const).map(scope => (
+                <div key={scope}>
+                  <h4>{scope === 'user' ? 'Пользователь' : 'Этот скан'}</h4>
+                  {(['input', 'output', 'costMicros'] as const).map(dimension => (
+                    <div key={dimension}>
+                      <p>{dimension === 'input' ? 'Входные токены' : dimension === 'output' ? 'Выходные токены' : 'Стоимость, микро-USD'}</p>
+                      <p>
+                        {quotaBlock[scope].limits[dimension] === null
+                          ? 'Без локального денежного лимита'
+                          : `Осталось ${quotaBlock[scope].remaining[dimension]} из ${quotaBlock[scope].limits[dimension]}`}
+                        ; учтено {quotaBlock[scope].used[dimension]}; резерв {quotaBlock[scope].held[dimension]}; перенос неопределённого расхода {quotaBlock[scope].carried[dimension]}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {quotaBlock.admission.status !== 'unavailable' ? (
+                <ul>
+                  {quotaBlock.admission.signals.map((signal, index) => (
+                    <li key={index}>
+                      {signal.scope === 'user' ? 'Пользователь' : 'Этот скан'} ·{' '}
+                      {signal.dimension === 'input' ? 'входные токены' : signal.dimension === 'output' ? 'выходные токены' : signal.dimension === 'costMicros' ? 'стоимость' : 'весь бюджет'}:{' '}
+                      {signal.reason === 'insufficient'
+                        ? `требуется ${signal.required}, осталось ${signal.remaining}`
+                        : 'учёт заблокирован из-за расхождения с политикой'}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <p>Резерв и перенос не означают подтверждённый расход. Неопределённые обязательства не сбрасываются со сменой суток. Оператору нужно сверить учёт или согласованно изменить лимиты; повторное нажатие этого не исправляет.</p>
+              <Button type="button" disabled={!current()} onClick={() => void refresh()}>
+                Проверить квоту и сохранённый разбор
+              </Button>
+            </div>
+          ) : !unsupportedReport ? (
             <Button type="button" disabled={!current()} onClick={() => void refresh(true, true)}>
               Повторить разбор
             </Button>

@@ -22,6 +22,7 @@ import {
 } from '@/shared/api/scans/llmSummaryClient';
 import { type ScanStatus, type ScanTransport } from '@/shared/api/scans/scanTransport';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
+import { usageSchema, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
 
 const id = '00000000-0000-4000-8000-000000000038';
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -86,6 +87,7 @@ function mockApi(
   getContext: () => SummaryContext = () => context,
   summary: () => Response | Promise<Response> = () => json(reply),
   existing: () => Response | Promise<Response> = () => json({ errorCode: 'LLM_SUMMARY_MISSING' }, 404),
+  getUsage?: () => LlmUsage,
 ) {
   vi.stubGlobal(
     'fetch',
@@ -93,7 +95,7 @@ function mockApi(
       requests.push({ path, init });
       if (path.endsWith('/summary') && init?.method === 'GET') return existing();
       if (path.endsWith('/usage'))
-        return json({ ...usage, ...tuple, integrationEnabled: true, quotaEnabled: true });
+        return json(getUsage?.() ?? { ...usage, ...tuple, integrationEnabled: true, quotaEnabled: true });
       return path.endsWith('/context') ? json(getContext()) : summary();
     }),
   );
@@ -1203,6 +1205,202 @@ it('unknown or exhausted quota never grants automatic generation', async () => {
   mount();
   await screen.findByRole('alert');
   expect(posts()).toHaveLength(0);
+});
+
+function summaryOutputQuotaUsage(blocked: boolean): LlmUsage {
+  const ample = {
+    limits: { input: 65536, output: 32768, costMicros: 0 },
+    used: { input: 0, output: 0, costMicros: 0 },
+    held: { input: 0, output: 0, costMicros: 0 },
+    carried: { input: 0, output: 0, costMicros: 0 },
+    remaining: { input: 65536, output: 32768, costMicros: 0 },
+    warning: false,
+    exhausted: false,
+  };
+  return usageSchema.parse({
+    ...usage,
+    ...tuple,
+    integrationEnabled: true,
+    quotaEnabled: true,
+    reason: blocked ? 'exhausted' : 'ready',
+    user: blocked
+      ? {
+          ...ample,
+          carried: { input: 0, output: 32768, costMicros: 0 },
+          remaining: { input: 65536, output: 0, costMicros: 0 },
+          warning: true,
+          exhausted: true,
+        }
+      : ample,
+    scan: ample,
+    signals: blocked ? [{ scope: 'user', dimension: 'output', reason: 'exhausted' }] : [],
+    admission: {
+      status: blocked ? 'insufficient' : 'fits',
+      reserve: { input: 2048, output: 4096, costMicros: 0 },
+      signals: blocked
+        ? [{ scope: 'user', dimension: 'output', reason: 'insufficient', required: 4096, remaining: 0 }]
+        : [],
+    },
+  });
+}
+
+function expectBlockedSummaryQuota() {
+  const panel = screen.getByRole('region', { name: 'Объяснение ИИ' });
+  expect(within(panel).getAllByText(/локальная квота/i)[0]).toBeVisible();
+  expect(panel).toHaveTextContent(/выходные токены/i);
+  expect(within(panel).getByText(
+    /Осталось 0 из 32768; учтено 0; резерв 0; перенос неопределённого расхода 32768/i,
+  )).toBeVisible();
+  expect(within(panel).getByText(/требуется 4096, осталось 0/i)).toBeVisible();
+  expect(panel).not.toHaveTextContent(/(?:израсходовано|потрачено|использовано|учтено)\s*[:—-]?\s*32768/i);
+  expect(panel).not.toHaveTextContent(
+    /попробуйте завтра|квота (?:сбросится|восстановится)|(?:завтра|через 24 часа).*(?:сбросится|восстановится)/i,
+  );
+  expect(within(panel).getByRole('button', { name: 'Проверить квоту и сохранённый разбор' })).toBeEnabled();
+  expect(within(panel).queryByRole('button', { name: 'Повторить разбор' })).not.toBeInTheDocument();
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+}
+
+it('carried output quota blocks initial generation and keeps quota rechecks GET-only after summary missing, with safe owner-scoped counts', async () => {
+  const blocked = summaryOutputQuotaUsage(true);
+  const unavailable = usageSchema.parse({
+    ...tuple,
+    integrationEnabled: true,
+    quotaEnabled: true,
+    available: false,
+    reason: 'unavailable',
+  });
+  mockApi(undefined, undefined, undefined, () =>
+    scanSession().subject === 'alice' ? blocked : unavailable,
+  );
+  const source = transport();
+  mount(source, publicStatus);
+
+  await screen.findByRole('button', { name: 'Проверить квоту и сохранённый разбор' });
+  expectBlockedSummaryQuota();
+  expect(requests.filter(r => /\/(summary|usage)$/.test(r.path)).map(r => [r.path.split('/').at(-1), r.init?.method]))
+    .toEqual([['summary', 'GET'], ['usage', 'GET']]);
+  expect(posts()).toHaveLength(0);
+  expect(source.results).not.toHaveBeenCalled();
+
+  const beforeRecheck = requests.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Проверить квоту и сохранённый разбор' }));
+  await waitFor(() => expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(2));
+  await screen.findByRole('button', { name: 'Проверить квоту и сохранённый разбор' });
+  expectBlockedSummaryQuota();
+  expect(requests.slice(beforeRecheck).every(r => r.init?.method === 'GET')).toBe(true);
+  expect(requests.filter(r => /\/(summary|usage)$/.test(r.path)).map(r => [r.path.split('/').at(-1), r.init?.method]))
+    .toEqual([['summary', 'GET'], ['usage', 'GET'], ['summary', 'GET'], ['usage', 'GET']]);
+  expect(posts()).toHaveLength(0);
+  expect(source.results).not.toHaveBeenCalled();
+
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(2);
+  expect(posts()).toHaveLength(0);
+
+  act(() => transitionScanSession('bob', new QueryClient(), true));
+  await act(async () => {});
+  expect(screen.queryByText(/перенос неопределённого расхода 32768/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/требуется 4096, осталось 0/i)).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Проверить квоту и сохранённый разбор' })).not.toBeInTheDocument();
+  expect(posts()).toHaveLength(0);
+});
+
+it('carried output quota becoming fits keeps the recheck GET-only and requires a separate create click for one POST', async () => {
+  let currentUsage = summaryOutputQuotaUsage(true);
+  const fittingUsage = summaryOutputQuotaUsage(false);
+  mockApi(undefined, undefined, undefined, () => currentUsage);
+  const source = transport();
+  mount(source, publicStatus);
+
+  await screen.findByRole('button', { name: 'Проверить квоту и сохранённый разбор' });
+  expectBlockedSummaryQuota();
+  expect(posts()).toHaveLength(0);
+  expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(1);
+
+  currentUsage = fittingUsage;
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(posts()).toHaveLength(0);
+  expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(1);
+
+  const beforeRecheck = requests.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Проверить квоту и сохранённый разбор' }));
+  const create = await screen.findByRole('button', { name: 'Создать ИИ-разбор' });
+  expect(create).toBeVisible();
+  expect(create).toBeEnabled();
+  expect(requests.slice(beforeRecheck).every(r => r.init?.method === 'GET')).toBe(true);
+  expect(requests.filter(r => /\/(summary|usage)$/.test(r.path)).map(r => [r.path.split('/').at(-1), r.init?.method]))
+    .toEqual([
+      ['summary', 'GET'], ['usage', 'GET'],
+      ['summary', 'GET'], ['usage', 'GET'],
+    ]);
+  expect(posts()).toHaveLength(0);
+  expect(source.results).not.toHaveBeenCalled();
+  expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+  expect(screen.queryByText(/перенос неопределённого расхода 32768/i)).not.toBeInTheDocument();
+
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(posts()).toHaveLength(0);
+  expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(2);
+
+  fireEvent.click(create);
+  await screen.findByText('ИИ-разбор готов');
+  expect(posts()).toHaveLength(1);
+  expect(source.results).toHaveBeenCalled();
+  const usageReadsAfterCreate = requests.filter(r => r.path.endsWith('/usage')).length;
+  expect(usageReadsAfterCreate).toBeGreaterThan(2);
+
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(posts()).toHaveLength(1);
+  expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(usageReadsAfterCreate);
+});
+
+it('passive quota recheck fences a policy change during usage before publishing counts or a create action', async () => {
+  let currentContext = context;
+  let usageReads = 0;
+  const blocked = summaryOutputQuotaUsage(true);
+  const fitting = summaryOutputQuotaUsage(false);
+  mockApi(() => currentContext, undefined, undefined, () => {
+    if (++usageReads === 1) return blocked;
+    currentContext = { ...context, policyVersion: 'f'.repeat(64) };
+    return fitting;
+  });
+  const source = transport();
+  mount(source, publicStatus);
+
+  await screen.findByRole('button', { name: 'Проверить квоту и сохранённый разбор' });
+  expectBlockedSummaryQuota();
+  expect(usageReads).toBe(1);
+  expect(posts()).toHaveLength(0);
+
+  const beforeRecheck = requests.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Проверить квоту и сохранённый разбор' }));
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(
+    'Отчёт или условия разбора изменились. Повторите разбор вручную.',
+  ));
+
+  expect(usageReads).toBe(2);
+  expect(requests.slice(beforeRecheck).map(r => [r.path.split('/').at(-1), r.init?.method]))
+    .toEqual([['context', 'GET'], ['summary', 'GET'], ['usage', 'GET'], ['context', 'GET']]);
+  const panel = screen.getByRole('region', { name: 'Объяснение ИИ' });
+  expect(within(panel).queryByRole('button', { name: /^Создать (?:платный )?ИИ-разбор$/ })).not.toBeInTheDocument();
+  expect(within(panel).queryByRole('button', { name: 'Проверить квоту и сохранённый разбор' })).not.toBeInTheDocument();
+  expect(within(panel).queryAllByText(/учтено \d+; резерв \d+; перенос неопределённого расхода \d+/i)).toHaveLength(0);
+  expect(panel).not.toHaveTextContent(/Осталось (?:0|32768) из 32768/i);
+  expect(panel).not.toHaveTextContent(/требуется 4096, осталось 0/i);
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+  expect(source.results).not.toHaveBeenCalled();
+  expect(posts()).toHaveLength(0);
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
 });
 
 it.each(['original', 'off', 'owner', 'reauth'] as const)(
