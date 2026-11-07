@@ -5,6 +5,16 @@
 
 ## Текущая готовность — 07.11.2026
 
+### Summary incident — 07.11, 14:43 UTC
+
+- Для scan `0d7242d7-7c81-4937-a516-ae908bc6e40c` read-only operator SQL подтвердил `completed`, history schema5, одну quota-попытку `dispatched` без наблюдённого usage и reservation без готового/предыдущего summary. Резерв токенов не является фактическим расходом. `LLM_SUMMARY_MISSING` GET не устанавливает причину исходного POST; она не восстановлена из текущих метаданных. Данные/holds/liabilities не изменялись, provider-вызовов не было. Retained test session — другой owner, её HTTP404 не принят за воспроизведение пользовательской ошибки.
+- `de480cd` исправляет потерю диагностики в frontend, **не доказывает исправление генерации**: конечные HTTP/phase/reason исходного failed POST сохраняются в памяти и показываются отдельно; открытие сведений не делает запросов. Неизвестные headers/body не выводятся, GET missing не становится POST-диагностикой; смена scope/session очищает сведения.
+- Новые UI-regressions воспроизведены RED, после правки summary/client **160/160 PASS**, typecheck, scoped lint, diff-check и build PASS. Полные suites не запускались.
+- Web-only apply завершился `new-healthy`, lock released, `2026-11-07T14:42:58.627Z`; API/worker/gateways/stores не обновлялись. После выкладки `ready:true`, `locked:false`, root200, anonymous auth401. Опубликованный report chunk `ScanDetailPage-0csJxJPJ.js`, достижимый из live entry, содержит новый UI. Локальный `dist` не использован как доказательство совпадения всех Docker assets.
+- Точный исходный POST response/diagnostic для этого сбоя ещё нужен. Не запускать новый платный запрос только ради реконструкции старой ошибки. Flownix по-прежнему `server shut down`; записи/закрытия в tracker не заявлены.
+
+### Предыдущая выкладка
+
 - Web `769d0de68b245b7c3a81af5a5cdfa0b6` опубликован штатным `web --apply`: `new-healthy`, lock released, без миграций. От первого journal до completion — **89,9 с**, не обещание мгновенных будущих выкладок.
 - Доставлены frontend-коммиты `5e60471` и `de1d10e`: безопасный возврат из восстановления пароля, восстановление сохранённого чата при readiness-timeout, сохранение проверенных источников черновика, видимый применённый фильтр и исправления навигации. API/worker/gateways не обновлялись; прежний API-only `fd4122b0af8bbb2f526930b64cfebcfb`/schema5 не мигрировал в этом запуске.
 - Capacity fix `1df2930`: исторический каталог сохраняет active32/archive16/total48, adapter — отдельные 48 слотов с резервированием до мутации. Полная проверка истории/custody/evidence/ref128 сохраняется; конечная ёмкость не означает бесконечное хранение. Синхронное чтение evidence проверяет прежний operation/lease deadline.
