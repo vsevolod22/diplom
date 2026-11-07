@@ -6,7 +6,7 @@ import {
   REPORT_AUTOMATION_REVISION,
   saveReportPreferences,
 } from '@/shared/api/preferences/reportPreferences';
-import { usage } from './llmChatFixtures';
+import { usage as chatUsage } from './llmChatFixtures';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -27,6 +27,13 @@ import { usageSchema, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
 const id = '00000000-0000-4000-8000-000000000038';
 const digest = `sha256:${'a'.repeat(64)}`;
 const tuple = { scanId: id, digest, platform: 'linux/amd64' as const, reportVersion: 'b'.repeat(64) };
+const usage = usageSchema.parse({
+  ...chatUsage,
+  ...tuple,
+  integrationEnabled: true,
+  quotaEnabled: true,
+  admission: { status: 'fits', reserve: { input: 2048, output: 4096, costMicros: 0 }, signals: [] },
+});
 const context: SummaryContext = {
   ...tuple,
   enabled: true,
@@ -494,6 +501,8 @@ it('original summary POST diagnostics are safe, passive to expand and scoped to 
     errorCode: 'LLM_PROVIDER_UNAVAILABLE', message: 'private-summary-message-never-display',
   }), { status: 502, headers: {
     'Content-Type': 'application/json', 'X-LLM-Failure-Phase': 'headers', 'X-LLM-Failure-Reason': 'http_error',
+    'X-LLM-Provider-Status': '400', 'X-LLM-Provider-Error-Code': 'invalid_json_schema',
+    'X-LLM-Provider-Error-Param': 'response_format.json_schema.schema',
   } }));
   const view = mount(transport(), publicStatus);
   await screen.findByRole('alert');
@@ -503,7 +512,12 @@ it('original summary POST diagnostics are safe, passive to expand and scoped to 
   const requestCount = requests.length;
   fireEvent.click(toggle);
   expect(details.open).toBe(true);
-  expect(details).toHaveTextContent('Ответ на POST /llm/summary: HTTP 502');
+  expect(within(details).getByText('Ответ на POST /llm/summary: HTTP 502')).toBeVisible();
+  expect(within(details).getByText('HTTP провайдера: 400')).toBeVisible();
+  expect(within(details).getByText('Код провайдера: invalid_json_schema')).toBeVisible();
+  expect(within(details).getByText('Параметр запроса: response_format.json_schema.schema')).toBeVisible();
+  expect(within(details).queryByRole('link')).not.toBeInTheDocument();
+  expect(within(details).queryByRole('button')).not.toBeInTheDocument();
   expect(details).toHaveTextContent('headers / http_error');
   expect(document.body.textContent).not.toContain('private-summary-message-never-display');
   expect(requests).toHaveLength(requestCount);
@@ -516,6 +530,65 @@ it('original summary POST diagnostics are safe, passive to expand and scoped to 
   act(() => transitionScanSession('bob', new QueryClient(), true));
   await act(async () => {});
   expect(screen.queryByText('headers / http_error')).not.toBeInTheDocument();
+  expect(screen.queryByText('HTTP провайдера: 400')).not.toBeInTheDocument();
+  expect(screen.queryByText('Код провайдера: invalid_json_schema')).not.toBeInTheDocument();
+  expect(screen.queryByText('Параметр запроса: response_format.json_schema.schema')).not.toBeInTheDocument();
+  expect(posts()).toHaveLength(1);
+});
+
+it.each([
+  { status: false, code: false, param: false },
+  { status: true, code: false, param: false },
+  { status: true, code: true, param: false },
+  { status: true, code: false, param: true },
+])('summary provider diagnostics render only present fields: %j', async ({ status, code, param }) => {
+  mockApi(undefined, () => new Response(JSON.stringify({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }), {
+    status: 502,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-LLM-Failure-Phase': 'headers',
+      'X-LLM-Failure-Reason': 'http_error',
+      ...(status ? { 'X-LLM-Provider-Status': '400' } : {}),
+      ...(code ? { 'X-LLM-Provider-Error-Code': 'invalid_json_schema' } : {}),
+      ...(param ? { 'X-LLM-Provider-Error-Param': 'response_format.json_schema.schema' } : {}),
+    },
+  }));
+  mount(transport(), publicStatus);
+  await screen.findByRole('alert');
+  const toggle = screen.getByText('Технические сведения запроса summary');
+  const details = toggle.closest('details')!;
+  const requestCount = requests.length;
+  fireEvent.click(toggle);
+
+  expect(within(details).getByText('Ответ на POST /llm/summary: HTTP 502')).toBeVisible();
+  expect(!!within(details).queryByText(/^HTTP провайдера:/)).toBe(status);
+  expect(!!within(details).queryByText(/^Код провайдера:/)).toBe(code);
+  expect(!!within(details).queryByText(/^Параметр запроса:/)).toBe(param);
+  expect(requests).toHaveLength(requestCount);
+  expect(posts()).toHaveLength(1);
+});
+
+it('summary provider diagnostics omit unsafe code and param without displaying raw provider text', async () => {
+  mockApi(undefined, () => new Response(JSON.stringify({
+    errorCode: 'LLM_PROVIDER_UNAVAILABLE', message: 'private-provider-body',
+  }), { status: 502, headers: {
+    'Content-Type': 'application/json',
+    'X-LLM-Failure-Phase': 'headers', 'X-LLM-Failure-Reason': 'http_error',
+    'X-LLM-Provider-Status': '400',
+    'X-LLM-Provider-Error-Code': '<script>private-provider-code</script>',
+    'X-LLM-Provider-Error-Param': 'https://private-provider-param.example',
+  } }));
+  mount(transport(), publicStatus);
+  await screen.findByRole('alert');
+  const toggle = screen.getByText('Технические сведения запроса summary');
+  const details = toggle.closest('details')!;
+  fireEvent.click(toggle);
+
+  expect(within(details).getByText('HTTP провайдера: 400')).toBeVisible();
+  expect(within(details).queryByText(/^Код провайдера:/)).not.toBeInTheDocument();
+  expect(within(details).queryByText(/^Параметр запроса:/)).not.toBeInTheDocument();
+  expect(document.body.textContent).not.toMatch(/private-provider-(?:body|code|param)/);
+  expect(within(details).queryByRole('link')).not.toBeInTheDocument();
   expect(posts()).toHaveLength(1);
 });
 
@@ -1205,6 +1278,52 @@ it('unknown or exhausted quota never grants automatic generation', async () => {
   mount();
   await screen.findByRole('alert');
   expect(posts()).toHaveLength(0);
+});
+
+it.each(['ready', 'warning'] as const)('exact admission unavailable with %s counters never grants generation', async reason => {
+  const unknown = usageSchema.parse({ ...usage, reason, admission: { status: 'unavailable' } });
+  mockApi(undefined, undefined, undefined, () => unknown);
+  const source = transport();
+  mount(source, publicStatus);
+
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('Не удалось проверить учёт ИИ. Генерация остановлена; остаток неизвестен.');
+  expect(posts()).toHaveLength(0);
+  expect(source.results).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /^Создать (?:платный )?ИИ-разбор$/ })).not.toBeInTheDocument();
+  expect(screen.queryByText('Технические сведения запроса summary')).not.toBeInTheDocument();
+  expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
+
+  fireEvent.focus(window);
+  fireEvent(window, new Event('online'));
+  await act(async () => {});
+  expect(posts()).toHaveLength(0);
+  expect(requests.filter(r => r.path.endsWith('/usage'))).toHaveLength(1);
+});
+
+it('exact admission unavailable on a passive quota recheck never offers a create action', async () => {
+  let currentUsage = summaryOutputQuotaUsage(true);
+  mockApi(undefined, undefined, undefined, () => currentUsage);
+  const source = transport();
+  mount(source, publicStatus);
+  await screen.findByRole('button', { name: 'Проверить квоту и сохранённый разбор' });
+
+  currentUsage = usageSchema.parse({ ...usage, admission: { status: 'unavailable' } });
+  const beforeRecheck = requests.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Проверить квоту и сохранённый разбор' }));
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(
+    'Не удалось проверить учёт ИИ. Генерация остановлена; остаток неизвестен.',
+  ));
+
+  expect(requests.slice(beforeRecheck).map(r => [r.path.split('/').at(-1), r.init?.method]))
+    .toEqual([['context', 'GET'], ['summary', 'GET'], ['usage', 'GET']]);
+  expect(posts()).toHaveLength(0);
+  expect(source.results).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /^Создать (?:платный )?ИИ-разбор$/ })).not.toBeInTheDocument();
+  expect(screen.queryByText('Технические сведения запроса summary')).not.toBeInTheDocument();
+  expect(screen.queryByText('ИИ-разбор готов')).not.toBeInTheDocument();
+  expect(screen.getByText('Исходный отчёт · checked не означает безопасность')).toBeVisible();
 });
 
 function summaryOutputQuotaUsage(blocked: boolean): LlmUsage {

@@ -14,6 +14,7 @@ import {
 import { transitionScanSession } from '@/shared/api/auth/scanSession';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import type { ScanStatus } from '@/shared/api/scans/scanTransport';
+import { usageSchema } from '@/shared/api/scans/llmUsageClient';
 import { context, frameLines, history, json, ndjson, turnId, usage } from './llmChatFixtures';
 import {
   policyModule,
@@ -28,6 +29,13 @@ const id = '00000000-0000-4000-8000-000000000038';
 const other = '00000000-0000-4000-8000-000000000039';
 const digest = `sha256:${'a'.repeat(64)}`;
 const tuple = { scanId: id, digest, platform: 'linux/amd64' as const, reportVersion: 'b'.repeat(64) };
+const summaryUsage = usageSchema.parse({
+  ...usage,
+  ...tuple,
+  integrationEnabled: true,
+  quotaEnabled: true,
+  admission: { status: 'fits', reserve: { input: 2048, output: 4096, costMicros: 0 }, signals: [] },
+});
 const findingId = `vuln-${'f'.repeat(64)}`;
 const row = {
   findingId,
@@ -199,7 +207,8 @@ function mockApi() {
       if (path.endsWith('/llm/history'))
         return json({ ...history, ...current, revision: head.revision, turns: head.turns });
       if (path.endsWith('/llm/readiness')) return json({ ...readinessWire(), ...current });
-      if (path.endsWith('/llm/usage') || path.endsWith('/llm/chat/usage'))
+      if (path.endsWith('/llm/usage')) return json({ ...summaryUsage, ...current });
+      if (path.endsWith('/llm/chat/usage'))
         return json({ ...usage, ...current, integrationEnabled: true, quotaEnabled: true });
       if (path.endsWith('/llm/chat') && method === 'POST') {
         if (api.languageFailure) return languageFailureReply();

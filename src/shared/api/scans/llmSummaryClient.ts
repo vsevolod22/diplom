@@ -182,21 +182,48 @@ const SUMMARY_FAILURE_REASONS = [
   'finish_error', 'finish_unknown', 'null_mismatch', 'unsafe_text', 'invalid_markup',
   'identifier_mismatch', 'nonprose_changed', 'not_normalized', 'invalid_link',
 ] as const;
+// Mirror server/api/src/llm/openai-http-diagnostic.ts; never expose raw provider text.
+const SUMMARY_PROVIDER_ERROR_CODES = [
+  'invalid_json_schema', 'invalid_request_error', 'unsupported_parameter', 'unsupported_value',
+  'invalid_value', 'context_length_exceeded', 'model_not_found', 'rate_limit_exceeded',
+  'insufficient_quota', 'invalid_api_key', 'server_error',
+] as const;
+const SUMMARY_PROVIDER_ERROR_PARAMS = [
+  'response_format', 'response_format.type', 'response_format.json_schema',
+  'response_format.json_schema.schema', 'response_format.json_schema.strict', 'model', 'messages',
+  'max_completion_tokens', 'reasoning_effort', 'service_tier', 'store', 'stream', 'n',
+] as const;
 export type SummaryFailureDiagnostic = Readonly<{
   httpStatus: number;
   phase?: (typeof SUMMARY_FAILURE_PHASES)[number];
   reason?: (typeof SUMMARY_FAILURE_REASONS)[number];
+  providerStatus?: number;
+  providerErrorCode?: (typeof SUMMARY_PROVIDER_ERROR_CODES)[number];
+  providerErrorParam?: (typeof SUMMARY_PROVIDER_ERROR_PARAMS)[number];
 }>;
-function summaryFailureDiagnostic(
-  httpStatus: number,
-  phase: unknown,
-  reason: unknown,
-): SummaryFailureDiagnostic {
-  const finitePhase = SUMMARY_FAILURE_PHASES.find((value) => value === phase);
-  const finiteReason = SUMMARY_FAILURE_REASONS.find((value) => value === reason);
+function summaryFailureDiagnostic(value: {
+  httpStatus: number;
+  phase?: unknown;
+  reason?: unknown;
+  providerStatus?: unknown;
+  providerErrorCode?: unknown;
+  providerErrorParam?: unknown;
+}): SummaryFailureDiagnostic {
+  const phase = SUMMARY_FAILURE_PHASES.find((member) => member === value.phase);
+  const reason = SUMMARY_FAILURE_REASONS.find((member) => member === value.reason);
+  const providerStatus = phase === 'headers' && reason === 'http_error' &&
+    typeof value.providerStatus === 'number' && Number.isInteger(value.providerStatus) &&
+    value.providerStatus > 200 && value.providerStatus <= 599 ? value.providerStatus : undefined;
+  const providerErrorCode = SUMMARY_PROVIDER_ERROR_CODES.find((member) => member === value.providerErrorCode);
+  const providerErrorParam = SUMMARY_PROVIDER_ERROR_PARAMS.find((member) => member === value.providerErrorParam);
   return Object.freeze({
-    httpStatus,
-    ...(finitePhase && finiteReason ? { phase: finitePhase, reason: finiteReason } : {}),
+    httpStatus: value.httpStatus,
+    ...(phase && reason ? { phase, reason } : {}),
+    ...(providerStatus !== undefined ? {
+      providerStatus,
+      ...(providerErrorCode ? { providerErrorCode } : {}),
+      ...(providerErrorParam ? { providerErrorParam } : {}),
+    } : {}),
   });
 }
 export class SummaryError extends Error {
@@ -204,7 +231,7 @@ export class SummaryError extends Error {
   constructor(readonly code: string, readonly httpStatus?: number, diagnostic?: SummaryFailureDiagnostic) {
     super('ИИ-сводка недоступна');
     this.diagnostic = diagnostic
-      ? summaryFailureDiagnostic(diagnostic.httpStatus, diagnostic.phase, diagnostic.reason)
+      ? summaryFailureDiagnostic(diagnostic)
       : undefined;
   }
 }
@@ -298,13 +325,19 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
         void response.body?.cancel().catch(() => {});
         throw new SummaryError('SESSION');
       }
-      const diagnostic = !response.ok && endpoint === 'summary' && body
-        ? summaryFailureDiagnostic(
-            response.status,
-            response.headers.get('X-LLM-Failure-Phase'),
-            response.headers.get('X-LLM-Failure-Reason'),
-          )
-        : undefined;
+      let diagnostic: SummaryFailureDiagnostic | undefined;
+      if (!response.ok && endpoint === 'summary' && body) {
+        const providerStatus = response.headers.get('X-LLM-Provider-Status');
+        diagnostic = summaryFailureDiagnostic({
+          httpStatus: response.status,
+          phase: response.headers.get('X-LLM-Failure-Phase'),
+          reason: response.headers.get('X-LLM-Failure-Reason'),
+          providerStatus: providerStatus !== null && /^(?:20[1-9]|2[1-9][0-9]|[3-5][0-9]{2})$/.test(providerStatus)
+            ? Number(providerStatus) : undefined,
+          providerErrorCode: response.headers.get('X-LLM-Provider-Error-Code'),
+          providerErrorParam: response.headers.get('X-LLM-Provider-Error-Param'),
+        });
+      }
       let value: unknown;
       try {
         const reader = response.body?.getReader();

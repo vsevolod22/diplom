@@ -8,6 +8,7 @@ import {
   summaryErrorMessage,
   type SummaryClient,
   type SummaryContext,
+  type SummaryFailureDiagnostic,
   type SummaryReply,
 } from '@/shared/api/scans/llmSummaryClient';
 
@@ -232,6 +233,142 @@ describe('summary recovery client', () => {
 });
 
 describe('summary POST failure diagnostics', () => {
+  const providerHeaders = {
+    'X-LLM-Failure-Phase': 'headers',
+    'X-LLM-Failure-Reason': 'http_error',
+    'X-LLM-Provider-Status': '400',
+    'X-LLM-Provider-Error-Code': 'invalid_json_schema',
+    'X-LLM-Provider-Error-Param': 'response_format',
+  };
+  const providerDiagnostic = {
+    httpStatus: 502,
+    phase: 'headers',
+    reason: 'http_error',
+    providerStatus: 400,
+    providerErrorCode: 'invalid_json_schema',
+    providerErrorParam: 'response_format',
+  };
+  function failedPost(headers: Record<string, string> = providerHeaders, body = JSON.stringify({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' })) {
+    const response = new Response(body, { status: 502, headers: { 'Content-Type': 'application/json', ...headers } });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    return { fetcher, pending: createSummaryClient(scanSession(), fetcher).summary(context, signal()) };
+  }
+
+  it('preserves distinct application and upstream HTTP statuses with only finite provider fields', async () => {
+    const { fetcher, pending } = failedPost();
+    await expect(pending).rejects.toMatchObject({ code: 'LLM_PROVIDER_UNAVAILABLE', httpStatus: 502 });
+    await expect(pending).rejects.toHaveProperty('diagnostic', providerDiagnostic);
+    const error = await pending.catch((value: SummaryError) => value);
+    expect(error).toBeInstanceOf(SummaryError);
+    if (!(error instanceof SummaryError)) throw new Error('Expected SummaryError');
+    expect(Object.isFrozen(error.diagnostic)).toBe(true);
+    expect(summaryErrorMessage(error)).not.toContain('invalid_json_schema');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('POST');
+  });
+
+  it.each([
+    'invalid_json_schema', 'invalid_request_error', 'unsupported_parameter', 'unsupported_value',
+    'invalid_value', 'context_length_exceeded', 'model_not_found', 'rate_limit_exceeded',
+    'insufficient_quota', 'invalid_api_key', 'server_error',
+  ])('preserves exact allowlisted provider error code %s', async (providerErrorCode) => {
+    const { pending } = failedPost({ ...providerHeaders, 'X-LLM-Provider-Error-Code': providerErrorCode });
+    await expect(pending).rejects.toHaveProperty('diagnostic', { ...providerDiagnostic, providerErrorCode });
+  });
+
+  it.each([
+    'response_format', 'response_format.type', 'response_format.json_schema',
+    'response_format.json_schema.schema', 'response_format.json_schema.strict', 'model', 'messages',
+    'max_completion_tokens', 'reasoning_effort', 'service_tier', 'store', 'stream', 'n',
+  ])('preserves exact allowlisted provider error parameter %s', async (providerErrorParam) => {
+    const { pending } = failedPost({ ...providerHeaders, 'X-LLM-Provider-Error-Param': providerErrorParam });
+    await expect(pending).rejects.toHaveProperty('diagnostic', { ...providerDiagnostic, providerErrorParam });
+  });
+
+  it.each([201, 299, 300, 400, 401, 429, 502, 599])('retains backend-supported non-200 upstream status %s', async (providerStatus) => {
+    const { pending } = failedPost({ ...providerHeaders, 'X-LLM-Provider-Status': String(providerStatus) });
+    await expect(pending).rejects.toHaveProperty('diagnostic', { ...providerDiagnostic, providerStatus });
+  });
+
+  it.each(['', '199', '200', '600', '0400', '+400', '400.0', '4e2', '400, 401', '400 private', 'x'.repeat(4096)]
+    .map((status) => [status.length > 32 ? 'oversized' : status, status]))(
+    'drops invalid upstream status and dependent details: %s', async (_label, status) => {
+      const { pending } = failedPost({ ...providerHeaders, 'X-LLM-Provider-Status': status });
+      await expect(pending).rejects.toHaveProperty('diagnostic', { httpStatus: 502, phase: 'headers', reason: 'http_error' });
+    },
+  );
+
+  it('requires upstream status but allows independently absent or unrecognized code and parameter', async () => {
+    const noStatus = Object.fromEntries(Object.entries(providerHeaders).filter(([key]) => key !== 'X-LLM-Provider-Status'));
+    await expect(failedPost(noStatus).pending).rejects.toHaveProperty('diagnostic', { httpStatus: 502, phase: 'headers', reason: 'http_error' });
+    for (const value of ['', 'INVALID_JSON_SCHEMA', 'messages[0].content', 'private-provider-text', 'x'.repeat(4096)]) {
+      await expect(failedPost({ ...providerHeaders, 'X-LLM-Provider-Error-Code': value }).pending)
+        .rejects.toHaveProperty('diagnostic', {
+          httpStatus: 502, phase: 'headers', reason: 'http_error', providerStatus: 400, providerErrorParam: 'response_format',
+        });
+      await expect(failedPost({ ...providerHeaders, 'X-LLM-Provider-Error-Param': value }).pending)
+        .rejects.toHaveProperty('diagnostic', {
+          httpStatus: 502, phase: 'headers', reason: 'http_error', providerStatus: 400, providerErrorCode: 'invalid_json_schema',
+        });
+    }
+    const { pending } = failedPost({
+      'X-LLM-Failure-Phase': 'headers', 'X-LLM-Failure-Reason': 'http_error', 'X-LLM-Provider-Status': '400',
+    });
+    await expect(pending).rejects.toHaveProperty('diagnostic', { httpStatus: 502, phase: 'headers', reason: 'http_error', providerStatus: 400 });
+  });
+
+  it.each([
+    ['content', 'invalid_content'], ['headers', 'invalid_type'], ['unknown', 'http_error'], ['', ''],
+  ])('ignores upstream fields outside headers/http_error (%s/%s)', async (phase, reason) => {
+    const { pending } = failedPost({ ...providerHeaders, 'X-LLM-Failure-Phase': phase, 'X-LLM-Failure-Reason': reason });
+    const expected = phase && phase !== 'unknown' ? { httpStatus: 502, phase, reason } : { httpStatus: 502 };
+    await expect(pending).rejects.toHaveProperty('diagnostic', expected);
+  });
+
+  it('retains safe upstream fields even when failed POST JSON is malformed', async () => {
+    const { pending } = failedPost(providerHeaders, '{');
+    await expect(pending).rejects.toMatchObject({ code: 'INVALID', httpStatus: 502 });
+    await expect(pending).rejects.toHaveProperty('diagnostic', providerDiagnostic);
+  });
+
+  it('does not promote body-forged provider diagnostics or arbitrary provider text', async () => {
+    const body = JSON.stringify({ errorCode: 'LLM_PROVIDER_UNAVAILABLE', ...providerDiagnostic, message: 'private-provider-text' });
+    const { pending } = failedPost({}, body);
+    await expect(pending).rejects.toHaveProperty('diagnostic', { httpStatus: 502 });
+    const error = await pending.catch((value: SummaryError) => value);
+    expect(JSON.stringify(error)).not.toContain('private-provider-text');
+  });
+
+  it.each(['context', 'existing'] as const)('never retains generation diagnostics on failed %s GET', async (method) => {
+    const response = new Response(JSON.stringify({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }), { status: 502, headers: providerHeaders });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const client = createSummaryClient(scanSession(), fetcher);
+    const pending = method === 'context' ? client.context(scanId, signal()) : client.existing(context, signal());
+    await expect(pending).rejects.toMatchObject({ code: 'LLM_PROVIDER_UNAVAILABLE', httpStatus: 502 });
+    await expect(pending).rejects.not.toHaveProperty('diagnostic', expect.anything());
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('GET');
+  });
+
+  it('ignores provider error headers on successful POST replies', async () => {
+    const response = json(reply);
+    for (const [key, value] of Object.entries(providerHeaders)) response.headers.set(key, value);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    expect(await createSummaryClient(scanSession(), fetcher).summary(context, signal())).toEqual(reply);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('revalidates copied constructor diagnostics rather than trusting widened objects', () => {
+    const error = new SummaryError('LLM_PROVIDER_UNAVAILABLE', 502, {
+      ...providerDiagnostic, providerErrorCode: 'private-provider-text', providerErrorParam: 'messages[0].content',
+    } as unknown as SummaryFailureDiagnostic);
+    expect(error.diagnostic).toEqual({ httpStatus: 502, phase: 'headers', reason: 'http_error', providerStatus: 400 });
+    const wrongPhase = new SummaryError('LLM_PROVIDER_UNAVAILABLE', 502, {
+      ...providerDiagnostic, phase: 'content', reason: 'invalid_content',
+    } as SummaryFailureDiagnostic);
+    expect(wrongPhase.diagnostic).toEqual({ httpStatus: 502, phase: 'content', reason: 'invalid_content' });
+  });
+
   it('preserves the provider error code and exact safe diagnostic from a failed POST', async () => {
     const response = json({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }, 502);
     response.headers.set('X-LLM-Failure-Phase', 'headers');
@@ -310,6 +447,9 @@ describe('summary POST failure diagnostics', () => {
     const late = json({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }, 502);
     late.headers.set('X-LLM-Failure-Phase', 'headers');
     late.headers.set('X-LLM-Failure-Reason', 'http_error');
+    late.headers.set('X-LLM-Provider-Status', '400');
+    late.headers.set('X-LLM-Provider-Error-Code', 'unsupported_parameter');
+    late.headers.set('X-LLM-Provider-Error-Param', 'reasoning_effort');
     const cancel = vi.spyOn(late.body!, 'cancel');
     finish(late);
     await vi.waitFor(() => expect(cancel).toHaveBeenCalled());

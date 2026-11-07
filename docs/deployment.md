@@ -5,6 +5,14 @@
 
 ## Текущая готовность — 07.11.2026
 
+### Summary: пассивная диагностика и локальные UI-правки — ещё не выложены
+
+- Точная production-проекция scan `0d7242d7-7c81-4937-a516-ae908bc6e40c` прочитана отдельными readonly SQLite handles, без запуска writable-конструкторов ScanLedger/QuotaLedger, auth-подмены для генерации или provider calls. ReportVersion совпал с `f753d4fcaf6c300d00c160d7cb70564b2dc4a1562889f1e9af2119935654a0be`:441 находка; выбрано25. Production preparation проходит, reserve45873 input/4096 output/52837 microUSD; exact snapshot admission=`fits`. Lifetime limit5000000/settled19287/held436054/remaining4544659. Это operator-only проверка подготовки/учёта, **не authenticated browser acceptance и не успешная генерация**.
+- Присланный usage JSON без `integrationEnabled`/`quotaEnabled` соответствует контракту `/llm/chat/usage`: там GET намеренно не рассчитывает exact admission без вопроса и возвращает `unavailable`. Это не доказательство ошибки подготовки summary. Исторический endpoint без исходного Network URL не установлен. `GET summary404/LLM_SUMMARY_MISSING` по-прежнему означает отсутствие подходящего сохранённого результата, а не причину upstream-отказа.
+- Локально summary больше не отправляет POST при неизвестном **summary** admission; chat contract не изменён. Frontend сохраняет и показывает уже выдаваемые backend конечные upstream HTTP/code/param только для failed summary POST с `headers/http_error`. Неизвестные значения/сырой текст не выводятся; повторов/освобождения UNKNOWN не добавлено.
+- Coordinator targeted component/client/deadline tests242 PASS; typecheck/scoped lint/diff-check PASS. Независимое ревью блокеров не нашло; дополнительная выборка291 PASS/1 FAIL: старый page test ожидает одну кнопку вместо двух, тот же отказ воспроизведён на HEAD через in-memory overlay. Не исправлялся как несвязанный.
+- Старые доступные nonsecret receipts не установили upstream HTTP/code/param пользовательского сбоя. Новых платных запросов и диагностической выкладки не было; реальное исправление генерации **не заявляется**. MCP повторно отвечает `server shut down` даже после сообщения пользователя о восстановлении: harness/записи задач пока недоступны, задачи не закрыты. Для атрибуции нужен существующий failed POST response с безопасными `X-LLM-Provider-*` headers; повторно нажимать генерацию только ради диагностики не следует.
+
 ### Lifetime budget $5/account — опубликован 19:59 UTC
 
 - По явному решению пользователя вместо дальнейшего расширения токеновых квот включён `LLM_QUOTA_LIFETIME_USER_COST_MICROS=5000000`: оценочный бюджет аккаунта за всё время. Учитываются все сохранённые settled и reserved/dispatched/fault расходы владельца по любым датам/сканам/политикам. Неизвестные обязательства не обнулены; суточные token caps больше не являются admission gate в этом режиме, request token/byte/time/concurrency bounds сохранены.

@@ -192,7 +192,7 @@ function SummaryScope({
   async function checkUsage(usage: LlmUsage, accepted: SummaryContext, signal: AbortSignal, recheck = false) {
     setQuotaBlock(null);
     if (!usage.available || !usage.integrationEnabled || !usage.quotaEnabled ||
-      !usageMatchesDisclosure(usage, accepted.disclosure))
+      usage.admission.status === 'unavailable' || !usageMatchesDisclosure(usage, accepted.disclosure))
       throw new SummaryError('LLM_QUOTA_UNAVAILABLE');
     // Lifetime snapshots retain daily counters, but only their server-level reason governs exhaustion.
     const blocked =
@@ -614,6 +614,9 @@ function SummaryScope({
         <details>
           <summary>Технические сведения запроса summary</summary>
           <p>Ответ на POST /llm/summary: HTTP {postFailure.httpStatus}</p>
+          {postFailure.providerStatus !== undefined ? <p>HTTP провайдера: {postFailure.providerStatus}</p> : null}
+          {postFailure.providerErrorCode ? <p>Код провайдера: {postFailure.providerErrorCode}</p> : null}
+          {postFailure.providerErrorParam ? <p>Параметр запроса: {postFailure.providerErrorParam}</p> : null}
           {postFailure.phase && postFailure.reason ? (
             <p>Этап и причина: {postFailure.phase} / {postFailure.reason}</p>
           ) : null}
