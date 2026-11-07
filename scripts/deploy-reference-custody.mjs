@@ -27,6 +27,11 @@ export function precheckRecoveryRecordCapacity(authority,checkpoint) {
 export const IMAGE_REFERENCE_LIMIT = 128;
 export const UNTAGGED_IMAGE_LIMIT = 16;
 export const IMAGE_INVENTORY_ROW_LIMIT = IMAGE_REFERENCE_LIMIT + UNTAGGED_IMAGE_LIMIT;
+export const ADAPTER_HISTORY_LIMIT = 48;
+export function assertAdapterHistoryCapacity(count,{reserve=0}={}) {
+  need(Number.isSafeInteger(count) && count >= 0 && (reserve === 0 || reserve === 1) &&
+    count + reserve <= ADAPTER_HISTORY_LIMIT,'ADAPTER_HISTORY_CAPACITY');
+}
 const ROLES = ['api','worker','web','egress','llm-egress','openai-egress'];
 const plain = v => v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype;
 const keys = (v, expected) => plain(v) && equal(Object.keys(v).sort(), [...expected].sort());

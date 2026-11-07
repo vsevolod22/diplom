@@ -16,7 +16,7 @@ import { readPublicLlmBinding, loadPublicLlmSettings, expectedPublicLlmConfig,
     publicAuthSchema, PUBLIC_LLM_GATEWAY_PROBE,
     reservationPublicLlmHelperArguments, validateReservationPublicLlmHelper, PUBLIC_LLM_RESERVATION_HEADER_PROGRAM,
     reservationLlmFingerprint, verifyHistoryReservationMigration } from './public-llm-stand.mjs';
-import { captureDeploymentCatalog, DEPLOYMENT_TOTAL_LIMIT, DEPLOYMENT_RETAINED_REFERENCE_LIMIT } from './public-llm-deployment-catalog.mjs';
+import { captureDeploymentCatalog, DEPLOYMENT_RETAINED_REFERENCE_LIMIT } from './public-llm-deployment-catalog.mjs';
 import { assertNoOpenAiDockerSecret, checkPublicLlmSourceBuild, validateOpenAiVolume, selectOpenAiOperations } from './public-llm-source-build.mjs';
 import { writeExclusive, syncDirectory } from './setup-local-cve.mjs';
 import { PUBLIC_DRAIN_PROBE, PUBLIC_READY_PROBE } from './refresh-public-cve.mjs';
@@ -25,7 +25,7 @@ import { requireDeploySupervisor, inspectDeploySupervisor } from './deploy-super
 import { deploymentAuthority, deploymentFileIdentity, createEngineJournal, readEngineJournal } from './deploy-authority.mjs';
 import { completionReferences, retainedReferenceHistory, referenceUnion, createReferenceCustody,
   validateReferenceCustody, custodyCompletionReferences, parseImageInventory, assertImageCapacity, referenceCustodyDiagnostic,
-    boundedDeploymentRecord, deploymentRecordLimit, precheckRecoveryRecordCapacity, candidateSourceEquivalence } from './deploy-reference-custody.mjs';
+    boundedDeploymentRecord, deploymentRecordLimit, precheckRecoveryRecordCapacity, candidateSourceEquivalence, assertAdapterHistoryCapacity } from './deploy-reference-custody.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROLES = Object.freeze(['api','worker','web','egress','llm-egress','openai-egress']);
@@ -92,11 +92,11 @@ function captureFile(path, { privateMode = true, limit = 16384 } = {}) {
   };
   verify(); return { bytes, verify };
 }
-function evidenceIndex(directory) {
+function evidenceIndex(directory, checkDeadline = () => {}) {
   const entries=[];let total=0;
-  const walk=(dir,prefix='',depth=0)=>{need(depth<=5,'EVIDENCE_DEPTH');protectedDirectory(dir);
+  const walk=(dir,prefix='',depth=0)=>{checkDeadline();need(depth<=5,'EVIDENCE_DEPTH');protectedDirectory(dir);
     for(const name of fs.readdirSync(dir).sort()){
-      need(/^[a-zA-Z0-9_.-]{1,100}$/.test(name),'EVIDENCE_NAME');
+      checkDeadline();need(/^[a-zA-Z0-9_.-]{1,100}$/.test(name),'EVIDENCE_NAME');
       if(!prefix&&['complete.json','operation.lock'].includes(name))continue;
       const path=join(dir,name),relative=prefix+name,s=fs.lstatSync(path);
       need(!s.isSymbolicLink()&&s.uid===process.getuid(),'EVIDENCE_OWNER');
@@ -104,21 +104,24 @@ function evidenceIndex(directory) {
       need(s.isFile()&&s.nlink===1&&(s.mode&0o7777)===0o600&&s.size<=256*1024**2,'EVIDENCE_FILE');
       total+=s.size;need(total<=4*1024**3&&entries.length<256,'EVIDENCE_CAPACITY');
       const fd=fs.openSync(path,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW),h=createHash('sha256'),b=Buffer.alloc(65536);
-      try{let n;while((n=fs.readSync(fd,b,0,b.length,null)))h.update(b.subarray(0,n));}finally{fs.closeSync(fd);}
+      try{for(;;){checkDeadline();const n=fs.readSync(fd,b,0,b.length,null);checkDeadline();if(!n)break;h.update(b.subarray(0,n));}}finally{fs.closeSync(fd);}
       const after=fs.lstatSync(path);need(equal([s.dev,s.ino,s.size,s.mtimeMs,s.ctimeMs],[after.dev,after.ino,after.size,after.mtimeMs,after.ctimeMs]),'EVIDENCE_CHANGED');
       entries.push({path:relative,bytes:s.size,sha256:h.digest('hex')});
-    }};walk(directory);return entries;
+    }};walk(directory);checkDeadline();return entries;
 }
-function captureBuildHistory(root, own = null, legacy = []) {
-  const parent=join(root,STATE,RECORDS),present=exists(parent),names=present?fs.readdirSync(parent).filter(n=>n!==own).sort():[];
-  need(names.length<DEPLOYMENT_TOTAL_LIMIT&&names.every(n=>/^[a-f0-9]{32}$/.test(n)),'ADAPTER_HISTORY_CAPACITY_OR_NAMES');
+function captureBuildHistory(root, own = null, legacy = [], checkDeadline = () => {}) {
+  checkDeadline();
+  const parent=join(root,STATE,RECORDS),present=exists(parent),allNames=present?fs.readdirSync(parent).sort():[];
+  checkDeadline();assertAdapterHistoryCapacity(allNames.length);
+  need(allNames.every(n=>/^[a-f0-9]{32}$/.test(n)),'ADAPTER_HISTORY_CAPACITY_OR_NAMES');
+  const names=allNames.filter(n=>n!==own);
   const guards=[],completions=[];
   if(present)guards.push(protectedDirectory(parent));
   for(const nonce of names){
-    const dir=join(parent,nonce);guards.push(protectedDirectory(dir));
+    checkDeadline();const dir=join(parent,nonce);guards.push(protectedDirectory(dir));
     const proof=captureFile(join(dir,'complete.json'),{limit:262144}),r=JSON.parse(proof.bytes);guards.push(proof.verify);
     need([2,3,4].includes(r.version)&&r.nonce===nonce&&r.project===PROJECT&&['published','old-restored','pre-mutation-aborted'].includes(r.outcome)&&Array.isArray(r.references)&&Array.isArray(r.evidence),'ADAPTER_HISTORY_INCOMPLETE');
-    need(equal(evidenceIndex(dir),r.evidence),'ADAPTER_HISTORY_EVIDENCE_CHANGED');
+    need(equal(evidenceIndex(dir,checkDeadline),r.evidence),'ADAPTER_HISTORY_EVIDENCE_CHANGED');
     const owner=captureFile(join(dir,'operation.lock/deploy-adapter-owner.json'));
     need(equal(JSON.parse(owner.bytes),{version:2,nonce,kind:'preserving-deployment'}),'ADAPTER_HISTORY_OWNER_MISMATCH');guards.push(owner.verify);
     need(equal(fs.readdirSync(join(dir,'operation.lock')),['deploy-adapter-owner.json']),'ADAPTER_HISTORY_LOCK_ARCHIVE_INVALID');
@@ -130,12 +133,15 @@ function captureBuildHistory(root, own = null, legacy = []) {
         completions.push({nonce,sha256:digest(proof.bytes),record:r,dir});
     // Capture metadata after full byte validation; retained history is never changed by this attempt.
     const rootEntries=fs.readdirSync(dir).sort();guards.push(()=>need(equal(fs.readdirSync(dir).sort(),rootEntries),'ADAPTER_HISTORY_CHANGED'));
-        const stamps=r.evidence.map(e=>{const path=join(dir,e.path),s=fs.lstatSync(path);return {path,stamp:[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]};});
-    guards.push(()=>{for(const {path,stamp} of stamps){const s=fs.lstatSync(path);need(equal(stamp,[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]),'ADAPTER_HISTORY_CHANGED');}});
+        const stamps=r.evidence.map(e=>{checkDeadline();const path=join(dir,e.path),s=fs.lstatSync(path);return {path,stamp:[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]};});
+    guards.push(()=>{for(const {path,stamp} of stamps){checkDeadline();const s=fs.lstatSync(path);need(equal(stamp,[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]),'ADAPTER_HISTORY_CHANGED');}});
   }
   const references=retainedReferenceHistory({legacy,completions});
     need(references.length<=DEPLOYMENT_RETAINED_REFERENCE_LIMIT,'IMAGE_REFERENCE_CAPACITY');
-  const verify=()=>{guards.forEach(g=>g());need(equal(exists(parent)?fs.readdirSync(parent).filter(n=>n!==own).sort():[],names),'ADAPTER_HISTORY_CHANGED');};
+  const verify=()=>{checkDeadline();guards.forEach(g=>{checkDeadline();g();checkDeadline();});
+      const currentNames=exists(parent)?fs.readdirSync(parent).sort():[];
+      checkDeadline();assertAdapterHistoryCapacity(currentNames.length);
+      need(equal(currentNames,allNames),'ADAPTER_HISTORY_CHANGED');};
   verify();return {references,verify,completions,count:names.length};
 }
 function legacyReferenceOrigins(catalog,retentions) {
@@ -302,7 +308,11 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     need(Number.isFinite(now()), 'CLOCK_INVALID'); activeDeadline = now() + budget;
     try { return await work(...args); } finally { activeDeadline = null; }
   };
-  function rootCheck() { need(resolve(root) === root && fs.realpathSync(root) === root && context === 'desktop-linux', 'ROOT_OR_CONTEXT_INVALID'); }
+  function checkHistoryDeadline() {
+      need(activeDeadline !== null, 'ADAPTER_DEADLINE_MISSING');
+      const time=now();need(Number.isFinite(time)&&time<activeDeadline&&(leaseDeadline===null||time<leaseDeadline),'ADAPTER_DEADLINE');
+    }
+    function rootCheck() { need(resolve(root) === root && fs.realpathSync(root) === root && context === 'desktop-linux', 'ROOT_OR_CONTEXT_INVALID'); }
   const clientEnv = () => ({ PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', HOME:home, COMPOSE_DISABLE_ENV_FILE:'1' });
   async function request(args, options, code, timeout = 30000) {
     need(activeDeadline !== null, 'ADAPTER_DEADLINE_MISSING');
@@ -399,9 +409,9 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       const source=capturePublicLlmSource(root,{openai:true}),self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
       const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs'].map(name=>captureFile(join(root,'scripts',name),{privateMode:false,limit:1024**2}));
       const contract=sourceContract(root),catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),
-              history=captureBuildHistory(root,owned?.nonce,legacyReferenceOrigins(catalog,retentions));
+              history=captureBuildHistory(root,owned?.nonce,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline);
       source.verify();
-      need(catalog.entries.length+history.count<DEPLOYMENT_TOTAL_LIMIT,'HISTORICAL_CATALOG_CAPACITY');
+      assertAdapterHistoryCapacity(history.count,{reserve:1});
       const disk=fs.statfsSync(join(root,STATE));need(disk.bavail*disk.bsize>=4*1024**3,'DISK_HEADROOM');
       const connection=await connect(),before=await namespace(config,connection);
             const requiredMemory=Object.values(next.services).filter(s=>s.restart!=='no').reduce((sum,s)=>sum+Number(s.mem_limit),0);
@@ -569,8 +579,9 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     await prepare({mode:ctx.mode,services:ctx.services,upgradeOperations:ctx.options?.upgradeOperations,
       migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5});
     noLock();const catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),
-          history=captureBuildHistory(root,null,legacyReferenceOrigins(catalog,retentions));
+          history=captureBuildHistory(root,null,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline);
         history.verify();catalog.verify();retentions.verify();
+    assertAdapterHistoryCapacity(history.count,{reserve:1});checkHistoryDeadline();
     const lock=acquireLock(root),nonce=randomBytes(16).toString('hex'),parent=join(root,STATE,RECORDS);leaseDeadline=now()+3600000;
     // An error after acquisition intentionally leaves an unowned HOLD, never guessed recovery.
     if(!exists(parent)){fs.mkdirSync(parent,{mode:0o700});syncDirectory(join(root,STATE));}
@@ -822,13 +833,13 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     // Metadata-only historical identities: old records may contain image Config.Env.
     // Never reserialize or hash that content into a recovery checkpoint.
     const walk=(path,relative,depth=0)=>{
-      need(depth<=6&&history.length<4096,'RECOVERY_HISTORY_LIMIT');const s=fs.lstatSync(path);
+      checkHistoryDeadline();need(depth<=6&&history.length<4096,'RECOVERY_HISTORY_LIMIT');const s=fs.lstatSync(path);
       need(!s.isSymbolicLink()&&s.uid===process.getuid(),'RECOVERY_HISTORY_OWNER');
       if(s.isDirectory()){
         need((s.mode&0o7777)===0o700,'RECOVERY_HISTORY_MODE');
         const names=fs.readdirSync(path).filter(n=>relative===RECORDS?n!==p.nonce:true).sort();
         history.push({path:relative,dev:s.dev,ino:s.ino,mode:s.mode,names});
-        for(const n of names){need(/^[a-zA-Z0-9_.-]{1,100}$/.test(n),'RECOVERY_HISTORY_NAME');walk(join(path,n),relative+'/'+n,depth+1);}
+        for(const n of names){checkHistoryDeadline();need(/^[a-zA-Z0-9_.-]{1,100}$/.test(n),'RECOVERY_HISTORY_NAME');walk(join(path,n),relative+'/'+n,depth+1);}
       }else{
         need(s.isFile()&&s.nlink===1&&(s.mode&0o7777)===0o600,'RECOVERY_HISTORY_FILE');
         history.push({path:relative,stamp:[s.dev,s.ino,s.uid,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]});
@@ -865,7 +876,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const initial=JSON.parse(captureFile(join(p.audit,'authority-v3.json'),{limit:deploymentRecordLimit('authority-v3.json')}).bytes);
     const files=recoveryFileSet(p);need(equal(files,initial.files),'PRESTART_FILE_DRIFT');
     const lease=ownedLease(p.lease),engine=engineJournal.checkpoint();
-    const evidence=evidenceIndex(p.audit).filter(e=>e.path!=='engine.jsonl');
+    const evidence=evidenceIndex(p.audit,checkHistoryDeadline).filter(e=>e.path!=='engine.jsonl');
     save(p,'history-v5-prestart.json',{version:3,kind:'history-v5-prestart',project:PROJECT,nonce:p.nonce,
       supervisor:{identity:lease.supervisor.identity,session:lease.supervisor.session},operation:operationIdentity(p.lock.path),daemon:p.connection.initial,
       source:digest(JSON.stringify(p.source.manifest.files.map(f=>({path:f.path,digest:f.digest})))),
@@ -1015,7 +1026,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const hasCandidates=Object.keys(p?.candidates??{}).length>0;
     const referenceCustody=hasCandidates?p.referenceCustody:null;
     const refs=hasCandidates?custodyCompletionReferences(referenceCustody,state.nonce,p.candidates):{references:[],borrowedReferences:[]};
-    const complete={version:referenceCustody?.version===2?4:3,project:PROJECT,nonce:state.nonce,...(p?.candidateReuse?{candidateReuse:p.candidateReuse.source,reuseOrigin:p.candidateReuse.origin}:{}),outcome:p?.phase==='published'?'published':p?.phase==='restored-healthy'?'old-restored':'pre-mutation-aborted',...refs,referenceCustody,evidence:evidenceIndex(state.audit)};
+    const complete={version:referenceCustody?.version===2?4:3,project:PROJECT,nonce:state.nonce,...(p?.candidateReuse?{candidateReuse:p.candidateReuse.source,reuseOrigin:p.candidateReuse.origin}:{}),outcome:p?.phase==='published'?'published':p?.phase==='restored-healthy'?'old-restored':'pre-mutation-aborted',...refs,referenceCustody,evidence:evidenceIndex(state.audit,checkHistoryDeadline)};
     completionReferences(complete,state.nonce);state.record('complete.json',complete);
     ownedLease(ctx.lease);need(!exists(join(state.audit,'operation.lock')),'LOCK_ARCHIVE_COLLISION');
     fs.renameSync(state.lock.path,join(state.audit,'operation.lock'));syncDirectory(state.audit);syncDirectory(join(root,STATE));state.released=true;leaseDeadline=null;engineJournal=null;return {released:true};
@@ -1049,9 +1060,9 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       'CONTAINER_NAME_CENSUS_FAILED','IMAGE_INSPECT_FAILED','NETWORK_CENSUS_FAILED','NETWORK_INSPECT_FAILED',
       'VOLUME_INSPECT_FAILED','VOLUME_CONSUMERS_FAILED','DOCKER_INFO_FAILED','RETAINED_IMAGE_INSPECT_FAILED','IMAGE_REFERENCE_CENSUS_FAILED']);
     need(journal.codes.slice(cp.engine.count).every(code=>prestartReads.has(code)),'RECOVERY_POST_CHECKPOINT_DISPATCH');
-    const evidence=evidenceIndex(audit).filter(e=>!['engine.jsonl','history-v5-prestart.json','failure-switchservices.json'].includes(e.path));
+    const evidence=evidenceIndex(audit,checkHistoryDeadline).filter(e=>!['engine.jsonl','history-v5-prestart.json','failure-switchservices.json'].includes(e.path));
     need(equal(evidence,cp.evidence),'RECOVERY_EVIDENCE_DRIFT');
-    const originalEvidence=evidenceIndex(audit),proofs=[owner,checkpoint];
+    const originalEvidence=evidenceIndex(audit,checkHistoryDeadline),proofs=[owner,checkpoint];
     const read=name=>{const f=captureFile(join(audit,name),{limit:deploymentRecordLimit(name)});proofs.push(f);return JSON.parse(f.bytes);};
     const authority=read('authority-v3.json'),intent=read('intent.json'),recovery=read('recovery.json'),built=read('built.json');
     const completion=read('history-migration-complete.json'),migration=read('history-migration-intent.json');
@@ -1085,7 +1096,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     need(sourceDigest===cp.source&&sourceDigest===intent.source&&sourceDigest===migration.source&&digest(self.bytes)===cp.adapter&&cp.adapter===intent.adapter&&
       equal(entryProofs.map(f=>digest(f.bytes)),cp.entrySources)&&equal(cp.entrySources,intent.entrySources),'RECOVERY_SOURCE_DRIFT');
     const contract=sourceContract(root),catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),
-          history=captureBuildHistory(root,nonce,legacyReferenceOrigins(catalog,retentions));
+          history=captureBuildHistory(root,nonce,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline);
         const referenceCustody=validateReferenceCustody(read('reference-custody.json'),nonce,history.references);
         need(equal(referenceCustody,intent.referenceCustody)&&equal(referenceCustody,built.referenceCustody)&&
           equal(referenceCustody,recovery.referenceCustody)&&equal(referenceCustody,cp.referenceCustody),'RECOVERY_CUSTODY_DRIFT');
@@ -1111,7 +1122,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const verifyOriginal=()=>{
       auditGuard();lockGuard();owner.verify();checkpoint.verify();proofs.forEach(f=>f.verify());
       need(equal(operationIdentity(lockPath),cp.operation),'RECOVERY_LOCK_CHANGED');
-      const current=evidenceIndex(audit).filter(e=>e.path!=='recovery-v5'&&!e.path.startsWith('recovery-v5/'));
+      const current=evidenceIndex(audit,checkHistoryDeadline).filter(e=>e.path!=='recovery-v5'&&!e.path.startsWith('recovery-v5/'));
       need(equal(current,originalEvidence),'RECOVERY_ORIGINAL_EVIDENCE_CHANGED');
     };
     verifyOriginal();const connection=await connect();need(equal(connection.initial,cp.daemon)&&connection.initial.id===intent.daemon,'RECOVERY_DAEMON_CHANGED');
