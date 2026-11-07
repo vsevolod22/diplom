@@ -3,7 +3,19 @@
 Команды выполняются из корня `diplom` с установленными зависимостями.
 Это интерфейс нового `scripts/deploy.mjs`, не обёртка старого lifecycle launcher.
 
-## Текущая готовность — batch27, 03.11.2026
+## Текущая готовность — 07.11.2026
+
+- Web `769d0de68b245b7c3a81af5a5cdfa0b6` опубликован штатным `web --apply`: `new-healthy`, lock released, без миграций. От первого journal до completion — **89,9 с**, не обещание мгновенных будущих выкладок.
+- Доставлены frontend-коммиты `5e60471` и `de1d10e`: безопасный возврат из восстановления пароля, восстановление сохранённого чата при readiness-timeout, сохранение проверенных источников черновика, видимый применённый фильтр и исправления навигации. API/worker/gateways не обновлялись; прежний API-only `fd4122b0af8bbb2f526930b64cfebcfb`/schema5 не мигрировал в этом запуске.
+- Capacity fix `1df2930`: исторический каталог сохраняет active32/archive16/total48, adapter — отдельные 48 слотов с резервированием до мутации. Полная проверка истории/custody/evidence/ref128 сохраняется; конечная ёмкость не означает бесконечное хранение. Синхронное чтение evidence проверяет прежний operation/lease deadline.
+- Целевые проверки: новые history12/12, смежные custody/actual-adapter/recovery53/53, выбранные web-deploy4/4, syntax/scoped lint/diff-check PASS. Это не полный test suite.
+- На опубликованном 8081 выполнен authenticated GET-only report → saved summary (4 русских абзаца) → chat (3 источника) → reload на375/1280:198 GET,0 POST,0 denied/pageErrors, DTO стабильны, overflow нет, browser закрыт, session file unchanged. Новая генерация, семантическая точность и исправление исторического chat HTTP502 этим не подтверждены.
+- Перед правкой очищены только воспроизводимые host caches (76 705 792 allocated bytes) и4 неиспользуемых/необязательных `:local` aliases;123 retained refs и8 public peer IDs/images/epochs сохранены. Image bytes не удалялись; неоднозначно атрибутированный BuildKit cache оставлен. Базы/snapshots/unknown liabilities/CVE/baselines/evidence не удалялись. Локальные receipts: `test-results/cleanup-20261106-host.json`, `test-results/cleanup-20261106-aliases.jsonl`.
+- Финальные записи в Flownix на момент завершения не приняты: MCP ответил `server shut down`. Итог сохранён здесь; не считать harness полностью завершённым после прерывания source/test lanes квотой агентов. Push и закрытие задач не выполнялись. Loopback8081 по-прежнему не публичный production.
+
+### Исторический snapshot подготовки batch27 — 03.11.2026
+
+Следующие статусы относятся к моменту подготовки и superseded текущей записью выше.
 
 **Новый batch27 не развёрнут и native acceptance не получена.** Последний live baseline
 по handoff координатора: API-only deployment `e412479434bb16f97b1d7e4043214eb2`,
