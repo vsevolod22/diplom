@@ -5,13 +5,13 @@
 
 ## Текущая готовность — 07.11.2026
 
-### Backend repair подготовлен, НЕ выложен — 07.11
+### Backend repair выложен — 07.11, 16:04 UTC
 
-- По просьбе пользователя завершить сессию до исчерпания токенов API rollout не запускался. Live остаётся на прежнем API; последнее web-only исправление quota UX описано ниже. Новых paid/provider вызовов не было.
+- По запросу пользователя `429f9a9` выложен штатным `node scripts/deploy.mjs app --services api --apply`: `new-healthy`, lock released, completion `2026-11-07T16:04:30.181Z`. Обновлён только API; web и worker временно прерывались. Миграций и upgrade operations не было; штатная проверка сохранности stores прошла. После выкладки ready/unlocked, root200, anonymous auth401. Новых paid/provider вызовов не было; реальная генерация не проверена.
 - Исправлены доказанные offline пути утечки: storage/quota cleanup handles захватываются внутри allocating callbacks до unwind enclosing guards; отказ синхронной последней проверки до входа в send компенсирует только свежий exact-bound dispatch без receipt. После входа в send любые ошибки сохраняют UNKNOWN; произвольного release исторических dispatched нет. Schema/caps/старые rows не менялись.
 - OpenAI принимает отсутствующий/null/default service_tier при прежнем exact model; остальные tiers и неподтверждённые usage по-прежнему отвергаются. Это исправление совместимости, а не доказательство причины старого live сбоя.
 - Исполнены 82 целевых provider/runtime/accounting/service регрессии: PASS; server typecheck, scoped lint и diff-check PASS. Отдельный openai-runtime-admission.test.ts падает при немедленном same-scan повторе после post-send abort: retained storage hold даёт409 LLM_HISTORY_CONFLICT. Независимый disposable baseline на предыдущем commit воспроизводит тот же отказ; несвязанный fixture не менялся.
-- Для продолжения: перечитать status и актуальный источник; штатный `node scripts/deploy.mjs app --services api` план прошёл (interrupted api/web/worker, no migration, schema5). После отдельного GO выполнить API-only apply с four-store preservation; не добавлять migrate/operations flags. Текущий пользователь всё ещё заблокирован старым UNKNOWN output32768: без подтверждённой сверки/согласованного изменения лимита новую генерацию не обещать. Дефекты воспроизведены offline, атрибуция старых UNKNOWN не установлена. Flownix по-прежнему недоступен, задачи/харнесс не закрыты.
+- Текущий пользователь остаётся заблокирован старым UNKNOWN output32768: без подтверждённой сверки или согласованного изменения лимита новую генерацию не обещать. Дефекты воспроизведены offline, атрибуция старых UNKNOWN не установлена. Flownix ранее был недоступен, задачи/харнесс не закрыты.
 
 ### Summary retry blocker — 07.11, 15:14 UTC
 
