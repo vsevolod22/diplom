@@ -487,6 +487,48 @@ it.each(['LLM_INVALID_RESPONSE', 'PRIVATE_PROVIDER_ERROR'])(
   },
 );
 
+it('original summary POST diagnostics are safe, passive to expand and scoped to the session', async () => {
+  mockApi(undefined, () => new Response(JSON.stringify({
+    errorCode: 'LLM_PROVIDER_UNAVAILABLE', message: 'private-summary-message-never-display',
+  }), { status: 502, headers: {
+    'Content-Type': 'application/json', 'X-LLM-Failure-Phase': 'headers', 'X-LLM-Failure-Reason': 'http_error',
+  } }));
+  const view = mount(transport(), publicStatus);
+  await screen.findByRole('alert');
+  const toggle = screen.getByText('Технические сведения запроса summary');
+  const details = toggle.closest('details')!;
+  expect(details.open).toBe(false);
+  const requestCount = requests.length;
+  fireEvent.click(toggle);
+  expect(details.open).toBe(true);
+  expect(details).toHaveTextContent('Ответ на POST /llm/summary: HTTP 502');
+  expect(details).toHaveTextContent('headers / http_error');
+  expect(document.body.textContent).not.toContain('private-summary-message-never-display');
+  expect(requests).toHaveLength(requestCount);
+  fireEvent(window, new Event('focus'));
+  fireEvent(window, new Event('online'));
+  view.unmount();
+  mount(transport(), publicStatus);
+  await screen.findByRole('alert');
+  expect(posts()).toHaveLength(1);
+  act(() => transitionScanSession('bob', new QueryClient(), true));
+  await act(async () => {});
+  expect(screen.queryByText('headers / http_error')).not.toBeInTheDocument();
+  expect(posts()).toHaveLength(1);
+});
+
+it('summary diagnostics never display unknown header values or treat GET missing as a POST failure', async () => {
+  mockApi(undefined, () => new Response('{', { status: 502, headers: {
+    'X-LLM-Failure-Phase': 'private-header-never-display', 'X-LLM-Failure-Reason': 'private-reason-never-display',
+  } }));
+  mount(transport(), publicStatus);
+  await screen.findByRole('alert');
+  const details = screen.getByText('Технические сведения запроса summary').closest('details')!;
+  expect(details).toHaveTextContent('Ответ на POST /llm/summary: HTTP 502');
+  expect(document.body.textContent).not.toMatch(/private-header-never-display|private-reason-never-display|LLM_SUMMARY_MISSING/);
+  expect(posts()).toHaveLength(1);
+});
+
 it('one opt-in click persists the existing language and generates once; later reports autoload without another button', async () => {
   saveReportPreferences({ language: 'ru', autoSummary: false });
   mockApi();

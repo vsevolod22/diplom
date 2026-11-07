@@ -168,9 +168,44 @@ export type SummarySource = {
 export type SummaryClient = Omit<ReturnType<typeof createSummaryClient>, 'existing'> & {
   existing?: ReturnType<typeof createSummaryClient>['existing'];
 };
+// Mirror server/api/src/llm/provider-diagnostic.ts without importing backend runtime code.
+const SUMMARY_FAILURE_PHASES = [
+  'request', 'connect', 'tls', 'dispatch_guard', 'headers', 'body', 'json', 'model',
+  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort',
+  'language', 'grounding', 'translation_title', 'translation_description',
+] as const;
+const SUMMARY_FAILURE_REASONS = [
+  'invalid_request', 'rejected', 'io_error', 'timeout', 'aborted', 'http_error',
+  'invalid_type', 'limit', 'invalid_json', 'mismatch', 'invalid_shape', 'invalid_finish',
+  'invalid_content', 'invalid_receipt', 'observation_failed', 'not_russian',
+  'unknown_identifier', 'finish_length', 'finish_content_filter', 'finish_tool_calls',
+  'finish_error', 'finish_unknown', 'null_mismatch', 'unsafe_text', 'invalid_markup',
+  'identifier_mismatch', 'nonprose_changed', 'not_normalized', 'invalid_link',
+] as const;
+export type SummaryFailureDiagnostic = Readonly<{
+  httpStatus: number;
+  phase?: (typeof SUMMARY_FAILURE_PHASES)[number];
+  reason?: (typeof SUMMARY_FAILURE_REASONS)[number];
+}>;
+function summaryFailureDiagnostic(
+  httpStatus: number,
+  phase: unknown,
+  reason: unknown,
+): SummaryFailureDiagnostic {
+  const finitePhase = SUMMARY_FAILURE_PHASES.find((value) => value === phase);
+  const finiteReason = SUMMARY_FAILURE_REASONS.find((value) => value === reason);
+  return Object.freeze({
+    httpStatus,
+    ...(finitePhase && finiteReason ? { phase: finitePhase, reason: finiteReason } : {}),
+  });
+}
 export class SummaryError extends Error {
-  constructor(readonly code: string, readonly httpStatus?: number) {
+  readonly diagnostic?: SummaryFailureDiagnostic;
+  constructor(readonly code: string, readonly httpStatus?: number, diagnostic?: SummaryFailureDiagnostic) {
     super('ИИ-сводка недоступна');
+    this.diagnostic = diagnostic
+      ? summaryFailureDiagnostic(diagnostic.httpStatus, diagnostic.phase, diagnostic.reason)
+      : undefined;
   }
 }
 export function isUnsupportedSummaryReport(error: unknown): boolean {
@@ -259,39 +294,53 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
         void response.body?.cancel().catch(() => {});
         throw new SummaryError('SESSION');
       }
-      const reader = response.body?.getReader();
-      if (!reader) throw new SummaryError('INVALID');
-      const cancelReader = () => {
-        void reader.cancel().catch(() => {});
-      };
-      controller.signal.addEventListener('abort', cancelReader, { once: true });
-      const chunks: Uint8Array[] = [];
-      let size = 0;
+      const diagnostic = !response.ok && endpoint === 'summary' && body
+        ? summaryFailureDiagnostic(
+            response.status,
+            response.headers.get('X-LLM-Failure-Phase'),
+            response.headers.get('X-LLM-Failure-Reason'),
+          )
+        : undefined;
+      let value: unknown;
       try {
-        while (true) {
-          const part = await reader.read();
-          if (controller.signal.aborted) throw new SummaryError('ABORTED');
-          if (part.done) break;
-          size += part.value.byteLength;
-          if (size > 65_536) throw new SummaryError('INVALID');
-          chunks.push(part.value);
+        const reader = response.body?.getReader();
+        if (!reader) throw new SummaryError('INVALID');
+        const cancelReader = () => {
+          void reader.cancel().catch(() => {});
+        };
+        controller.signal.addEventListener('abort', cancelReader, { once: true });
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        try {
+          while (true) {
+            const part = await reader.read();
+            if (controller.signal.aborted) throw new SummaryError('ABORTED');
+            if (part.done) break;
+            size += part.value.byteLength;
+            if (size > 65_536) throw new SummaryError('INVALID');
+            chunks.push(part.value);
+          }
+        } finally {
+          controller.signal.removeEventListener('abort', cancelReader);
+          cancelReader();
+          reader.releaseLock();
         }
-      } finally {
-        controller.signal.removeEventListener('abort', cancelReader);
-        cancelReader();
-        reader.releaseLock();
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+        value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      } catch (error) {
+        if (diagnostic && current() && !controller.signal.aborted)
+          throw new SummaryError('INVALID', response.status, diagnostic);
+        throw error;
       }
-      const bytes = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset);
-        offset += chunk.length;
-      }
-      const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
       if (!current() || controller.signal.aborted) throw new SummaryError('SESSION');
       if (!response.ok) {
         const code = z.object({ errorCode: z.string().regex(/^[A-Z_]{1,64}$/) }).safeParse(value);
-        throw new SummaryError(code.success ? code.data.errorCode : 'UNAVAILABLE', response.status);
+        throw new SummaryError(code.success ? code.data.errorCode : 'UNAVAILABLE', response.status, diagnostic);
       }
       return value;
     };

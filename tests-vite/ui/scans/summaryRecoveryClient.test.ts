@@ -78,7 +78,10 @@ describe('summary recovery client', () => {
   });
 
   it('maps only the exact owner-cache-missing error code to null, without a generation fallback', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json({ errorCode: 'LLM_SUMMARY_MISSING' }, 404));
+    const response = json({ errorCode: 'LLM_SUMMARY_MISSING' }, 404);
+    response.headers.set('X-LLM-Failure-Phase', 'headers');
+    response.headers.set('X-LLM-Failure-Reason', 'http_error');
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
     expect(await createSummaryClient(scanSession(), fetcher).existing(context, signal())).toBeNull();
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher.mock.calls[0][1]?.method).toBe('GET');
@@ -225,6 +228,94 @@ describe('summary recovery client', () => {
     };
     expect(controlled.existing).toBeUndefined();
     expect(createSummaryClient(scanSession(), vi.fn()).existing).toBeTypeOf('function');
+  });
+});
+
+describe('summary POST failure diagnostics', () => {
+  it('preserves the provider error code and exact safe diagnostic from a failed POST', async () => {
+    const response = json({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }, 502);
+    response.headers.set('X-LLM-Failure-Phase', 'headers');
+    response.headers.set('X-LLM-Failure-Reason', 'http_error');
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const pending = createSummaryClient(scanSession(), fetcher).summary(context, signal());
+
+    await expect(pending).rejects.toBeInstanceOf(SummaryError);
+    await expect(pending).rejects.toMatchObject({ code: 'LLM_PROVIDER_UNAVAILABLE', httpStatus: 502 });
+    await expect(pending).rejects.toHaveProperty('diagnostic', {
+      httpStatus: 502,
+      phase: 'headers',
+      reason: 'http_error',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe(`/api/v1/browser/scans/${scanId}/llm/summary`);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('POST');
+  });
+
+  it('keeps HTTP status and safe diagnostics on SummaryError even when the failed POST JSON is malformed', async () => {
+    const response = new Response('{', {
+      status: 502,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-LLM-Failure-Phase': 'headers',
+        'X-LLM-Failure-Reason': 'http_error',
+      },
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const pending = createSummaryClient(scanSession(), fetcher).summary(context, signal());
+
+    await expect(pending).rejects.toBeInstanceOf(SummaryError);
+    await expect(pending).rejects.toMatchObject({ httpStatus: 502 });
+    await expect(pending).rejects.toHaveProperty('diagnostic', {
+      httpStatus: 502,
+      phase: 'headers',
+      reason: 'http_error',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('POST');
+  });
+
+  it('omits unknown and oversized failure header values instead of retaining arbitrary provider text', async () => {
+    for (const value of ['unknown_provider_detail', 'x'.repeat(4096)]) {
+      const response = json({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }, 502);
+      response.headers.set('X-LLM-Failure-Phase', value);
+      response.headers.set('X-LLM-Failure-Reason', value);
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+      const pending = createSummaryClient(scanSession(), fetcher).summary(context, signal());
+
+      await expect(pending).rejects.toBeInstanceOf(SummaryError);
+      await expect(pending).rejects.toMatchObject({ code: 'LLM_PROVIDER_UNAVAILABLE', httpStatus: 502 });
+      await expect(pending).rejects.toHaveProperty('diagnostic', { httpStatus: 502 });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher.mock.calls[0][1]?.method).toBe('POST');
+    }
+  });
+
+  it('rejects a late failed POST as SESSION without leaking its diagnostic after an owner switch', async () => {
+    let finish!: (response: Response) => void;
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = createSummaryClient(scanSession(), fetcher).summary(context, signal());
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'SESSION' });
+    const noDiagnostic = expect(pending).rejects.not.toHaveProperty('diagnostic', expect.anything());
+    const requestSignal = fetcher.mock.calls[0][1]?.signal;
+    transitionScanSession('another-owner', queryClient, true);
+    expect(requestSignal?.aborted).toBe(true);
+    await rejected;
+    await noDiagnostic;
+
+    const late = json({ errorCode: 'LLM_PROVIDER_UNAVAILABLE' }, 502);
+    late.headers.set('X-LLM-Failure-Phase', 'headers');
+    late.headers.set('X-LLM-Failure-Reason', 'http_error');
+    const cancel = vi.spyOn(late.body!, 'cancel');
+    finish(late);
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+    await expect(pending).rejects.not.toHaveProperty('diagnostic', expect.anything());
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.method).toBe('POST');
   });
 });
 

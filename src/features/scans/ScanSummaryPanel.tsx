@@ -33,6 +33,7 @@ import {
   verifiedSummarySources,
   type SummaryClient,
   type SummaryContext,
+  type SummaryFailureDiagnostic,
   type SummaryReply,
   type SummarySource,
 } from '@/shared/api/scans/llmSummaryClient';
@@ -147,6 +148,7 @@ function SummaryScope({
   const [pending, setPending] = useState(false);
   const [phase, setPhase] = useState<SummaryPhase>('context');
   const [message, setMessage] = useState('');
+  const [postFailure, setPostFailure] = useState<SummaryFailureDiagnostic | null>(null);
   const [unsupportedReport, setUnsupportedReport] = useState(false);
     const [missingResult, setMissingResult] = useState(false);
   const [result, setResult] = useState<{
@@ -168,6 +170,7 @@ function SummaryScope({
     invalidateRequest();
     setPending(false);
     setResult(null);
+    setPostFailure(null);
   }
   function checkContext(next: SummaryContext) {
     if (next.scanId !== status.scanId || next.digest !== status.digest || next.platform !== status.platform)
@@ -209,7 +212,10 @@ function SummaryScope({
       ]);
       checkContext(next);
       if (generation.current !== version || controller.signal.aborted || !current()) return;
-      if (contextRef.current && contextFence(next) !== contextFence(contextRef.current)) setResult(null);
+      if (contextRef.current && contextFence(next) !== contextFence(contextRef.current)) {
+        setResult(null);
+        setPostFailure(null);
+      }
       contextRef.current = next;
       setContext(next);
       accepted = next;
@@ -256,6 +262,7 @@ function SummaryScope({
       contextRef.current = null;
       setContext(null);
       setResult(null);
+      setPostFailure(null);
       setMessage(summaryErrorMessage(error));
     } finally {
       clearTimeout(deadline);
@@ -339,6 +346,7 @@ function SummaryScope({
     setMissingResult(false);
     setPhase('waiting');
     setResult(null);
+    setPostFailure(null);
     setMessage('');
     let timedOut = false;
     const deadline = setTimeout(() => {
@@ -442,6 +450,7 @@ function SummaryScope({
     } catch (error) {
       if (generation.current === version && current()) {
         setUnsupportedReport(isUnsupportedSummaryReport(error));
+        setPostFailure(error instanceof SummaryError ? error.diagnostic ?? null : null);
         setMessage(
           error instanceof ReportAutomationError
             ? error.code === 'DISCLOSURE'
@@ -552,6 +561,16 @@ function SummaryScope({
             Отменить разбор
           </Button>
         </div>
+      ) : null}
+      {postFailure && !pending && !result && current() ? (
+        <details>
+          <summary>Технические сведения запроса summary</summary>
+          <p>Ответ на POST /llm/summary: HTTP {postFailure.httpStatus}</p>
+          {postFailure.phase && postFailure.reason ? (
+            <p>Этап и причина: {postFailure.phase} / {postFailure.reason}</p>
+          ) : null}
+          <p>Проверенный результат не получен. Запрос уже мог быть обработан или учтён. Автоматического повтора нет. Проверка сохранённого разбора через GET не восстанавливает причину этой ошибки.</p>
+        </details>
       ) : null}
       {failure && !pending && !result ? (
         <div>
