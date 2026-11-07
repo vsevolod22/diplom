@@ -5,6 +5,19 @@ import { BROWSER_SCANS_PATH } from './scanTransport';
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const vector = z.strictObject({ input: count, output: count, costMicros: count });
 const limitVector = vector.extend({ costMicros: count.nullable() });
+const lifetimeBudgetSchema = z
+  .strictObject({
+    limitMicros: count.min(1).max(1_000_000_000),
+    usedMicros: count,
+    heldMicros: count,
+    remainingMicros: count,
+  })
+  .refine((value) => {
+    // Individual safe integers can still overflow when added; compare the exact balance.
+    const remaining = BigInt(value.limitMicros) - BigInt(value.usedMicros) - BigInt(value.heldMicros);
+    return BigInt(value.remainingMicros) === (remaining > 0n ? remaining : 0n);
+  });
+export type LifetimeBudget = z.infer<typeof lifetimeBudgetSchema>;
 const scope = z
   .strictObject({
     limits: limitVector,
@@ -71,6 +84,7 @@ export const usageSchema = z.discriminatedUnion('available', [
       ...binding,
       available: z.literal(true),
       monetaryLimit: z.enum(['capped', 'uncapped']).optional(),
+      lifetimeBudget: lifetimeBudgetSchema.optional(),
       admission,
       reason: z.enum(['ready', 'warning', 'exhausted', 'policy_fault']),
       window: z
@@ -90,20 +104,48 @@ export const usageSchema = z.discriminatedUnion('available', [
     })
     .refine((value) => {
       const next = value.admission;
+      const lifetime = value.lifetimeBudget;
+      if (lifetime) {
+        if (value.monetaryLimit !== 'uncapped') return false;
+        if (lifetime.usedMicros < value.user.used.costMicros) return false;
+        if (
+          BigInt(lifetime.heldMicros) <
+          BigInt(value.user.held.costMicros) + BigInt(value.user.carried.costMicros)
+        )
+          return false;
+        // The owner's daily totals include this scan, in every accounting bucket and dimension.
+        if (
+          (['used', 'held', 'carried'] as const).some((bucket) =>
+            (['input', 'output', 'costMicros'] as const).some(
+              (dimension) => value.user[bucket][dimension] < value.scan[bucket][dimension],
+            ),
+          )
+        )
+          return false;
+      }
       for (const name of ['user', 'scan'] as const) {
         const cost = value[name].limits.costMicros;
         if (value.monetaryLimit === 'uncapped' ? cost !== null : cost === null) return false;
         if (value.monetaryLimit === 'capped' && (cost === null || cost <= 0)) return false;
       }
-      if (value.monetaryLimit === 'uncapped' && value.signals.some((s) => s.dimension === 'costMicros'))
+      if (
+        value.monetaryLimit === 'uncapped' &&
+        value.signals.some((s) => s.dimension === 'costMicros' && (!lifetime || s.scope !== 'user'))
+      )
         return false;
       if (next.status === 'unavailable') return true;
       if (value.monetaryLimit === undefined ? next.reserve.costMicros !== 0 : next.reserve.costMicros <= 0)
         return false;
+      const remainingFor = (name: 'user' | 'scan', dimension: 'input' | 'output' | 'costMicros') =>
+        lifetime
+          ? name === 'user' && dimension === 'costMicros'
+            ? lifetime.remainingMicros
+            : null
+          : value[name].remaining[dimension];
       const expected = (['user', 'scan'] as const).flatMap((name) =>
         (['input', 'output', 'costMicros'] as const)
           .filter((d) => {
-            const remaining = value[name].remaining[d];
+            const remaining = remainingFor(name, d);
             return remaining !== null && next.reserve[d] > remaining;
           })
           .map((d) => `${name}:${d}`),
@@ -117,7 +159,7 @@ export const usageSchema = z.discriminatedUnion('available', [
           (s) =>
             expected.includes(`${s.scope}:${s.dimension}`) &&
             s.required === next.reserve[s.dimension] &&
-            s.remaining === value[s.scope].remaining[s.dimension],
+            s.remaining === remainingFor(s.scope, s.dimension),
         )
       )
         return false;
@@ -126,17 +168,18 @@ export const usageSchema = z.discriminatedUnion('available', [
     }),
 ]);
 export type LlmUsage = z.infer<typeof usageSchema>;
-/** A free/old accounting snapshot cannot admit a paid request (or vice versa). */
+/** Accounting must match the disclosed provider, monetary mode and lifetime cap exactly. */
 export function usageMatchesDisclosure(
   usage: LlmUsage,
   disclosure:
-    | { provider: 'OpenAI'; monetaryLimit: 'capped' | 'uncapped' }
+    | { provider: 'OpenAI'; monetaryLimit: 'capped' | 'uncapped'; lifetimeUserCostMicros?: number }
     | { provider: 'OpenRouter' }
     | null,
 ) {
   if (!usage.available || !disclosure) return false;
   return disclosure.provider === 'OpenAI'
-    ? usage.monetaryLimit === disclosure.monetaryLimit
+    ? usage.monetaryLimit === disclosure.monetaryLimit &&
+        usage.lifetimeBudget?.limitMicros === disclosure.lifetimeUserCostMicros
     : usage.monetaryLimit === undefined;
 }
 export type UsageBinding = Pick<LlmUsage, 'scanId' | 'digest' | 'platform' | 'reportVersion'>;

@@ -62,6 +62,7 @@ const numeric = Object.freeze({
 });
 const budgetNames = ['OPENAI_REQUEST_BUDGET_MICROS', 'OPENAI_USER_BUDGET_MICROS', 'OPENAI_SCAN_BUDGET_MICROS'];
 const costNames = ['LLM_QUOTA_USER_COST_USD', 'LLM_QUOTA_SCAN_COST_USD'];
+const lifetimeCostName = 'LLM_QUOTA_LIFETIME_USER_COST_MICROS';
 function integer(text, min, max) {
   safe(typeof text === 'string' && /^(?:0|[1-9][0-9]{0,15})$/.test(text));
   const n = Number(text); safe(Number.isSafeInteger(n) && n >= min && n <= max); return n;
@@ -80,8 +81,12 @@ export function validateOpenAiDeployment(value) {
   const openrouter = openAiRouterSelection(value.openrouter);
   safe(value.keyVolume === openrouter.keyVolume && (value.credentialVolume === null || openAiVolumeName(value.credentialVolume)));
   const e = value.environment, mode = value.monetaryLimit;
+  const lifetime = mode === 'uncapped' && Object.hasOwn(e ?? {}, lifetimeCostName);
   keys(e, [...Object.keys(fixed), ...Object.keys(numeric), 'OPENAI_ENABLED', 'OPENAI_POLICY_REVISION', 'OPENAI_ACCOUNTING_REVISION',
-    'LLM_QUOTA_REVISION', 'OPENAI_MONETARY_LIMIT', 'LLM_QUOTA_MONETARY_LIMIT', ...(mode === 'capped' ? [...budgetNames, ...costNames] : [])]);
+    'LLM_QUOTA_REVISION', 'OPENAI_MONETARY_LIMIT', 'LLM_QUOTA_MONETARY_LIMIT', ...(mode === 'capped' ? [...budgetNames, ...costNames] : []),
+    ...(lifetime ? [lifetimeCostName] : [])]);
+  // Independent account-lifetime cap, not a daily or per-request monetary budget.
+  if (lifetime) integer(e[lifetimeCostName], 1, 1_000_000_000);
   safe(Object.entries(fixed).every(([k, v]) => e[k] === v) && ['true', 'false'].includes(e.OPENAI_ENABLED));
   safe(e.OPENAI_ENABLED !== 'true' || value.credentialVolume !== null);
   safe(['OPENAI_POLICY_REVISION', 'OPENAI_ACCOUNTING_REVISION', 'LLM_QUOTA_REVISION'].every(k => revision(e[k])));

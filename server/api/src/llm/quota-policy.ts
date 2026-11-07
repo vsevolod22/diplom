@@ -10,6 +10,8 @@ export type LimitVector = Readonly<{ input: number; output: number; costMicros: 
 export const MAX_OBSERVATION_COST_MICROS = 2_097_152_000;
 export type QuotaPolicy = Readonly<{
   revision: string; version: string; warningPercent: number; requestInput: number;
+  // Account-wide budget, separate from capped per-request/daily monetary contracts.
+  lifetimeUserCostMicros?: number;
   observationTokens: number; observationCostMicros: number; receiptMs: number; replayDays: number;
   maxRows: number; dbBytes: number; diskHeadroomBytes: number; busyMs: number; cleanupBatch: number;
 } & (
@@ -19,6 +21,8 @@ export type QuotaPolicy = Readonly<{
 
 // Legacy absence means an explicitly configured finite cap, never uncapped.
 export function checkedQuotaMonetaryPolicy(policy: QuotaPolicy): void {
+  if (policy.lifetimeUserCostMicros !== undefined &&
+      (policy.monetaryLimit !== 'uncapped' || integer(policy.lifetimeUserCostMicros) < 1)) throw quotaUnavailable();
   if (policy.monetaryLimit === 'uncapped') {
     if (policy.user.costMicros !== null || policy.scan.costMicros !== null) throw quotaUnavailable();
   } else {
@@ -81,6 +85,8 @@ export function quotaPolicyFromEnvironment(env: NodeJS.ProcessEnv = process.env)
     if (!revision || revision === 'undecided' || !/^[A-Za-z0-9._-]{1,80}$/.test(revision) || env.LLM_QUOTA_WINDOW !== 'utc-day') return null;
     const mode = env.LLM_QUOTA_MONETARY_LIMIT;
     if (mode !== undefined && mode !== 'capped' && mode !== 'uncapped') return null;
+    const lifetime = env.LLM_QUOTA_LIFETIME_USER_COST_MICROS;
+    if (lifetime !== undefined && mode !== 'uncapped') return null;
     if (mode === 'uncapped' && (env.LLM_QUOTA_USER_COST_USD !== undefined || env.LLM_QUOTA_SCAN_COST_USD !== undefined)) return null;
     const scope = <T extends number | null>(key: string, costMicros: T) => Object.freeze({
       input: number(`${key}_INPUT`, 1e9), output: number(`${key}_OUTPUT`, 1e9), costMicros });
@@ -93,6 +99,7 @@ export function quotaPolicyFromEnvironment(env: NodeJS.ProcessEnv = process.env)
     if (micros !== undefined && env.LLM_QUOTA_OBSERVATION_COST_USD !== undefined || mode === 'uncapped' && micros === undefined) return null;
     const observationCostMicros = micros === undefined ? cost('OBSERVATION_COST') : number('OBSERVATION_COST_MICROS', MAX_OBSERVATION_COST_MICROS, 1);
     const settings = { revision, ...scopes,
+      ...(lifetime !== undefined ? { lifetimeUserCostMicros: number('LIFETIME_USER_COST_MICROS', 1_000_000_000, 1) } : {}),
       warningPercent: number('WARNING_PERCENT', 80, 80), requestInput: number('REQUEST_INPUT', 65536, 1025),
       observationTokens: number('OBSERVATION_TOKENS', 1048576, 65536), observationCostMicros,
       receiptMs: number('RECEIPT_MS', 300000, 30000), replayDays: number('REPLAY_DAYS', 7, 7),

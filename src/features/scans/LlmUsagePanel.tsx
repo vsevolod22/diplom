@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { subscribeScanSession } from '@/shared/api/auth/scanSession';
 import {
   createUsageClient,
+  type LifetimeBudget,
   type LlmUsage,
   type UsageBinding,
   type UsageClient,
@@ -17,6 +18,40 @@ const reasons = {
   disabled: 'Продуктовые квоты выключены оператором.',
   unavailable: 'Счётчики временно недоступны; остаток неизвестен.',
 };
+export function LifetimeBudgetDetails({ budget }: { budget: LifetimeBudget }) {
+  const usd = (micros: number) => {
+    const amount = BigInt(micros);
+    const fraction = (amount % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
+    return `$${amount / 1_000_000n}${fraction ? `.${fraction}` : ''}`;
+  };
+  return (
+    <section aria-label="Бюджет ИИ за всё время">
+      <h4>{usd(budget.limitMicros)} на аккаунт за всё время</h4>
+      <dl>
+        <div>
+          <dt>Использовано по оценке сервера</dt>
+          <dd>{usd(budget.usedMicros)}</dd>
+        </div>
+        <div>
+          <dt>В резерве, включая неопределённый расход</dt>
+          <dd>{usd(budget.heldMicros)}</dd>
+        </div>
+        <div>
+          <dt>Осталось по оценке сервера</dt>
+          <dd>{usd(budget.remainingMicros)}</dd>
+        </div>
+      </dl>
+      <p>
+        Это серверная оценка, не счёт провайдера. Резерв включает ожидающие запросы и расход, который пока
+        неизвестен; это не подтверждённое списание и не свободный остаток.
+      </p>
+      <p>
+        Бюджет общий для аккаунта за всё время и не обновляется со сменой суток. Остаток не гарантирует допуск
+        следующего полного запроса.
+      </p>
+    </section>
+  );
+}
 export function LlmUsagePanel({ binding, refreshVersion, client: supplied }: Props) {
   const client = useMemo(() => supplied ?? createUsageClient(), [supplied]);
   const key = binding ? JSON.stringify(binding) : '';
@@ -142,9 +177,16 @@ export function LlmUsagePanel({ binding, refreshVersion, client: supplied }: Pro
           {!usage.integrationEnabled ? <p>Генерация выключена; просмотр счётчиков её не включает.</p> : null}
           {usage.available ? (
             <>
+              {usage.lifetimeBudget ? <LifetimeBudgetDetails budget={usage.lifetimeBudget} /> : null}
+              {usage.lifetimeBudget ? (
+                <p>
+                  Оконные счётчики токенов и стоимости — статистика, не блокирующие бюджеты. Допуск
+                  определяется отдельным бюджетом аккаунта за всё время.
+                </p>
+              ) : null}
               <p>
-                Окно UTC: {new Date(usage.window.start).toISOString()} —{' '}
-                {new Date(usage.window.end).toISOString()}
+                {usage.lifetimeBudget ? 'Окно счётчиков UTC' : 'Окно UTC'}:{' '}
+                {new Date(usage.window.start).toISOString()} — {new Date(usage.window.end).toISOString()}
               </p>
               <ul>
                 {usage.signals.map((signal, index) => (
@@ -163,7 +205,10 @@ export function LlmUsagePanel({ binding, refreshVersion, client: supplied }: Pro
               </ul>
               {(['user', 'scan'] as const).map((scope) => (
                 <div key={scope}>
-                  <h5>{scope === 'user' ? 'Пользователь' : 'Этот скан'}</h5>
+                  <h5>
+                    {scope === 'user' ? 'Пользователь' : 'Этот скан'}
+                    {usage.lifetimeBudget ? ' · оконные счётчики' : ''}
+                  </h5>
                   <dl>
                     {(['input', 'output', 'costMicros'] as const).map((d) => (
                       <div key={d}>
@@ -176,8 +221,10 @@ export function LlmUsagePanel({ binding, refreshVersion, client: supplied }: Pro
                         </dt>
                         <dd>
                           {usage[scope].limits[d] === null
-                            ? 'Без локального денежного лимита — платно, не бесплатно; остаток не ограничен'
-                            : `Осталось ${usage[scope].remaining[d]} из ${usage[scope].limits[d]}`}
+                            ? 'Без денежного лимита запроса и суток — платно, не бесплатно; отдельный бюджет аккаунта может ограничивать расход'
+                            : usage.lifetimeBudget
+                              ? `Оконный счётчик: ${usage[scope].limits[d]}; расчётный остаток счётчика ${usage[scope].remaining[d]} (не бюджет допуска)`
+                              : `Осталось ${usage[scope].remaining[d]} из ${usage[scope].limits[d]}`}
                           ; учтено {usage[scope].used[d]}; резерв {usage[scope].held[d]}; перенос
                           неопределённого расхода {usage[scope].carried[d]}
                         </dd>

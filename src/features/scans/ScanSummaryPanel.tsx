@@ -8,9 +8,16 @@ import {
   useReportPreferences,
 } from '@/shared/api/preferences/reportPreferences';
 import { OpenAiDisclosure } from './OpenAiDisclosure';
+import { LifetimeBudgetDetails } from './LlmUsagePanel';
 import { ReportRemediation } from './ReportRemediation';
 import { ReportSourceLink, type ReportSourceNavigate } from './reportSourceNavigation';
-import { createUsageClient, usageMatchesDisclosure, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
+import {
+  createUsageClient,
+  UsageError,
+  usageMatchesDisclosure,
+  type LifetimeBudget,
+  type LlmUsage,
+} from '@/shared/api/scans/llmUsageClient';
 import {
   allowAutomationDisclosure,
   allowSummaryAutomation,
@@ -150,6 +157,7 @@ function SummaryScope({
   const [message, setMessage] = useState('');
   const [postFailure, setPostFailure] = useState<SummaryFailureDiagnostic | null>(null);
   const [quotaBlock, setQuotaBlock] = useState<Extract<LlmUsage, { available: true }> | null>(null);
+  const [lifetimeBudget, setLifetimeBudget] = useState<LifetimeBudget | null>(null);
   const [unsupportedReport, setUnsupportedReport] = useState(false);
     const [missingResult, setMissingResult] = useState(false);
   const [result, setResult] = useState<{
@@ -173,6 +181,7 @@ function SummaryScope({
     setResult(null);
     setPostFailure(null);
     setQuotaBlock(null);
+    setLifetimeBudget(null);
   }
   function checkContext(next: SummaryContext) {
     if (next.scanId !== status.scanId || next.digest !== status.digest || next.platform !== status.platform)
@@ -185,7 +194,10 @@ function SummaryScope({
     if (!usage.available || !usage.integrationEnabled || !usage.quotaEnabled ||
       !usageMatchesDisclosure(usage, accepted.disclosure))
       throw new SummaryError('LLM_QUOTA_UNAVAILABLE');
-    const blocked = usage.user.exhausted || usage.scan.exhausted || usage.reason === 'policy_fault' ||
+    // Lifetime snapshots retain daily counters, but only their server-level reason governs exhaustion.
+    const blocked =
+      usage.reason === 'exhausted' || usage.reason === 'policy_fault' ||
+      (!usage.lifetimeBudget && (usage.user.exhausted || usage.scan.exhausted)) ||
       usage.admission.status === 'insufficient' || usage.admission.status === 'policy_fault';
     if (blocked || recheck) {
       const after = await client.context(status.scanId, signal);
@@ -193,6 +205,7 @@ function SummaryScope({
       if (signal.aborted || !current() || contextFence(after) !== contextFence(accepted))
         throw new SummaryError('STALE');
     }
+    setLifetimeBudget(usage.lifetimeBudget ?? null);
     if (blocked) {
       setQuotaBlock(usage);
       throw new SummaryError('LLM_QUOTA_EXCEEDED');
@@ -208,6 +221,7 @@ function SummaryScope({
     setMissingResult(false);
     setMessage('');
     setQuotaBlock(null);
+    setLifetimeBudget(null);
     setUnsupportedReport(false);
     let timedOut = false;
     const deadline = setTimeout(() => {
@@ -295,7 +309,9 @@ function SummaryScope({
       setContext(null);
       setResult(null);
       setPostFailure(null);
-      setMessage(summaryErrorMessage(error));
+      setMessage(
+        summaryErrorMessage(error instanceof UsageError ? new SummaryError('LLM_QUOTA_UNAVAILABLE') : error),
+      );
     } finally {
       clearTimeout(deadline);
       controller.abort();
@@ -380,6 +396,7 @@ function SummaryScope({
     setResult(null);
     setPostFailure(null);
     setQuotaBlock(null);
+    setLifetimeBudget(null);
     setMessage('');
     let timedOut = false;
     const deadline = setTimeout(() => {
@@ -478,7 +495,7 @@ function SummaryScope({
             ? error.code === 'DISCLOSURE'
               ? 'Условия ИИ-разбора изменились. Проверьте настройки аккаунта.'
               : 'Не удалось подготовить разбор. Отчёт сканеров доступен; можно повторить вручную.'
-            : summaryErrorMessage(error),
+            : summaryErrorMessage(error instanceof UsageError ? new SummaryError('LLM_QUOTA_UNAVAILABLE') : error),
         );
       }
     } finally {
@@ -526,6 +543,15 @@ function SummaryScope({
       <p>Дополнительное объяснение, не заключение о безопасности. Проверяйте рекомендации по находкам сканера и источникам под каждым абзацем.</p>
       {context?.disclosure?.provider === 'OpenAI' ? (
         <OpenAiDisclosure disclosure={context.disclosure} />
+      ) : null}
+      {lifetimeBudget && current() ? (
+        <>
+          <LifetimeBudgetDetails budget={lifetimeBudget} />
+          <p>
+            Денежный режим «без лимита» относится только к запросу и суткам. Отдельный бюджет аккаунта за всё
+            время ограничивает расход; показан снимок перед отправкой.
+          </p>
+        </>
       ) : null}
       {missingResult && !pending && !result && !failure ? (
               <div>
@@ -601,20 +627,33 @@ function SummaryScope({
           </Alert>
           {quotaBlock && current() ? (
             <div>
-              <p>Локальная квота ИИ: новая отправка остановлена до обращения к модели.</p>
+              <p>
+                Локальная квота ИИ: новая отправка остановлена до обращения к модели. Предыдущие запросы уже
+                могли быть обработаны или учтены; это не означает отсутствия расхода.
+              </p>
               {quotaBlock.monetaryLimit === 'uncapped' ? (
-                <p>Денежный режим — без локального денежного лимита. Технические лимиты токенов остаются отдельными.</p>
+                <p>
+                  Денежный режим — без лимита запроса и суток; отдельный бюджет аккаунта может ограничивать
+                  расход. {quotaBlock.lifetimeBudget
+                    ? 'Оконные счётчики токенов — статистика, не блокирующие бюджеты.'
+                    : 'Технические лимиты токенов остаются отдельными.'}
+                </p>
               ) : null}
               {(['user', 'scan'] as const).map(scope => (
                 <div key={scope}>
-                  <h4>{scope === 'user' ? 'Пользователь' : 'Этот скан'}</h4>
+                  <h4>
+                    {scope === 'user' ? 'Пользователь' : 'Этот скан'}
+                    {quotaBlock.lifetimeBudget ? ' · оконные счётчики' : ''}
+                  </h4>
                   {(['input', 'output', 'costMicros'] as const).map(dimension => (
                     <div key={dimension}>
                       <p>{dimension === 'input' ? 'Входные токены' : dimension === 'output' ? 'Выходные токены' : 'Стоимость, микро-USD'}</p>
                       <p>
                         {quotaBlock[scope].limits[dimension] === null
-                          ? 'Без локального денежного лимита'
-                          : `Осталось ${quotaBlock[scope].remaining[dimension]} из ${quotaBlock[scope].limits[dimension]}`}
+                          ? 'Без денежного лимита запроса и суток; бюджет аккаунта учитывается отдельно'
+                          : quotaBlock.lifetimeBudget
+                            ? `Оконный счётчик: ${quotaBlock[scope].limits[dimension]}; расчётный остаток счётчика ${quotaBlock[scope].remaining[dimension]} (не бюджет допуска)`
+                            : `Осталось ${quotaBlock[scope].remaining[dimension]} из ${quotaBlock[scope].limits[dimension]}`}
                         ; учтено {quotaBlock[scope].used[dimension]}; резерв {quotaBlock[scope].held[dimension]}; перенос неопределённого расхода {quotaBlock[scope].carried[dimension]}
                       </p>
                     </div>

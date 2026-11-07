@@ -207,6 +207,7 @@ export const openAiDisclosureSchema = z.discriminatedUnion('monetaryLimit', [
   z.strictObject({
     ...openAiDisclosureShape,
     monetaryLimit: z.literal('uncapped'),
+    lifetimeUserCostMicros: z.number().int().min(1).max(1_000_000_000).optional(),
     requestBudgetMicros: z.null(),
     userBudgetMicros: z.null(),
     scanBudgetMicros: z.null(),

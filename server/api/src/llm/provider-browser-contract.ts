@@ -16,6 +16,7 @@ export type OpenAiDisclosure = {
   costBasis: typeof OPENAI_ESTIMATE_SOURCE;
   estimatedPrice: { unit: 'microUSD-per-million-tokens'; input: number; output: number };
   data: typeof LEGACY_SCANNER_DATA | typeof PUBLIC_SCANNER_DATA;
+  lifetimeUserCostMicros?: number;
 } & ({ monetaryLimit: 'uncapped'; requestBudgetMicros: null; userBudgetMicros: null; scanBudgetMicros: null } |
   { monetaryLimit: 'capped'; requestBudgetMicros: number; userBudgetMicros: number; scanBudgetMicros: number });
 export type ChatDisclosureFields = { sentData: typeof CHAT_SENT_DATA; localRetention: typeof CHAT_LOCAL_RETENTION };
@@ -28,7 +29,8 @@ export function openAiDisclosure(policy: OpenAiPolicy, quota: QuotaPolicy, publi
     operatorApprovedRouting: true as const, providerComplianceNotProvenByDeclaration: true as const, zeroDataRetentionVerified: false as const,
     costBasis: OPENAI_ESTIMATE_SOURCE, estimatedPrice: { unit: 'microUSD-per-million-tokens' as const,
       input: policy.inputPriceMicrosPerMillion, output: policy.outputPriceMicrosPerMillion },
-    data: publicReport ? PUBLIC_SCANNER_DATA : LEGACY_SCANNER_DATA };
+    data: publicReport ? PUBLIC_SCANNER_DATA : LEGACY_SCANNER_DATA,
+    ...(quota.lifetimeUserCostMicros !== undefined ? { lifetimeUserCostMicros: quota.lifetimeUserCostMicros } : {}) };
   if (policy.monetaryLimit === 'uncapped' && quota.monetaryLimit === 'uncapped')
     return { ...base, monetaryLimit: 'uncapped', requestBudgetMicros: null, userBudgetMicros: null, scanBudgetMicros: null };
   if (policy.monetaryLimit !== 'uncapped' && quota.monetaryLimit !== 'uncapped')

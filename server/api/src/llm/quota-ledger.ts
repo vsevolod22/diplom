@@ -15,7 +15,10 @@ type Row = { id: string; state: string; window: number; expires: number; input: 
   reserve_input: number; reserve_output: number; reserve_cost: number; receipt: string | null;
   user_key: string; scan_key: string; report_hash: string; policy_hash: string; request_hash: string; quota_policy: string };
 export type ScopeUsage = { limits: LimitVector; used: Vector; held: Vector; carried: Vector; remaining: LimitVector; warning: boolean; exhausted: boolean };
-export type QuotaSnapshot = { admission: QuotaAdmission; monetaryLimit?: MonetaryLimit; window: { start: number; end: number }; user: ScopeUsage; scan: ScopeUsage;
+export type LifetimeBudget = { limitMicros: number; usedMicros: number; heldMicros: number; remainingMicros: number };
+export type QuotaSnapshot = { admission: QuotaAdmission; monetaryLimit?: MonetaryLimit; lifetimeBudget?: LifetimeBudget;
+  // With lifetimeBudget, daily token totals are counters, not admission limits.
+  window: { start: number; end: number }; user: ScopeUsage; scan: ScopeUsage;
   reason: 'ready' | 'warning' | 'exhausted' | 'policy_fault';
   signals: Array<{ scope: 'user' | 'scan'; dimension: 'input' | 'output' | 'costMicros' | 'all'; reason: 'warning' | 'exhausted' | 'policy_fault' }> };
 
@@ -141,6 +144,18 @@ export class QuotaLedger {
       exhausted: remaining.input === 0 || remaining.output === 0 || limits.costMicros !== null &&
         (total('costMicros') > limits.costMicros || limits.costMicros > 0 && remaining.costMicros === 0) };
   }
+  private lifetimeBudget(userKey: string): LifetimeBudget | undefined {
+    const limitMicros = this.policy.lifetimeUserCostMicros;
+    if (limitMicros === undefined) return undefined;
+    // No window, scan or policy filter: old paid/free policies and unknown sends
+    // remain account liabilities after a policy switch or calendar rollover.
+    const row = this.db.prepare(`SELECT coalesce(sum(CASE WHEN state='settled' THEN cost ELSE 0 END),0) AS usedMicros,
+      coalesce(sum(CASE WHEN state IN ('reserved','dispatched','fault') THEN cost ELSE 0 END),0) AS heldMicros
+      FROM quota_attempt WHERE user_key=?`).get(userKey) as { usedMicros: number; heldMicros: number };
+    const usedMicros = integer(row.usedMicros, Number.MAX_SAFE_INTEGER), heldMicros = integer(row.heldMicros, Number.MAX_SAFE_INTEGER);
+    const total = integer(usedMicros + heldMicros, Number.MAX_SAFE_INTEGER);
+    return { limitMicros, usedMicros, heldMicros, remainingMicros: Math.max(0, limitMicros - total) };
+  }
   private validateReserve(reserve: Vector, paid = false): void {
     checkedQuotaMonetaryPolicy(this.policy);
     // The uncapped mode is an opt-in paid seam, never a widening of freeOnly.
@@ -150,7 +165,8 @@ export class QuotaLedger {
     integer(reserve.costMicros, paid ? this.policy.observationCostMicros : 0);
     if (reserve.input === 0 || reserve.output === 0 || paid && reserve.costMicros === 0) throw quotaUnavailable();
   }
-  private admission(user: ScopeUsage, scan: ScopeUsage, userFault: boolean, scanFault: boolean, reserve?: Vector, paid = false): QuotaAdmission {
+  private admission(user: ScopeUsage, scan: ScopeUsage, userFault: boolean, scanFault: boolean, reserve?: Vector, paid = false,
+    lifetimeBudget?: LifetimeBudget): QuotaAdmission {
       if (!reserve) return { status: 'unavailable' };
       // Storage admits the largest supported envelope; preparation/runtime still
       // enforce the narrower legacy profile ceiling before producing a vector.
@@ -158,12 +174,16 @@ export class QuotaLedger {
       const signals: AdmissionSignal[] = [];
       for (const [name, scope, fault] of [['user', user, userFault], ['scan', scan, scanFault]] as const) {
         if (fault) signals.push({ scope: name, dimension: 'all', reason: 'policy_fault' });
+        if (lifetimeBudget) continue;
         for (const dimension of ['input', 'output', 'costMicros'] as const) {
           const remaining = scope.remaining[dimension];
           if (remaining !== null && reserve[dimension] > remaining) signals.push({ scope: name, dimension, reason: 'insufficient',
             required: reserve[dimension], remaining });
         }
       }
+      if (lifetimeBudget && reserve.costMicros > lifetimeBudget.remainingMicros)
+        signals.push({ scope: 'user', dimension: 'costMicros', reason: 'insufficient',
+          required: reserve.costMicros, remaining: lifetimeBudget.remainingMicros });
       return Object.freeze({ status: userFault || scanFault ? 'policy_fault' : signals.length ? 'insufficient' : 'fits',
         reserve: Object.freeze({ ...reserve }), signals: Object.freeze(signals.map(s => Object.freeze(s))) });
     }
@@ -171,11 +191,17 @@ export class QuotaLedger {
     const window = Math.floor(time / DAY) * DAY;
     const userKey = hash(subject), scanKey = hash(JSON.stringify([subject, scanId]));
     const user = this.scope('user_key', userKey, window, this.policy.user), scan = this.scope('scan_key', scanKey, window, this.policy.scan);
+    const lifetimeBudget = this.lifetimeBudget(userKey);
+    if (lifetimeBudget) for (const scope of [user, scan]) {
+      scope.exhausted = lifetimeBudget.remainingMicros === 0;
+      scope.warning = lifetimeBudget.usedMicros + lifetimeBudget.heldMicros >= lifetimeBudget.limitMicros * this.policy.warningPercent / 100;
+    }
     const userFault = this.db.prepare("SELECT 1 FROM quota_attempt WHERE state='fault' AND user_key=? LIMIT 1").get(userKey);
     const scanFault = this.db.prepare("SELECT 1 FROM quota_attempt WHERE state='fault' AND scan_key=? LIMIT 1").get(scanKey);
     const signals: QuotaSnapshot['signals'] = [];
     for (const [name, scope, fault] of [['user', user, userFault], ['scan', scan, scanFault]] as const) {
       if (fault) signals.push({ scope: name, dimension: 'all', reason: 'policy_fault' });
+      if (lifetimeBudget) continue;
       for (const dimension of ['input', 'output', 'costMicros'] as const) {
         const total = scope.used[dimension] + scope.held[dimension] + scope.carried[dimension];
         const cap = scope.limits[dimension];
@@ -186,7 +212,10 @@ export class QuotaLedger {
           signals.push({ scope: name, dimension, reason: 'warning' });
       }
     }
-    return { admission: this.admission(user, scan, !!userFault, !!scanFault, reserve, paid),
+    if (lifetimeBudget && (user.exhausted || user.warning))
+      signals.push({ scope: 'user', dimension: 'costMicros', reason: user.exhausted ? 'exhausted' : 'warning' });
+    return { admission: this.admission(user, scan, !!userFault, !!scanFault, reserve, paid, lifetimeBudget),
+      ...(lifetimeBudget ? { lifetimeBudget } : {}),
       ...(this.policy.monetaryLimit !== undefined ? { monetaryLimit: this.policy.monetaryLimit } : {}),
       window: { start: window, end: window + DAY }, user, scan, signals,
       reason: userFault || scanFault ? 'policy_fault' : user.exhausted || scan.exhausted ? 'exhausted' : user.warning || scan.warning ? 'warning' : 'ready' };
@@ -205,8 +234,11 @@ export class QuotaLedger {
       if (!binding.subject || binding.subject.length > 200 || !binding.scanId || binding.scanId.length > 200 ||
           ![binding.reportVersion, binding.policyVersion, binding.requestHash].every(v => /^[a-f0-9]{64}$/.test(v))) throw quotaUnavailable();
       this.validateReserve(reserve, context !== undefined);
+      // Retain settlements even while lifetime enforcement is disabled, so a later
+      // enable cannot erase spend. Rows deleted by older cleanup are unrecoverable;
+      // lifetime totals can only include retained history. Released rows owe zero.
       this.db.prepare(`DELETE FROM quota_attempt WHERE id IN (SELECT id FROM quota_attempt
-        WHERE state IN ('settled','released') AND window+?<? LIMIT ?)`)
+        WHERE state='released' AND cost=0 AND window+?<? LIMIT ?)`)
         .run(DAY * (1 + this.policy.replayDays), time, this.policy.cleanupBatch);
       const view = this.snapshotAt(binding.subject, binding.scanId, time, reserve, context !== undefined);
       if (view.admission.status !== 'fits') throw quotaExceeded(view.admission);

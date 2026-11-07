@@ -3,15 +3,29 @@ import {
   type OpenAiDisclosure as Disclosure,
 } from '@/shared/api/scans/llmPublicContract';
 
+type Props = { disclosure: Disclosure & { lifetimeUserCostMicros?: number }; chat?: boolean };
+
 /** Cost and egress stay visible; only low-level policy details are collapsed. */
-export function OpenAiDisclosure({ disclosure, chat = false }: { disclosure: Disclosure; chat?: boolean }) {
+export function OpenAiDisclosure({ disclosure, chat = false }: Props) {
+  const lifetime =
+    disclosure.monetaryLimit === 'uncapped' &&
+    Number.isSafeInteger(disclosure.lifetimeUserCostMicros) &&
+    disclosure.lifetimeUserCostMicros !== undefined &&
+    disclosure.lifetimeUserCostMicros >= 1 &&
+    disclosure.lifetimeUserCostMicros <= 1_000_000_000
+      ? disclosure.lifetimeUserCostMicros
+      : undefined;
+  const lifetimeUsd =
+    lifetime === undefined ? null : `$${(lifetime / 1_000_000).toFixed(6).replace(/\.?0+$/, '')}`;
   return (
     <div aria-label="Условия OpenAI">
       <p>
         OpenAI · {disclosure.model}. Платный ИИ:{' '}
-        {disclosure.monetaryLimit === 'uncapped'
-          ? 'без локального денежного лимита — это не бесплатный режим.'
-          : 'с серверными денежными лимитами.'}{' '}
+        {lifetimeUsd
+          ? `${lifetimeUsd} на аккаунт за всё время — это не бесплатный режим.`
+          : disclosure.monetaryLimit === 'uncapped'
+            ? 'без локального денежного лимита — это не бесплатный режим.'
+            : 'с серверными денежными лимитами.'}{' '}
         Стоимость рассчитывается сервером по настроенным ставкам, это оценка, не счёт провайдера.
       </p>
       <p>
@@ -33,6 +47,12 @@ export function OpenAiDisclosure({ disclosure, chat = false }: { disclosure: Dis
           <p>
             Денежные лимиты, микро-USD: запрос — {disclosure.requestBudgetMicros}; пользователь —{' '}
             {disclosure.userBudgetMicros}; скан — {disclosure.scanBudgetMicros}.
+          </p>
+        ) : lifetimeUsd ? (
+          <p>
+            Бюджет аккаунта — {lifetimeUsd} на аккаунт за всё время, без сброса со сменой суток. Денежные
+            лимиты запроса и суток не установлены; отдельный бюджет аккаунта ограничивает расход. Оконные
+            счётчики токенов — статистика, не блокирующие бюджеты; ограничения отдельных запросов сохраняются.
           </p>
         ) : (
           <p>Локальный предел расходов не установлен; токенные квоты и ограничения запросов сохраняются.</p>
