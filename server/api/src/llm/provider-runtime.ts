@@ -148,9 +148,7 @@ export function createOpenAiRuntime(config: OpenAiServerConfiguration, quota: Qu
                   return accepted;
                 },
               }, (binding, send) => fence(() => {
-                if (!bound.dispatch(binding)) throw quotaUnavailable();
-                dispatched?.();
-                send();
+                if (!bound.dispatchGuarded(binding, () => dispatched?.(), send)) throw quotaUnavailable();
               }));
               if (!receipt) throw quotaUnavailable();
               return select(result);

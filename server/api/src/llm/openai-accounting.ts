@@ -103,11 +103,13 @@ export function checkedOpenAiQuotaUsage(context: OpenAiQuotaContext, usage: Open
   checkedOpenAiUsage(usage, context.reserve, provider);
 }
 
-// Adapter bridge only. There is deliberately no send/transport/guard here: the
-// orchestration layer must recheck owner/session/consent/report, commit dispatch,
-// THEN synchronously invoke send exactly once. A failed send is not a refund.
+// Adapter bridge only: authority and transport callbacks belong to orchestration.
+// Dispatch commits before the final synchronous check and send. Only a rejected
+// pre-send check can compensate that fresh dispatch; an entered send is not a refund.
 export function bindOpenAiAccounting(ledger: QuotaLedger, id: string, context: OpenAiQuotaContext): Readonly<{
-  accounting: OpenAiAccounting; dispatch: (binding: OpenAiAccountingBinding) => boolean; release: () => boolean;
+  accounting: OpenAiAccounting; dispatch: (binding: OpenAiAccountingBinding) => boolean;
+  dispatchGuarded: (binding: OpenAiAccountingBinding, beforeSend: () => void, send: () => void) => boolean;
+  release: () => boolean;
 }> {
   checkedOpenAiQuotaContext(context);
   const matches = (binding: OpenAiAccountingBinding) => binding.operation === context.accounting.operation &&
@@ -118,5 +120,7 @@ export function bindOpenAiAccounting(ledger: QuotaLedger, id: string, context: O
     observe: (binding: OpenAiAccountingBinding, usage: OpenAiUsage) => matches(binding) && ledger.observeOpenAi(id, context, usage),
   });
   return Object.freeze({ accounting, dispatch: (binding: OpenAiAccountingBinding) => matches(binding) && ledger.dispatchOpenAi(id, context),
+    dispatchGuarded: (binding: OpenAiAccountingBinding, beforeSend: () => void, send: () => void) =>
+      matches(binding) && ledger.dispatchOpenAiGuarded(id, context, beforeSend, send),
     release: () => ledger.releaseOpenAi(id, context) });
 }

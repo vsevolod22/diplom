@@ -273,6 +273,32 @@ export class QuotaLedger {
       return dispatched;
     });
   }
+  dispatchOpenAiGuarded(id: string, context: OpenAiQuotaContext, beforeSend: () => void, send: () => void): boolean {
+    if (!this.dispatchOpenAi(id, context)) return false;
+    try {
+      const result: unknown = beforeSend();
+      if (result !== undefined) {
+        // Consume rejected promises/thenables without trusting an arbitrary .catch.
+        void new Promise<unknown>(resolve => resolve(result)).catch(() => {});
+        throw quotaUnavailable();
+      }
+    } catch (error) {
+      // Only this call's fresh dispatch is known unsent. Recheck the exact branded
+      // binding and receipt under the write lock; never expose a general refund.
+      try {
+        this.write(() => {
+          const row = this.openAiRow(id, context);
+          if (!row || row.state !== 'dispatched' || row.receipt !== null) return;
+          this.db.prepare(`UPDATE quota_attempt SET state='released',input=0,output=0,cost=0
+            WHERE id=? AND state='dispatched' AND receipt IS NULL`).run(id);
+        });
+      } catch { /* Failed compensation retains liability and the original rejection. */ }
+      throw error;
+    }
+    // Entry into send ends the proof of non-dispatch, even if send itself throws.
+    send();
+    return true;
+  }
   releaseOpenAi(id: string, context: OpenAiQuotaContext): boolean {
     return this.write(() => this.openAiRow(id, context) !== undefined && this.releaseReserved(id));
   }

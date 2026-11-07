@@ -156,7 +156,7 @@ export class OpenAiProvider {
         catch { throw failed('json', 'invalid_json'); }
         if (!object(envelope)) throw failed('envelope', 'invalid_shape');
         if (envelope.model !== policy.model) throw failed('model', 'mismatch');
-        if (envelope.service_tier !== undefined && envelope.service_tier !== 'default') throw failed('envelope', 'invalid_shape');
+        if (envelope.service_tier !== undefined && envelope.service_tier !== null && envelope.service_tier !== 'default') throw failed('envelope', 'invalid_shape');
         phase = 'usage';
         const usage = observeOpenAiUsage(envelope.usage, request.reserve, policy);
         try { if (accounting.observe(binding, usage) !== true) throw failed('accounting', 'observation_failed'); }

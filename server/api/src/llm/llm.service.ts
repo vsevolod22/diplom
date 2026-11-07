@@ -170,21 +170,22 @@ export class LlmService {
       const { store, storageReservation } = this.withSummary(access, scanId, (fresh, current) => {
         this.currentSummary(report, policy, fresh, current, controller.signal);
         const store = this.historyRuntime.summaryStore();
-        return { store, storageReservation: store.reserveSummary(access.identity.subject, scanId, expiresAt) };
+        const storageReservation = store.reserveSummary(access.identity.subject, scanId, expiresAt);
+        releaseStorage = () => store.releaseSummary(access.identity.subject, scanId, storageReservation);
+        return { store, storageReservation };
       });
-      releaseStorage = () => store.releaseSummary(access.identity.subject, scanId, storageReservation);
       const ledger = this.quotas.ledger();
       const selected = selectPreparedSummary(report, policy.findings, ledger.policy.requestInput, policy.prepareSummary);
-      attempt = this.withSummary(access, scanId, (fresh, current) => {
+      this.withSummary(access, scanId, (fresh, current) => {
         this.currentSummary(report, policy, fresh, current, controller.signal);
-        let reserved: RuntimeAttempt<SummaryResponse> | undefined;
         store.guardSummaryReservation(access.identity.subject, scanId, storageReservation, () => {
-          reserved = ledger.withBusyTimeout(Math.min(SUMMARY_STORAGE.busyMs, ledger.policy.busyMs), () =>
-            selected.prepared.reserveAttempt(ledger, { subject: access.identity.subject, scanId,
-              reportVersion: report.reportVersion, policyVersion: policy.providerPolicyVersion, requestHash: selected.prepared.hash }));
+          ledger.withBusyTimeout(Math.min(SUMMARY_STORAGE.busyMs, ledger.policy.busyMs), () => {
+            attempt = selected.prepared.reserveAttempt(ledger, { subject: access.identity.subject, scanId,
+              reportVersion: report.reportVersion, policyVersion: policy.providerPolicyVersion, requestHash: selected.prepared.hash });
+          });
         });
-        return reserved!;
       });
+      if (!attempt) throw quotaUnavailable();
       let observed = false;
       const operation = attempt.generate(controller.signal, dispatchAndSend => this.withSummary(access, scanId, (fresh, current) => {
         this.currentSummary(report, policy, fresh, current, controller.signal);
@@ -193,9 +194,9 @@ export class LlmService {
       }), () => { observed = true; }, () => {
         // Called by the runtime after accounting dispatch, not during credential
         // access. Recheck after quota's synchronous busy wait, immediately at send.
-        dispatched = true;
         if (controller.signal.aborted) throw new ConflictException({ errorCode: 'LLM_REQUEST_ABORTED' });
         store.guardSummaryReservation(access.identity.subject, scanId, storageReservation, () => {});
+        dispatched = true;
       });
       const stopped = new Promise<never>((_, reject) => {
         const stop = () => {
