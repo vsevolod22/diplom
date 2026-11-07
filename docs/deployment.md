@@ -5,6 +5,14 @@
 
 ## Текущая готовность — 07.11.2026
 
+### Summary retry blocker — 07.11, 15:14 UTC
+
+- После уточнения пользователя «после нажатия повторить разбор» повторная read-only SQL диагностика установила текущую блокировку **до нового POST**: user output limit32768, used0, held+carried32768, remaining0;11 dispatched UNKNOWN attempts владельца. На самом scan по-прежнему одна старая dispatched-попытка. Денежный режим `uncapped` активен, но не отменяет технический output cap. Это объясняет текущий отказ повтора, **не восстанавливает причину первоначальной ошибки провайдера**. Holds/quotas/liabilities не сбрасывались и не повышались.
+- `7bec50f`: summary показывает проверенный quota snapshot и отличает недоступный учёт от исчерпанной квоты. Кнопка «Проверить квоту и сохранённый разбор» делает только GET даже после восстановления допуска; генерация — отдельной явной кнопкой с действующим согласием. Final context fence перед счётчиками/Create, session/owner/policy drift скрывает снимок. Спекулятивные cache/preference изменения не включены.
+- RED регрессии blocked→GET-only retry, blocked→fits→отдельный Create и policy drift исправлены; summary/client/OpenAI browser scope **199/199 PASS**, typecheck/scoped lint/diff-check/build PASS. Native paid acceptance не запускалась.
+- Web-only apply: `new-healthy`, lock released, completion `2026-11-07T15:14:18.351Z`. После поставки ready/unlocked, root200/auth401, live report chunk `ScanDetailPage-sufWFz5-.js` содержит новое объяснение/кнопку. API/worker/gateways/stores не обновлялись. Flownix `server shut down`, harness/закрытие задач не заявлены.
+- Для новой генерации требуется сверка UNKNOWN-учёта или отдельно согласованное повышение технической квоты с сохранением обязательств. Само исправление UI этот допуск не создаёт.
+
 ### Summary incident — 07.11, 14:43 UTC
 
 - Для scan `0d7242d7-7c81-4937-a516-ae908bc6e40c` read-only operator SQL подтвердил `completed`, history schema5, одну quota-попытку `dispatched` без наблюдённого usage и reservation без готового/предыдущего summary. Резерв токенов не является фактическим расходом. `LLM_SUMMARY_MISSING` GET не устанавливает причину исходного POST; она не восстановлена из текущих метаданных. Данные/holds/liabilities не изменялись, provider-вызовов не было. Retained test session — другой owner, её HTTP404 не принят за воспроизведение пользовательской ошибки.
