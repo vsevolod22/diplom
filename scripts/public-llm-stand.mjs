@@ -26,7 +26,10 @@ import { readCurrentBackupExport, transferCurrentBackupSnapshot } from './public
 import { OPENAI_DEPLOYMENT, validateOpenAiDeployment, validateOpenAiVolume,
   openAiEnvironment, assertNoOpenAiDockerSecret, validateOpenAiBuildDeployment, selectOpenAiOperations,
     PUBLIC_IMAGE_OPERATIONS, PUBLIC_IMAGE_OPERATIONS_ACK, PUBLIC_IMAGE_LOGGING,
-    PUBLIC_IMAGE_OPERATION_ROLES, PUBLIC_IMAGE_EGRESS_COMMAND } from './public-llm-source-build.mjs';
+    PUBLIC_IMAGE_OPERATION_ROLES, PUBLIC_IMAGE_EGRESS_COMMAND,
+    MODULEAPI_SLOT_DEPLOYMENT, validateModuleApiDeployment, validateModuleApiBuildDeployment,
+    moduleApiEnvironment, validateModuleApiVolume, assertNoModuleApiDockerSecret,
+    discoverModuleApiExecutionClosure } from './public-llm-source-build.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const requireApi = createRequire(new URL('../server/api/package.json', import.meta.url));
@@ -95,6 +98,7 @@ export const PUBLIC_LLM_REPORT4K_ENV = Object.freeze({ ...PUBLIC_LLM_DOTS_ENV,
   LLM_OUTPUT_TOKENS: '4096', LLM_POLICY_REVISION: PUBLIC_LLM_REPORT4K_PROFILE,
 });
 export function publicLlmSelectedEnvironment(selection) {
+  if (selection?.version === 7) return moduleApiEnvironment(selection, publicLlmSelectedEnvironment(selection.openrouter));
   if (selection?.version === 6) return openAiEnvironment(selection, publicLlmSelectedEnvironment(selection.openrouter));
   switch (validateLlmSelection(selection).version) {
     case 1: return PUBLIC_LLM_ENV;
@@ -109,6 +113,8 @@ function publicLlmGatewayCommand(selection) {
 }
 export function validatePublicLlmTransition(prior, next) {
   validateLlmSelection(next);
+  if (next.version === 7) { validateModuleApiBuildDeployment({ prior, next }); return; }
+  safe(prior?.version !== 7); // No implicit provider rollback, including a v7 -> v6 downgrade.
   if (next.version === 6) {
     safe(prior !== null && prior !== undefined); validateLlmSelection(prior);
     safe(equal(next.openrouter, prior.version === 6 ? prior.openrouter : prior));
@@ -148,6 +154,7 @@ export function parsePublicLlmConfig(text) {
   return environment;
 }
 export function validateLlmSelection(value) {
+  if (Object.getOwnPropertyDescriptor(value ?? {}, 'version')?.value === 7) return validateModuleApiDeployment(value);
   if (Object.getOwnPropertyDescriptor(value ?? {}, 'version')?.value === 6) return validateOpenAiDeployment(value);
   safe(value && (value.version === 1 && equal(Object.keys(value).sort(), ['keyVolume', 'version']) ||
     value.version === 2 && equal(Object.keys(value).sort(), ['keyVolume', 'timing', 'version']) && value.timing === PUBLIC_LLM_TIMING ||
@@ -161,7 +168,8 @@ export function validateLlmSelection(value) {
   return Object.freeze({ version: value.version, keyVolume: value.keyVolume, ...(value.version >= 2 ? { timing: PUBLIC_LLM_TIMING } : {}),
     ...(value.version >= 3 ? { profile: value.version === 3 ? PUBLIC_LLM_NVIDIA_PROFILE : value.version === 4 ? PUBLIC_LLM_DOTS_PROFILE : PUBLIC_LLM_REPORT4K_PROFILE } : {}) });
 }
-export function loadPublicLlmSettings(home = homedir(), { openai = false } = {}) {
+export function loadPublicLlmSettings(home = homedir(), { openai = false, moduleapi = false } = {}) {
+  safe(typeof openai === 'boolean' && typeof moduleapi === 'boolean' && !(openai && moduleapi));
   const path = join(home, '.local/state/diplom-public-images/llm');
   // No symlinked ancestor may redirect this approved public-only state path.
   const ancestors = []; let current = '/';
@@ -188,15 +196,27 @@ export function loadPublicLlmSettings(home = homedir(), { openai = false } = {})
     ...(environment === PUBLIC_LLM_NVIDIA_ENV ? { profile: PUBLIC_LLM_NVIDIA_PROFILE } : environment === PUBLIC_LLM_DOTS_ENV ? { profile: PUBLIC_LLM_DOTS_PROFILE } : environment === PUBLIC_LLM_REPORT4K_ENV ? { profile: PUBLIC_LLM_REPORT4K_PROFILE } : {}) });
   const fences = [config, ...(receipt ? [receipt] : [])];
 
-  if (openai) {
+  if (openai || moduleapi) {
     const descriptor = fileFence(join(path, OPENAI_DEPLOYMENT.configName), 16384, 0o600);
     const next = validateOpenAiDeployment(privateJson(descriptor.bytes)); safe(equal(next.openrouter, selection));
     fences.push(descriptor); selection = next;
-
+  }
+  const moduleApiPath = join(path, MODULEAPI_SLOT_DEPLOYMENT.configName);
+  const moduleApiPresent = moduleapi && has(moduleApiPath);
+  if (moduleApiPresent) {
+    const descriptor = fileFence(moduleApiPath, 16384, 0o600);
+    const next = validateModuleApiDeployment(privateJson(descriptor.bytes));
+    // An approved operations-only publication does not rewrite the protected
+    // v6 descriptor. Reconcile ONLY that optional field, then compare everything
+    // else exactly. The adapter separately checks the actual published transition.
+    const protectedPrior = selectOpenAiOperations(selection, next.openai);
+    validateModuleApiBuildDeployment({ prior: protectedPrior, next });
+    fences.push(descriptor); selection = next;
   }
   const verify = () => {
     for (const a of ancestors) { const s = fs.lstatSync(a.path); safe(s.isDirectory() && !s.isSymbolicLink() && s.dev === a.stamp.dev && s.ino === a.stamp.ino && s.mode === a.stamp.mode && s.uid === a.stamp.uid); }
     directory(path, 0o700); for (const f of fences) f.verify(); safe(has(receiptPath) === Boolean(receipt));
+    if (moduleapi) safe(has(moduleApiPath) === moduleApiPresent);
 
   };
   verify(); return { selection, verify };
@@ -207,11 +227,13 @@ export function readPublicLlmBinding(root) {
   directory(state, 0o700);
   safe(!fs.readdirSync(state).some(n => n.startsWith('.llm-pending-')));
   if (!has(path)) { safe(!has(join(root, STATE, 'compose.llm-env.json'))); return null; }
-  const text = readBounded(path, 4096, 0o600), value = validateLlmSelection(privateJson(text));
+  const text = readBounded(path, 16384, 0o600), value = validateLlmSelection(privateJson(text));
+  safe(value.version === 7 || Buffer.byteLength(text) <= 4096);
   safe(text === JSON.stringify(value) && equal(privateJson(readBounded(join(state, 'compose.llm-env.json'), 16384, 0o600)), publicLlmEnvironmentOverlay(value)));
   return value;
 }
 export function publicLlmEnvironmentOverlay(selection) {
+  if (selection?.version === 7) return moduleApiEnvironmentOverlay(selection);
   if (selection?.version === 6) return openAiEnvironmentOverlay(selection);
   const environment = publicLlmSelectedEnvironment(selection);
   return { services: { api: { environment: { ...environment }, ...(selection.keyVolume ? { volumes: [
@@ -230,6 +252,7 @@ export function publicLlmStaticOverlay(root) {
   }])) };
 }
 export function expectedPublicLlmConfig(root, cve = null, selection = null) {
+  if (selection?.version === 7) return expectedModuleApiConfig(root, cve, selection);
   if (selection?.version === 6) return expectedOpenAiConfig(root, cve, selection);
   const model = expectedConfig(root, cve);
   if (!selection) return model;
@@ -251,7 +274,15 @@ export function publicLlmComposeArguments(root, args, { cve = false, llm = true,
     ...(llm ? ['-f', join(root, 'server/deploy/compose.public-llm.yaml'), '-f', join(dir, 'compose.llm-env.json')] : []),
     ...(pinned ? ['-f', join(dir, 'compose.images.json')] : []), ...args];
 }
-export function validatePublicLlmImage(image, name) {
+export function validatePublicLlmImage(image, name, selection = null) {
+  if (selection?.version === 7) {
+    validateModuleApiDeployment(selection); assertNoModuleApiDockerSecret(image?.Config);
+    if (name === 'openai-egress') {
+      safe(equal(image?.Config?.Cmd, MODULEAPI_SLOT_DEPLOYMENT.gatewayCommand));
+      const copy = structuredClone(image); copy.Config.Cmd = ['python', '-I', 'proxy.py'];
+      return validateImage(copy, 'egress');
+    }
+  }
   if (name === 'openai-egress') {
     assertNoOpenAiDockerSecret(image?.Config); safe(equal(image?.Config?.Cmd, OPENAI_DEPLOYMENT.gatewayCommand));
     const copy = structuredClone(image); copy.Config.Cmd = ['python', '-I', 'proxy.py']; return validateImage(copy, 'egress');
@@ -260,7 +291,20 @@ export function validatePublicLlmImage(image, name) {
   safe(equal(image?.Config?.Cmd, ['python', '-I', 'openrouter.py']));
   const copy = structuredClone(image); copy.Config.Cmd = ['python', '-I', 'proxy.py']; return validateImage(copy, 'egress');
 }
+// Call only AFTER the caller verifies the sealed retained image ID/tag/custody.
+// A v7 transition can retain BOTH the replaced OpenAI image and ModuleAPI slot
+// images. Keep normal role validation exact; choose only a declared authority.
+export function validatePublicLlmRetainedImage(image, name, selection = null) {
+  if (selection?.version === 7) {
+    const s = validateModuleApiDeployment(selection);
+    if (name === 'openai-egress' && equal(image?.Config?.Cmd, OPENAI_DEPLOYMENT.gatewayCommand))
+      return validatePublicLlmImage(image, name, s.openai);
+    return validatePublicLlmImage(image, name, s);
+  }
+  return validatePublicLlmImage(image, name, selection);
+}
 export function validatePublicLlmConfig(value, root, cve = null, selection = null, images = null) {
+  if (selection?.version === 7) return validateModuleApiConfig(value, root, cve, selection, images);
   if (selection?.version === 6) return validateOpenAiConfig(value, root, cve, selection, images);
   if (!selection) return validateConfig(value, root, cve, images);
   const expected = expectedPublicLlmConfig(root, cve, selection), copy = structuredClone(value);
@@ -293,6 +337,10 @@ export function validatePublicLlmConfig(value, root, cve = null, selection = nul
   validateConfig(copy, root, cve, baseImages);
 }
 export function projectPublicLlmContainer(item, name, spec, image, config, selection) {
+  if (selection?.version === 7) {
+    const p = stripModuleApiContainer(item, name, spec, image, selection);
+    return projectPublicLlmContainer(p.item, p.name, p.spec, p.image, config, selection.openrouter);
+  }
   if (selection?.version === 6) {
     const p = stripOpenAiContainer(item, name, spec, image, selection);
     return projectPublicLlmContainer(p.item, p.name, p.spec, p.image, config, selection.openrouter);
@@ -336,7 +384,7 @@ export function projectPublicLlmContainer(item, name, spec, image, config, selec
   return { item: c, name, spec: s, image: im, config };
 }
 export function validatePublicLlmContainer(item, name, spec, image, config, extra = {}, selection = null) {
-  validatePublicLlmImage(image, name);
+  validatePublicLlmImage(image, name, selection);
   const p = projectPublicLlmContainer(item, name, spec, image, config, selection);
   const images = extra.images && { ...extra.images, ...(['llm-egress', 'openai-egress'].includes(name) ? { egress: p.image } : {}) };
   validateContainer(p.item, p.name, p.spec, p.image, p.config, { ...extra, images });
@@ -347,6 +395,7 @@ export function validatePublicLlmKeyVolume(v, selection) {
     equal(v.Options ?? {}, {}) && equal(v.Labels, { 'diplom.public-llm': 'key-v1' }));
 }
 export async function inspectPublicLlmNamespace(run, options, root, cve = null, selection = null, extra = {}) {
+  if (selection?.version === 7) return inspectModuleApiNamespace(run, options, root, cve, selection, extra);
   if (selection?.version === 6) return inspectOpenAiNamespace(run, options, root, cve, selection, extra);
   if (!selection) return inspectNamespace(run, options, expectedConfig(root, cve), extra);
   const model = expectedPublicLlmConfig(root, cve, selection), base = expectedConfig(root, cve), images = new Map();
@@ -1162,8 +1211,11 @@ export async function executePublicLlmMaintenance(ops, originalBaseline = null, 
   return { outcome: 'ready', generationVerified: false };
 }
 
-export function capturePublicLlmSource(root, { openai = false } = {}) {
+export function capturePublicLlmSource(root, { openai = false, moduleapi = false } = {}) {
+  safe(typeof openai === 'boolean' && typeof moduleapi === 'boolean' && !(openai && moduleapi));
   checkIgnores(root);
+  if (moduleapi) for (const name of ['gateway/moduleapi.Dockerfile', 'moduleapi-api.Dockerfile', 'moduleapi-secret-init.Dockerfile'])
+    safe(!has(join(root, 'server/deploy', name + '.dockerignore')));
   if (openai) for (const name of ['gateway/openai.Dockerfile', 'openai-api.Dockerfile'])
     safe(!has(join(root, 'server/deploy', name + '.dockerignore')));
   for (const file of ['public-stand.Dockerfile', 'gateway/openrouter.Dockerfile']) safe(!has(join(root, 'server/deploy', file + '.dockerignore')));
@@ -1185,8 +1237,19 @@ export function capturePublicLlmSource(root, { openai = false } = {}) {
     safe(extendedDockerfile === legacyDockerfile.replace('WORKDIR /app/server/api\n',
       'COPY server/deploy/openai-secret-bootstrap.mjs server/deploy/openai-secret-bootstrap.mjs\nWORKDIR /app/server/api\n'));
   }
+  if (moduleapi) {
+    paths.push('server/deploy/gateway/moduleapi.Dockerfile', 'server/deploy/gateway/moduleapi.py',
+      'server/deploy/moduleapi-api.Dockerfile', MODULEAPI_SLOT_DEPLOYMENT.bootstrap,
+      'server/deploy/moduleapi-secret-init.py', 'server/deploy/moduleapi-secret-init.Dockerfile',
+      'scripts/moduleapi-secret-provision.py', 'scripts/public-llm-config.py');
+    const legacyDockerfile = readBounded(join(root, 'server/deploy/api.Dockerfile'), 16384);
+    const extendedDockerfile = readBounded(join(root, 'server/deploy/moduleapi-api.Dockerfile'), 16384);
+    safe(extendedDockerfile === legacyDockerfile.replace('WORKDIR /app/server/api\n',
+      'COPY server/deploy/moduleapi-secret-bootstrap.mjs server/deploy/moduleapi-secret-bootstrap.mjs\nWORKDIR /app/server/api\n'));
+  }
   const executionProofs = new Map(), executionDirectories = new Map();
-  const executionClosure = openai ? discoverOpenAiExecutionClosure(root, name => {
+  const discover = moduleapi ? discoverModuleApiExecutionClosure : discoverOpenAiExecutionClosure;
+  const executionClosure = openai || moduleapi ? discover(root, name => {
     const path = join(root, name);
     for (let p = dirname(path); ; p = dirname(p)) {
       safe(p === root || p.startsWith(root + '/'));
@@ -1935,6 +1998,312 @@ export async function inspectOpenAiNamespace(run, options, root, cve, selection,
     const members = out.containers.filter(c => c.State.Running && Object.hasOwn(c.NetworkSettings.Networks, n.Name));
     safe(equal(Object.keys(n.Containers ?? {}).sort(), members.map(c => c.Id).sort()));
     safe(members.every(c => role(c) === 'openai-egress' || n.Internal && role(c) === 'api'));
+  }
+  return out;
+}
+
+// v7 replaces the historical gateway SLOT, not the provider identity. Its own
+// descriptor and guards are checked before projecting only common base invariants.
+const moduleApiProviderKey = key => providerKey(key) || key.startsWith('MODULEAPI_') || key.startsWith('MODULE_API_');
+const moduleApiAlias = 'moduleapi-egress';
+const moduleApiSlot = 'openai-egress';
+function normalizedModuleApiService(service) {
+  const copy = normalizedService(service);
+  for (const network of Object.values(copy.networks ?? {})) {
+    if (network && typeof network === 'object' && network.priority === 0) delete network.priority;
+  }
+  return copy;
+}
+export function moduleApiStaticOverlay(root) {
+  const gateway = structuredClone(publicLlmStaticOverlay(root).services['llm-egress']);
+  gateway.image = `${PROJECT}-${moduleApiSlot}:local`;
+  gateway.build.dockerfile = 'server/deploy/gateway/moduleapi.Dockerfile';
+  gateway.command = [...MODULEAPI_SLOT_DEPLOYMENT.gatewayCommand];
+  gateway.networks = { openai_internal: { aliases: [moduleApiAlias] }, openai_uplink: null };
+  return { services: { api: { build: { dockerfile: 'server/deploy/moduleapi-api.Dockerfile' },
+    ulimits: { core: { soft: 0, hard: 0 } }, networks: { openai_internal: null },
+    depends_on: { [moduleApiSlot]: { condition: 'service_started' } } }, [moduleApiSlot]: gateway },
+    networks: Object.fromEntries(MODULEAPI_SLOT_DEPLOYMENT.networks.map(name => [name, {
+      name: `${PROJECT}_${name}`, labels: { [LABEL]: 'v1' }, ...(name.endsWith('_internal') ? { internal: true } : {}),
+    }])) };
+}
+export function moduleApiEnvironmentOverlay(selection) {
+  const s = validateModuleApiDeployment(selection), prior = publicLlmEnvironmentOverlay(s.openrouter), topology = moduleApiStaticOverlay('../..');
+  return applyOpenAiOperations({ services: { ...prior.services, ...topology.services, api: {
+    ...prior.services.api, ...topology.services.api,
+    environment: moduleApiEnvironment(s, publicLlmSelectedEnvironment(s.openrouter)),
+    ...(s.credentialVolume ? { entrypoint: [...MODULEAPI_SLOT_DEPLOYMENT.entrypoint], command: [...MODULEAPI_SLOT_DEPLOYMENT.command] } : {}),
+    volumes: [...(prior.services.api.volumes ?? []), ...(s.credentialVolume ? [{ type: 'volume', source: MODULEAPI_SLOT_DEPLOYMENT.volumeKey,
+      target: MODULEAPI_SLOT_DEPLOYMENT.mount, read_only: true, volume: { nocopy: true } }] : [])],
+  } }, networks: topology.networks, volumes: { ...prior.volumes,
+    ...(s.openai.credentialVolume ? { [OPENAI_DEPLOYMENT.volumeKey]: { name: s.openai.credentialVolume, external: true } } : {}),
+    ...(s.credentialVolume ? { [MODULEAPI_SLOT_DEPLOYMENT.volumeKey]: { name: s.credentialVolume, external: true } } : {}),
+  } }, s);
+}
+export function expectedModuleApiConfig(root, cve, selection) {
+  const s = validateModuleApiDeployment(selection), model = expectedPublicLlmConfig(root, cve, s.openrouter);
+  const overlay = moduleApiEnvironmentOverlay(s), topology = moduleApiStaticOverlay(root);
+  for (const key of Object.keys(model.services.api.environment).filter(moduleApiProviderKey)) delete model.services.api.environment[key];
+  Object.assign(model.services.api.environment, overlay.services.api.environment);
+  model.services.api.build.dockerfile = 'server/deploy/moduleapi-api.Dockerfile';
+  model.services.api.ulimits = { core: { soft: 0, hard: 0 } };
+  if (s.credentialVolume) { model.services.api.entrypoint = [...MODULEAPI_SLOT_DEPLOYMENT.entrypoint]; model.services.api.command = [...MODULEAPI_SLOT_DEPLOYMENT.command]; }
+  Object.assign(model.services.api.networks, topology.services.api.networks);
+  Object.assign(model.services.api.depends_on, topology.services.api.depends_on);
+  if (s.credentialVolume) model.services.api.volumes.push(overlay.services.api.volumes.at(-1));
+  model.services[moduleApiSlot] = topology.services[moduleApiSlot]; Object.assign(model.networks, topology.networks);
+  Object.assign(model.volumes, overlay.volumes); return applyOpenAiOperations(model, s);
+}
+export function validateModuleApiConfig(value, root, cve, selection, images) {
+  const s = validateModuleApiDeployment(selection), expected = expectedModuleApiConfig(root, cve, s), copy = structuredClone(value);
+  for (const group of ['services', 'networks', 'volumes']) safe(equal(Object.keys(copy[group] ?? {}).sort(), Object.keys(expected[group]).sort()));
+  for (const name of PUBLIC_IMAGE_OPERATION_ROLES) {
+    safe(equal(copy.services[name].logging, PUBLIC_IMAGE_LOGGING));
+    delete copy.services[name].logging; delete expected.services[name].logging;
+  }
+  safe(equal(copy.services.egress.command, PUBLIC_IMAGE_EGRESS_COMMAND));
+  copy.services.egress.command = ['python', '-I', 'proxy.py']; expected.services.egress.command = copy.services.egress.command;
+  if (images) {
+    safe(equal(Object.keys(images).sort(), Object.keys(expected.services).sort()));
+    for (const [name, image] of Object.entries(images)) { validatePublicLlmImage(image, name, s); expected.services[name].image = image.Id; }
+  }
+  safe(equal(normalizedModuleApiService(copy.services[moduleApiSlot]), expected.services[moduleApiSlot])); delete copy.services[moduleApiSlot];
+  for (const name of MODULEAPI_SLOT_DEPLOYMENT.networks) { safe(equal(normalizedNetwork(copy.networks[name]), expected.networks[name])); delete copy.networks[name]; }
+  const api = copy.services.api, legacy = expectedPublicLlmConfig(root, cve, s.openrouter).services.api;
+  safe(equal(Object.fromEntries(Object.entries(api.environment ?? {}).filter(([key]) => moduleApiProviderKey(key))), publicLlmSelectedEnvironment(s)));
+  for (const key of Object.keys(api.environment).filter(moduleApiProviderKey)) delete api.environment[key];
+  Object.assign(api.environment, publicLlmSelectedEnvironment(s.openrouter));
+  safe(api.build.dockerfile === 'server/deploy/moduleapi-api.Dockerfile'); api.build.dockerfile = legacy.build.dockerfile;
+  safe(equal(api.ulimits, { core: {} }) || equal(api.ulimits, { core: { soft: 0, hard: 0 } })); delete api.ulimits;
+  if (s.credentialVolume) {
+    safe(equal(api.entrypoint, MODULEAPI_SLOT_DEPLOYMENT.entrypoint) && equal(api.command, MODULEAPI_SLOT_DEPLOYMENT.command));
+    api.entrypoint = legacy.entrypoint; api.command = legacy.command;
+    safe(equal(api.volumes.filter(m => m.target === MODULEAPI_SLOT_DEPLOYMENT.mount), expected.services.api.volumes.filter(m => m.target === MODULEAPI_SLOT_DEPLOYMENT.mount)));
+    api.volumes = api.volumes.filter(m => m.target !== MODULEAPI_SLOT_DEPLOYMENT.mount);
+  }
+  safe(normalizedService(api).networks.openai_internal === null); delete api.networks.openai_internal;
+  safe(equal(normalizedService(api).depends_on[moduleApiSlot], { condition: 'service_started' })); delete api.depends_on[moduleApiSlot];
+  for (const key of [OPENAI_DEPLOYMENT.volumeKey, MODULEAPI_SLOT_DEPLOYMENT.volumeKey]) if (Object.hasOwn(expected.volumes, key)) {
+    safe(equal(copy.volumes[key], expected.volumes[key])); delete copy.volumes[key];
+  }
+  // Old secret declarations may remain, never old secret mounts. Unknown mounts
+  // and all other extra authority survive this projection to the base validator.
+  validatePublicLlmConfig(copy, root, cve, s.openrouter, images && Object.fromEntries(Object.entries(images).filter(([name]) => name !== moduleApiSlot)));
+}
+function validateModuleApiAliases(container, name) {
+  for (const [network, endpoint] of Object.entries(container.NetworkSettings?.Networks ?? {})) {
+    const internalSlot = name === moduleApiSlot && network === `${PROJECT}_openai_internal`;
+    const allowed = new Set([name, container.Name.slice(1), container.Id, container.Id.slice(0, 12), ...(internalSlot ? [moduleApiAlias] : [])]);
+    const aliases = endpoint.Aliases ?? [];
+    safe(Array.isArray(aliases) && new Set(aliases).size === aliases.length && aliases.every(alias => allowed.has(alias)));
+    // Stopped endpoints may have no live DNS names; the fixed Compose alias is
+    // still checked below. A running slot must expose the exact internal alias.
+    if (internalSlot && container.State?.Running) safe(aliases.includes(moduleApiAlias));
+    if (endpoint.DNSNames != null) safe(Array.isArray(endpoint.DNSNames) && endpoint.DNSNames.every(alias => allowed.has(alias)));
+  }
+}
+export function stripModuleApiContainer(item, name, spec, image, selection) {
+  const s = validateModuleApiDeployment(selection), c = structuredClone(item), im = structuredClone(image), model = structuredClone(spec);
+  assertNoModuleApiDockerSecret(c.Config); validateModuleApiAliases(c, name);
+  if (s.openai.credentialVolume) safe(!(c.Mounts ?? []).some(m => m.Name === s.openai.credentialVolume) &&
+    !(c.HostConfig.Mounts ?? []).some(m => m.Source === s.openai.credentialVolume));
+  if (PUBLIC_IMAGE_OPERATION_ROLES.includes(name)) {
+    safe(equal(model.logging, PUBLIC_IMAGE_LOGGING) && equal(c.HostConfig.LogConfig, { Type: PUBLIC_IMAGE_LOGGING.driver, Config: PUBLIC_IMAGE_LOGGING.options }));
+    delete model.logging; c.HostConfig.LogConfig = { Type: 'json-file', Config: {} };
+    if (name === 'egress') {
+      safe(equal(model.command, PUBLIC_IMAGE_EGRESS_COMMAND) && equal(c.Config.Cmd, PUBLIC_IMAGE_EGRESS_COMMAND) && c.Path === PUBLIC_IMAGE_EGRESS_COMMAND[0] && equal(c.Args, PUBLIC_IMAGE_EGRESS_COMMAND.slice(1)));
+      model.command = ['python', '-I', 'proxy.py']; c.Config.Cmd = model.command; c.Path = 'python'; c.Args = model.command.slice(1);
+    }
+  }
+  if (name === 'api') {
+    const env = envMap(c.Config.Env);
+    safe(equal(Object.fromEntries(Object.entries(env).filter(([key]) => moduleApiProviderKey(key))), publicLlmSelectedEnvironment(s)));
+    for (const key of Object.keys(env).filter(moduleApiProviderKey)) delete env[key]; Object.assign(env, publicLlmSelectedEnvironment(s.openrouter));
+    c.Config.Env = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+    safe(model.build.dockerfile === 'server/deploy/moduleapi-api.Dockerfile'); model.build.dockerfile = 'server/deploy/api.Dockerfile';
+    safe(equal(model.ulimits, { core: { soft: 0, hard: 0 } }) && equal(c.HostConfig.Ulimits, [{ Name: 'core', Soft: 0, Hard: 0 }])); delete model.ulimits; delete c.HostConfig.Ulimits;
+    if (s.credentialVolume) {
+      const command = [...MODULEAPI_SLOT_DEPLOYMENT.entrypoint, ...MODULEAPI_SLOT_DEPLOYMENT.command];
+      safe(equal(c.Config.Entrypoint, MODULEAPI_SLOT_DEPLOYMENT.entrypoint) && equal(model.entrypoint, MODULEAPI_SLOT_DEPLOYMENT.entrypoint) &&
+        equal(c.Config.Cmd, MODULEAPI_SLOT_DEPLOYMENT.command) && equal(model.command, MODULEAPI_SLOT_DEPLOYMENT.command) && c.Path === command[0] && equal(c.Args, command.slice(1)));
+      c.Config.Entrypoint = ['docker-entrypoint.sh']; model.entrypoint = c.Config.Entrypoint; c.Path = 'docker-entrypoint.sh'; c.Args = [...MODULEAPI_SLOT_DEPLOYMENT.command];
+      const declarations = c.HostConfig.Mounts.filter(m => m.Target === MODULEAPI_SLOT_DEPLOYMENT.mount), mounts = c.Mounts.filter(m => m.Destination === MODULEAPI_SLOT_DEPLOYMENT.mount);
+      safe(declarations.length === 1 && mounts.length === 1); const d = declarations[0], m = mounts[0];
+      safe(d.Type === 'volume' && d.Source === s.credentialVolume && d.ReadOnly === true &&
+        (equal(d.VolumeOptions, { NoCopy: true }) || equal(d.VolumeOptions, { NoCopy: true, DriverConfig: {} })) &&
+        Object.keys(d).every(key => ['Type', 'Source', 'Target', 'ReadOnly', 'VolumeOptions'].includes(key)) &&
+        m.Type === 'volume' && m.Name === s.credentialVolume && m.RW === false && !m.SubPath && (!m.Propagation || m.Propagation === 'rprivate'));
+      c.HostConfig.Mounts = c.HostConfig.Mounts.filter(m => m.Target !== MODULEAPI_SLOT_DEPLOYMENT.mount); c.Mounts = c.Mounts.filter(m => m.Destination !== MODULEAPI_SLOT_DEPLOYMENT.mount);
+      model.volumes = model.volumes.filter(m => m.target !== MODULEAPI_SLOT_DEPLOYMENT.mount);
+    }
+    for (const key of Object.keys(model.environment).filter(moduleApiProviderKey)) delete model.environment[key]; Object.assign(model.environment, publicLlmSelectedEnvironment(s.openrouter));
+    safe(Object.hasOwn(c.NetworkSettings.Networks, `${PROJECT}_openai_internal`)); delete c.NetworkSettings.Networks[`${PROJECT}_openai_internal`];
+    if (c.HostConfig.NetworkMode === `${PROJECT}_openai_internal`) c.HostConfig.NetworkMode = `${PROJECT}_auth_internal`;
+    safe(normalizedService(model).networks.openai_internal === null && equal(normalizedService(model).depends_on[moduleApiSlot], { condition: 'service_started' }));
+    delete model.networks.openai_internal; delete model.depends_on[moduleApiSlot];
+  }
+  if (name === moduleApiSlot) {
+    safe(c.Name === `/${PROJECT}-${moduleApiSlot}-1` && role(c) === moduleApiSlot && owned(c.Config.Labels));
+    safe(equal(c.Config.Cmd, MODULEAPI_SLOT_DEPLOYMENT.gatewayCommand) && equal(model.command, MODULEAPI_SLOT_DEPLOYMENT.gatewayCommand) &&
+      c.Path === 'python' && equal(c.Args, MODULEAPI_SLOT_DEPLOYMENT.gatewayCommand.slice(1)));
+    validatePublicLlmImage(im, moduleApiSlot, s);
+    safe(equal(normalizedModuleApiService({ networks: model.networks }).networks, { openai_internal: { aliases: [moduleApiAlias] }, openai_uplink: null }));
+    safe(equal(Object.keys(c.NetworkSettings.Networks).sort(), MODULEAPI_SLOT_DEPLOYMENT.networks.map(n => `${PROJECT}_${n}`).sort()));
+    const map = { [`${PROJECT}_openai_internal`]: `${PROJECT}_llm_internal`, [`${PROJECT}_openai_uplink`]: `${PROJECT}_llm_uplink` };
+    safe(Object.hasOwn(map, c.HostConfig.NetworkMode)); c.HostConfig.NetworkMode = map[c.HostConfig.NetworkMode];
+    c.NetworkSettings.Networks = Object.fromEntries(Object.entries(c.NetworkSettings.Networks).map(([key, value]) => [map[key], value]));
+    c.Name = `/${PROJECT}-llm-egress-1`; c.Config.Labels['com.docker.compose.service'] = 'llm-egress';
+    c.Config.Cmd = publicLlmGatewayCommand(s.openrouter); im.Config.Cmd = ['python', '-I', 'openrouter.py']; model.command = c.Config.Cmd;
+    c.Path = 'python'; c.Args = c.Config.Cmd.slice(1); name = 'llm-egress';
+  }
+  return { item: c, name, spec: model, image: im };
+}
+// Resolve an ORIGINAL owning reference, not a borrowing completion or an own
+// :local name. No new import edge into frozen recovery/source closures is needed.
+function captureModuleApiLocalImageCustody(root, image) {
+  const parent = join(root, STATE, 'deploy-adapter-v1'), proofs = [], directories = [];
+  const capture = (path, cap = 262144) => {
+    const info = fs.lstatSync(path);
+    safe(info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.uid === process.getuid() && (info.mode & 0o7777) === 0o600);
+    const proof = fileFence(path, cap, 0o600);
+    const verify = () => { const current = fs.lstatSync(path);
+      safe(current.isFile() && !current.isSymbolicLink() && current.nlink === 1 && current.uid === info.uid); proof.verify(); };
+    proofs.push({ verify }); verify(); return proof;
+  };
+  const directoryProof = path => {
+    directory(path, 0o700); const info = fs.lstatSync(path), names = fs.readdirSync(path).sort();
+    const verify = () => { directory(path, 0o700); const current = fs.lstatSync(path);
+      safe(current.dev === info.dev && current.ino === info.ino && current.uid === info.uid && equal(fs.readdirSync(path).sort(), names)); };
+    directories.push(verify); return names;
+  };
+  const verify = () => { directories.forEach(check => check()); proofs.forEach(proof => proof.verify()); };
+  if (has(parent)) {
+    const names = directoryProof(parent); safe(names.length <= 48 && names.every(name => /^[a-f0-9]{32}$/.test(name)));
+    for (const nonce of names) {
+      const dir = join(parent, nonce); directoryProof(dir);
+      const completion = capture(join(dir, 'complete.json')), record = privateJson(completion.bytes);
+      safe(record.project === PROJECT && record.nonce === nonce && [2, 3, 4].includes(record.version) &&
+        ['published', 'old-restored', 'pre-mutation-aborted'].includes(record.outcome) && Array.isArray(record.references) && record.references.length <= 12);
+      const references = record.references.filter(ref => ref.name === moduleApiSlot && ref.image === image.Id);
+      if (!references.length) continue;
+      safe([3, 4].includes(record.version) && record.referenceCustody && Array.isArray(record.evidence) && record.evidence.length <= 256 &&
+        new Set(record.evidence.map(entry => entry.path)).size === record.evidence.length);
+      const sealed = name => {
+        const proof = capture(join(dir, name)), matches = record.evidence.filter(entry => entry.path === name);
+        safe(matches.length === 1 && equal(matches[0], { path: name, bytes: Buffer.byteLength(proof.bytes), sha256: hash(proof.bytes) }));
+        return privateJson(proof.bytes);
+      };
+      safe(equal(directoryProof(join(dir, 'operation.lock')), ['deploy-adapter-owner.json']));
+      safe(equal(privateJson(capture(join(dir, 'operation.lock/deploy-adapter-owner.json')).bytes), { version: 2, nonce, kind: 'preserving-deployment' }));
+      const custody = sealed('reference-custody.json'), intent = sealed('intent.json');
+      safe(equal(custody, record.referenceCustody) && equal(intent.referenceCustody, custody) && intent.nonce === nonce &&
+        intent.project === PROJECT && intent.kind === 'preserving-deployment' && intent.version === 2 &&
+        [1, 2].includes(custody.version) && Array.isArray(custody.old) && Array.isArray(custody.candidates) &&
+        custody.old.length > 0 && custody.old.length <= 6 && custody.candidates.length === custody.old.length &&
+        record.version === (custody.version === 2 ? 4 : 3) &&
+        new Set(custody.old.map(row => row.name)).size === custody.old.length &&
+        custody.candidates.every((row, index) => row.name === custody.old[index].name));
+      for (const ref of references) {
+        const old = custody.old.find(row => row.name === moduleApiSlot), candidate = custody.candidates.find(row => row.name === moduleApiSlot);
+        safe(equal(Object.keys(ref).sort(), ['image', 'name', 'tag']));
+        if (old?.ownership === 'owned' && old.image === image.Id && old.tag === ref.tag) {
+          safe(equal(Object.keys(old).sort(), ['image', 'name', 'ownership', 'tag']) &&
+            ref.tag === `dip-deploy-${moduleApiSlot}:old-${nonce}` &&
+            intent.old?.some(row => row.role === moduleApiSlot && row.image === image.Id));
+          verify(); return { reference: ref.tag, verify };
+        }
+        if (custody.version === 1 && candidate && candidate.tag === ref.tag) {
+          safe(equal(Object.keys(candidate).sort(), ['name', 'tag']) && ref.tag === `dip-deploy-${moduleApiSlot}:candidate-${nonce}`);
+          const built = sealed(`built-${moduleApiSlot}.json`);
+          safe(built.role === moduleApiSlot && built.image === image.Id && built.tag === ref.tag && built.oldImage === old?.image && built.oldTag === old?.tag);
+          verify(); return { reference: ref.tag, verify };
+        }
+      }
+    }
+  }
+  // A legacy retained reference has its own checkpoint/receipt seal. Match exact
+  // ID AND Config before it can authorize an old provider's image validator.
+  const retained = capturePublicLlmRetentions(root);
+  for (const receipt of retained.receipts) {
+    const row = receipt.images[moduleApiSlot];
+    if (row && equal(row.image, { Id: image.Id, Os: image.Os, Config: image.Config })) {
+      const check = () => { verify(); retained.verify(); };
+      check(); return { reference: row.tag, verify: check };
+    }
+  }
+  safe(false);
+}
+export async function inspectModuleApiNamespace(run, options, root, cve, selection, extra = {}) {
+  const s = validateModuleApiDeployment(selection), model = expectedModuleApiConfig(root, cve, s);
+  const one = async (kind, id) => { const rows = JSON.parse(await run([kind, 'inspect', id], options)); safe(rows.length === 1); return rows[0]; };
+  const gateway = await one('container', `${PROJECT}-${moduleApiSlot}-1`), image = await one('image', gateway.Image);
+  validatePublicLlmContainer(gateway, moduleApiSlot, model.services[moduleApiSlot], image, model, extra, s);
+  const api = await one('container', `${PROJECT}-api-1`), apiImage = await one('image', api.Image);
+  validatePublicLlmContainer(api, 'api', model.services.api, apiImage, model, extra, s);
+  const networks = [], volumes = [];
+  for (const name of MODULEAPI_SLOT_DEPLOYMENT.networks) {
+    const n = await one('network', `${PROJECT}_${name}`);
+    safe(n.Name === `${PROJECT}_${name}` && owned(n.Labels) && n.Driver === 'bridge' && Boolean(n.Internal) === name.endsWith('_internal') &&
+      !n.Attachable && !n.Ingress && !n.EnableIPv6 && equal(n.Options ?? {}, {}) && (!n.IPAM || n.IPAM.Driver === 'default' && equal(n.IPAM.Options ?? {}, {}))); networks.push(n);
+  }
+  for (const [volumeName, current] of [[s.openai.credentialVolume, false], [s.credentialVolume, true]]) if (volumeName) {
+    const volume = await one('volume', volumeName);
+    if (current) validateModuleApiVolume(volume, s); else validateOpenAiVolume(volume, s.openai);
+    const ids = (await run(['container', 'ls', '--all', '--filter', `volume=${volumeName}`, '--format', '{{.ID}}', '--no-trunc'], options)).trim().split('\n').filter(Boolean);
+    safe(equal(ids, current ? [api.Id] : []));
+    if (current) { const m = api.Mounts.find(m => m.Destination === MODULEAPI_SLOT_DEPLOYMENT.mount); safe(m.Source === volume.Mountpoint && m.Driver === 'local'); }
+    volumes.push(volume);
+  }
+  const originals = new Map([['api', api]]), localCustody = []; let observedTag = false;
+  const wrapped = async (args, opts) => {
+    localCustody.forEach(verify => verify());
+    const text = await run(args, opts);
+    if (args[1] === 'ls' && ['container', 'network'].includes(args[0])) {
+      const remove = args[0] === 'container' ? [`${PROJECT}-${moduleApiSlot}-1`] : MODULEAPI_SLOT_DEPLOYMENT.networks.map(n => `${PROJECT}_${n}`);
+      return text.split('\n').filter(row => !remove.includes(row.split('\t')[0])).join('\n');
+    }
+    if (args[0] === 'image' && args[1] === 'ls') {
+      const tag = `${PROJECT}-${moduleApiSlot}:local`;
+      if (text.split('\n').includes(tag)) {
+        const local = await one('image', tag);
+        safe(Array.isArray(local.RepoTags) && local.RepoTags.includes(tag));
+        if (local.Id === image.Id) {
+          safe(equal(local.Config, image.Config) && local.Os === image.Os);
+          validatePublicLlmImage(local, moduleApiSlot, s);
+        } else {
+          const custody = captureModuleApiLocalImageCustody(root, local); localCustody.push(custody.verify);
+          for (const reference of [local.Id, custody.reference]) {
+            custody.verify(); const retained = await one('image', reference); custody.verify();
+            safe(retained.Id === local.Id && retained.Os === local.Os && equal(retained.Config, local.Config) &&
+              Array.isArray(retained.RepoTags) && retained.RepoTags.includes(custody.reference) && retained.RepoTags.includes(tag));
+          }
+          // Provider selection follows immutable ID/config/tag + original seal.
+          validatePublicLlmRetainedImage(local, moduleApiSlot, s); custody.verify();
+        }
+        observedTag = true;
+      }
+      return text.split('\n').filter(row => row !== tag).join('\n');
+    }
+    if (args[0] === 'container' && args[1] === 'inspect') {
+      const rows = JSON.parse(text); safe(rows.length === 1); const name = role(rows[0]);
+      if (name === 'api' || PUBLIC_IMAGE_OPERATION_ROLES.includes(name)) {
+        const previous = originals.get(name); if (previous) safe(control(previous) === control(rows[0]) && equal(epoch(previous), epoch(rows[0])));
+        const im = name === 'api' ? apiImage : extra.images?.[name] ?? await one('image', rows[0].Image);
+        validatePublicLlmContainer(rows[0], name, model.services[name], im, model, extra, s); originals.set(name, rows[0]);
+        return JSON.stringify([stripModuleApiContainer(rows[0], name, model.services[name], im, s).item]);
+      }
+    }
+    return text;
+  };
+  const legacyImages = extra.images && Object.fromEntries(Object.entries(extra.images).filter(([name]) => name !== moduleApiSlot));
+  const out = await inspectPublicLlmNamespace(wrapped, options, root, cve, s.openrouter, { ...extra, images: legacyImages });
+  out.containers = out.containers.map(c => originals.get(role(c)) ?? c); out.containers.push(gateway); out.networks.push(...networks); out.volumes.push(...volumes);
+  localCustody.forEach(verify => verify());
+  if (observedTag) out.images.push(`${PROJECT}-${moduleApiSlot}:local`);
+  for (const n of networks) {
+    const members = out.containers.filter(c => c.State.Running && Object.hasOwn(c.NetworkSettings.Networks, n.Name));
+    safe(equal(Object.keys(n.Containers ?? {}).sort(), members.map(c => c.Id).sort()));
+    safe(members.every(c => role(c) === moduleApiSlot || n.Internal && role(c) === 'api'));
   }
   return out;
 }

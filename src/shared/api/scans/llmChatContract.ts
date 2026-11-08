@@ -8,6 +8,10 @@ import {
   openAiReadinessShape,
   validOpenAiReadiness,
   OPENAI_COST_BASIS,
+  MODULEAPI_COST_BASIS,
+  moduleApiDisclosureSchema,
+  moduleApiReadinessShape,
+  validModuleApiReadiness,
   publicChatMetadataShape,
   publicReadinessShape,
   providerFailureSchema,
@@ -43,12 +47,27 @@ export const sameChatBinding = (a: ChatBinding, b: ChatBinding) =>
 const budgetUuid = '00000000-0000-0000-0000-000000000000';
 export const CHAT_SOURCE_BUDGET = Object.freeze({
   revision: 'immutable-full-citations-aggregate-v2',
-  citationBytes: 8192 - (serializedBytes({
-    v: 1, deliveryMode: 'validated-completed-reply', nativeProviderStream: false,
-    scanId: budgetUuid, digest: `sha256:${'0'.repeat(64)}`, platform: 'linux/amd64', reportVersion: '0'.repeat(64),
-    epoch: budgetUuid, revision: Number.MAX_SAFE_INTEGER, mutationId: budgetUuid, turnId: budgetUuid,
-    type: 'citation', seq: 51, index: 31, source: null,
-  }) - 4 + 1),
+  citationBytes:
+    8192 -
+    (serializedBytes({
+      v: 1,
+      deliveryMode: 'validated-completed-reply',
+      nativeProviderStream: false,
+      scanId: budgetUuid,
+      digest: `sha256:${'0'.repeat(64)}`,
+      platform: 'linux/amd64',
+      reportVersion: '0'.repeat(64),
+      epoch: budgetUuid,
+      revision: Number.MAX_SAFE_INTEGER,
+      mutationId: budgetUuid,
+      turnId: budgetUuid,
+      type: 'citation',
+      seq: 51,
+      index: 31,
+      source: null,
+    }) -
+      4 +
+      1),
   sourcesBytes: 32 * 2048,
 });
 
@@ -77,7 +96,9 @@ export const chatSourceSchema = z
 const sources = z
   .array(chatSourceSchema)
   .max(32)
-  .refine((v) => v.reduce((sum, source) => sum + serializedBytes(source), 0) <= CHAT_SOURCE_BUDGET.sourcesBytes)
+  .refine(
+    (v) => v.reduce((sum, source) => sum + serializedBytes(source), 0) <= CHAT_SOURCE_BUDGET.sourcesBytes,
+  )
   .refine((v) => new Set(v.map((s) => s.finding.findingId)).size === v.length);
 export const chatReplySchema = z
   .strictObject({
@@ -153,6 +174,10 @@ const openAiChatDisclosure = z.discriminatedUnion('monetaryLimit', [
   openAiDisclosureSchema.options[0].extend(chatDisclosureFields),
   openAiDisclosureSchema.options[1].extend(chatDisclosureFields),
 ]);
+const moduleApiChatDisclosure = z.discriminatedUnion('monetaryLimit', [
+  moduleApiDisclosureSchema.options[0].extend(chatDisclosureFields),
+  moduleApiDisclosureSchema.options[1].extend(chatDisclosureFields),
+]);
 const disclosure = z
   .strictObject({
     provider: z.literal('OpenRouter'),
@@ -185,7 +210,9 @@ export const chatContextSchema = z
     revision: count,
     enabled: z.boolean(),
     policyVersion: hash.nullable(),
-    disclosure: z.discriminatedUnion('provider', [disclosure, openAiChatDisclosure]).nullable(),
+    disclosure: z
+      .discriminatedUnion('provider', [disclosure, openAiChatDisclosure, moduleApiChatDisclosure])
+      .nullable(),
     limits: z.strictObject({ questionBytes: z.literal(2048), bodyBytes: z.literal(8192) }),
     deliveryMode: z.literal('completed-response'),
     pending: z.boolean(),
@@ -215,6 +242,12 @@ export const chatReceiptSchema = z.discriminatedUnion('source', [
     costMicros: count.positive(),
     source: z.literal(OPENAI_COST_BASIS),
   }),
+  z.strictObject({
+    input: count.positive(),
+    output: count.max(4096),
+    costMicros: count.positive(),
+    source: z.literal(MODULEAPI_COST_BASIS),
+  }),
 ]);
 export function chatReceiptMatchesProvider(usage: z.infer<typeof chatReceiptSchema>, context: ChatContext) {
   return (
@@ -222,7 +255,9 @@ export function chatReceiptMatchesProvider(usage: z.infer<typeof chatReceiptSche
     usage.source ===
       (context.disclosure.provider === 'OpenAI'
         ? OPENAI_COST_BASIS
-        : 'server-validated-provider-reported-not-invoice')
+        : context.disclosure.provider === 'ModuleAPI'
+          ? MODULEAPI_COST_BASIS
+          : 'server-validated-provider-reported-not-invoice')
   );
 }
 export const chatResultSchema = z.union([
@@ -259,9 +294,10 @@ export const chatResultSchema = z.union([
     )
     .refine((v) => sameChatBinding(v.reply, v)),
 ]);
-export const chatReadinessSchema = z.discriminatedUnion('setupAction', [
+export const chatReadinessSchema = z.union([
   z.strictObject({ ...chatBindingSchema.shape, ...publicReadinessShape }).refine(validPublicReadiness),
   z.strictObject({ ...chatBindingSchema.shape, ...openAiReadinessShape }).refine(validOpenAiReadiness),
+  z.strictObject({ ...chatBindingSchema.shape, ...moduleApiReadinessShape }).refine(validModuleApiReadiness),
 ]);
 export type ChatReadiness = z.infer<typeof chatReadinessSchema>;
 export type ChatContext = z.infer<typeof chatContextSchema>;

@@ -150,6 +150,89 @@ export function assertNoOpenAiDockerSecret(config) {
 }
 
 
+// v7 replaces the historical OpenAI infrastructure slot, not its identity or custody.
+// These constants describe public source only; importing this module never loads settings.
+export const MODULEAPI_SLOT_DEPLOYMENT = Object.freeze({
+  version: 7, provider: 'ModuleAPI', model: 'gpt-5.4-mini', configName: 'moduleapi-deployment.json',
+  bootstrap: 'server/deploy/moduleapi-secret-bootstrap.mjs',
+  entrypoint: Object.freeze(['/usr/local/bin/node', '--disable-warning=ExperimentalWarning', '/app/server/deploy/moduleapi-secret-bootstrap.mjs']),
+  command: Object.freeze(['node', '--import', 'tsx', 'src/oci/public-image.main.ts']),
+  volumeKey: 'moduleapi-secrets', mount: '/run/moduleapi-secrets', target: '/run/moduleapi-secrets/server.env',
+  gatewayCommand: Object.freeze(['python', '-I', 'moduleapi.py', '--serve']),
+  networks: Object.freeze(['openai_internal', 'openai_uplink']),
+});
+const moduleApiSafe = ok => { if (!ok) throw Error('PUBLIC ModuleAPI v7 refused/HOLD; details withheld.'); };
+const moduleApiFixed = Object.freeze({ LLM_PROVIDER: 'moduleapi', MODULEAPI_MODEL: MODULEAPI_SLOT_DEPLOYMENT.model,
+  MODULEAPI_ROUTING_APPROVED: 'true', MODULEAPI_RETENTION: 'unknown', LLM_QUOTA_ENABLED: 'true', LLM_QUOTA_WINDOW: 'utc-day' });
+const moduleApiNumeric = Object.freeze(Object.fromEntries(Object.entries(numeric).map(([key, range]) => [key.replace(/^OPENAI_/, 'MODULEAPI_'), range])));
+const moduleApiBudgets = budgetNames.map(key => key.replace(/^OPENAI_/, 'MODULEAPI_'));
+const sharedQuota = environment => Object.fromEntries(Object.entries(environment).filter(([key]) => key.startsWith('LLM_QUOTA_')));
+
+export function validateModuleApiDeployment(value) {
+  keys(value, ['version', 'provider', 'keyVolume', 'openrouter', 'openai', 'monetaryLimit', 'environment', 'credentialVolume', 'operations']);
+  moduleApiSafe(value.version === 7 && value.provider === 'ModuleAPI' && value.operations === PUBLIC_IMAGE_OPERATIONS &&
+    ['capped', 'uncapped'].includes(value.monetaryLimit));
+  const openai = validateOpenAiDeployment(value.openai), openrouter = openAiRouterSelection(value.openrouter);
+  moduleApiSafe(openai.operations === PUBLIC_IMAGE_OPERATIONS && equal(openrouter, openai.openrouter) && value.keyVolume === openai.keyVolume &&
+    (value.credentialVolume === null || value.credentialVolume === MODULEAPI_SLOT_DEPLOYMENT.volumeKey));
+  const e = value.environment, mode = value.monetaryLimit;
+  keys(e, [...Object.keys(moduleApiFixed), ...Object.keys(moduleApiNumeric), 'MODULEAPI_ENABLED', 'MODULEAPI_POLICY_REVISION',
+    'MODULEAPI_ACCOUNTING_REVISION', 'MODULEAPI_MONETARY_LIMIT', 'LLM_QUOTA_REVISION', 'LLM_QUOTA_MONETARY_LIMIT', lifetimeCostName,
+    ...(mode === 'capped' ? [...moduleApiBudgets, ...costNames] : [])]);
+  moduleApiSafe(Object.entries(moduleApiFixed).every(([key, text]) => e[key] === text) && ['true', 'false'].includes(e.MODULEAPI_ENABLED) &&
+    (e.MODULEAPI_ENABLED !== 'true' || value.credentialVolume !== null));
+  moduleApiSafe(['MODULEAPI_POLICY_REVISION', 'MODULEAPI_ACCOUNTING_REVISION', 'LLM_QUOTA_REVISION'].every(key => revision(e[key])) &&
+    e.MODULEAPI_MONETARY_LIMIT === mode && e.LLM_QUOTA_MONETARY_LIMIT === mode && e[lifetimeCostName] === '5000000' &&
+    equal(sharedQuota(e), sharedQuota(openai.environment)));
+  const n = Object.fromEntries(Object.entries(moduleApiNumeric).map(([key, [min, max]]) => [key, integer(e[key], min, max)]));
+  moduleApiSafe(n.LLM_QUOTA_DB_BYTES % 4096 === 0 && n.LLM_QUOTA_REQUEST_INPUT >= n.MODULEAPI_INPUT_TOKENS &&
+    n.LLM_QUOTA_RECEIPT_MS > n.MODULEAPI_TIMEOUT_MS && n.LLM_QUOTA_OBSERVATION_TOKENS >= Math.max(n.MODULEAPI_INPUT_TOKENS, n.MODULEAPI_OUTPUT_TOKENS));
+  if (mode === 'capped') {
+    const [request, user, scan] = moduleApiBudgets.map(key => integer(e[key], 1, 1_000_000));
+    moduleApiSafe(Math.min(user, scan) >= request && dollars(e.LLM_QUOTA_USER_COST_USD) === user && dollars(e.LLM_QUOTA_SCAN_COST_USD) === scan &&
+      n.LLM_QUOTA_OBSERVATION_COST_MICROS >= request);
+  }
+  const upperCost = (BigInt(n.MODULEAPI_INPUT_TOKENS) * BigInt(n.MODULEAPI_INPUT_PRICE_MICROS_PER_MILLION) +
+    BigInt(n.MODULEAPI_OUTPUT_TOKENS) * BigInt(n.MODULEAPI_OUTPUT_PRICE_MICROS_PER_MILLION) + 999999n) / 1000000n;
+  if (mode === 'uncapped') moduleApiSafe(upperCost <= BigInt(n.LLM_QUOTA_OBSERVATION_COST_MICROS));
+  return Object.freeze({ version: 7, provider: 'ModuleAPI', keyVolume: openai.keyVolume, openrouter, openai, monetaryLimit: mode,
+    environment: Object.freeze(Object.fromEntries(Object.keys(e).sort().map(key => [key, e[key]]))),
+    credentialVolume: value.credentialVolume, operations: value.operations });
+}
+export function validateModuleApiBuildDeployment(value) {
+  keys(value, ['prior', 'next']);
+  const priorVersion = Object.getOwnPropertyDescriptor(value.prior ?? {}, 'version')?.value;
+  moduleApiSafe(priorVersion === 6 || priorVersion === 7);
+  const prior = priorVersion === 6 ? validateOpenAiDeployment(value.prior) : validateModuleApiDeployment(value.prior);
+  const next = validateModuleApiDeployment(value.next);
+  moduleApiSafe(equal(next.openai, priorVersion === 6 ? prior : prior.openai) && prior.operations === next.operations &&
+    equal(sharedQuota(next.environment), sharedQuota(prior.environment)) &&
+    (priorVersion !== 7 || prior.credentialVolume === null || prior.credentialVolume === next.credentialVolume));
+  return { prior, next };
+}
+export function selectModuleApiOperations(descriptor, prior, upgrade = false) {
+  moduleApiSafe(upgrade === false);
+  return validateModuleApiBuildDeployment({ prior, next: descriptor }).next;
+}
+export function moduleApiEnvironment(selection, routerEnvironment) {
+  const s = validateModuleApiDeployment(selection);
+  // Retain the OpenRouter auxiliary configuration, but never old provider keys/policy.
+  return { ...Object.fromEntries(Object.entries(routerEnvironment).filter(([key]) =>
+    !key.startsWith('LLM_QUOTA_') && !key.startsWith('OPENAI_') && !key.startsWith('MODULEAPI_') &&
+    !['MODULE_API_KEY', 'OPENROUTER_API_KEY'].includes(key))), ...s.environment };
+}
+export function validateModuleApiVolume(value, selection) {
+  const s = validateModuleApiDeployment(selection);
+  moduleApiSafe(s.credentialVolume !== null && value?.Name === s.credentialVolume && value.Driver === 'local' && value.Scope === 'local' &&
+    typeof value.Mountpoint === 'string' && value.Mountpoint.startsWith('/') && !/[\x00-\x1f\x7f]/.test(value.Mountpoint) && equal(value.Options ?? {}, {}));
+  keys(value.Labels, ['org.diplom.moduleapi-secret', 'org.diplom.moduleapi-secret.claim']);
+  moduleApiSafe(value.Labels['org.diplom.moduleapi-secret'] === 'v1' && /^[a-f0-9]{32}$/.test(value.Labels['org.diplom.moduleapi-secret.claim']));
+}
+export function assertNoModuleApiDockerSecret(config) {
+  moduleApiSafe(Array.isArray(config?.Env) && !config.Env.some(text => typeof text !== 'string' ||
+    /^(?:MODULE_API_KEY|OPENAI_API_KEY|OPENROUTER_API_KEY)(?:=|$)/.test(text)));
+}
+
 // Separate v6 execution authority. Never imported by or added to frozen recovery's allowlist.
 const OPENAI_EXECUTION_MODULES = Object.freeze([
   'scripts/local-stand.mjs', 'scripts/public-current-backup-transfer.mjs', 'scripts/public-cve-bridge-capacity.mjs',
@@ -168,9 +251,19 @@ const OPENAI_EXECUTION_ENTRIES = Object.freeze(['scripts/public-llm-stand.mjs', 
 // readSource must capture/fence the exact public bytes it returns. The walker does
 // not execute discovered modules. Computed imports and undeclared dependencies refuse.
 export function discoverOpenAiExecutionClosure(root, readSource) {
+  return discoverExecutionClosure(root, readSource, OPENAI_EXECUTION_MODULES, OPENAI_EXECUTION_ENTRIES);
+}
+const MODULEAPI_EXECUTION_MODULES = Object.freeze([...OPENAI_EXECUTION_MODULES,
+  'scripts/moduleapi-deployment-descriptor.mjs', MODULEAPI_SLOT_DEPLOYMENT.bootstrap]);
+const MODULEAPI_EXECUTION_ENTRIES = Object.freeze([...OPENAI_EXECUTION_ENTRIES,
+  'scripts/moduleapi-deployment-descriptor.mjs', MODULEAPI_SLOT_DEPLOYMENT.bootstrap]);
+export function discoverModuleApiExecutionClosure(root, readSource) {
+  return discoverExecutionClosure(root, readSource, MODULEAPI_EXECUTION_MODULES, MODULEAPI_EXECUTION_ENTRIES);
+}
+function discoverExecutionClosure(root, readSource, allowed, entries) {
   safe(resolve(root) === root && typeof readSource === 'function');
   const require = createRequire(import.meta.url), ts = require('typescript');
-  const permitted = new Set(OPENAI_EXECUTION_MODULES), modules = new Set(), edges = new Set(), todo = [...OPENAI_EXECUTION_ENTRIES];
+  const permitted = new Set(allowed), modules = new Set(), edges = new Set(), todo = [...entries];
   let bytes = 0, sites = 0;
   while (todo.length) {
     const name = todo.shift(); if (modules.has(name)) continue;
@@ -222,13 +315,18 @@ export function discoverOpenAiExecutionClosure(root, readSource) {
     };
     visit(source);
   }
-  return { entries: [...OPENAI_EXECUTION_ENTRIES], modules: [...modules].sort(), edges: [...edges].sort() };
+  return { entries: [...entries], modules: [...modules].sort(), edges: [...edges].sort() };
 }
 
 // The only writable DB here is a disposable private copy of an immutable capture.
 // No provider/runtime factory, bootstrap, live mount, reset or initialization path.
 export function checkOpenAiQuotaSnapshot(root, { selection, snapshotPath }) {
-  const env = validateOpenAiDeployment(selection).environment;
+  return checkQuotaSnapshot(root, validateOpenAiDeployment(selection).environment, snapshotPath);
+}
+export function checkModuleApiQuotaSnapshot(root, { selection, snapshotPath }) {
+  return checkQuotaSnapshot(root, validateModuleApiDeployment(selection).environment, snapshotPath);
+}
+function checkQuotaSnapshot(root, env, snapshotPath) {
   safe(resolve(root) === root && fs.realpathSync(root) === root && resolve(snapshotPath) === snapshotPath &&
     fs.realpathSync(dirname(snapshotPath)) === dirname(snapshotPath));
   const stamp = s => [s.dev, s.ino, s.uid, s.mode, s.nlink, s.size, s.mtimeMs, s.ctimeMs];
@@ -268,8 +366,50 @@ export function checkOpenAiQuotaSnapshot(root, { selection, snapshotPath }) {
   finally { fs.closeSync(fd); if (temp) fs.rmSync(temp, { recursive: true, force: true }); }
 }
 
-export function checkPublicLlmSourceBuild(root, { openai = null } = {}) {
+// Runs only real public factories in the copied API tree. The provider factory
+// throws if eagerly invoked; qualification never obtains a credential or transport.
+export function moduleApiSourceConfigurationProgram(selection) {
+  const s = validateModuleApiDeployment(selection);
+  return `import fs from 'node:fs';
+    import {readModuleApiEnvironment} from './src/llm/moduleapi-environment.ts';
+    import {MODULEAPI_PROMPTS,MODULEAPI_ENDPOINT,checkedModuleApiPolicy} from './src/llm/moduleapi-policy.ts';
+    import {quotaPolicyFromEnvironment} from './src/llm/quota-policy.ts';
+    import {createModuleApiRuntime} from './src/llm/provider-runtime.ts';
+    import {PUBLIC_IMAGE_RESOURCE_POLICY,PUBLIC_IMAGE_CHECKS_VERSION,PUBLIC_IMAGE_LIMITS} from './src/oci/public-image-policy.ts';
+    import {publicResourceEnvelope} from './src/worker/worker-runtime.ts';
+    import * as zlib from 'node:zlib';
+    import * as bootstrap from '../deploy/moduleapi-secret-bootstrap.mjs';
+    const expected=${JSON.stringify(MODULEAPI_SLOT_DEPLOYMENT)};
+    if(JSON.stringify(bootstrap.API_ENTRYPOINT)!==JSON.stringify(expected.entrypoint)||
+      JSON.stringify(bootstrap.API_COMMAND)!==JSON.stringify(expected.command)||bootstrap.SECRET_PATH!==expected.target||
+      bootstrap.SECRET_VOLUME!==expected.volumeKey||bootstrap.SECRET_DIRECTORY!==expected.mount||
+      bootstrap.BOOTSTRAP_SOURCE!==expected.bootstrap||bootstrap.BOOTSTRAP_TARGET!=='/app/'+expected.bootstrap||
+      bootstrap.API_WORKDIR!=='/app/server/api')throw Error('bootstrap-contract');
+    const env=JSON.parse(fs.readFileSync(0,'utf8'));
+    const config=readModuleApiEnvironment(MODULEAPI_PROMPTS,{...env,MODULEAPI_ENABLED:'true'});
+    const quota=quotaPolicyFromEnvironment(env);
+    const runtime=config&&quota&&createModuleApiRuntime(config,quota,()=>{throw Error('offline-provider-forbidden');});
+    if(!runtime||runtime.provider!=='ModuleAPI'||config.policy.provider!=='ModuleAPI'||
+      config.policy.model!==expected.model||config.policy.retention!=='unknown'||
+      MODULEAPI_ENDPOINT!=='https://moduleapi.pro/v1/chat/completions'||!checkedModuleApiPolicy(config.policy)||
+      quota.lifetimeUserCostMicros!==5000000||config.policy.monetaryLimit!==${JSON.stringify(s.monetaryLimit)}||
+      config.policy.inputPriceMicrosPerMillion!==Number(env.MODULEAPI_INPUT_PRICE_MICROS_PER_MILLION)||
+      config.policy.outputPriceMicrosPerMillion!==Number(env.MODULEAPI_OUTPUT_PRICE_MICROS_PER_MILLION))throw Error('configuration');
+    if(config.policy.monetaryLimit==='uncapped'&&(config.policy.requestBudgetMicros!==null||
+      config.spending.userBudgetMicros!==null||config.spending.scanBudgetMicros!==null||quota.user.costMicros!==null||quota.scan.costMicros!==null))throw Error('monetary-mode');
+    if(PUBLIC_IMAGE_RESOURCE_POLICY!=='public-hub-resources-v2'||PUBLIC_IMAGE_CHECKS_VERSION!=='trivy-0.69.3-public-archive-v2'||
+      typeof zlib.createZstdDecompress!=='function')throw Error('public-image-runtime');
+    const limits={compressedLayer:256*1024**2,compressedTotal:768*1024**2,wireBytes:800*1024**2,
+      expandedLayer:512*1024**2,expandedTotal:1024**3,scratchBytes:2*1024**3,deadlineMs:180000};
+    if(Object.entries(limits).some(([key,value])=>PUBLIC_IMAGE_LIMITS[key]!==value))throw Error('public-image-budget');
+    if(!publicResourceEnvelope(name=>({'memory.max':'4294967296','memory.swap.max':'0','cpu.max':'100000 100000','pids.max':'128'})[name],
+      ()=>({info:{isDirectory:()=>true,isSymbolicLink:()=>false},fs:{type:0x01021994,blocks:2304*256,bsize:4096}})))throw Error('public-image-envelope');`;
+}
+
+export function checkPublicLlmSourceBuild(root, { openai = null, moduleapi = null } = {}) {
+  moduleApiSafe(openai === null || moduleapi === null);
   const selection = openai === null ? null : validateOpenAiDeployment(openai);
+  const moduleApiSelection = moduleapi === null ? null : validateModuleApiDeployment(moduleapi);
   if (resolve(root) !== root || fs.realpathSync(root) !== root) throw Error('PUBLIC_SOURCE_ROOT_REJECTED');
   const temp = fs.mkdtempSync(join(tmpdir(), 'public-llm-copy-'));
   const refuse = reason => { const error = Error(reason); error.reason = reason; throw error; };
@@ -337,6 +477,35 @@ export function checkPublicLlmSourceBuild(root, { openai = null } = {}) {
         encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 ** 2 });
       if (result.status !== 0) refuse('PUBLIC_OPENAI_RUNTIME_CONFIGURATION_REJECTED');
     }
-    return { typescript: true, bundle: true, docker: false, ...(selection ? { openai: true } : {}) };
+    if (moduleApiSelection) {
+      for (const path of ['server/api/src', 'server/api/tsconfig.json', 'server/runtime/src', MODULEAPI_SLOT_DEPLOYMENT.bootstrap,
+        'server/deploy/moduleapi-api.Dockerfile', 'server/deploy/moduleapi-secret-init.py', 'server/deploy/moduleapi-secret-init.Dockerfile',
+        'scripts/moduleapi-secret-provision.py', 'server/deploy/gateway/moduleapi.Dockerfile', 'server/deploy/gateway/moduleapi.py',
+        'server/deploy/gateway/proxy.py', 'server/deploy/trust/db-signing-key.pub.pem']) {
+        const stat = fs.lstatSync(join(root, path));
+        if (stat.isSymbolicLink() || !(stat.isFile() || stat.isDirectory())) refuse('PUBLIC_MODULEAPI_SOURCE_REJECTED');
+        fs.mkdirSync(dirname(join(temp, path)), { recursive: true });
+        fs.cpSync(join(root, path), join(temp, path), { recursive: true, dereference: false });
+      }
+      const baseRecipe = fs.readFileSync(join(root, 'server/deploy/api.Dockerfile'), 'utf8');
+      const apiRecipe = fs.readFileSync(join(temp, 'server/deploy/moduleapi-api.Dockerfile'), 'utf8');
+      if (!baseRecipe.includes('WORKDIR /app/server/api\n') || apiRecipe !== baseRecipe.replace('WORKDIR /app/server/api\n',
+        'COPY server/deploy/moduleapi-secret-bootstrap.mjs server/deploy/moduleapi-secret-bootstrap.mjs\nWORKDIR /app/server/api\n'))
+        refuse('PUBLIC_MODULEAPI_RECIPE_REJECTED');
+      const gatewayRecipe = fs.readFileSync(join(temp, 'server/deploy/gateway/moduleapi.Dockerfile'), 'utf8');
+      if (gatewayRecipe !== '# Separate opt-in image; no existing composition or gateway default changes.\nFROM python:3.13.7-slim\nWORKDIR /opt/gateway\nCOPY server/deploy/gateway/proxy.py server/deploy/gateway/moduleapi.py ./\nUSER 65532:65532\nCMD ["python", "-I", "moduleapi.py", "--serve"]\n')
+        refuse('PUBLIC_MODULEAPI_RECIPE_REJECTED');
+      fs.symlinkSync(join(root, 'server/api/node_modules'), join(temp, 'server/api/node_modules'), 'dir');
+      fs.writeFileSync(join(temp, 'server/api/tsconfig.public-moduleapi.json'), JSON.stringify({ extends: './tsconfig.json',
+        files: ['src/oci/public-image.main.ts', 'src/worker/public-image-worker.main.ts'], include: [] }));
+      if (run([require.resolve('typescript/bin/tsc'), '--project', 'server/api/tsconfig.public-moduleapi.json']).status !== 0)
+        refuse('PUBLIC_MODULEAPI_TYPESCRIPT_REJECTED');
+      if (run(['--check', MODULEAPI_SLOT_DEPLOYMENT.bootstrap]).status !== 0) refuse('PUBLIC_MODULEAPI_BOOTSTRAP_REJECTED');
+      const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', moduleApiSourceConfigurationProgram(moduleApiSelection)], {
+        cwd: join(temp, 'server/api'), env: { PATH: process.env.PATH }, input: JSON.stringify(moduleApiSelection.environment),
+        encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 ** 2 });
+      if (result.status !== 0 || result.error || result.signal !== null || result.stdout !== '') refuse('PUBLIC_MODULEAPI_RUNTIME_CONFIGURATION_REJECTED');
+    }
+    return { typescript: true, bundle: true, docker: false, ...(selection ? { openai: true } : {}), ...(moduleApiSelection ? { moduleapi: true } : {}) };
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }

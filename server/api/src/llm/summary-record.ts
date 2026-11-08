@@ -3,6 +3,7 @@ import { PUBLIC_IMAGE_PROFILE } from '../oci/public-image-policy.js';
 import { hashValue, historyUnavailable, isId, reportBinding } from './history-contract.js';
 import { publicFreePolicy } from './policy.js';
 import { checkedOpenAiPolicy } from './openai-policy.js';
+import { checkedModuleApiPolicy } from './moduleapi-policy.js';
 import { openAiNarrative } from './openai-response-contract.js';
 import type { SummaryValidationPolicy } from './provider-runtime-contract.js';
 import type { ReportContext } from './report-context.js';
@@ -36,8 +37,10 @@ export function decodeSummaryRecord(row: SummaryRow): SummaryRecord {
 
 function supportedPolicy(policy: SummaryValidationPolicy): boolean {
   if (!('provider' in policy)) return publicFreePolicy(policy);
-  checkedOpenAiPolicy(policy.policy);
-  return policy.provider === 'OpenAI' && policy.findings === policy.policy.findings &&
+  if (policy.provider === 'ModuleAPI') checkedModuleApiPolicy(policy.policy);
+  else if (policy.provider === 'OpenAI') checkedOpenAiPolicy(policy.policy);
+  else return false;
+  return policy.findings === policy.policy.findings &&
     policy.requestBytes === policy.policy.requestBytes && policy.responseBytes === policy.policy.responseBytes;
 }
 

@@ -24,6 +24,7 @@ export function ReportPreferencesPanel({
   const [feedback, setFeedback] = useState<{ source: ReportPreferences; failed: boolean } | null>(null);
   const selection = draft.source === preferences ? draft : preferences;
   const active = session.subject === subject;
+  const paidConsent = preferences.moduleApiSummaryConsent ?? preferences.openAiSummaryConsent;
 
   function select(patch: Partial<ReportPreferencesInput>) {
     setDraft({ ...selection, source: preferences, ...patch });
@@ -39,6 +40,9 @@ export function ReportPreferencesPanel({
         autoSummary: selection.autoSummary,
         ...(selection.autoSummary && preferences.openAiSummaryConsent
           ? { openAiSummaryConsent: preferences.openAiSummaryConsent }
+          : {}),
+        ...(selection.autoSummary && preferences.moduleApiSummaryConsent
+          ? { moduleApiSummaryConsent: preferences.moduleApiSummaryConsent }
           : {}),
       },
       session,
@@ -84,19 +88,20 @@ export function ReportPreferencesPanel({
           className="report-preferences__disclosure"
           data-automation-revision={REPORT_AUTOMATION_REVISION}
         >
-          {preferences.openAiSummaryConsent ? (
+          {paidConsent ? (
             <>
-              <OpenAiDisclosure disclosure={preferences.openAiSummaryConsent.disclosure} />
+              <OpenAiDisclosure disclosure={paidConsent.disclosure} />
               <p>
-                Платный авторазбор разрешён только для сохранённой политики OpenAI. Смена условий требует
-                нового согласия в отчёте; сохранение этих настроек не подтверждает новую политику.
+                Платный авторазбор разрешён только для сохранённой политики {paidConsent.disclosure.provider}.
+                Смена условий требует нового согласия в отчёте; сохранение этих настроек не подтверждает новую
+                политику.
               </p>
             </>
           ) : (
             <p>
-              Эта настройка разрешает только прежний бесплатный профиль OpenRouter. Для платного OpenAI
-              откройте отчёт, прочитайте условия и отдельно включите платный авторазбор. Старые предпочтения
-              его не включают.
+              Эта настройка разрешает только прежний бесплатный профиль OpenRouter. Для платного OpenAI или
+              ModuleAPI откройте отчёт, прочитайте условия и отдельно включите платный авторазбор. Старые
+              предпочтения его не включают. Согласие OpenAI не переносится на стороннего провайдера ModuleAPI.
             </p>
           )}
           <p>
@@ -119,13 +124,14 @@ export function ReportPreferencesPanel({
             </p>
             <p>
               Прежний бесплатный ИИ-разбор и отдельный перевод используют профиль ниже; это не разрешение
-              платного OpenAI. Сохранение «Русский» разрешает ограниченный автоматический перевод только
-              исходных заголовка и описания выбранной уязвимости (advisory), не всего отчёта. Эти данные
-              передаются через OpenRouter только модели Dots (dots-studio/dots-3-note-preview:free),
-              провайдеру Atlas Cloud (atlas-cloud/fp8), только в бесплатном режиме, без автоматической замены
-              модели или провайдера. Провайдер декларирует отсутствие обучения (no-training), но не отсутствие
-              хранения: запросы могут сохраняться, это не Zero Data Retention (ZDR). Декларация и одобрение
-              оператора не доказывают соблюдение; качество в продукте ещё не проверено.
+              платного OpenAI или ModuleAPI. Сохранение «Русский» разрешает ограниченный автоматический
+              перевод только исходных заголовка и описания выбранной уязвимости (advisory), не всего отчёта.
+              Эти данные передаются через OpenRouter только модели Dots
+              (dots-studio/dots-3-note-preview:free), провайдеру Atlas Cloud (atlas-cloud/fp8), только в
+              бесплатном режиме, без автоматической замены модели или провайдера. Провайдер декларирует
+              отсутствие обучения (no-training), но не отсутствие хранения: запросы могут сохраняться, это не
+              Zero Data Retention (ZDR). Декларация и одобрение оператора не доказывают соблюдение; качество в
+              продукте ещё не проверено.
             </p>
             <p>
               Результат — машинная интерпретация, а не подтверждение безопасности. Действуют серверные квоты

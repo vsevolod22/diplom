@@ -19,6 +19,7 @@ import { collectSummarySources, type SummarySource } from '@/shared/api/scans/ll
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import { usageMatchesDisclosure, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
 import { OpenAiDisclosure } from './OpenAiDisclosure';
+import { isPaidDisclosure } from '@/shared/api/scans/llmPublicContract';
 import { ReportRemediation } from './ReportRemediation';
 import type { ReportSourceNavigate } from './reportSourceNavigation';
 import { utf8Bytes } from '@/shared/api/scans/vulnAdvisory';
@@ -38,8 +39,8 @@ type Snapshot = {
 };
 const readinessMessages = {
   'configuration-required': 'Чат не настроен. Обратитесь к оператору.',
-  'environment-key-required': 'Требуется серверная настройка OpenAI. Не вводите ключ в интерфейс.',
-  'accounting-configuration-required': 'Учёт стоимости OpenAI не настроен. Обратитесь к оператору.',
+  'environment-key-required': 'Требуется серверная настройка провайдера. Не вводите ключ в интерфейс.',
+  'accounting-configuration-required': 'Учёт стоимости провайдера не настроен. Обратитесь к оператору.',
   'public-key-required': 'Чат не настроен. Обратитесь к оператору; не вводите ключи в чат.',
   'public-key-unsafe': 'Настройки чата не прошли проверку безопасности. Обратитесь к оператору.',
   'quota-store-unavailable': 'Не удалось проверить лимиты. Попробуйте обновить историю позже.',
@@ -82,7 +83,8 @@ function readinessMatchesContext(ready: ChatReadiness, context: ChatContext) {
   if (!sameChatBinding(ready, context)) return false;
   if (ready.setupAction === 'operator-server-environment-configuration') {
     if (!context.enabled) return true; // Disabled contexts deliberately disclose no provider policy.
-    return context.disclosure?.provider === 'OpenAI' && ready.provider.model === context.disclosure.model;
+    return isPaidDisclosure(context.disclosure) &&
+      ready.provider.name === context.disclosure.provider && ready.provider.model === context.disclosure.model;
   }
   if (!context.enabled) return ready.provider.status === 'unverified-profile';
   return (
@@ -438,7 +440,7 @@ function ChatScope({
       else if (publicReport && ready && previous && !readinessMatchesContext(ready, previous.context))
         discardPrevious();
       const next = await readSnapshot(signal, observeContext);
-      if (!publicReport && next.context.disclosure?.provider === 'OpenAI') {
+      if (!publicReport && isPaidDisclosure(next.context.disclosure)) {
         ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
       }
@@ -494,7 +496,7 @@ function ChatScope({
       !current() ||
       (kind === 'chat' &&
         (!accepted.context.enabled ||
-          ((publicReport || accepted.context.disclosure?.provider === 'OpenAI') && !readiness?.localReady)))
+          ((publicReport || isPaidDisclosure(accepted.context.disclosure)) && !readiness?.localReady)))
     )
       return;
     const value = kind === 'chat' ? question : decision;
@@ -507,7 +509,7 @@ function ChatScope({
     const mutationId = crypto.randomUUID();
     const ids = [...selectedIds];
     void operate(kind, kind === 'chat' ? 120_000 : 45_000, async (signal, publish) => {
-      if (kind === 'chat' && (publicReport || accepted.context.disclosure?.provider === 'OpenAI')) {
+      if (kind === 'chat' && (publicReport || isPaidDisclosure(accepted.context.disclosure))) {
         const ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
         if (!ready?.localReady) throw new ChatError('LLM_CONFIGURATION_UNAVAILABLE');
@@ -569,7 +571,7 @@ function ChatScope({
   const questionInvalid = question.length > 0 && !validChatText(question);
   const decisionInvalid = decision.length > 0 && !validChatText(decision);
   const available = !!snapshot && !pending && !context?.pending && current();
-  const needsReadiness = publicReport || context?.disclosure?.provider === 'OpenAI';
+  const needsReadiness = publicReport || isPaidDisclosure(context?.disclosure);
   const generationAllowed = !!context?.enabled && (!needsReadiness || readiness?.localReady === true);
   const connection = pending
     ? operation === 'read'
@@ -736,13 +738,13 @@ function ChatScope({
         <p id="scan-chat-input-error" role="status" aria-live="polite" aria-atomic="true">
           {questionInvalid ? questionFeedback : null}
         </p>
-        {context?.disclosure?.provider === 'OpenAI' ? (
+        {isPaidDisclosure(context?.disclosure) ? (
           <OpenAiDisclosure disclosure={context.disclosure} chat />
         ) : null}
         <p id="scan-chat-send-help">
           Нажимая «Отправить вопрос», вы разрешаете{' '}
-          {context?.disclosure?.provider === 'OpenAI'
-            ? 'платный запрос OpenAI на показанных условиях текущей политики и передачу вопроса, находок и истории. Это отдельное согласие, не прежний бесплатный opt-in.'
+          {isPaidDisclosure(context?.disclosure)
+            ? `платный запрос ${context.disclosure.provider} на показанных условиях текущей политики и передачу вопроса, находок и истории. Это отдельное согласие, не прежний бесплатный opt-in и не разрешение другого провайдера.`
             : 'передать внешнему ИИ вопрос и контекст отчёта, включая историю чата. Запрет обучения не гарантирует отсутствие хранения.'}
         </p>
         <Button
@@ -837,12 +839,14 @@ function ChatScope({
                     </p>
                   </>
                 ) : (
-                  <p>OpenAI · {context.disclosure.model}. Платный ответ, оценка сервера — не счёт.</p>
+                  <p>{context.disclosure.provider} · {context.disclosure.model}. Платный ответ, оценка сервера — не счёт.</p>
                 )}
                 <p>
-                  {context.disclosure.retention === 'no-storage'
-                    ? 'Провайдер декларирует отсутствие хранения и обучения'
-                    : 'Провайдер декларирует отсутствие обучения (no-training); отсутствие хранения не заявлено, это не ZDR; запросы могут сохраняться'}
+                  {context.disclosure.retention === 'unknown'
+                    ? 'Условия хранения и обучения у стороннего ModuleAPI неизвестны; отсутствие обучения и хранения не подтверждено, это не проверенный ZDR'
+                    : context.disclosure.retention === 'no-storage'
+                      ? 'Провайдер декларирует отсутствие хранения и обучения'
+                      : 'Провайдер декларирует отсутствие обучения (no-training); отсутствие хранения не заявлено, это не ZDR; запросы могут сохраняться'}
                   ; декларация и одобрение оператора не доказывают соблюдение. Передаются очищенный вопрос,
                   все пользовательские сообщения и решения, выбранные находки и полное покрытие, без исходных
                   свидетельств.
@@ -901,7 +905,8 @@ function ChatScope({
                 <p>
                   Последний ответ: входных токенов {receipt.input}, выходных токенов {receipt.output},
                   учтённая стоимость в миллионных долях доллара: {receipt.costMicros}.{' '}
-                  {receipt.source === 'server-estimated-configured-rates-not-invoice'
+                  {receipt.source === 'server-estimated-configured-rates-not-invoice' ||
+                                    receipt.source === 'moduleapi-server-estimated-configured-rates-not-invoice'
                     ? 'Оценка сервера по настроенным ставкам, не счёт провайдера.'
                     : 'Проверенное сервером сообщение провайдера, не счёт.'}
                 </p>

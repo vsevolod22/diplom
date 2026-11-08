@@ -3,6 +3,7 @@ import { isCveId, isDebianTempId, isDebianDlaId, identifierLabel } from './publi
 import {
   freeProfileSchema,
   openAiDisclosureSchema,
+  moduleApiDisclosureSchema,
   publicChatMetadataShape,
   scannerDisclosureData,
   validPublicChatMetadata,
@@ -68,7 +69,9 @@ export const summaryContextSchema = z
     unavailableReason: z.literal('LLM_SUMMARY_UNSUPPORTED_REPORT').optional(),
     summaryResultRead: z.boolean().optional(),
     policyVersion: hash.nullable(),
-    disclosure: z.discriminatedUnion('provider', [disclosure, openAiDisclosureSchema]).nullable(),
+    disclosure: z
+      .discriminatedUnion('provider', [disclosure, openAiDisclosureSchema, moduleApiDisclosureSchema])
+      .nullable(),
     ...publicChatMetadataShape,
   })
   .refine(validPublicChatMetadata)
@@ -170,28 +173,85 @@ export type SummaryClient = Omit<ReturnType<typeof createSummaryClient>, 'existi
 };
 // Mirror server/api/src/llm/provider-diagnostic.ts without importing backend runtime code.
 const SUMMARY_FAILURE_PHASES = [
-  'request', 'connect', 'tls', 'dispatch_guard', 'headers', 'body', 'json', 'model',
-  'envelope', 'finish', 'content', 'usage', 'accounting', 'deadline', 'caller_abort',
-  'language', 'grounding', 'translation_title', 'translation_description',
+  'request',
+  'connect',
+  'tls',
+  'dispatch_guard',
+  'headers',
+  'body',
+  'json',
+  'model',
+  'envelope',
+  'finish',
+  'content',
+  'usage',
+  'accounting',
+  'deadline',
+  'caller_abort',
+  'language',
+  'grounding',
+  'translation_title',
+  'translation_description',
 ] as const;
 const SUMMARY_FAILURE_REASONS = [
-  'invalid_request', 'rejected', 'io_error', 'timeout', 'aborted', 'http_error',
-  'invalid_type', 'limit', 'invalid_json', 'mismatch', 'invalid_shape', 'invalid_finish',
-  'invalid_content', 'invalid_receipt', 'observation_failed', 'not_russian',
-  'unknown_identifier', 'finish_length', 'finish_content_filter', 'finish_tool_calls',
-  'finish_error', 'finish_unknown', 'null_mismatch', 'unsafe_text', 'invalid_markup',
-  'identifier_mismatch', 'nonprose_changed', 'not_normalized', 'invalid_link',
+  'invalid_request',
+  'rejected',
+  'io_error',
+  'timeout',
+  'aborted',
+  'http_error',
+  'invalid_type',
+  'limit',
+  'invalid_json',
+  'mismatch',
+  'invalid_shape',
+  'invalid_finish',
+  'invalid_content',
+  'invalid_receipt',
+  'observation_failed',
+  'not_russian',
+  'unknown_identifier',
+  'finish_length',
+  'finish_content_filter',
+  'finish_tool_calls',
+  'finish_error',
+  'finish_unknown',
+  'null_mismatch',
+  'unsafe_text',
+  'invalid_markup',
+  'identifier_mismatch',
+  'nonprose_changed',
+  'not_normalized',
+  'invalid_link',
 ] as const;
 // Mirror server/api/src/llm/openai-http-diagnostic.ts; never expose raw provider text.
 const SUMMARY_PROVIDER_ERROR_CODES = [
-  'invalid_json_schema', 'invalid_request_error', 'unsupported_parameter', 'unsupported_value',
-  'invalid_value', 'context_length_exceeded', 'model_not_found', 'rate_limit_exceeded',
-  'insufficient_quota', 'invalid_api_key', 'server_error',
+  'invalid_json_schema',
+  'invalid_request_error',
+  'unsupported_parameter',
+  'unsupported_value',
+  'invalid_value',
+  'context_length_exceeded',
+  'model_not_found',
+  'rate_limit_exceeded',
+  'insufficient_quota',
+  'invalid_api_key',
+  'server_error',
 ] as const;
 const SUMMARY_PROVIDER_ERROR_PARAMS = [
-  'response_format', 'response_format.type', 'response_format.json_schema',
-  'response_format.json_schema.schema', 'response_format.json_schema.strict', 'model', 'messages',
-  'max_completion_tokens', 'reasoning_effort', 'service_tier', 'store', 'stream', 'n',
+  'response_format',
+  'response_format.type',
+  'response_format.json_schema',
+  'response_format.json_schema.schema',
+  'response_format.json_schema.strict',
+  'model',
+  'messages',
+  'max_completion_tokens',
+  'reasoning_effort',
+  'service_tier',
+  'store',
+  'stream',
+  'n',
 ] as const;
 export type SummaryFailureDiagnostic = Readonly<{
   httpStatus: number;
@@ -211,28 +271,40 @@ function summaryFailureDiagnostic(value: {
 }): SummaryFailureDiagnostic {
   const phase = SUMMARY_FAILURE_PHASES.find((member) => member === value.phase);
   const reason = SUMMARY_FAILURE_REASONS.find((member) => member === value.reason);
-  const providerStatus = phase === 'headers' && reason === 'http_error' &&
-    typeof value.providerStatus === 'number' && Number.isInteger(value.providerStatus) &&
-    value.providerStatus > 200 && value.providerStatus <= 599 ? value.providerStatus : undefined;
+  const providerStatus =
+    phase === 'headers' &&
+    reason === 'http_error' &&
+    typeof value.providerStatus === 'number' &&
+    Number.isInteger(value.providerStatus) &&
+    value.providerStatus > 200 &&
+    value.providerStatus <= 599
+      ? value.providerStatus
+      : undefined;
   const providerErrorCode = SUMMARY_PROVIDER_ERROR_CODES.find((member) => member === value.providerErrorCode);
-  const providerErrorParam = SUMMARY_PROVIDER_ERROR_PARAMS.find((member) => member === value.providerErrorParam);
+  const providerErrorParam = SUMMARY_PROVIDER_ERROR_PARAMS.find(
+    (member) => member === value.providerErrorParam,
+  );
   return Object.freeze({
     httpStatus: value.httpStatus,
     ...(phase && reason ? { phase, reason } : {}),
-    ...(providerStatus !== undefined ? {
-      providerStatus,
-      ...(providerErrorCode ? { providerErrorCode } : {}),
-      ...(providerErrorParam ? { providerErrorParam } : {}),
-    } : {}),
+    ...(providerStatus !== undefined
+      ? {
+          providerStatus,
+          ...(providerErrorCode ? { providerErrorCode } : {}),
+          ...(providerErrorParam ? { providerErrorParam } : {}),
+        }
+      : {}),
   });
 }
 export class SummaryError extends Error {
   readonly diagnostic?: SummaryFailureDiagnostic;
-  constructor(readonly code: string, readonly httpStatus?: number, diagnostic?: SummaryFailureDiagnostic) {
+  constructor(
+    readonly code: string,
+    readonly httpStatus?: number,
+    diagnostic?: SummaryFailureDiagnostic,
+  ) {
     super('ИИ-сводка недоступна');
-    this.diagnostic = diagnostic
-      ? summaryFailureDiagnostic(diagnostic)
-      : undefined;
+    this.diagnostic = diagnostic ? summaryFailureDiagnostic(diagnostic) : undefined;
   }
 }
 export function isUnsupportedSummaryReport(error: unknown): boolean {
@@ -253,12 +325,12 @@ export function summaryErrorMessage(error: unknown): string {
   const diagnostic = error instanceof SummaryError ? error.diagnostic : undefined;
   if (diagnostic?.providerStatus === 429 || code === 'LLM_PROVIDER_RATE_LIMITED') {
     const providerStatus = diagnostic?.providerStatus === 429 ? ' (HTTP 429)' : '';
-    const providerCode = diagnostic?.providerErrorCode ? ` Код провайдера: ${diagnostic.providerErrorCode}.` : '';
+    const providerCode = diagnostic?.providerErrorCode
+      ? ` Код провайдера: ${diagnostic.providerErrorCode}.`
+      : '';
     return `Провайдер ИИ ограничил запрос${providerStatus}.${providerCode} Возможно временное ограничение запросов или ограничение аккаунта сервиса у провайдера; точная причина не подтверждена. Это не означает, что локальный бюджет вашего аккаунта исчерпан. Оператору нужно проверить лимиты и состояние аккаунта сервиса у провайдера. Автоматического повтора нет; повторить вручную можно позднее. Отчёт сканеров доступен.`;
   }
-  if (
-    ['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED'].includes(code)
-  )
+  if (['LLM_CAPACITY', 'LLM_BUDGET_EXCEEDED'].includes(code))
     return 'ИИ-разбор временно недоступен. Попробуйте позднее; отчёт сканеров доступен.';
   if (['TIMEOUT', 'LLM_REQUEST_ABORTED', 'LLM_PROVIDER_TIMEOUT'].includes(code))
     return 'Не дождались ответа ИИ. Можно повторить разбор вручную.';
@@ -338,8 +410,10 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
           httpStatus: response.status,
           phase: response.headers.get('X-LLM-Failure-Phase'),
           reason: response.headers.get('X-LLM-Failure-Reason'),
-          providerStatus: providerStatus !== null && /^(?:20[1-9]|2[1-9][0-9]|[3-5][0-9]{2})$/.test(providerStatus)
-            ? Number(providerStatus) : undefined,
+          providerStatus:
+            providerStatus !== null && /^(?:20[1-9]|2[1-9][0-9]|[3-5][0-9]{2})$/.test(providerStatus)
+              ? Number(providerStatus)
+              : undefined,
           providerErrorCode: response.headers.get('X-LLM-Provider-Error-Code'),
           providerErrorParam: response.headers.get('X-LLM-Provider-Error-Param'),
         });
@@ -383,7 +457,11 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
       if (!current() || controller.signal.aborted) throw new SummaryError('SESSION');
       if (!response.ok) {
         const code = z.object({ errorCode: z.string().regex(/^[A-Z_]{1,64}$/) }).safeParse(value);
-        throw new SummaryError(code.success ? code.data.errorCode : 'UNAVAILABLE', response.status, diagnostic);
+        throw new SummaryError(
+          code.success ? code.data.errorCode : 'UNAVAILABLE',
+          response.status,
+          diagnostic,
+        );
       }
       return value;
     };
@@ -408,7 +486,8 @@ export function createSummaryClient(session: ReturnType<typeof scanSession>, fet
       try {
         value = await request(context.scanId, 'summary', signal);
       } catch (error) {
-        if (error instanceof SummaryError && error.code === 'LLM_SUMMARY_MISSING' && error.httpStatus === 404) return null;
+        if (error instanceof SummaryError && error.code === 'LLM_SUMMARY_MISSING' && error.httpStatus === 404)
+          return null;
         throw error;
       }
       const reply = summaryReplySchema.parse(value);
@@ -504,8 +583,9 @@ export async function collectSummarySources(
           status.perCheck?.[check]?.findingCount !== expected ||
           (check === 'vuln' &&
             status.identifierCounts &&
-            (cve !== status.identifierCounts.cve || debianTemp !== status.identifierCounts.debianTemp ||
-                          debianDla !== (status.identifierCounts.debianDla ?? 0)))
+            (cve !== status.identifierCounts.cve ||
+              debianTemp !== status.identifierCounts.debianTemp ||
+              debianDla !== (status.identifierCounts.debianDla ?? 0)))
         )
           throw new SummaryError('INVALID');
         break;
@@ -526,9 +606,11 @@ export function verifiedSummarySources(reply: SummaryReply, sources: SummarySour
     const source = byId.get(id);
     if (!source || facts.get(id)?.check !== source.check) throw new SummaryError('INVALID');
   }
-  return sources.filter((source) => cited.has(source.findingId)).map((source) => {
-    // Keep legacy three-field facts usable; retain full validated server facts for citation cards.
-    const finding = publicSafeFinding.safeParse(facts.get(source.findingId));
-    return finding.success ? { ...source, finding: finding.data } : source;
-  });
+  return sources
+    .filter((source) => cited.has(source.findingId))
+    .map((source) => {
+      // Keep legacy three-field facts usable; retain full validated server facts for citation cards.
+      const finding = publicSafeFinding.safeParse(facts.get(source.findingId));
+      return finding.success ? { ...source, finding: finding.data } : source;
+    });
 }

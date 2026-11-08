@@ -16,6 +16,14 @@ import { makeOpenAiTransport } from './openai-transport.js';
 import { OPENAI_PROMPTS } from './openai-prompts.js';
 import { openAiDisclosure, OPENAI_ESTIMATE_SOURCE, OPENROUTER_RECEIPT_SOURCE, type ChatReceipt } from './provider-browser-contract.js';
 import type { PreparedOperation, ProviderRuntimeSnapshot, RuntimeAttempt } from './provider-runtime-contract.js';
+import { createModuleApiAccountingPolicy, createModuleApiQuotaContext, bindModuleApiAccounting, MODULEAPI_COST_BASIS } from './moduleapi-accounting.js';
+import { prepareModuleApiSummary, prepareModuleApiChat, type ModuleApiPrepared } from './moduleapi-prepared-request.js';
+import { ModuleApiProvider, type ModuleApiGuardedTransport } from './moduleapi-provider.js';
+import { readModuleApiEnvironment, type ModuleApiServerConfiguration } from './moduleapi-environment.js';
+import { readModuleApiKeyEnvironment, moduleApiKeyEnvironmentReady, type ModuleApiEnvironment } from './moduleapi-key-environment.js';
+import { MODULEAPI_PROMPTS, type ModuleApiPolicy } from './moduleapi-policy.js';
+import { makeModuleApiTransport } from './moduleapi-transport.js';
+import { moduleApiDisclosure, MODULEAPI_ESTIMATE_SOURCE } from './provider-browser-contract.js';
 
 export const PROVIDER_RUNTIME_OPTIONS = Symbol('PROVIDER_RUNTIME_OPTIONS');
 // Trusted DI seams only. Neither transport nor credential/config callbacks come from HTTP.
@@ -26,6 +34,10 @@ export type ProviderRuntimeOptions = Readonly<{
   credential?: () => string;
   credentialReady?: () => boolean;
   transport?: (policy: OpenAiPolicy, maxConcurrent: number) => OpenAiGuardedTransport;
+  moduleApiConfiguration?: () => ModuleApiServerConfiguration | null;
+  moduleApiCredential?: () => string;
+  moduleApiCredentialReady?: () => boolean;
+  moduleApiTransport?: (policy: ModuleApiPolicy, maxConcurrent: number) => ModuleApiGuardedTransport;
 }>;
 export type LegacyProviderRuntime = { policy(): LlmPolicy | null; provider(): LlmProvider;
   resolve?: () => ProviderRuntimeSnapshot | null };
@@ -90,7 +102,7 @@ export function openRouterRuntime(policy: LlmPolicy, provider: () => LlmProvider
     prepareChat: context => operation(prepareHistory(context, policy), raw => validateChatReply(raw, context.report, true), true) });
 }
 
-class OpenAiAdmission {
+export class PaidProviderAdmission {
   private readonly active = new Set<{ limit: number }>();
   acquire(limit: number, currentLimit = limit): () => void {
     if (![limit, currentLimit].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 8)) throw configError();
@@ -107,7 +119,7 @@ class OpenAiAdmission {
 export function createOpenAiRuntime(config: OpenAiServerConfiguration, quota: QuotaPolicy,
   provider: () => OpenAiProvider,
   admit?: () => () => void): ProviderRuntimeSnapshot | null {
-  const admission = new OpenAiAdmission();
+  const admission = new PaidProviderAdmission();
   const acquire = admit ?? (() => admission.acquire(config.maxConcurrent));
   const policy = config.policy;
   if (!config.accountingRevision || config.spending.userBudgetMicros !== quota.user.costMicros ||
@@ -172,14 +184,116 @@ export function createOpenAiRuntime(config: OpenAiServerConfiguration, quota: Qu
     }) });
 }
 
+export function selectedProvider(environment: ModuleApiEnvironment): 'openrouter' | 'openai' | 'moduleapi' | null {
+  const value = environment.LLM_PROVIDER;
+  return value === undefined || value === 'openrouter' ? 'openrouter' :
+    value === 'openai' || value === 'moduleapi' ? value : null;
+}
+
+export function createModuleApiRuntime(config: ModuleApiServerConfiguration, quota: QuotaPolicy,
+  provider: () => ModuleApiProvider, admit?: () => () => void): ProviderRuntimeSnapshot | null {
+  const admission = new PaidProviderAdmission();
+  const acquire = admit ?? (() => admission.acquire(config.maxConcurrent));
+  const policy = config.policy;
+  if (!config.accountingRevision || config.spending.userBudgetMicros !== quota.user.costMicros ||
+      config.spending.scanBudgetMicros !== quota.scan.costMicros) return null;
+  const approval = createModuleApiAccountingPolicy({ enabled: true, revision: config.accountingRevision, providerPolicyVersion: policy.version,
+    quotaPolicyVersion: quota.version, billing: 'estimate-only-effective-tariff-not-verified', costBasis: MODULEAPI_COST_BASIS,
+    ...(policy.monetaryLimit === undefined ? {} : { monetaryLimit: policy.monetaryLimit }) }, policy, quota);
+  if (!approval) return null;
+  const version = hashValue(['moduleapi-runtime-v1', policy.version, quota.version, approval.version]);
+  function operation<T>(prepared: ModuleApiPrepared, select: (result: Awaited<ReturnType<ModuleApiProvider['generate']>>) => T): PreparedOperation<T> {
+    const contextFor = (binding: QuotaBindings) => createModuleApiQuotaContext(binding, prepared, policy, approval!);
+    return Object.freeze({ hash: prepared.hash, reserve: prepared.reserve,
+      snapshot: (ledger: QuotaLedger, binding: QuotaBindings) => ledger.snapshotModuleApi(contextFor(binding)),
+      reserveAttempt: (ledger: QuotaLedger, binding: QuotaBindings): RuntimeAttempt<T> => {
+        const context = contextFor(binding), id = ledger.reserveModuleApi(context), bound = bindModuleApiAccounting(ledger, id, context);
+        return Object.freeze({ id, release: () => { bound.release(); },
+          async generate(signal, fence, observed, dispatched) {
+            let release: (() => void) | undefined;
+            try {
+              let adapter: ModuleApiProvider | undefined;
+              fence(() => {
+                if (signal.aborted) throw configError();
+                release = acquire();
+                adapter = provider();
+              });
+              if (!adapter) throw configError();
+              let receipt: ChatReceipt | undefined;
+              const result = await adapter.generate(prepared, signal, {
+                assertReserved: bound.accounting.assertReserved,
+                observe(binding, usage) {
+                  const accepted = bound.accounting.observe(binding, usage);
+                  if (accepted && usage.normal && usage.input !== undefined && usage.output !== undefined && usage.costMicros !== undefined) {
+                    receipt = Object.freeze({ input: usage.input, output: usage.output, costMicros: usage.costMicros, source: MODULEAPI_ESTIMATE_SOURCE });
+                    observed(receipt);
+                  }
+                  return accepted;
+                },
+              }, (binding, send) => fence(() => {
+                if (!bound.dispatchGuarded(binding, () => dispatched?.(), send)) throw quotaUnavailable();
+              }));
+              if (!receipt) throw quotaUnavailable();
+              return select(result);
+            } finally { release?.(); }
+          } });
+      } });
+  }
+  return Object.freeze({ provider: 'ModuleAPI', version,
+    chatVersion: hashValue([version, HISTORY.version, 'question-history-decisions-retained-no-output-cache']),
+    providerPolicyVersion: policy.version, timeoutMs: policy.timeoutMs, requestBytes: policy.requestBytes,
+    responseBytes: policy.responseBytes, findings: policy.findings, outputTokens: policy.outputTokens,
+    chatEnabled: true, durableSummary: true,
+    summaryPolicy: Object.freeze({ provider: 'ModuleAPI', version, policy, findings: policy.findings,
+      requestBytes: policy.requestBytes, responseBytes: policy.responseBytes }),
+    disclosure: report => moduleApiDisclosure(policy, quota, !!report.profile),
+    prepareSummary: report => operation(prepareModuleApiSummary(report, policy), result => {
+      if (result.operation !== 'summary') throw configError(); return result.value;
+    }),
+    prepareChat: context => operation(prepareModuleApiChat(context, policy), result => {
+      if (result.operation !== 'chat') throw configError(); return result.value;
+    }) });
+}
+
+export class ModuleApiRuntimeResolver {
+  private readonly snapshots = new Map<string, { configuration: ModuleApiServerConfiguration; runtime: ProviderRuntimeSnapshot | null }>();
+  constructor(private readonly options: ProviderRuntimeOptions = {}, private readonly admission = new PaidProviderAdmission()) {}
+  environment(): ModuleApiEnvironment { return this.options.environment?.() ?? process.env; }
+  selected() { return selectedProvider(this.environment()); }
+  inspect(): { configuration: ModuleApiServerConfiguration | null; runtime: ProviderRuntimeSnapshot | null } {
+    const configuration = this.options.moduleApiConfiguration ? this.options.moduleApiConfiguration() :
+      readModuleApiEnvironment(MODULEAPI_PROMPTS, this.environment());
+    if (!configuration) return { configuration: null, runtime: null };
+    const quota = this.options.quotaPolicy ? this.options.quotaPolicy() : quotaPolicyFromEnvironment(this.environment());
+    if (!quota) return { configuration, runtime: null };
+    const key = hashValue([configuration, quota]);
+    const existing = this.snapshots.get(key);
+    if (existing) return existing;
+    if (this.snapshots.size >= 4) return { configuration, runtime: null };
+    let transport: ModuleApiGuardedTransport | undefined;
+    const runtime = createModuleApiRuntime(configuration, quota, () => {
+      transport ??= (this.options.moduleApiTransport ?? makeModuleApiTransport)(configuration.policy, configuration.maxConcurrent);
+      return new ModuleApiProvider(configuration.policy,
+        this.options.moduleApiCredential ? this.options.moduleApiCredential() : readModuleApiKeyEnvironment(this.environment()), transport);
+    }, () => {
+      if (this.selected() !== 'moduleapi') throw configError();
+      const current = this.inspect();
+      if (!current.runtime || !current.configuration) throw configError();
+      return this.admission.acquire(configuration.maxConcurrent, current.configuration.maxConcurrent);
+    });
+    const snapshot = Object.freeze({ configuration, runtime });
+    this.snapshots.set(key, snapshot);
+    return snapshot;
+  }
+  credentialReady(): boolean { return this.options.moduleApiCredentialReady?.() ?? moduleApiKeyEnvironmentReady(this.environment()); }
+}
+
 export class OpenAiRuntimeResolver {
-  private readonly admission = new OpenAiAdmission();
   private readonly snapshots = new Map<string, { configuration: OpenAiServerConfiguration; runtime: ProviderRuntimeSnapshot | null }>();
-  constructor(private readonly options: ProviderRuntimeOptions = {}) {}
+  constructor(private readonly options: ProviderRuntimeOptions = {}, private readonly admission = new PaidProviderAdmission()) {}
   environment(): OpenAiEnvironment { return this.options.environment?.() ?? process.env; }
-  selected(): 'openrouter' | 'openai' | null {
-    const value = this.environment().LLM_PROVIDER;
-    return value === undefined || value === 'openrouter' ? 'openrouter' : value === 'openai' ? 'openai' : null;
+  selected(): 'openrouter' | 'openai' | 'moduleapi' | null {
+    return selectedProvider(this.environment());
   }
   inspect(): { configuration: OpenAiServerConfiguration | null; runtime: ProviderRuntimeSnapshot | null } {
     const configuration = this.options.configuration ? this.options.configuration() : readOpenAiEnvironment(OPENAI_PROMPTS, this.environment());
@@ -209,7 +323,8 @@ export class OpenAiRuntimeResolver {
   }
   translationCompatible(): boolean {
     const mode = this.options.quotaPolicy ? this.options.quotaPolicy()?.monetaryLimit : this.environment().LLM_QUOTA_MONETARY_LIMIT;
-    return (mode === undefined || mode === 'capped') && this.environment().OPENAI_MONETARY_LIMIT !== 'uncapped';
+    return (mode === undefined || mode === 'capped') && this.environment().OPENAI_MONETARY_LIMIT !== 'uncapped' &&
+          this.environment().MODULEAPI_MONETARY_LIMIT !== 'uncapped';
   }
   credentialReady(): boolean { return this.options.credentialReady?.() ?? openAiKeyEnvironmentReady(this.environment()); }
 }

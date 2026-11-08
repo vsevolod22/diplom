@@ -17,6 +17,7 @@ STATE_PARTS = (".local", "state", "diplom-public-images", "llm")
 KEY_NAME = "openrouter.key"
 CONFIG_NAME = "llm.env"
 OPENAI_CONFIG_NAME = "openai-deployment.json"
+MODULEAPI_CONFIG_NAME = "moduleapi-deployment.json"
 KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,512}", re.ASCII)
 # Explicit operator-selected Dots replacement: no-training is NOT no-storage/ZDR.
 # Reported metadata: NVIDIA training=true conflicts with API data_collection=deny;
@@ -128,7 +129,7 @@ def open_state(path, create=False):
 
 
 def create_file(directory_fd, name, payload):
-    if name not in (KEY_NAME, CONFIG_NAME, OPENAI_CONFIG_NAME):
+    if name not in (KEY_NAME, CONFIG_NAME, OPENAI_CONFIG_NAME, MODULEAPI_CONFIG_NAME):
         raise Refusal("Unsupported public state filename.")
     info = os.fstat(directory_fd)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
@@ -407,14 +408,42 @@ def prepare_openai():
         os.close(fd)
 
 
+def prepare_moduleapi():
+    """Explicit protected nonsecret v7 descriptor; no secret or installed config reads."""
+    payload = sys.stdin.buffer.read(16385)
+    if not payload or len(payload) > 16384:
+        raise Refusal('ModuleAPI descriptor refused; no values printed.')
+    root = Path(__file__).absolute().parents[1]
+    destination = state_path()
+    if destination == root or root in destination.parents:
+        raise Refusal('ModuleAPI configuration must remain outside the source tree.')
+    try:
+        result = subprocess.run(['node', str(root / 'scripts/moduleapi-deployment-descriptor.mjs'), '--normalize'],
+                                input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                cwd=root, env={'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'},
+                                timeout=10, check=False)
+        if result.returncode != 0 or not result.stdout or len(result.stdout) > 16384:
+            raise Refusal('ModuleAPI descriptor refused; no values printed.')
+    except (OSError, subprocess.TimeoutExpired):
+        raise Refusal('ModuleAPI descriptor validator unavailable; nothing installed.') from None
+    fd = open_state(destination)
+    try:
+        create_file(fd, MODULEAPI_CONFIG_NAME, result.stdout)
+    finally:
+        os.close(fd)
+
+
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ("--prepare", "--prepare-openai", "--set-key", "--status", "--coordinator-check-timeout", "--coordinator-commit-timeout", "--coordinator-check-nvidia", "--coordinator-commit-nvidia", "--coordinator-check-dots", "--coordinator-commit-dots", "--coordinator-check-report4k", "--coordinator-commit-report4k"):
-        print("Usage: public-llm-config.py --prepare | --set-key | --status. No key/path arguments accepted.", file=sys.stderr)
+    if len(sys.argv) != 2 or sys.argv[1] not in ("--prepare", "--prepare-openai", "--prepare-moduleapi", "--set-key", "--status", "--coordinator-check-timeout", "--coordinator-commit-timeout", "--coordinator-check-nvidia", "--coordinator-commit-nvidia", "--coordinator-check-dots", "--coordinator-commit-dots", "--coordinator-check-report4k", "--coordinator-commit-report4k"):
+        print("Usage: public-llm-config.py --prepare | --prepare-openai | --prepare-moduleapi | --set-key | --status. No key/path arguments accepted.", file=sys.stderr)
         return 1
     mode = sys.argv[1]
     fd = None
     try:
-        if mode == '--prepare-openai':
+        if mode == '--prepare-moduleapi':
+            prepare_moduleapi()
+            print('ModuleAPI nonsecret v7 descriptor prepared (0600); no key, volume, activation or database operation.')
+        elif mode == '--prepare-openai':
             prepare_openai()
             print('OpenAI nonsecret v6 descriptor prepared (0600); no key, volume, activation or database operation.')
         elif mode == '--coordinator-check-timeout':

@@ -172,12 +172,16 @@ export type LlmUsage = z.infer<typeof usageSchema>;
 export function usageMatchesDisclosure(
   usage: LlmUsage,
   disclosure:
-    | { provider: 'OpenAI'; monetaryLimit: 'capped' | 'uncapped'; lifetimeUserCostMicros?: number }
+    | {
+        provider: 'OpenAI' | 'ModuleAPI';
+        monetaryLimit: 'capped' | 'uncapped';
+        lifetimeUserCostMicros?: number;
+      }
     | { provider: 'OpenRouter' }
     | null,
 ) {
   if (!usage.available || !disclosure) return false;
-  return disclosure.provider === 'OpenAI'
+  return disclosure.provider !== 'OpenRouter'
     ? usage.monetaryLimit === disclosure.monetaryLimit &&
         usage.lifetimeBudget?.limitMicros === disclosure.lifetimeUserCostMicros
     : usage.monetaryLimit === undefined;

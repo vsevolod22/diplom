@@ -106,7 +106,7 @@ export class HistoryService {
               const snapshot = this.quotas.ledger().snapshot(access.identity.subject, scanId);
               const policy = resolveProviderRuntime(this.providerRuntime);
               usage = { available: true, ...snapshot,
-                ...(policy?.provider === 'OpenAI' ? { monetaryLimit: snapshot.monetaryLimit ?? 'capped' } : {}) };
+                ...(policy && policy.provider !== 'OpenRouter' ? { monetaryLimit: snapshot.monetaryLimit ?? 'capped' } : {}) };
             }
       catch { usage = { available: false, admission: { status: 'unavailable' } }; }
       return this.result(access, report, head, { ...reportBinding(report), ...usage as Record<string, unknown> });
@@ -180,7 +180,7 @@ export class HistoryService {
       if (!report.findings.length) throw new ConflictException({ errorCode: 'LLM_NO_EVIDENCE' });
       ledger = this.quotas.ledger();
       const selected = selectPreparedHistory(report, head, question, policy.findings, ledger.policy.requestInput, policy.prepareChat,
-              policy.provider === 'OpenAI' ? 3 : HISTORY.citations);
+              policy.provider !== 'OpenRouter' ? 3 : HISTORY.citations);
       const key = hashValue([access.identity.subject, access.session, store.incarnation, reportBinding(report),
         head.epoch, head.revision, hashValue([head.turns, head.decisions]), policy.provider, policy.providerPolicyVersion, policy.version, chatPolicy(policy),
         HISTORY.version, question, selected.context.omission.selectedFindingIds]);

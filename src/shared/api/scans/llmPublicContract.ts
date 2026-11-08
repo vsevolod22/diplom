@@ -215,6 +215,41 @@ export const openAiDisclosureSchema = z.discriminatedUnion('monetaryLimit', [
 ]);
 export type OpenAiDisclosure = z.infer<typeof openAiDisclosureSchema>;
 
+export const MODULEAPI_MODEL = 'gpt-5.4-mini';
+export const MODULEAPI_COST_BASIS = 'moduleapi-server-estimated-configured-rates-not-invoice';
+const moduleApiDisclosureShape = {
+  ...openAiDisclosureShape,
+  provider: z.literal('ModuleAPI'),
+  model: z.literal(MODULEAPI_MODEL),
+  retention: z.literal('unknown'),
+  tariffVerified: z.literal(false),
+  costBasis: z.literal(MODULEAPI_COST_BASIS),
+};
+export const moduleApiDisclosureSchema = z.discriminatedUnion('monetaryLimit', [
+  z.strictObject({
+    ...moduleApiDisclosureShape,
+    monetaryLimit: z.literal('capped'),
+    requestBudgetMicros: positiveBudget,
+    userBudgetMicros: positiveBudget,
+    scanBudgetMicros: positiveBudget,
+  }),
+  z.strictObject({
+    ...moduleApiDisclosureShape,
+    monetaryLimit: z.literal('uncapped'),
+    lifetimeUserCostMicros: z.number().int().min(1).max(1_000_000_000).optional(),
+    requestBudgetMicros: z.null(),
+    userBudgetMicros: z.null(),
+    scanBudgetMicros: z.null(),
+  }),
+]);
+export type ModuleApiDisclosure = z.infer<typeof moduleApiDisclosureSchema>;
+export type PaidDisclosure = OpenAiDisclosure | ModuleApiDisclosure;
+export function isPaidDisclosure<T extends { provider: string }>(
+  value: T | null | undefined,
+): value is Extract<T, { provider: 'OpenAI' | 'ModuleAPI' }> {
+  return value?.provider === 'OpenAI' || value?.provider === 'ModuleAPI';
+}
+
 const catalogBase = { checkedOn: z.literal('2026-10-21'), liveVerified: z.literal(false) };
 const catalog = z.union([
   z.strictObject({
@@ -308,6 +343,36 @@ export const openAiReadinessShape = {
 export function validOpenAiReadiness(value: z.infer<z.ZodObject<typeof openAiReadinessShape>>) {
   const configured = value.provider.status === 'configured-unprobed';
   if (configured !== (value.provider.model === OPENAI_MODEL)) return false;
+  const expected: typeof value.blockers = [];
+  if (!configured) expected.push('configuration-required');
+  if (value.credential !== 'environment-valid') expected.push('environment-key-required');
+  if (value.accounting !== 'configured') expected.push('accounting-configuration-required');
+  if (value.quota !== 'available') expected.push('quota-store-unavailable');
+  if (value.history !== 'available') expected.push('history-store-unavailable');
+  return (
+    JSON.stringify(expected) === JSON.stringify(value.blockers) &&
+    value.localReady === !expected.length &&
+    value.status === (expected.length ? 'setup-required' : 'locally-configured')
+  );
+}
+
+export const moduleApiReadinessShape = {
+  ...openAiReadinessShape,
+  costBasis: z.literal(MODULEAPI_COST_BASIS),
+  provider: z.strictObject({
+    name: z.literal('ModuleAPI'),
+    model: z.literal(MODULEAPI_MODEL).nullable(),
+    status: z.enum(['configured-unprobed', 'configuration-unavailable']),
+    liveVerified: z.literal(false),
+    retention: z.literal('unknown'),
+    operatorApprovedRouting: z.literal(true),
+    zeroDataRetentionVerified: z.literal(false),
+    tariffVerified: z.literal(false),
+  }),
+};
+export function validModuleApiReadiness(value: z.infer<z.ZodObject<typeof moduleApiReadinessShape>>) {
+  const configured = value.provider.status === 'configured-unprobed';
+  if (configured !== (value.provider.model === MODULEAPI_MODEL)) return false;
   const expected: typeof value.blockers = [];
   if (!configured) expected.push('configuration-required');
   if (value.credential !== 'environment-valid') expected.push('environment-key-required');

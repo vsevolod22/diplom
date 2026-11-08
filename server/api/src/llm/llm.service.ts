@@ -19,8 +19,8 @@ import { SUMMARY_STORAGE } from './summary-record.js';
 import { selectSummaryReport, selectPreparedSummary } from './summary-context.js';
 import { requirePublicSummaryReport, supportsPublicSummary } from './summary-report-support.js';
 import type { QuotaLedger } from './quota-ledger.js';
-import { publicCredentialStatus, publicReadiness, openAiReadiness } from './public-readiness.js';
-import { OpenAiRuntimeResolver, PROVIDER_RUNTIME_OPTIONS, openRouterRuntime, resolveProviderRuntime, type ProviderRuntimeOptions } from './provider-runtime.js';
+import { publicCredentialStatus, publicReadiness, openAiReadiness, moduleApiReadiness } from './public-readiness.js';
+import { OpenAiRuntimeResolver, ModuleApiRuntimeResolver, PaidProviderAdmission, PROVIDER_RUNTIME_OPTIONS, openRouterRuntime, resolveProviderRuntime, type ProviderRuntimeOptions } from './provider-runtime.js';
 import type { ProviderRuntimeSnapshot, RuntimeAttempt } from './provider-runtime-contract.js';
 import type { SummaryResponse } from './summary-result-cache.js';
 import { PUBLIC_OPENROUTER_KEY_FILE } from './public-key-file.js';
@@ -29,18 +29,27 @@ import { abortDiagnostic, diagnose, stoppedDiagnostic } from './provider-diagnos
 @Injectable()
 export class LlmRuntime {
   private readonly openAi: OpenAiRuntimeResolver;
+  private readonly moduleApi: ModuleApiRuntimeResolver;
     constructor(@Optional() @Inject(PUBLIC_LLM_REPORTS) private readonly publicReports = false,
-      @Optional() @Inject(PROVIDER_RUNTIME_OPTIONS) options?: ProviderRuntimeOptions) { this.openAi = new OpenAiRuntimeResolver(options); }
+      @Optional() @Inject(PROVIDER_RUNTIME_OPTIONS) options?: ProviderRuntimeOptions) {
+      const admission = new PaidProviderAdmission();
+      this.openAi = new OpenAiRuntimeResolver(options, admission);
+      this.moduleApi = new ModuleApiRuntimeResolver(options, admission);
+    }
     resolve(): ProviderRuntimeSnapshot | null {
       const selected = this.publicReports ? this.openAi.selected() : 'openrouter';
       if (selected === null) return null;
       if (selected === 'openai') return this.openAi.inspect().runtime;
+      if (selected === 'moduleapi') return this.moduleApi.inspect().runtime;
       const policy = this.policy();
       return policy ? openRouterRuntime(policy, () => this.provider()) : null;
     }
     translationCompatible(): boolean { return !this.publicReports || this.openAi.translationCompatible(); }
     openAiReadiness(quotaAvailable: boolean, historyAvailable: boolean) {
       return this.publicReports && this.openAi.selected() === 'openai' ? openAiReadiness(this.openAi, quotaAvailable, historyAvailable) : null;
+    }
+    moduleApiReadiness(quotaAvailable: boolean, historyAvailable: boolean) {
+      return this.publicReports && this.moduleApi.selected() === 'moduleapi' ? moduleApiReadiness(this.moduleApi, quotaAvailable, historyAvailable) : null;
     }
   policy(env: NodeJS.ProcessEnv = process.env): LlmPolicy | null {
     const policy = policyFromEnvironment(env);
@@ -265,7 +274,7 @@ export class LlmService {
           historyAvailable = true;
         } catch { /* Never initialize or migrate missing stores. */ }
     return { scanId: report.scanId, digest: report.digest, platform: report.platform, reportVersion: report.reportVersion,
-      ...(this.runtime.openAiReadiness?.(quotaAvailable, historyAvailable) ?? publicReadiness(
+      ...(this.runtime.moduleApiReadiness?.(quotaAvailable, historyAvailable) ?? this.runtime.openAiReadiness?.(quotaAvailable, historyAvailable) ?? publicReadiness(
               resolveProviderRuntime(this.runtime)?.provider === 'OpenRouter' ? this.runtime.policy() : null,
               this.runtime.credentialStatus(), quotaAvailable, historyAvailable)) };
   }
@@ -286,7 +295,7 @@ export class LlmService {
         } catch { /* Counters remain useful without an admissible exact candidate. */ }
       }
       return { ...binding, ...flags, quotaEnabled: true, available: true, ...snapshot,
-              ...(policy?.provider === 'OpenAI' ? { monetaryLimit: snapshot.monetaryLimit ?? 'capped' } : {}) };
+              ...(policy && policy.provider !== 'OpenRouter' ? { monetaryLimit: snapshot.monetaryLimit ?? 'capped' } : {}) };
     } catch { return { ...binding, ...flags, available: false, reason: flags.quotaEnabled ? 'unavailable' : 'disabled' }; }
   }
   async summary(authorize: () => Identity, scanId: string, body: unknown, signal: AbortSignal) {

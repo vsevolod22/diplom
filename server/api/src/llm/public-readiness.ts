@@ -1,8 +1,8 @@
 import { lstatSync } from 'node:fs';
 import { FREE_MODEL, FREE_PROVIDER, PUBLIC_FREE_MODEL, PUBLIC_FREE_PROVIDER, publicFreePolicy, type LlmPolicy } from './policy.js';
 import { PUBLIC_OPENROUTER_KEY_FILE } from './public-key-file.js';
-import type { OpenAiReadiness, OpenAiReadinessBlocker, TranslationReadiness, TranslationReadinessBlocker } from './provider-browser-contract.js';
-import type { OpenAiRuntimeResolver } from './provider-runtime.js';
+import { MODULEAPI_ESTIMATE_SOURCE, type ModuleApiReadiness, type ModuleApiReadinessBlocker, type OpenAiReadiness, type OpenAiReadinessBlocker, type TranslationReadiness, type TranslationReadinessBlocker } from './provider-browser-contract.js';
+import type { OpenAiRuntimeResolver, ModuleApiRuntimeResolver } from './provider-runtime.js';
 
 export type PublicCredentialStatus = 'unconfigured' | 'missing' | 'unsafe' | 'metadata-valid';
 // Metadata only: never opens a credential, constructs a provider or follows an env path.
@@ -38,6 +38,25 @@ export function openAiReadiness(resolver: OpenAiRuntimeResolver, quotaAvailable:
     history: historyAvailable ? 'available' : 'unavailable', accounting: runtime ? 'configured' : 'unavailable',
     provider: { name: 'OpenAI', model: configuration?.policy.model ?? null,
       status: configuration ? 'configured-unprobed' : 'configuration-unavailable', liveVerified: false },
+    generationVerified: false, requiresConsent: true, acceptsCredentials: false, setupAction: 'operator-server-environment-configuration' };
+}
+
+export function moduleApiReadiness(resolver: ModuleApiRuntimeResolver, quotaAvailable: boolean, historyAvailable: boolean): ModuleApiReadiness {
+  const { configuration, runtime } = resolver.inspect();
+  const keyReady = resolver.credentialReady();
+  const blockers: ModuleApiReadinessBlocker[] = [];
+  if (!configuration) blockers.push('configuration-required');
+  if (!keyReady) blockers.push('environment-key-required');
+  if (!runtime) blockers.push('accounting-configuration-required');
+  if (!quotaAvailable) blockers.push('quota-store-unavailable');
+  if (!historyAvailable) blockers.push('history-store-unavailable');
+  return { status: blockers.length ? 'setup-required' : 'locally-configured', localReady: blockers.length === 0, blockers,
+    credential: keyReady ? 'environment-valid' : 'unavailable', quota: quotaAvailable ? 'available' : 'unavailable',
+    history: historyAvailable ? 'available' : 'unavailable', accounting: runtime ? 'configured' : 'unavailable',
+    costBasis: MODULEAPI_ESTIMATE_SOURCE,
+    provider: { name: 'ModuleAPI', model: configuration?.policy.model ?? null,
+      status: configuration ? 'configured-unprobed' : 'configuration-unavailable', liveVerified: false,
+      retention: 'unknown', operatorApprovedRouting: true, zeroDataRetentionVerified: false, tariffVerified: false },
     generationVerified: false, requiresConsent: true, acceptsCredentials: false, setupAction: 'operator-server-environment-configuration' };
 }
 

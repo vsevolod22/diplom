@@ -5,6 +5,8 @@ import Database from 'better-sqlite3';
 import { PUBLIC_FREE_OUTPUT_TOKENS } from './policy.js';
 import { checkedOpenAiQuotaContext, checkedOpenAiQuotaUsage, type OpenAiQuotaContext } from './openai-accounting.js';
 import type { OpenAiUsage } from './openai-usage.js';
+import { checkedModuleApiQuotaContext, checkedModuleApiQuotaUsage, type ModuleApiQuotaContext } from './moduleapi-accounting.js';
+import type { ModuleApiUsage } from './moduleapi-usage.js';
 import { DAY, checkedQuotaMonetaryPolicy, integer, quotaExceeded, quotaUnavailable, type QuotaAdmission, type AdmissionSignal, type LimitVector, type MonetaryLimit, type QuotaPolicy, type UsageObservation, type Vector } from './quota-policy.js';
 
 const APPLICATION = 1145655601;
@@ -227,25 +229,25 @@ export class QuotaLedger {
   reserve(binding: QuotaBindings, reserve: Vector): string {
     return this.reserveAttempt(binding, reserve);
   }
-  private reserveAttempt(binding: QuotaBindings, reserve: Vector, context?: OpenAiQuotaContext): string {
+  private reserveAttempt(binding: QuotaBindings, reserve: Vector, paidPolicySnapshot?: string): string {
     return this.write(() => {
       // The authoritative clock is intentionally sampled AFTER BEGIN IMMEDIATE.
       const time = this.time();
       if (!binding.subject || binding.subject.length > 200 || !binding.scanId || binding.scanId.length > 200 ||
           ![binding.reportVersion, binding.policyVersion, binding.requestHash].every(v => /^[a-f0-9]{64}$/.test(v))) throw quotaUnavailable();
-      this.validateReserve(reserve, context !== undefined);
+      this.validateReserve(reserve, paidPolicySnapshot !== undefined);
       // Retain settlements even while lifetime enforcement is disabled, so a later
       // enable cannot erase spend. Rows deleted by older cleanup are unrecoverable;
       // lifetime totals can only include retained history. Released rows owe zero.
       this.db.prepare(`DELETE FROM quota_attempt WHERE id IN (SELECT id FROM quota_attempt
         WHERE state='released' AND cost=0 AND window+?<? LIMIT ?)`)
         .run(DAY * (1 + this.policy.replayDays), time, this.policy.cleanupBatch);
-      const view = this.snapshotAt(binding.subject, binding.scanId, time, reserve, context !== undefined);
+      const view = this.snapshotAt(binding.subject, binding.scanId, time, reserve, paidPolicySnapshot !== undefined);
       if (view.admission.status !== 'fits') throw quotaExceeded(view.admission);
       const id = randomUUID();
       this.db.prepare(`INSERT INTO quota_attempt VALUES(?,?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?,NULL)`).run(
         id, hash(binding.subject), hash(JSON.stringify([binding.subject, binding.scanId])), binding.reportVersion, binding.policyVersion,
-        binding.requestHash, context ? this.openAiPolicySnapshot(context) : JSON.stringify(this.policy), view.window.start, time + this.policy.receiptMs,
+        binding.requestHash, paidPolicySnapshot ?? JSON.stringify(this.policy), view.window.start, time + this.policy.receiptMs,
         reserve.input, reserve.output, reserve.costMicros, reserve.input, reserve.output, reserve.costMicros);
       this.db.prepare('UPDATE quota_meta SET clock=? WHERE id=1').run(time);
       return id;
@@ -283,7 +285,7 @@ export class QuotaLedger {
   }
   reserveOpenAi(context: OpenAiQuotaContext): string {
     this.currentOpenAiPolicy(context);
-    return this.reserveAttempt(context.binding, context.reserve, context);
+    return this.reserveAttempt(context.binding, context.reserve, this.openAiPolicySnapshot(context));
   }
   assertOpenAiReserved(id: string, context: OpenAiQuotaContext): boolean {
     this.currentOpenAiPolicy(context);
@@ -348,6 +350,115 @@ export class QuotaLedger {
       // selected provider/policy. Known overages remain liabilities even above a
       // configured observation ceiling; only settlement is disallowed then.
       const { quota } = checkedOpenAiQuotaContext(context);
+      const input = observation.input === undefined ? undefined : integer(observation.input, 1_048_576);
+      const output = observation.output === undefined ? undefined : integer(observation.output, 1_048_576);
+      const cost = observation.costMicros === undefined ? undefined : integer(observation.costMicros, Number.MAX_SAFE_INTEGER);
+      const normal = observation.normal && input !== undefined && output !== undefined && cost !== undefined &&
+        input <= row.reserve_input && output <= row.reserve_output && cost <= row.reserve_cost &&
+        input <= quota.observationTokens && output <= quota.observationTokens && cost <= quota.observationCostMicros;
+      if (!normal && input === undefined && output === undefined && cost === undefined) return false;
+      this.db.prepare(`UPDATE quota_attempt SET state=?,input=?,output=?,cost=?,receipt=? WHERE id=? AND state='dispatched'`).run(
+        normal ? 'settled' : 'fault', normal ? input : Math.max(row.reserve_input, input ?? 0),
+        normal ? output : Math.max(row.reserve_output, output ?? 0), normal ? cost : Math.max(row.reserve_cost, cost ?? 0), receipt, id);
+      this.db.prepare('UPDATE quota_meta SET clock=? WHERE id=1').run(time);
+      return normal;
+    });
+  }
+  // Separate branded ModuleAPI receipts, same transaction and historical account totals.
+  private moduleApiPolicySnapshot(context: ModuleApiQuotaContext): string {
+    const { quota } = checkedModuleApiQuotaContext(context);
+    return JSON.stringify({ ...quota, paidAccounting: context.accounting });
+  }
+  private currentModuleApiPolicy(context: ModuleApiQuotaContext): void {
+    const { quota } = checkedModuleApiQuotaContext(context);
+    if (JSON.stringify(quota) !== JSON.stringify(this.policy)) throw quotaUnavailable();
+  }
+  private moduleApiRow(id: string, context: ModuleApiQuotaContext): Row | undefined {
+    const snapshot = this.moduleApiPolicySnapshot(context), binding = context.binding;
+    const row = this.db.prepare('SELECT * FROM quota_attempt WHERE id=?').get(id) as Row | undefined;
+    if (!row || row.quota_policy !== snapshot || row.user_key !== hash(binding.subject) ||
+        row.scan_key !== hash(JSON.stringify([binding.subject, binding.scanId])) || row.report_hash !== binding.reportVersion ||
+        row.policy_hash !== binding.policyVersion || row.request_hash !== binding.requestHash ||
+        row.reserve_input !== context.reserve.input || row.reserve_output !== context.reserve.output ||
+        row.reserve_cost !== context.reserve.costMicros) return undefined;
+    return row;
+  }
+  snapshotModuleApi(context: ModuleApiQuotaContext): QuotaSnapshot {
+    this.currentModuleApiPolicy(context);
+    try {
+      return this.db.transaction(() => {
+        this.safety();
+        return this.snapshotAt(context.binding.subject, context.binding.scanId, this.time(), context.reserve, true);
+      })();
+    } catch { throw quotaUnavailable(); }
+  }
+  reserveModuleApi(context: ModuleApiQuotaContext): string {
+    this.currentModuleApiPolicy(context);
+    return this.reserveAttempt(context.binding, context.reserve, this.moduleApiPolicySnapshot(context));
+  }
+  assertModuleApiReserved(id: string, context: ModuleApiQuotaContext): boolean {
+    this.currentModuleApiPolicy(context);
+    try {
+      return this.db.transaction(() => {
+        this.safety();
+        const row = this.moduleApiRow(id, context);
+        return !!row && row.state === 'reserved' && row.expires >= this.time();
+      })();
+    } catch { throw quotaUnavailable(); }
+  }
+  dispatchModuleApi(id: string, context: ModuleApiQuotaContext): boolean {
+    this.currentModuleApiPolicy(context);
+    return this.write(() => {
+      const time = this.time(), row = this.moduleApiRow(id, context);
+      if (!row || row.state !== 'reserved' || row.expires < time) return false;
+      const dispatched = this.db.prepare("UPDATE quota_attempt SET state='dispatched' WHERE id=? AND state='reserved'").run(id).changes === 1;
+      this.db.prepare('UPDATE quota_meta SET clock=? WHERE id=1').run(time);
+      return dispatched;
+    });
+  }
+  dispatchModuleApiGuarded(id: string, context: ModuleApiQuotaContext, beforeSend: () => void, send: () => void): boolean {
+    if (!this.dispatchModuleApi(id, context)) return false;
+    try {
+      const result: unknown = beforeSend();
+      if (result !== undefined) {
+        // Consume rejected promises/thenables without trusting an arbitrary .catch.
+        void new Promise<unknown>(resolve => resolve(result)).catch(() => {});
+        throw quotaUnavailable();
+      }
+    } catch (error) {
+      // Only this call's fresh dispatch is known unsent. Recheck the exact branded
+      // binding and receipt under the write lock; never expose a general refund.
+      try {
+        this.write(() => {
+          const row = this.moduleApiRow(id, context);
+          if (!row || row.state !== 'dispatched' || row.receipt !== null) return;
+          this.db.prepare(`UPDATE quota_attempt SET state='released',input=0,output=0,cost=0
+            WHERE id=? AND state='dispatched' AND receipt IS NULL`).run(id);
+        });
+      } catch { /* Failed compensation retains liability and the original rejection. */ }
+      throw error;
+    }
+    // Entry into send ends the proof of non-dispatch, even if send itself throws.
+    send();
+    return true;
+  }
+  releaseModuleApi(id: string, context: ModuleApiQuotaContext): boolean {
+    return this.write(() => this.moduleApiRow(id, context) !== undefined && this.releaseReserved(id));
+  }
+  observeModuleApi(id: string, context: ModuleApiQuotaContext, observation: ModuleApiUsage): boolean {
+    checkedModuleApiQuotaUsage(context, observation);
+    return this.write(() => {
+      const row = this.moduleApiRow(id, context);
+      if (!row) return false;
+      const receipt = hash(JSON.stringify([context.accounting, observation.source, observation.normal,
+        observation.input ?? null, observation.output ?? null, observation.costMicros ?? null]));
+      if (row.state === 'settled' || row.state === 'fault') return row.state === 'settled' && row.receipt === receipt;
+      const time = this.time();
+      if (row.state !== 'dispatched' || time > row.expires) return false;
+      // Bounds and price provenance belong to the reservation, NOT the currently
+      // selected provider/policy. Known overages remain liabilities even above a
+      // configured observation ceiling; only settlement is disallowed then.
+      const { quota } = checkedModuleApiQuotaContext(context);
       const input = observation.input === undefined ? undefined : integer(observation.input, 1_048_576);
       const output = observation.output === undefined ? undefined : integer(observation.output, 1_048_576);
       const cost = observation.costMicros === undefined ? undefined : integer(observation.costMicros, Number.MAX_SAFE_INTEGER);

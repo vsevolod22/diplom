@@ -4,10 +4,12 @@ import {
   readReportPreferences,
   saveReportPreferences,
   openAiSummaryConsentSchema,
+  moduleApiSummaryConsentSchema,
   subscribeReportPreferences,
   useReportPreferences,
 } from '@/shared/api/preferences/reportPreferences';
 import { OpenAiDisclosure } from './OpenAiDisclosure';
+import { isPaidDisclosure } from '@/shared/api/scans/llmPublicContract';
 import { LifetimeBudgetDetails } from './LlmUsagePanel';
 import { ReportRemediation } from './ReportRemediation';
 import { ReportSourceLink, type ReportSourceNavigate } from './reportSourceNavigation';
@@ -98,20 +100,19 @@ export function ScanSummaryPanel(props: Props) {
   } | null>(null);
   function enableAutomation(context: SummaryContext) {
     if (!reportPreferencesCurrent(preferences) || !context.enabled || !context.policyVersion) return;
-    const paid =
-      context.disclosure?.provider === 'OpenAI'
-        ? openAiSummaryConsentSchema.safeParse({
-            version: 1,
-            policyVersion: context.policyVersion,
-            disclosure: context.disclosure,
-          })
-        : null;
-    if (paid ? !paid.success : !allowAutomationDisclosure(context.disclosure, 'summary')) return;
+    const grant = { version: 1, policyVersion: context.policyVersion, disclosure: context.disclosure };
+    const paid = context.disclosure?.provider === 'OpenAI' ? openAiSummaryConsentSchema.safeParse(grant) : null;
+    const moduleApi = context.disclosure?.provider === 'ModuleAPI'
+      ? moduleApiSummaryConsentSchema.safeParse(grant) : null;
+    if (paid && !paid.success) return;
+    if (moduleApi && !moduleApi.success) return;
+    if (!paid && !moduleApi && !allowAutomationDisclosure(context.disclosure, 'summary')) return;
     const saved = saveReportPreferences(
       {
         language: preferences.language,
         autoSummary: true,
         ...(paid?.success ? { openAiSummaryConsent: paid.data } : {}),
+        ...(moduleApi?.success ? { moduleApiSummaryConsent: moduleApi.data } : {}),
       },
       owner,
     );
@@ -329,8 +330,8 @@ function SummaryScope({
       !allowSummaryAutomation(preferences, accepted)
     ) {
       setMessage(
-        accepted.disclosure?.provider === 'OpenAI'
-          ? 'Для платного OpenAI требуется новое согласие на показанные условия. Прежний opt-in не применяется.'
+        isPaidDisclosure(accepted.disclosure)
+          ? `Для платного ${accepted.disclosure.provider} требуется новое согласие на показанные условия. Прежний opt-in не применяется.`
           : 'Условия ИИ-разбора изменились. Проверьте настройки аккаунта.',
       );
     }
@@ -515,7 +516,7 @@ function SummaryScope({
       !current() ||
       !accepted?.enabled ||
       !(
-        accepted.disclosure?.provider === 'OpenAI' ||
+        isPaidDisclosure(accepted.disclosure) ||
         allowAutomationDisclosure(accepted.disclosure, 'summary')
       )
     )
@@ -541,7 +542,7 @@ function SummaryScope({
         <Sparkles size={24} aria-hidden="true" /> Объяснение ИИ
       </h3>
       <p>Дополнительное объяснение, не заключение о безопасности. Проверяйте рекомендации по находкам сканера и источникам под каждым абзацем.</p>
-      {context?.disclosure?.provider === 'OpenAI' ? (
+      {isPaidDisclosure(context?.disclosure) ? (
         <OpenAiDisclosure disclosure={context.disclosure} />
       ) : null}
       {lifetimeBudget && current() ? (
@@ -561,7 +562,7 @@ function SummaryScope({
                 </Button>
                 {authorized ? (
                   <Button type="button" disabled={!current() || !context?.enabled} onClick={() => void refresh(true, true)}>
-                    {context?.disclosure?.provider === 'OpenAI' ? 'Создать платный ИИ-разбор' : 'Создать ИИ-разбор'}
+                    {isPaidDisclosure(context?.disclosure) ? 'Создать платный ИИ-разбор' : 'Создать ИИ-разбор'}
                   </Button>
                 ) : null}
               </div>
@@ -569,8 +570,8 @@ function SummaryScope({
             {!authorized && !result && !unsupportedReport ? (
         <div>
           <p id="scan-summary-send-help">
-            {context?.disclosure?.provider === 'OpenAI'
-              ? 'Включение разрешает платный авторазбор только для показанных OpenAI, политики и денежного режима. Старое бесплатное согласие не применяется.'
+            {isPaidDisclosure(context?.disclosure)
+              ? `Включение разрешает платный авторазбор только для показанных ${context.disclosure.provider}, политики и денежного режима. Согласие для другого провайдера или бесплатного режима не применяется.`
               : 'Находки отчёта, имена пакетов и версии передаются внешней модели, которая может сохранять данные.'}{' '}
             Авторазбор следующих сканирований можно выключить в <a href="/account">настройках аккаунта</a>.
           </p>
@@ -583,14 +584,14 @@ function SummaryScope({
               status.state !== 'completed' ||
               !context?.enabled ||
               !(
-                context.disclosure?.provider === 'OpenAI' ||
+                isPaidDisclosure(context.disclosure) ||
                 allowAutomationDisclosure(context.disclosure, 'summary')
               )
             }
             onClick={enableAutomation}
           >
-            {context?.disclosure?.provider === 'OpenAI'
-              ? 'Включить платный авторазбор OpenAI'
+            {isPaidDisclosure(context?.disclosure)
+              ? `Включить платный авторазбор ${context.disclosure.provider}`
               : 'Включить авторазбор'}
           </Button>
         </div>

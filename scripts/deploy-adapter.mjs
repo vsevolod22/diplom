@@ -10,14 +10,15 @@ import { isDeepStrictEqual as equal } from 'node:util';
 import { PROJECT, STATE, LABEL, IMAGE_LABEL, ORIGIN, readProfile, acquireLock,
   runIsolatedDocker, isolatedDockerDiagnostic, CONFIG_SECRET } from './public-image-stand.mjs';
 import { readPublicLlmBinding, loadPublicLlmSettings, expectedPublicLlmConfig,
-  validatePublicLlmContainer, validatePublicLlmImage, validatePublicLlmTransition,
+  validatePublicLlmContainer, validatePublicLlmImage, validatePublicLlmRetainedImage, validatePublicLlmTransition,
   capturePublicLlmSource, qualifyPublicAuthSnapshot, capturePublicLlmRetentions,
     publicLlmEnvironmentOverlay, validatePublicLlmConfig,
     publicAuthSchema, PUBLIC_LLM_GATEWAY_PROBE,
     reservationPublicLlmHelperArguments, validateReservationPublicLlmHelper, PUBLIC_LLM_RESERVATION_HEADER_PROGRAM,
     reservationLlmFingerprint, verifyHistoryReservationMigration } from './public-llm-stand.mjs';
 import { captureDeploymentCatalog, DEPLOYMENT_RETAINED_REFERENCE_LIMIT } from './public-llm-deployment-catalog.mjs';
-import { assertNoOpenAiDockerSecret, checkPublicLlmSourceBuild, validateOpenAiVolume, selectOpenAiOperations } from './public-llm-source-build.mjs';
+import { assertNoOpenAiDockerSecret, checkPublicLlmSourceBuild, validateOpenAiVolume, selectOpenAiOperations,
+  assertNoModuleApiDockerSecret, validateModuleApiVolume, selectModuleApiOperations } from './public-llm-source-build.mjs';
 import { writeExclusive, syncDirectory } from './setup-local-cve.mjs';
 import { PUBLIC_DRAIN_PROBE, PUBLIC_READY_PROBE } from './refresh-public-cve.mjs';
 import { createAdapterSnapshots, qualifyAdapterStoreCopies } from './deploy-adapter-stores.mjs';
@@ -63,6 +64,14 @@ export const DEPLOY_ADAPTER_CAPABILITIES = Object.freeze({ version: 2, status: t
     recoverHistoryV5Prestart: true, recoveryCheckpointVersion: 3,
   liveQualified: false, noAutomaticDatabaseRollback: true });
 
+export function adapterGatewayProbe(selection) {
+  const moduleapi=selection?.version===7;
+  return PUBLIC_LLM_GATEWAY_PROBE+PUBLIC_LLM_GATEWAY_PROBE
+    .replaceAll('llmGateway',moduleapi?'moduleApiGateway':'openAiGateway')
+    .replaceAll('connectLlmGateway',moduleapi?'connectModuleApiGateway':'connectOpenAiGateway')
+    .replaceAll('llm-egress',moduleapi?'moduleapi-egress':'openai-egress');
+}
+
 export function deploymentTargets(mode, services) {
   need(['web','app'].includes(mode) && Array.isArray(services) && services.length > 0 && services.length <= ROLES.length &&
     new Set(services).size === services.length && services.every(n => ROLES.includes(n)), 'TARGETS_INVALID');
@@ -92,7 +101,7 @@ function captureFile(path, { privateMode = true, limit = 16384 } = {}) {
   };
   verify(); return { bytes, verify };
 }
-function evidenceIndex(directory, checkDeadline = () => {}) {
+export function evidenceIndex(directory, checkDeadline = () => {}) {
   const entries=[];let total=0;
   const walk=(dir,prefix='',depth=0)=>{checkDeadline();need(depth<=5,'EVIDENCE_DEPTH');protectedDirectory(dir);
     for(const name of fs.readdirSync(dir).sort()){
@@ -109,7 +118,7 @@ function evidenceIndex(directory, checkDeadline = () => {}) {
       entries.push({path:relative,bytes:s.size,sha256:h.digest('hex')});
     }};walk(directory);checkDeadline();return entries;
 }
-function captureBuildHistory(root, own = null, legacy = [], checkDeadline = () => {}) {
+export function captureBuildHistory(root, own = null, legacy = [], checkDeadline = () => {}) {
   checkDeadline();
   const parent=join(root,STATE,RECORDS),present=exists(parent),allNames=present?fs.readdirSync(parent).sort():[];
   checkDeadline();assertAdapterHistoryCapacity(allNames.length);
@@ -144,7 +153,7 @@ function captureBuildHistory(root, own = null, legacy = [], checkDeadline = () =
       need(equal(currentNames,allNames),'ADAPTER_HISTORY_CHANGED');};
   verify();return {references,verify,completions,count:names.length};
 }
-function legacyReferenceOrigins(catalog,retentions) {
+export function legacyReferenceOrigins(catalog,retentions) {
   return retentions.receipts.flatMap(receipt=>{
     const entry=catalog.entries.find(e=>e.name===receipt.audit);need(entry,'RETENTION_ORIGIN_MISSING');
     const proof=captureFile(join(entry.path,'image-retention.json'),{limit:262144});
@@ -161,14 +170,14 @@ function loadConfiguration(root, home, desired, upgradeOperations = false) {
   if (exists(join(state,'compose.cve.json'))) files.push('compose.cve.json');
   const proofs = files.map(name => captureFile(join(state,name)));
   const profile = readProfile(root), selection = readPublicLlmBinding(root);
-  need(profile && selection?.version === 6, 'PUBLISHED_V6_REQUIRED');
+  need(profile && [6,7].includes(selection?.version), 'PUBLISHED_V6_OR_V7_REQUIRED');
   const model = expectedPublicLlmConfig(root, profile.cve, selection);
   const pins = JSON.parse(proofs[2].bytes);
   need(plain(pins) && equal(Object.keys(pins),['services']) && plain(pins.services) &&
     equal(Object.keys(pins.services).sort(),Object.keys(model.services).sort()) &&
     Object.values(pins.services).every(v => plain(v) && equal(Object.keys(v),['image']) && imageId(v.image)), 'PINS_INVALID');
-  const settings = desired ? loadPublicLlmSettings(home,{openai:true}) : null;
-  const next = settings ? selectOpenAiOperations(settings.selection,selection,upgradeOperations) : selection;
+  const settings = desired ? loadPublicLlmSettings(home,{moduleapi:true}) : null;
+  const next = settings ? (settings.selection.version === 7 ? selectModuleApiOperations : selectOpenAiOperations)(settings.selection,selection,upgradeOperations) : selection;
   if (settings) validatePublicLlmTransition(selection,next);
   const verify = () => { verifyDirectory(); proofs.forEach(p => p.verify()); settings?.verify(); };
   verify(); return { profile, selection, model, pins, next, verify,
@@ -352,7 +361,11 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     for(const c of containers){const n=role(c),a=plan?.authorities.get(n)??{model,selection:config.selection};validatePublicLlmContainer(c,n,a.model.services[n],images[n],a.model,{images,...(plan?.jwt?{secret:plan.jwt.bytes.toString()}: {})},a.selection);assertCommand(c);
       if(n.endsWith('volume-init'))need(c.State.Running===false&&c.State.Status==='exited'&&c.State.ExitCode===0&&c.State.Pid===0&&c.RestartCount===0&&!c.State.OOMKilled&&!c.State.Error,'INITIALIZER_STATE_INVALID');
     }
-    const netNames = Object.values(model.networks).map(n=>n.name), volumeNames = Object.values(model.volumes).map(v=>v.name);
+    const netNames = Object.values(model.networks).map(n=>n.name);
+    // The new credential volume is fenced before it has a consumer. Keep both
+    // providers' volumes under metadata/consumer authority throughout replacement.
+    const volumeSpecs = {...model.volumes,...(config.next.version===7?expectedPublicLlmConfig(root,config.profile.cve,config.next).volumes:{})};
+    const volumeNames = [...new Set(Object.values(volumeSpecs).map(v=>v.name))];
     const listedNetworks=(await query(['network','ls','--filter',`label=com.docker.compose.project=${PROJECT}`,'--format','{{.Name}}'],'NETWORK_CENSUS_FAILED')).trim().split('\n').filter(Boolean).sort();
     need(equal(listedNetworks,[...netNames].sort()),'UNOWNED_OR_EXTRA_NETWORK');
     const networks = JSON.parse(await query(['network','inspect',...netNames],'NETWORK_INSPECT_FAILED'));
@@ -366,8 +379,12 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       for(const c of members)need(c.NetworkSettings.Networks[n.Name].NetworkID===n.Id&&n.Containers[c.Id].Name===c.Name.slice(1),'NETWORK_ENDPOINT_DRIFT');
     }
     for(const v of volumes){need(v.Driver==='local'&&v.Scope==='local'&&equal(v.Options??{},{}),'VOLUME_POLICY');
-          const spec=Object.values(model.volumes).find(s=>s.name===v.Name);
-          if(v.Name===config.selection.credentialVolume)validateOpenAiVolume(v,config.selection);
+          const spec=Object.values(volumeSpecs).find(s=>s.name===v.Name);
+          const selections=[config.selection,config.next];
+          const moduleapi=selections.find(s=>s.version===7&&s.credentialVolume===v.Name);
+          const openai=selections.map(s=>s.version===7?s.openai:s).find(s=>s.credentialVolume===v.Name);
+          if(moduleapi)validateModuleApiVolume(v,moduleapi);
+          else if(openai)validateOpenAiVolume(v,openai);
           else if(!spec.external)need(v.Labels?.[LABEL]==='v1'&&v.Labels?.['com.docker.compose.project']===PROJECT,'VOLUME_OWNERSHIP');
       const consumers=[...containers,...(helper?[helper]:[])].filter(c=>c.Mounts.some(m=>m.Type==='volume'&&m.Name===v.Name));
       const actual=(await query(['container','ls','--all','--filter',`volume=${v.Name}`,'--format','{{.ID}}','--no-trunc'],'VOLUME_CONSUMERS_FAILED')).trim().split('\n').filter(Boolean).sort();
@@ -397,7 +414,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         networks:observed.networks.length,volumes:observed.volumes.length,capabilities:DEPLOY_ADAPTER_CAPABILITIES});
     } catch(error){throw safeError('STATUS_REFUSED',error);}
   }
-  async function prepare({mode,services,lease,upgradeOperations=false,migrateHistoryV4ToV5=false}={}) {
+  async function prepare({mode,services,lease,upgradeOperations=false,migrateHistoryV4ToV5=false,migrate=false}={}) {
     try {rootCheck();const owned=lease?ownedLease(lease):null;if(!owned)noLock();else {need(!owned.plan,'PREFLIGHT_ALREADY_PREPARED');need(mode!=='app'||owned.supervisor,'APP_SUPERVISOR_REQUIRED');}const targets=deploymentTargets(mode,services);
       need(typeof upgradeOperations === 'boolean' && typeof migrateHistoryV4ToV5 === 'boolean', 'OPERATIONS_FLAG_INVALID');
       need(!migrateHistoryV4ToV5 || mode==='app' && !upgradeOperations && targets.includes('api') && targets.every(n=>['web','api'].includes(n)), 'HISTORY_MIGRATION_SCOPE');
@@ -405,8 +422,10 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       const config=loadConfiguration(root,home,true,upgradeOperations);
       need(mode!=='web'||equal(config.selection,config.next),'WEB_REQUIRES_UNCHANGED_RUNTIME_CONFIG');
       const next=expectedPublicLlmConfig(root,config.profile.cve,config.next);
-      if(!equal(config.selection,config.next))need(ROLES.every(n=>targets.includes(n)),'CONFIG_CHANGE_REQUIRES_ALL_APP_TARGETS');
-      const source=capturePublicLlmSource(root,{openai:true}),self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
+      const moduleApiChange=config.next.version===7&&!equal(config.selection,config.next);
+      if(moduleApiChange)need(mode==='app'&&['api','web','openai-egress'].every(n=>targets.includes(n))&&!upgradeOperations&&!migrateHistoryV4ToV5&&!migrate,'MODULEAPI_TRANSITION_SCOPE');
+      else if(!equal(config.selection,config.next))need(ROLES.every(n=>targets.includes(n)),'CONFIG_CHANGE_REQUIRES_ALL_APP_TARGETS');
+      const source=capturePublicLlmSource(root,config.next.version===7?{moduleapi:true}:{openai:true}),self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
       const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs'].map(name=>captureFile(join(root,'scripts',name),{privateMode:false,limit:1024**2}));
       const contract=sourceContract(root),catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),
               history=captureBuildHistory(root,owned?.nonce,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline);
@@ -420,10 +439,10 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         retentions.verify();
         const values=JSON.parse(await request(['image','inspect',row.tag],connection.options,'RETAINED_IMAGE_VERIFY_FAILED'));
         need(values.length===1&&values[0].Id===row.image.Id&&equal(values[0].Config,row.image.Config)&&values[0].RepoTags?.includes(row.tag),'RETAINED_IMAGE_CHANGED');
-        validatePublicLlmImage(values[0],name);retentions.verify();
+        validatePublicLlmRetainedImage(values[0],name,config.next);retentions.verify();
       }
       for(const ref of history.references){const values=JSON.parse(await request(['image','inspect',ref.tag],connection.options,'RETAINED_IMAGE_VERIFY_FAILED'));
-        need(values.length===1&&values[0].Id===ref.image&&values[0].RepoTags?.includes(ref.tag),'RETAINED_IMAGE_CHANGED');validatePublicLlmImage(values[0],ref.name);}
+        need(values.length===1&&values[0].Id===ref.image&&values[0].RepoTags?.includes(ref.tag),'RETAINED_IMAGE_CHANGED');validatePublicLlmRetainedImage(values[0],ref.name,config.next);}
       need(before.containers.filter(c=>!role(c).endsWith('volume-init')).every(healthy),'OLD_SITE_NOT_HEALTHY');
       const custodyNonce=owned?.nonce??randomBytes(16).toString('hex');
       let referenceCustody=createReferenceCustody({nonce:custodyNonce,targets,
@@ -449,8 +468,13 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
               need(!migrateHistoryV4ToV5 || !plan.migration,'HISTORY_AUTH_MIGRATION_CONFLICT');
               if(plan.historyMigration!=='none') need(!plan.migration&&!upgradeOperations&&equal(config.selection,config.next)&&targets.every(n=>['web','api'].includes(n)),'HISTORY_MIGRATION_SCOPE');
             }
+            if(moduleApiChange)need(!plan.migration&&plan.historyMigration==='none','MODULEAPI_TRANSITION_MIGRATION');
             for(const n of ROLES.filter(n=>!targets.includes(n)))need(equal(config.model.services[n],next.services[n]),'NON_TARGET_CONFIG_CHANGE');
-            need(equal(config.model.networks,next.networks)&&equal(config.model.volumes,next.volumes),'TOPOLOGY_CHANGE_UNSUPPORTED');
+            need(equal(config.model.networks,next.networks),'TOPOLOGY_CHANGE_UNSUPPORTED');
+            if(config.next.version===7){
+              need(Object.entries(config.model.volumes).every(([n,s])=>equal(next.volumes[n],s))&&
+                Object.entries(next.volumes).every(([n,s])=>Object.hasOwn(config.model.volumes,n)||n==='moduleapi-secrets'&&s.external===true&&s.name===config.next.credentialVolume),'TOPOLOGY_CHANGE_UNSUPPORTED');
+            }else need(equal(config.model.volumes,next.volumes),'TOPOLOGY_CHANGE_UNSUPPORTED');
       if(mode==='web'){
         const api=before.containers.find(c=>role(c)==='api');
         const proof=JSON.parse(await request(['container','exec',api.Id,'node','-e',WEB_BACKEND_SOURCE_PROBE],connection.options,'BACKEND_SOURCE_PROBE_FAILED',5000));
@@ -524,11 +548,12 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         old:plan.targets.map(n=>({role:n,id:plan.before.containers.find(c=>role(c)===n).Id,image:plan.before.images[n].Id})),referenceCustody:plan.referenceCustody,
                 ...(plan.candidateReuse?{candidateReuse:plan.candidateReuse.source,reuseOrigin:plan.candidateReuse.origin}:{}),lifecycle:false});
       // Compilation/COPY qualification belongs to build, never read-only planning.
-      const qualification=await checkSource(root,{openai:plan.config.next});
-      need(qualification?.typescript===true&&qualification.bundle===true&&qualification.openai===true,'SOURCE_BUILD_QUALIFICATION');await stable(plan);
+      const provider=plan.config.next.version===7?'moduleapi':'openai';
+      const qualification=await checkSource(root,{[provider]:plan.config.next});
+      need(qualification?.typescript===true&&qualification.bundle===true&&qualification[provider]===true,'SOURCE_BUILD_QUALIFICATION');await stable(plan);
             if(plan.historyMigration!=='none')plan.recoveryRecordCapacity=recoveryRecordPrecheck(plan);
             if(plan.candidateReuse)record('candidate-reuse.json',{version:1,origin:plan.candidateReuse.origin,source:plan.candidateReuse.source,
-              qualification:{typescript:true,bundle:true,openai:true},referenceCustody:plan.referenceCustody});
+              qualification:{typescript:true,bundle:true,[provider]:true},referenceCustody:plan.referenceCustody});
       const end=now()+30*60*1000,candidates={};plan.candidates=candidates;plan.candidateImages={...plan.before.images};
       const call=async(args,code,requested=30000)=>{await stable(plan);plan.owner.verify();proofs.forEach(p=>p.verify());
         const timeout=Math.floor(Math.min(requested,end-now()));need(timeout>0,'BUILD_DEADLINE');
@@ -549,7 +574,8 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
           await call(['build','--pull=false','--file',join(root,build.dockerfile),'--label',`${LABEL}=v1`,'--label',`${IMAGE_LABEL}=${PROJECT}`,'--tag',tag,root],'CANDIDATE_BUILD_FAILED',20*60*1000);
         }
         const rows=JSON.parse(await call(['image','inspect',tag],'CANDIDATE_IMAGE_INSPECT_FAILED'));
-        need(rows.length===1&&rows[0].RepoTags?.includes(tag)&&(!candidate.image||rows[0].Id===candidate.image),'CANDIDATE_IMAGE_CARDINALITY');validatePublicLlmImage(rows[0],name);assertNoOpenAiDockerSecret(rows[0].Config);
+        need(rows.length===1&&rows[0].RepoTags?.includes(tag)&&(!candidate.image||rows[0].Id===candidate.image),'CANDIDATE_IMAGE_CARDINALITY');validatePublicLlmImage(rows[0],name,plan.config.next);assertNoOpenAiDockerSecret(rows[0].Config);
+                if(plan.config.next.version===7)assertNoModuleApiDockerSecret(rows[0].Config);
         plan.candidateImages[name]=rows[0];candidates[name]=Object.freeze({image:rows[0].Id,tag,oldImage:plan.before.images[name].Id,oldTag});
         record(`built-${name}.json`,{role:name,...candidates[name]});
       }
@@ -577,7 +603,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     // Read-only admission must also pass on APPLY before creating the shared
     // operation lock or an attempt directory. Repeat under that lock in preflight.
     await prepare({mode:ctx.mode,services:ctx.services,upgradeOperations:ctx.options?.upgradeOperations,
-      migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5});
+      migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5,migrate:ctx.options?.migrate});
     noLock();const catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),
           history=captureBuildHistory(root,null,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline);
         history.verify();catalog.verify();retentions.verify();
@@ -624,7 +650,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     fence();need(refs.length<=DEPLOYMENT_RETAINED_REFERENCE_LIMIT,'RETAINED_REFERENCE_SCOPE');
     if(refs.length){const rows=JSON.parse(await request(['image','inspect',...refs.map(r=>r.tag)],p.connection.options,'RETAINED_IMAGE_INSPECT_FAILED'));
       need(rows.length===refs.length,'RETAINED_IMAGE_CARDINALITY');
-      for(let i=0;i<refs.length;i++){const ref=refs[i],image=rows[i];need(image.Id===ref.image&&image.RepoTags?.includes(ref.tag)&&(!ref.config||equal(image.Config,ref.config)),'RETAINED_IMAGE_CHANGED');validatePublicLlmImage(image,ref.name);}
+      for(let i=0;i<refs.length;i++){const ref=refs[i],image=rows[i];need(image.Id===ref.image&&image.RepoTags?.includes(ref.tag)&&(!ref.config||equal(image.Config,ref.config)),'RETAINED_IMAGE_CHANGED');validatePublicLlmRetainedImage(image,ref.name,p.config.next);}
     }
     const inventory=parseImageInventory(await request(['image','ls','--no-trunc','--filter',`label=${IMAGE_LABEL}=${PROJECT}`,'--format','{{.Repository}}:{{.Tag}}\t{{.ID}}'],p.connection.options,'IMAGE_REFERENCE_CENSUS_FAILED'));
     const planned=p.referenceCustody?[...p.referenceCustody.candidates.filter(r=>r.ownership!=='borrowed'),...p.referenceCustody.old.filter(r=>r.ownership==='owned')]:[];
@@ -889,7 +915,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       const rows=JSON.parse(await request(['container','inspect',c.Id],p.connection.options,'READINESS_INSPECT_FAILED'));need(rows.length===1,'READINESS_CARDINALITY');const current=rows[0];
       need(equal(control(current),control(c))&&equal(processState(current),processState(c)),'READINESS_EPOCH_CHANGED');
       if(name==='worker'||name==='api'&&current.State.Health?.Status==='healthy'){
-        const gateway=name==='api'?PUBLIC_LLM_GATEWAY_PROBE+PUBLIC_LLM_GATEWAY_PROBE.replaceAll('llmGateway','openAiGateway').replaceAll('connectLlmGateway','connectOpenAiGateway').replaceAll('llm-egress','openai-egress'):'';
+        const gateway=name==='api'?adapterGatewayProbe(p.authorities.get(name).selection):'';
         const worker=name==='worker'&&p.authorities.get(name).selection.operations?`import * as z from 'node:zlib';import {PUBLIC_IMAGE_RESOURCE_POLICY as policy,PUBLIC_IMAGE_CHECKS_VERSION as checks,PUBLIC_IMAGE_LIMITS as limits} from './src/oci/public-image-policy.ts';import {publicResourceEnvelope} from './src/worker/worker-runtime.ts';if(typeof z.createZstdDecompress!=='function'||policy!=='public-hub-resources-v2'||checks!=='trivy-0.69.3-public-archive-v2'||limits.compressedLayer!==256*1024**2||limits.compressedTotal!==768*1024**2||limits.wireBytes!==800*1024**2||limits.expandedLayer!==512*1024**2||limits.expandedTotal!==1024**3||limits.scratchBytes!==2*1024**3||limits.deadlineMs!==180000||!publicResourceEnvelope())throw Error('RESOURCE_CONTRACT');`:'';
                 const program=worker+gateway+(p.config.profile.cve?cveReadyProbe():ADAPTER_READY_PROBE);
         const r=JSON.parse(await request(['container','exec',current.Id,'node','--import','tsx','--input-type=module','-e',program],p.connection.options,'READINESS_EXEC_FAILED',15000));
@@ -1193,7 +1219,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     }
   }
   const methods={acquireLock:acquire,releaseLock:release,
-    preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease,upgradeOperations:ctx.options?.upgradeOperations,migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5}),
+    preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease,upgradeOperations:ctx.options?.upgradeOperations,migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5,migrate:ctx.options?.migrate}),
     build:ctx=>{contextPlan(ctx);return buildCandidate(ctx.plan);},validateCandidate:validate,
     verify:async ctx=>{const p=contextPlan(ctx);need(p.phase==='validated','VERIFY_STAGE');await stable(p);return {valid:true};},
     waitForIdle,prepareRecovery,fenceAdmissions,snapshot,qualifyState,switchServices,health,publishReceipt,restoreOld};

@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { z } from 'zod';
-import { openAiDisclosureSchema } from '@/shared/api/scans/llmPublicContract';
+import { moduleApiDisclosureSchema, openAiDisclosureSchema } from '@/shared/api/scans/llmPublicContract';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 
 export const REPORT_AUTOMATION_REVISION = 'report-automation-v4-remediation';
@@ -25,12 +25,31 @@ export const openAiSummaryConsentSchema = z
   );
 export type OpenAiSummaryConsent = z.infer<typeof openAiSummaryConsentSchema>;
 
+// Independent grant: no migration of a free or OpenAI permission to this recipient.
+export const moduleApiSummaryConsentSchema = z
+  .strictObject({
+    version: z.literal(1),
+    policyVersion: z.string().regex(/^[a-f0-9]{64}$/),
+    disclosure: moduleApiDisclosureSchema,
+  })
+  .transform((grant) =>
+    Object.freeze({
+      ...grant,
+      disclosure: Object.freeze({
+        ...grant.disclosure,
+        estimatedPrice: Object.freeze({ ...grant.disclosure.estimatedPrice }),
+      }),
+    }),
+  );
+export type ModuleApiSummaryConsent = z.infer<typeof moduleApiSummaryConsentSchema>;
+
 type Session = ReturnType<typeof scanSession>;
 export type ReportPreferencesInput = Readonly<{
   language: 'original' | 'ru';
   autoSummary: boolean;
   /** Only an explicit action after the exact paid disclosure may populate this grant. */
   openAiSummaryConsent?: OpenAiSummaryConsent;
+  moduleApiSummaryConsent?: ModuleApiSummaryConsent;
 }>;
 export type ReportPreferences = ReportPreferencesInput &
   Readonly<{
@@ -61,11 +80,14 @@ function decode(raw: string | null): ReportPreferences {
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return defaults;
     const record = value as Record<string, unknown>;
+    const hasOpenAi = Object.hasOwn(record, 'openAiSummaryConsent');
+    const hasModuleApi = Object.hasOwn(record, 'moduleApiSummaryConsent');
+    const keys = ['autoSummary', 'automationRevision', 'language', 'version'];
+    if (hasOpenAi) keys.push('openAiSummaryConsent');
+    if (hasModuleApi) keys.push('moduleApiSummaryConsent');
     if (
-      Object.keys(record).sort().join(',') !==
-        (Object.hasOwn(record, 'openAiSummaryConsent')
-          ? 'autoSummary,automationRevision,language,openAiSummaryConsent,version'
-          : 'autoSummary,automationRevision,language,version') ||
+      (hasOpenAi && hasModuleApi) ||
+      Object.keys(record).sort().join(',') !== keys.sort().join(',') ||
       record.version !== 1 ||
       record.automationRevision !== REPORT_AUTOMATION_REVISION ||
       (record.language !== 'original' && record.language !== 'ru') ||
@@ -76,9 +98,13 @@ function decode(raw: string | null): ReportPreferences {
       record.openAiSummaryConsent === undefined
         ? undefined
         : openAiSummaryConsentSchema.parse(record.openAiSummaryConsent);
-    if (consent && !record.autoSummary) return defaults;
+    const moduleApiConsent = hasModuleApi
+      ? moduleApiSummaryConsentSchema.parse(record.moduleApiSummaryConsent)
+      : undefined;
+    if ((consent || moduleApiConsent) && !record.autoSummary) return defaults;
     return {
       ...(consent ? { openAiSummaryConsent: consent } : {}),
+      ...(moduleApiConsent ? { moduleApiSummaryConsent: moduleApiConsent } : {}),
       language: record.language,
       autoSummary: record.autoSummary,
       authorized: true,
@@ -167,7 +193,13 @@ export function saveReportPreferences(
     preferences.openAiSummaryConsent === undefined
       ? null
       : openAiSummaryConsentSchema.safeParse(preferences.openAiSummaryConsent);
+  const parsedModuleApiConsent =
+    preferences.moduleApiSummaryConsent === undefined
+      ? null
+      : moduleApiSummaryConsentSchema.safeParse(preferences.moduleApiSummaryConsent);
+  if (parsedConsent && parsedModuleApiConsent) return false;
   if (parsedConsent && (!parsedConsent.success || !preferences.autoSummary)) return false;
+  if (parsedModuleApiConsent && (!parsedModuleApiConsent.success || !preferences.autoSummary)) return false;
   readReportPreferences();
   try {
     const key = storageKey(session.subject);
@@ -177,6 +209,7 @@ export function saveReportPreferences(
       language: preferences.language,
       autoSummary: preferences.autoSummary,
       ...(parsedConsent?.success ? { openAiSummaryConsent: parsedConsent.data } : {}),
+      ...(parsedModuleApiConsent?.success ? { moduleApiSummaryConsent: parsedModuleApiConsent.data } : {}),
     });
     window.localStorage.setItem(key, raw);
     if (window.localStorage.getItem(key) !== raw) throw new Error('Preferences not persisted');

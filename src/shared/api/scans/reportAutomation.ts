@@ -4,6 +4,7 @@ import {
   readReportPreferences,
   type ReportPreferences,
   openAiSummaryConsentSchema,
+  moduleApiSummaryConsentSchema,
 } from '@/shared/api/preferences/reportPreferences';
 
 /** A consent-version string is not a change token. Every save/revocation replaces the snapshot. */
@@ -38,17 +39,35 @@ export function allowSummaryAutomation(
     !context.policyVersion
   )
     return false;
-  const paid = openAiSummaryConsentSchema.safeParse({
+  const grant = {
     version: 1,
     policyVersion: context.policyVersion,
     disclosure: context.disclosure,
-  });
+  };
+  const moduleApi = moduleApiSummaryConsentSchema.safeParse(grant);
+  if (moduleApi.success) {
+    const saved = moduleApiSummaryConsentSchema.safeParse(preferences.moduleApiSummaryConsent);
+    return (
+      !preferences.openAiSummaryConsent &&
+      saved.success &&
+      JSON.stringify(saved.data) === JSON.stringify(moduleApi.data)
+    );
+  }
+  const paid = openAiSummaryConsentSchema.safeParse(grant);
   if (paid.success) {
     const saved = openAiSummaryConsentSchema.safeParse(preferences.openAiSummaryConsent);
-    return saved.success && JSON.stringify(saved.data) === JSON.stringify(paid.data);
+    return (
+      !preferences.moduleApiSummaryConsent &&
+      saved.success &&
+      JSON.stringify(saved.data) === JSON.stringify(paid.data)
+    );
   }
   // A paid opt-in is not permission to silently switch back to a different provider.
-  return !preferences.openAiSummaryConsent && allowAutomationDisclosure(context.disclosure, 'summary');
+  return (
+    !preferences.openAiSummaryConsent &&
+    !preferences.moduleApiSummaryConsent &&
+    allowAutomationDisclosure(context.disclosure, 'summary')
+  );
 }
 
 /** Exact account disclosure; a new server policy is not new user consent. */

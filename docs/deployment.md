@@ -5,6 +5,15 @@
 
 ## Текущая готовность — 08.11.2026
 
+### ModuleAPI v7 — код и offline-переход готовы, на стенде НЕ включён
+
+- DIP-HRNS-6 v12 continuation `c339774a-c09a-4bf1-b286-bb65e11ce506` завершён: отдельные core/accounting/backend/UI/infra ветки ModuleAPI, независимое source review DIP-ARTF-647. Новые strict DTO, свежий ModuleAPI consent, русский ответ и общий $5 lifetime с историческими UNKNOWN; OpenAI/free grants не переносятся, no-training/verified tariff не обещаются.
+- DIP-HRNS-6 v13 run `855618df-5907-4d3c-891f-b0a9f743aa3a`: реализован более короткий явный v6→v7 переход через замену существующего API-only gateway slot `openai-egress` и внутренний alias `moduleapi-egress`. Сохраняются8services/8networks, текущая image custody, четыре stores/JWT, old OpenAI external secret volume и OpenRouter; новые роли/сети и пересоздание БД не нужны. Изменение provider не маскируется именем инфраструктурного slot.
+- Реальный preserving adapter с fake-engine прошёл first/repeat v7 и selected failures; финально29/29 (DIP-ARTF-654). Independent review нашло P2 protected operations reconciliation и postpublication old-local-tag custody; оба исправлены и закрыты DIP-ARTF-655,22 selected checks. Реальная offline source qualification: typescript/bundle/moduleapi=true, docker=false. Это не Linux/image qualification и не live generation.
+- Parent исправил только positive fixtures в `openAiBrowser.test.tsx`: fits теперь explicit, неизвестный admission отдельно проверяет0POST. Selected OpenAI/ModuleAPI UI+contract116/116 PASS, root/API typechecks и frontend build PASS (existing large-chunk warning); не полный suite.
+- Последний actual `node scripts/deploy.mjs status`: ready=true/locked=false. Ни apply, ни secret transfer, ни платных ModuleAPI calls не выполнялось. Metadata-only локальный preflight: `~/.diplom-moduleapi/server.env` отсутствует; значение из чата не копировалось в инструменты/логи. Для реальной приёмки нужны hidden local input, immutable Linux initializer/bootstrap qualification, reviewed effective-tariff/estimate settings, protected v7 descriptor и одна preserving выкладка. Рабочий отчёт/чат ModuleAPI пока НЕ подтверждён.
+- Точный актуальный operator runbook и границы: [`server/deploy/moduleapi-deployment.md`](../server/deploy/moduleapi-deployment.md). Ранние source-only/new-gateway оценки ниже/в истории superseded v7 slot transition; historical `MODULEAPI_DEPLOYMENT` не выбирать как v7 authority. Задачи не закрыты,8080/CVE refresh/данные не менялись.
+
 ### Web-only поставка и ограниченная очистка — 08.11, завершено
 
 - Flownix восстановлен. Existing DIP-HRNS-7v3 run `0455dc64-4d0a-493f-ae5d-52dafcc05da3` completed: шесть независимых Sol6.1 lanes (targeted tests, compatibility, LLM source, account/cache preservation, native-readonly review, security). Scoped web/API compatibility GO; upstream429 остаётся внешним blocker, новых provider calls нет. Задачи не закрывались.

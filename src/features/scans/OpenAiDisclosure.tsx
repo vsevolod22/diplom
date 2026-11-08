@@ -1,6 +1,6 @@
 import {
   LEGACY_SCANNER_DISCLOSURE,
-  type OpenAiDisclosure as Disclosure,
+  type PaidDisclosure as Disclosure,
 } from '@/shared/api/scans/llmPublicContract';
 
 type Props = { disclosure: Disclosure & { lifetimeUserCostMicros?: number }; chat?: boolean };
@@ -18,9 +18,9 @@ export function OpenAiDisclosure({ disclosure, chat = false }: Props) {
   const lifetimeUsd =
     lifetime === undefined ? null : `$${(lifetime / 1_000_000).toFixed(6).replace(/\.?0+$/, '')}`;
   return (
-    <div aria-label="Условия OpenAI">
+    <div aria-label={`Условия ${disclosure.provider}`}>
       <p>
-        OpenAI · {disclosure.model}. Платный ИИ:{' '}
+        {disclosure.provider} · {disclosure.model}. Платный ИИ:{' '}
         {lifetimeUsd
           ? `${lifetimeUsd} на аккаунт за всё время — это не бесплатный режим.`
           : disclosure.monetaryLimit === 'uncapped'
@@ -29,14 +29,24 @@ export function OpenAiDisclosure({ disclosure, chat = false }: Props) {
         Стоимость рассчитывается сервером по настроенным ставкам, это оценка, не счёт провайдера.
       </p>
       <p>
-        Передаются очищенные находки и покрытие проверок
+        {disclosure.provider === 'ModuleAPI' ? 'Стороннему провайдеру ModuleAPI передаются' : 'Передаются'}{' '}
+        очищенные находки и покрытие проверок
         {disclosure.data === LEGACY_SCANNER_DISCLOSURE
           ? ''
           : ', имена пакетов, установленные и сообщённые исправленные версии'}
         {chat ? ', вопрос, история пользовательских сообщений и принятые решения' : ''}. Без исходных
-        свидетельств и ключей. Запрет обучения (no-training) не гарантирует отсутствия хранения: ZDR не
-        подтверждён. Декларация и одобрение оператора не доказывают соблюдение.
+        свидетельств и ключей.{' '}
+        {disclosure.provider === 'ModuleAPI'
+          ? 'Условия хранения и использования данных для обучения неизвестны. Отсутствие обучения, хранения и Zero Data Retention (ZDR) не подтверждены. Одобрение маршрута оператором не доказывает соблюдение приватности и соответствие модели её названию.'
+          : 'Запрет обучения (no-training) не гарантирует отсутствия хранения: ZDR не подтверждён. Декларация и одобрение оператора не доказывают соблюдение.'}
       </p>
+      {disclosure.provider === 'ModuleAPI' ? (
+        <p>
+          Тариф аккаунта и группы ModuleAPI не проверен. Настроенные ставки — не подтверждённый тариф и не
+          счёт; название gpt-5.4-mini — обозначение модели у стороннего провайдера, не гарантия
+          эквивалентности прямому OpenAI.
+        </p>
+      ) : null}
       <details>
         <summary>Стоимость и ограничения</summary>
         <p>
@@ -53,6 +63,8 @@ export function OpenAiDisclosure({ disclosure, chat = false }: Props) {
             Бюджет аккаунта — {lifetimeUsd} на аккаунт за всё время, без сброса со сменой суток. Денежные
             лимиты запроса и суток не установлены; отдельный бюджет аккаунта ограничивает расход. Оконные
             счётчики токенов — статистика, не блокирующие бюджеты; ограничения отдельных запросов сохраняются.
+            Учитываются исторические расходы всех провайдеров и резервы, включая неопределённый расход; смена
+            провайдера или политики не сбрасывает этот бюджет.
           </p>
         ) : (
           <p>Локальный предел расходов не установлен; токенные квоты и ограничения запросов сохраняются.</p>
