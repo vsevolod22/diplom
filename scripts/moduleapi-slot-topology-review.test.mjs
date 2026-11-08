@@ -4,15 +4,63 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { adapterFixture, openAiSelection, moduleApiSelection } from './moduleapi-slot-transition-fixture.mjs';
 import { runDeployment } from './deploy-core.mjs';
 import { loadCveRuntime } from './public-cve-bridge-runtime.mjs';
 import { PROJECT } from './public-image-stand.mjs';
 import { validateOpenAiDeployment, validateModuleApiDeployment, validateModuleApiBuildDeployment } from './public-llm-source-build.mjs';
-import { loadPublicLlmSettings, PUBLIC_LLM_ENV, validatePublicLlmTransition, validatePublicLlmImage } from './public-llm-stand.mjs';
+import { loadPublicLlmSettings, PUBLIC_LLM_ENV, validatePublicLlmTransition, validatePublicLlmImage,
+  expectedModuleApiConfig, validateModuleApiConfig } from './public-llm-stand.mjs';
 
 const clone = value => structuredClone(value);
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+test('Compose pruning normalizes only unused known retired OpenAI external declaration', () => {
+  const selection = validateModuleApiDeployment(moduleApiSelection(validateOpenAiDeployment(openAiSelection())));
+  const expected = expectedModuleApiConfig(ROOT, null, selection), rendered = clone(expected);
+  delete rendered.volumes['openai-secrets']; const original = clone(rendered);
+  assert.doesNotThrow(() => validateModuleApiConfig(rendered, ROOT, null, selection));
+  assert.deepEqual(rendered, original, 'validation never mutates real render or expected topology');
+  assert.deepEqual(expected.volumes['openai-secrets'], { name: selection.openai.credentialVolume, external: true });
+  assert.doesNotThrow(() => validateModuleApiConfig(expected, ROOT, null, selection));
+  const disabled = validateModuleApiDeployment({ ...selection, credentialVolume: null,
+    environment: { ...selection.environment, MODULEAPI_ENABLED: 'false' } });
+  const noKey = expectedModuleApiConfig(ROOT, null, disabled); delete noKey.volumes['openai-secrets'];
+  assert.doesNotThrow(() => validateModuleApiConfig(noKey, ROOT, null, disabled));
+});
+
+test('Compose pruning refuses wrong present declaration, missing other volumes and every old-secret reference', () => {
+  const selection = validateModuleApiDeployment(moduleApiSelection(validateOpenAiDeployment(openAiSelection())));
+  const expected = expectedModuleApiConfig(ROOT, null, selection), prune = () => {
+    const value = clone(expected); delete value.volumes['openai-secrets']; return value;
+  };
+  for (const declaration of [{ name: 'wrong', external: true }, { name: 'openai-secrets', external: false },
+    { name: 'openai-secrets', external: true, driver: 'local' }, null]) {
+    const bad = clone(expected); bad.volumes['openai-secrets'] = declaration;
+    assert.throws(() => validateModuleApiConfig(bad, ROOT, null, selection));
+  }
+  for (const key of Object.keys(expected.volumes).filter(key => key !== 'openai-secrets')) {
+    const bad = prune(); delete bad.volumes[key]; assert.throws(() => validateModuleApiConfig(bad, ROOT, null, selection), key);
+  }
+  const extra = prune(); extra.volumes.unapproved = { name: 'unapproved', external: true };
+  assert.throws(() => validateModuleApiConfig(extra, ROOT, null, selection));
+  const suppliedRouter = 'diplom-public-8081-llm-key-' + 'a'.repeat(32);
+  const priorWithRouter = validateOpenAiDeployment({ ...selection.openai, keyVolume: suppliedRouter,
+    openrouter: { ...selection.openrouter, keyVolume: suppliedRouter } });
+  const withRouter = validateModuleApiDeployment(moduleApiSelection(priorWithRouter));
+  const missingRouter = expectedModuleApiConfig(ROOT, null, withRouter);
+  delete missingRouter.volumes['openai-secrets']; delete missingRouter.volumes.public_llm_key;
+  assert.throws(() => validateModuleApiConfig(missingRouter, ROOT, null, withRouter));
+  for (const service of Object.keys(expected.services)) for (const mount of [
+    { type: 'volume', source: 'openai-secrets', target: '/run/old', read_only: true, volume: { nocopy: true } },
+    { type: 'bind', source: 'openai-secrets', target: '/run/old', read_only: true }, 'openai-secrets:/run/old:ro',
+  ]) {
+    const bad = prune(); bad.services[service].volumes ??= []; bad.services[service].volumes.push(mount);
+    assert.throws(() => validateModuleApiConfig(bad, ROOT, null, selection), service);
+  }
+});
 function protectedSettings(t) {
   const home = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'moduleapi-review-settings-')));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

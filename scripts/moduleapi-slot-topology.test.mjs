@@ -139,7 +139,7 @@ for (const [name, mutate] of Object.entries({
   'old provider identity': m => { m.services.api.environment.LLM_PROVIDER = 'openai'; },
   'false retention': m => { m.services.api.environment.MODULEAPI_RETENTION = 'no-training'; },
   'wrong bootstrap': m => { m.services.api.entrypoint = [...OPENAI_DEPLOYMENT.entrypoint]; },
-  'old volume removed': m => { delete m.volumes['openai-secrets']; },
+  'wrong retained volume identity': m => { m.volumes['openai-secrets'].name = 'unapproved-old-secret'; },
 })) test(`strict v7 Compose rejects ${name}`, t => {
   const f = materialized(t), bad = clone(f.model); mutate(bad);
   assert.throws(() => validatePublicLlmConfig(bad, f.root, null, f.next));

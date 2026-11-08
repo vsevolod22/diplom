@@ -2056,6 +2056,15 @@ export function expectedModuleApiConfig(root, cve, selection) {
 }
 export function validateModuleApiConfig(value, root, cve, selection, images) {
   const s = validateModuleApiDeployment(selection), expected = expectedModuleApiConfig(root, cve, s), copy = structuredClone(value);
+  const oldKey = OPENAI_DEPLOYMENT.volumeKey, oldDeclaration = expected.volumes[oldKey];
+  // Compose prunes unused external declarations. Restore only this known retired
+  // secret in the comparison copy; actual namespace/custody fencing is unchanged.
+  if (oldDeclaration && !Object.hasOwn(copy.volumes ?? {}, oldKey)) {
+    safe(s.openai.credentialVolume !== null && equal(oldDeclaration, { name: s.openai.credentialVolume, external: true }) &&
+      Object.values(copy.services ?? {}).every(service => Array.isArray(service.volumes ?? []) && (service.volumes ?? []).every(mount =>
+        ![oldKey, s.openai.credentialVolume].includes(typeof mount === 'string' ? mount.split(':')[0] : mount?.source))));
+    copy.volumes ??= {}; copy.volumes[oldKey] = structuredClone(oldDeclaration);
+  }
   for (const group of ['services', 'networks', 'volumes']) safe(equal(Object.keys(copy[group] ?? {}).sort(), Object.keys(expected[group]).sort()));
   for (const name of PUBLIC_IMAGE_OPERATION_ROLES) {
     safe(equal(copy.services[name].logging, PUBLIC_IMAGE_LOGGING));
