@@ -531,10 +531,12 @@ it('does not migrate old consent or generate until one explicit enable click sav
   const enable = await screen.findByRole('button', { name: 'Включить авторазбор' });
   await waitFor(() => expect(enable).toBeEnabled());
   await screen.findByText('Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.');
-  expect(within(summary()).getAllByRole('button')).toHaveLength(1);
+  expect(within(summary()).getByRole('button', { name: 'Проверить сохранённый разбор' })).toBeEnabled();
+  expect(within(summary()).getByRole('button', { name: 'Включить авторазбор' })).toBe(enable);
   expect(within(summary()).getByText(/Находки отчёта, имена пакетов и версии/)).toBeVisible();
   expect(localStorage.getItem('report-preferences:v1:alice')).toBe(raw);
   expect(readReportPreferences().authorized).toBe(false);
+  expect(api.requests.filter((request) => request.method === 'POST')).toHaveLength(0);
   expect(api.summaryPosts()).toHaveLength(0);
   expect(api.requests.some((r) => r.path.endsWith('/llm/usage'))).toBe(false);
   fireEvent.click(enable);

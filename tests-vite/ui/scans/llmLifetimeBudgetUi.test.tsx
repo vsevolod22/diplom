@@ -230,19 +230,31 @@ it.each(['shortage', 'exhausted', 'policy_fault'] as const)(
   'summary blocks %s using server lifetime admission/reason rather than daily flags',
   async (mode) => {
     grant();
-    const usage = mode === 'shortage' ? insufficientLifetimeUsage() : lifetimeUsage();
+    const usage = mode === 'policy_fault' ? lifetimeUsage() : insufficientLifetimeUsage();
     usage.user.exhausted = false;
     usage.scan.exhausted = false;
-    if (mode !== 'shortage') {
-      usage.reason = mode;
-      usage.admission = { status: 'unavailable' };
-      if (mode === 'exhausted')
-        usage.lifetimeBudget = {
-          limitMicros: 5000000,
-          usedMicros: 4400000,
-          heldMicros: 600000,
-          remainingMicros: 0,
-        };
+    if (mode === 'exhausted') {
+      usage.reason = 'exhausted';
+      usage.lifetimeBudget = {
+        limitMicros: 5000000,
+        usedMicros: 4400000,
+        heldMicros: 600000,
+        remainingMicros: 0,
+      };
+      usage.admission = {
+        status: 'insufficient',
+        reserve: { input: 2048, output: 2048, costMicros: 30000 },
+        signals: [
+          { scope: 'user', dimension: 'costMicros', reason: 'insufficient', required: 30000, remaining: 0 },
+        ],
+      };
+    } else if (mode === 'policy_fault') {
+      usage.reason = 'policy_fault';
+      usage.admission = {
+        status: 'policy_fault',
+        reserve: { input: 2048, output: 2048, costMicros: 30000 },
+        signals: [{ scope: 'user', dimension: 'all', reason: 'policy_fault' }],
+      };
     } else usage.reason = 'ready';
     const api = summaryApi(usage);
     mountSummary();
@@ -264,6 +276,29 @@ it.each(['shortage', 'exhausted', 'policy_fault'] as const)(
     ).toBeVisible();
     expect(screen.getByText('Исходные находки и покрытие сканеров')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Повторить разбор' })).not.toBeInTheDocument();
+    fireEvent.focus(window);
+    fireEvent(window, new Event('online'));
+    await act(async () => {});
+    expect(api.posts()).toHaveLength(0);
+  },
+);
+
+it.each(['ready', 'exhausted', 'policy_fault'] as const)(
+  'summary treats unavailable admission with reason %s as unknown, not verified exhaustion',
+  async (reason) => {
+    grant();
+    const usage = lifetimeUsage();
+    usage.reason = reason;
+    usage.admission = { status: 'unavailable' };
+    const api = summaryApi(usage);
+    mountSummary();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('остаток неизвестен');
+    expect(alert).not.toHaveTextContent('Локальная квота ИИ не допускает новый разбор');
+    expect(screen.queryByRole('region', { name: 'Бюджет ИИ за всё время' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Проверить квоту и сохранённый разбор' })).not.toBeInTheDocument();
+    expect(screen.getByText('Исходные находки и покрытие сканеров')).toBeVisible();
+    expect(api.posts()).toHaveLength(0);
     fireEvent.focus(window);
     fireEvent(window, new Event('online'));
     await act(async () => {});
@@ -359,7 +394,19 @@ it('keeps daily token blocking for legacy uncapped snapshots without lifetime me
   const usage: LlmUsage = lifetimeUsage();
   if (!usage.available) throw new Error('Expected available usage');
   delete usage.lifetimeBudget;
-  usage.admission = { status: 'unavailable' };
+  usage.admission = {
+    status: 'insufficient',
+    reserve: { input: 2048, output: 2048, costMicros: 30000 },
+    signals: (['user', 'scan'] as const).flatMap((scope) =>
+      (['input', 'output'] as const).map((dimension) => ({
+        scope,
+        dimension,
+        reason: 'insufficient' as const,
+        required: 2048,
+        remaining: 0,
+      })),
+    ),
+  };
   const api = summaryApi(usage, legacyContext);
   mountSummary();
   await screen.findByRole('alert');
