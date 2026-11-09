@@ -155,6 +155,11 @@ export function createChatClient(session = scanSession(), fetcher: typeof fetch 
                 : 'REPORT_UNAVAILABLE',
         );
       }
+      if ([502, 503, 504].includes(response.status) &&
+        !/^application\/json(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
+        void response.body?.cancel().catch(() => {});
+        throw new ChatError('DELIVERY');
+      }
       const length = response.headers.get('content-length');
       const framed = !!framing && response.ok;
       const cap = response.ok ? limit : 8192;

@@ -36,6 +36,8 @@
     "@blocknote/core": "^0.41.1",
     "@blocknote/mantine": "^0.41.1",
     "@blocknote/react": "^0.41.1",
+    "@chatscope/chat-ui-kit-react": "2.1.1",
+    "@chatscope/chat-ui-kit-styles": "1.4.0",
     "@diceui/combobox": "^1.2.2",
     "@hookform/resolvers": "^5.2.2",
     "@omsimos/react-highlight-popover": "^1.4.1",

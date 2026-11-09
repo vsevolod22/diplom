@@ -11,6 +11,7 @@ import {
   chatRepresentation,
   encodeDelivery,
   writeDelivery,
+  writeCompletedDelivery,
   type ChatDelivery,
 } from '../history-delivery.js';
 
@@ -79,6 +80,54 @@ class Socket extends EventEmitter {
   }
 }
 const frame = (line: string) => JSON.parse(line);
+
+test('completed publication uses one fresh guard for the whole bounded wire instead of repeating expensive store reads', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  t.after(() => t.mock.timers.reset());
+  const sources = Array.from({ length: 32 }, (_, index) => ({ ...outcome.reply.sources[0],
+    finding: { ...outcome.reply.sources[0].finding, findingId: `secret-0-${index}`, evidenceRef: `result-0-secret-${index}` } }));
+  const delivery: ChatDelivery = { ...outcome, reply: { ...outcome.reply, sources, text: 'я '.repeat(5461) } };
+  const socket = new Socket(); let guards = 0, releases = 0;
+  await writeCompletedDelivery({ delivery, write(action) { guards++; t.mock.timers.tick(150); action(); },
+    release() { releases++; } }, socket.response, new AbortController().signal);
+  assert.equal(guards, 1);
+  assert.equal(releases, 1);
+  assert.equal(socket.destroyed, false);
+  assert.equal(socket.writableFinished, true);
+  assert.equal(socket.lines.join(''), encodeDelivery(delivery).lines.join(''));
+  assert.equal(encodeDelivery(delivery).lines.length, 51);
+  const previous = new Socket();
+  await writeDelivery({ delivery, write(action) { t.mock.timers.tick(150); action(); }, release() {} },
+    previous.response, new AbortController().signal);
+  assert.equal(previous.destroyed, true, 'per-frame store guards exhaust the same absolute delivery deadline');
+});
+
+test('completed publication waits for socket finish with bounded abort cleanup and no second write', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] }); t.after(() => t.mock.timers.reset());
+  const socket = new Socket(); let releases = 0, guards = 0;
+  socket.end = value => { if (value) socket.lines.push(value); socket.writableEnded = true; };
+  const writing = writeCompletedDelivery({ delivery: outcome, write(action) { guards++; action(); },
+    release() { releases++; } }, socket.response, new AbortController().signal);
+  assert.equal(releases, 0);
+  t.mock.timers.tick(DELIVERY.timeoutMs + 1); await writing;
+  assert.equal(guards, 1); assert.equal(releases, 1); assert.equal(socket.destroyed, true);
+  assert.equal(socket.listenerCount('finish'), 0); assert.equal(socket.listenerCount('error'), 0);
+});
+
+for (const mode of ['authority', 'abort', 'deadline'] as const) {
+  test(`completed publication suppresses the entire response on prepublication ${mode} loss`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] }); t.after(() => t.mock.timers.reset());
+    const socket = new Socket(), controller = new AbortController(); let releases = 0;
+    await assert.rejects(writeCompletedDelivery({ delivery: outcome, write(action) {
+      if (mode === 'authority') throw new Error('PRIVATE');
+      if (mode === 'abort') controller.abort();
+      if (mode === 'deadline') t.mock.timers.tick(DELIVERY.timeoutMs + 1);
+      action();
+    }, release() { releases++; } }, socket.response, controller.signal));
+    assert.equal(socket.headers, undefined); assert.equal(socket.lines.length, 0); assert.equal(releases, 1);
+    assert.equal(socket.listenerCount('finish'), 0); assert.equal(socket.listenerCount('close'), 0);
+  });
+}
 
 // Real HTTP serialization without a listener, network, database or provider.
 class MemoryHttpSocket extends Duplex {

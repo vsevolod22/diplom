@@ -63,6 +63,51 @@ function send(question = 'Что проверить?') {
   fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: question } });
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
 }
+it('recovers a committed answer after an HTML 502 through GETs without repeating the paid POST', async () => {
+  const api = chatApi();
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await api.fetcher(input, init);
+    if (String(input).endsWith('/chat')) return new Response('Bad Gateway', { status: 502, headers: { 'content-type': 'text/html' } });
+    return response;
+  });
+  mount(api, fetcher); await open(); send();
+  await screen.findByText(/Ответ сохранён. Соединение прервалось/);
+  expect(screen.getByText(/исходную находку/)).toBeVisible();
+  expect(screen.getByLabelText('Вопрос чату')).toHaveValue('');
+  expect(api.requests.filter(request => request.init.method === 'POST')).toHaveLength(1);
+});
+
+it('does not recover another mutation after uncertain delivery and never resends', async () => {
+  const api = chatApi();
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await api.fetcher(input, init);
+    if (String(input).endsWith('/chat')) {
+      api.head = { ...api.head, turns: api.head.turns.map(turn => ({ ...turn, mutationId: crypto.randomUUID() })) };
+      return new Response('Bad Gateway', { status: 502, headers: { 'content-type': 'text/html' } });
+    }
+    return response;
+  });
+  mount(api, fetcher); await open(); send();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Обновить историю' })).not.toBeDisabled());
+  expect(screen.queryByText(/Ответ сохранён. Соединение прервалось/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/исходную находку/)).not.toBeInTheDocument();
+  expect(api.requests.filter(request => request.init.method === 'POST')).toHaveLength(1);
+});
+
+it('shows an honest thinking indicator while the explicit chat request is pending', async () => {
+  const api = chatApi(); let complete!: () => void;
+  const gate = new Promise<void>(resolve => { complete = resolve; });
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/chat')) await gate;
+    return api.fetcher(input, init);
+  });
+  mount(api, fetcher); await open(); send();
+  await screen.findByText('ИИ готовит ответ');
+  expect(screen.getByText(/Ответ появится после проверки и сохранения/)).toBeVisible();
+  await act(async () => complete());
+  await waitFor(() => expect(screen.queryByText('ИИ готовит ответ')).not.toBeInTheDocument());
+});
+
 it.each(['partial', 'failed', 'cancelled'] as const)('B2 %s explains summary/translation limitation without claiming unchecked results are safe', async state => {
   const api = chatApi();
   render(<ScanChatPanel status={{ ...status, state }} transport={sourceTransport()} client={createChatClient(scanSession(), api.fetcher)} />);

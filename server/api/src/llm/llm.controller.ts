@@ -4,7 +4,7 @@ import { BrowserIdentity, type BrowserRequest } from './browser-identity.js';
 import { LlmService } from './llm.service.js';
 import type { HistoryResult } from './history.service.js';
 import type { SummaryPublication } from './summary-result-cache.js';
-import { chatRepresentation, writeDelivery } from './history-delivery.js';
+import { chatRepresentation, writeCompletedDelivery } from './history-delivery.js';
 
 @Controller('api/v1/browser/scans/:scanId/llm')
 export class LlmController {
@@ -81,7 +81,7 @@ export class LlmController {
       result = await this.safe(() => this.llm.history().generate(req, scanId, body, controller.signal, representation));
       if (representation === 'ndjson') {
         if (!result.delivery) throw new ServiceUnavailableException({ errorCode: 'LLM_UNAVAILABLE' });
-        await this.safe(() => writeDelivery({ delivery: result!.delivery!, outputTokens: result!.outputTokens,
+        await this.safe(() => writeCompletedDelivery({ delivery: result!.delivery!, outputTokens: result!.outputTokens,
                   write: result!.write, release: () => result?.release?.() }, res, controller.signal));
       } else this.writeHistoryResponse(res, result);
     } finally { result?.release?.(); req.off('aborted', abort); res.off('close', abort); }

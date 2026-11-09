@@ -197,6 +197,52 @@ export function encodeDelivery(value: ChatDelivery, outputTokens: number = CEILI
   return { lines: Object.freeze(lines), error };
 }
 
+// Completed replies are already durably committed. Their finite NDJSON document
+// needs one guarded publication, not a database round-trip for every small frame.
+export async function writeCompletedDelivery(result: DeliveryResult, response: ServerResponse, signal: AbortSignal) {
+  if (result.delivery.outcome !== 'completed') return writeDelivery(result, response, signal);
+  let started = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let finished!: () => void;
+  let failed!: () => void;
+  let aborted!: () => void;
+  const deadline = Date.now() + DELIVERY.timeoutMs;
+  try {
+    const wire = encodeDelivery(result.delivery, result.outputTokens).lines.join('');
+    const completion = new Promise<void>((resolve, reject) => {
+      finished = resolve;
+      failed = () => reject(unavailable());
+      aborted = failed;
+    });
+    void completion.catch(() => {});
+    response.once('finish', finished);
+    response.once('error', failed);
+    response.once('close', failed);
+    signal.addEventListener('abort', aborted, { once: true });
+    timer = setTimeout(failed, Math.max(1, deadline - Date.now()));
+    result.write(() => {
+      if (signal.aborted || response.destroyed || Date.now() >= deadline) throw unavailable();
+      response.writeHead(200, {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'cache-control': 'no-store, no-transform',
+        'x-content-type-options': 'nosniff',
+      });
+      started = true;
+      response.end(wire);
+    });
+    await completion;
+  } catch (error) {
+    if (!started) throw error;
+    response.destroy();
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (finished) response.off('finish', finished);
+    if (failed) { response.off('error', failed); response.off('close', failed); }
+    if (aborted) signal.removeEventListener('abort', aborted);
+    result.release();
+  }
+}
+
 export async function writeDelivery(result: DeliveryResult, response: ServerResponse, signal: AbortSignal) {
   let started = false,
     terminal = false,

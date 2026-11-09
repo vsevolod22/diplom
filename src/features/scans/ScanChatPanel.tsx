@@ -27,6 +27,7 @@ import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import { identifierLabel, identifierCountsTotal } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
+import { ChatBubble, ChatThinking } from './ChatConversation';
 import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient; onNavigateSource?: ReportSourceNavigate };
@@ -519,10 +520,34 @@ function ChatScope({
       checkStatus(before);
       if (chatContextFence(before) !== chatContextFence(accepted.context) || signal.aborted || !current())
         throw new ChatError('STALE');
-      const result =
-        kind === 'chat'
-          ? await client.chat(before, value, mutationId, signal)
-          : await client.decision(before, value, ids, mutationId, signal);
+      const send = async () => {
+        try {
+          return kind === 'chat'
+            ? await client.chat(before, value, mutationId, signal)
+            : await client.decision(before, value, ids, mutationId, signal);
+        } catch (error) {
+          // A failed delivery is not a failed generation. Reconcile only this
+          // exact attempt through authorized reads; never repeat a paid POST.
+          if (kind !== 'chat' || signal.aborted || !current() || !(error instanceof ChatError) ||
+            !['DELIVERY', 'TIMEOUT'].includes(error.code)) throw error;
+          const recovered = await readSnapshot(signal);
+          const saved = recovered.history.turns.find(turn => turn.mutationId === mutationId);
+          if (policyFence(recovered.context) !== policyFence(before) ||
+            recovered.context.epoch !== before.epoch || recovered.context.pending ||
+            recovered.history.epoch !== before.epoch || recovered.history.revision !== before.revision + 2 ||
+            !saved || saved.state !== 'completed' || saved.question !== value ||
+            !sameChatBinding(saved.report, before) || !verifiedChatSources(saved.reply, recovered.sources)) throw error;
+          publish(() => {
+            setSnapshot(recovered);
+            setQuestion('');
+            setSelectedIds(previous => retainedDecisionSources(accepted, recovered, previous));
+            setMessage('Ответ сохранён. Соединение прервалось, поэтому ответ прочитан из подтверждённой истории без повторной отправки.');
+          });
+          return null;
+        }
+      };
+      const result = await send();
+      if (!result) return;
       if (signal.aborted || !current()) throw new ChatError('STALE');
       if (
         'reply' in result &&
@@ -643,8 +668,10 @@ function ChatScope({
           {!snapshot.history.turns.length && !snapshot.history.decisions.length ? (
             <p>Например: «С каких находок начать?» Не добавляйте пароли, ключи или другие чувствительные данные.</p>
           ) : null}
+          <div className="scan-chat-conversation" aria-label="Сохранённая переписка">
           {snapshot.history.turns.map((turn) => (
             <article key={turn.id}>
+              <ChatBubble direction="outgoing">
               <h5>
                 Вопрос ·{' '}
                 {
@@ -658,14 +685,15 @@ function ChatScope({
                 }
               </h5>
               <p style={{ whiteSpace: 'pre-wrap' }}>{turn.question}</p>
+              </ChatBubble>
               {turn.state === 'completed' ? (
-                <>
+                <ChatBubble direction="incoming">
                   <h5>Ответ · проверьте по источникам</h5>
                   <SafeMarkdown text={turn.reply.text} />
                   <SourceList sources={turn.reply.sources} current={context} prefix={`chat-${turn.id}`}
                                       onNavigate={onNavigateSource ? category => current() && !pending && onNavigateSource(category) : undefined}
                                       disabled={pending} />
-                </>
+                </ChatBubble>
               ) : (
                 <>
                   <p>
@@ -705,8 +733,10 @@ function ChatScope({
               )}
             </article>
           ))}
+          </div>
         </>
       ) : null}
+      {pending && operation === 'chat' ? <ChatThinking /> : null}
       <form
         className="scan-a1__compose"
         aria-label="Отправка вопроса по отчёту"

@@ -592,25 +592,34 @@ test('TASK16 R4 real cookie/service/controller admitted failure frames preserve 
     await post(await input()).then(response => response.text().catch(() => ''), () => ''); afterWrite = undefined;
     assert.equal(failedWrites, 2, 'failed head invalidation after usage forbids stale error/end');
     assert.equal(quota.snapshot(owner, scanId).scan.used.input, 3000); acquire(owner)(); invalid = false;
-    // Actual durable revision invalidation after usage write: next write must fail, no stale error frame.
+    // Completed NDJSON is one atomic bounded write. Invalidation BEFORE that
+    // publication must suppress the whole reply, not leak an initial usage frame.
     let written = 0;
-    const race = await input(); afterWrite = n => { written = n; if (n === 2) {
+    const race = await input(); afterWrite = n => { written = n; };
+    afterResult = async () => {
       const head = history.snapshot(owner, scanId), report = app.get(ReportReader).read({ subject: owner, scope: ['scan:read'] }, scanId);
       history.decision(owner, scanId, head.epoch, head.revision, { id: randomUUID(), mutationId: randomUUID(), kind: 'user-decision', text: 'New decision after receipt.', report: reportBinding(report), sources: [] });
-    } };
-    await post(race).then(r => r.text().catch(() => ''), () => ''); afterWrite = undefined;
-    assert.equal(written, 2, 'head invalidation forbids citation/delta/done/error writes');
+    };
+    const staleHead = await post(race); assert.equal(staleHead.status, 409);
+    assert.doesNotMatch(await staleHead.text(), /"usage"|"citation"|"delta"|"done"/);
+    afterWrite = undefined; afterResult = undefined;
+    assert.equal(written, 0, 'head invalidation forbids the entire completed publication');
     assert.equal(quota.snapshot(owner, scanId).scan.used.input, 3500); assert.equal(history.snapshot(owner, scanId).turns.at(-1)!.state, 'completed'); acquire(owner)();
     // Report and cookie rotation independently use the same production write guard, never a boolean permission.
     const reader = app.get(ReportReader), read = reader.read.bind(reader); let stale = false;
     reader.read = (...args) => { const report = read(...args); return stale ? { ...report, reportVersion: 'e'.repeat(64) } : report; };
-    written = 0; afterWrite = n => { written = n; if (n === 2) stale = true; };
-    await post(await input()).then(r => r.text().catch(() => ''), () => ''); stale = false; afterWrite = undefined; reader.read = read;
-    assert.equal(written, 2, 'changed report forbids further writes');
+    written = 0; afterWrite = n => { written = n; }; afterResult = async () => { stale = true; };
+    const staleReport = await post(await input()); assert.equal(staleReport.status, 409);
+    assert.doesNotMatch(await staleReport.text(), /"usage"|"citation"|"delta"|"done"/);
+    stale = false; afterWrite = undefined; afterResult = undefined; reader.read = read;
+    assert.equal(written, 0, 'changed report forbids completed publication');
     assert.equal(quota.snapshot(owner, scanId).scan.used.input, 4000); acquire(owner)();
-    written = 0; const sessionInput = await input(); afterWrite = n => { written = n; if (n === 2) app.get(AuthStore).revoke(cookie.slice('demo_session='.length)); };
-    await post(sessionInput).then(r => r.text().catch(() => ''), () => ''); afterWrite = undefined;
-    assert.equal(written, 2, 'revoked cookie forbids further writes');
+    written = 0; const sessionInput = await input(); afterWrite = n => { written = n; };
+    afterResult = async () => { app.get(AuthStore).revoke(cookie.slice('demo_session='.length)); };
+    const revoked = await post(sessionInput); assert.equal(revoked.status, 503);
+    assert.doesNotMatch(await revoked.text(), /"usage"|"citation"|"delta"|"done"/);
+    afterWrite = undefined; afterResult = undefined;
+    assert.equal(written, 0, 'revoked cookie forbids completed publication');
     assert.equal(quota.snapshot(owner, scanId).scan.used.input, 4500); acquire(owner)();
     const login = await fetch(`${base}/auth/login`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ email: 'task16@example.com', password: 'synthetic-task16-password-1234' }) });
     cookie = login.headers.get('set-cookie')!.split(';')[0];
