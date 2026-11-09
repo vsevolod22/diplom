@@ -69,6 +69,7 @@ export function ChatMarkdownComposer({ value, onChange, textareaRef, disabled, i
   });
   const appliedValue = useRef<string | null>(null);
   const replacing = useRef(false);
+  const toolbarSelection = useRef<ReturnType<typeof editor.prosemirrorState.selection.getBookmark> | null>(null);
   const [, refreshSelection] = useState(0);
 
   useLayoutEffect(() => {
@@ -89,7 +90,11 @@ export function ChatMarkdownComposer({ value, onChange, textareaRef, disabled, i
     replacing.current = true;
     try {
       const blocks = value ? editor.tryParseMarkdownToBlocks(value) : [];
-      editor.replaceBlocks(editor.document, blocks.length ? blocks : [{ type: 'paragraph' }]);
+      editor.transact(() => {
+        editor.replaceBlocks(editor.document, blocks.length ? blocks : [{ type: 'paragraph' }]);
+        editor.setTextCursorPosition(editor.document.at(-1)!, 'end');
+      });
+      toolbarSelection.current = null;
       // Keep the exact supplied draft until the user actually edits it. In particular,
       // retry preparation must not rewrite or truncate the server's saved question.
       appliedValue.current = value;
@@ -109,26 +114,60 @@ export function ChatMarkdownComposer({ value, onChange, textareaRef, disabled, i
   }
   function active(kind: Format) {
     if (kind === 'bold' || kind === 'italic' || kind === 'code') return !!editor.getActiveStyles()[kind];
-    const type = editor.getTextCursorPosition().block.type;
-    return type === (kind === 'heading' ? 'heading' : kind);
+    return selectedBlocks().every(block => kind === 'heading'
+      ? block.type === 'heading' && block.props.level === 2
+      : block.type === kind);
+  }
+  function selectedBlocks() {
+    return editor.getSelection()?.blocks ?? [editor.getTextCursorPosition().block];
   }
   function format(kind: Format) {
     if (disabled) return;
+    editor.transact(tr => {
+      if (toolbarSelection.current) tr.setSelection(toolbarSelection.current.resolve(tr.doc));
+      if (kind === 'bold' || kind === 'italic' || kind === 'code') {
+        editor.toggleStyles({ [kind]: true });
+        return;
+      }
+      const blocks = selectedBlocks();
+      const toggleOff = active(kind);
+      // BlockNote's block selection API omits text offsets and selection direction.
+      // Map the exact ProseMirror bookmark through the single formatting transaction.
+      const selection = tr.selection.getBookmark();
+      const mappingStart = tr.mapping.maps.length;
+      for (const block of blocks) {
+        if (toggleOff) editor.updateBlock(block, { type: 'paragraph' });
+        else if (kind === 'heading') editor.updateBlock(block, { type: 'heading', props: { level: 2 } });
+        else editor.updateBlock(block, { type: kind });
+      }
+      tr.setSelection(selection.map(tr.mapping.slice(mappingStart)).resolve(tr.doc));
+    });
+    toolbarSelection.current = null;
     editor.focus();
-    if (kind === 'bold' || kind === 'italic' || kind === 'code') {
-      editor.toggleStyles({ [kind]: true });
-    } else {
-      const block = editor.getTextCursorPosition().block;
-      if (active(kind)) editor.updateBlock(block, { type: 'paragraph' });
-      else if (kind === 'heading') editor.updateBlock(block, { type: 'heading', props: { level: 2 } });
-      else editor.updateBlock(block, { type: kind });
-    }
     refreshSelection(current => current + 1);
   }
 
   return (
     <div className="scan-chat-editor" data-disabled={disabled || undefined}
       onDropCapture={event => event.preventDefault()}
+      onBlurCapture={event => {
+        if (editor.domElement?.contains(event.target) && event.relatedTarget instanceof Node
+          && event.currentTarget.querySelector('.scan-chat-editor__toolbar')?.contains(event.relatedTarget)) {
+          toolbarSelection.current = editor.prosemirrorState.selection.getBookmark();
+        }
+      }}
+      onFocusCapture={event => {
+        if (editor.domElement?.contains(event.target)) toolbarSelection.current = null;
+      }}
+      onMouseDown={event => {
+        if (disabled || event.button !== 0 || !(event.target instanceof HTMLElement)
+          || event.target.closest('.scan-chat-editor__toolbar, .bn-block-content')) return;
+        // Padding outside a text block is still part of the writing surface.
+        event.preventDefault();
+        toolbarSelection.current = null;
+        editor.setTextCursorPosition(editor.document.at(-1)!, 'end');
+        editor.focus();
+      }}
       onKeyDown={event => {
         // Enter edits the document; no editor shortcut may implicitly submit the form.
         if (event.key === 'Enter') event.stopPropagation();

@@ -218,3 +218,19 @@ it('explicit refresh rechecks source pages as well as context and history', asyn
   expect(refreshCalls.filter(call => call.path.endsWith('/chat/usage'))).toHaveLength(2);
   expect(transport.results).toHaveBeenCalledTimes(6);
 });
+
+
+it("a context rejection preserves verified history without a second POST", async () => {
+  const api = chatApi();
+  const fetcher = vi.fn<typeof fetch>((input, init) => init?.method === "POST"
+    ? Promise.resolve(json({ errorCode: "LLM_CONTEXT_LIMIT" }, 409))
+    : api.fetcher(input, init));
+  render(<ScanChatPanel status={status} transport={sourceTransport()} client={createChatClient(scanSession(), fetcher)} />);
+  await settled();
+  fireEvent.change(screen.getByLabelText("Вопрос чату"), { target: { value: question } });
+  fireEvent.click(screen.getByRole("button", { name: "Отправить вопрос" }));
+  await settled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Обязательный контекст");
+  expect(screen.getByRole("button", { name: "Отправить вопрос" })).toBeEnabled();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});

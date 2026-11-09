@@ -39,6 +39,20 @@ function ControlledComposer() {
         Внешний повтор
       </button>
       <button onClick={() => setValue('')}>Внешний сброс</button>
+      <button onClick={() => setValue('Alpha paragraph\n\nBeta paragraph\n\nGamma paragraph')}>
+        Три абзаца
+      </button>
+      <button onClick={() => setValue('# Existing H1')}>Исходный H1</button>
+      <button onClick={() => setValue('## Existing H2\n\n## Second H2')}>Исходные H2</button>
+      <button onClick={() => setValue('Before selected after')}>Подстрока</button>
+      <button
+        onClick={() => {
+          setValue('## Retry heading\n\nRetry paragraph');
+          textareaRef.current?.focus();
+        }}
+      >
+        Повтор с фокусом как в панели
+      </button>
       <button onClick={() => setDisabled((previous) => !previous)}>Переключить блокировку</button>
       <button onClick={() => setValue('я '.repeat(682) + 'я')}>Граница UTF-8</button>
       <button onClick={() => setValue('я '.repeat(683))}>Сверх лимита UTF-8</button>

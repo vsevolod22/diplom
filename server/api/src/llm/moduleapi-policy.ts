@@ -67,6 +67,7 @@ export function createModuleApiPolicy(config: unknown, prompts: ModuleApiPrompts
     const version = hash(JSON.stringify({ contract: 'moduleapi-offline-core-v2', accounting: 'configured-rates-ceil-micros-v1',
       provider: 'ModuleAPI', endpoint: MODULEAPI_ENDPOINT, returnedModels: MODULEAPI_RETURNED_MODELS,
       privacy: 'retention-and-training-unknown', tariff: 'effective-tariff-not-verified', ...settings, chatSources: CHAT_SOURCE_BUDGET,
+            historyWire: 'exact-source-catalog-v1',
       prompts: { summary: hash(frozenPrompts.summary), chat: hash(frozenPrompts.chat) },
       responseFormats: { summary: moduleApiResponseFormat('summary'), chat: moduleApiResponseFormat('chat') } }));
     const policy = Object.freeze({ ...settings, provider: 'ModuleAPI' as const, version });

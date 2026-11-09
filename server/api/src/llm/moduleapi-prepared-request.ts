@@ -11,6 +11,7 @@ import { moduleApiReserve, type ModuleApiReserve } from './moduleapi-usage.js';
 // These are provider-neutral schema/alphabet validators; policy authority stays separate.
 import { openAiNarrative as moduleApiNarrative, type OpenAiOperation as ModuleApiOperation } from './openai-response-contract.js';
 import { moduleApiChatNarrative, moduleApiResponseFormat } from './moduleapi-chat-format.js';
+import { moduleApiHistoryWire } from './moduleapi-history-wire.js';
 
 export type { OpenAiOperation as ModuleApiOperation } from './openai-response-contract.js';
 export type ModuleApiPrepared = Readonly<{
@@ -135,7 +136,7 @@ function prepare(operation: ModuleApiOperation, input: ReportContext | HistoryCo
     const body = JSON.stringify({ model: policy.model, max_completion_tokens: policy.outputTokens,
       reasoning_effort: 'none', n: 1, stream: false, store: false, service_tier: 'default',
       response_format: moduleApiResponseFormat(operation),
-      messages: [{ role: 'system', content: prompts[operation] }, { role: 'user', content: JSON.stringify(content) }] });
+      messages: [{ role: 'system', content: prompts[operation] }, { role: 'user', content: JSON.stringify(operation === 'chat' ? moduleApiHistoryWire(content as HistoryContext) : content) }] });
     const bytes = Buffer.byteLength(body);
     if (bytes > policy.requestBytes) return fail();
     // Same conservative byte bound as the existing adapter, including framing allowance.

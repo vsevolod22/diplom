@@ -1,4 +1,4 @@
-.scan-chat-editor { min-width: 0; border: 1px solid #59546e; border-radius: 12px; background: #201e30; color: #f5f3fc; overflow: hidden; }
+.scan-chat-editor { min-width: 0; border: 1px solid #59546e; border-radius: 10px; background: #201e30; color: #f5f3fc; overflow: hidden; }
 .scan-chat-editor:focus-within { border-color: #d1ff5e; box-shadow: 0 0 0 2px #d1ff5e16; }
 .scan-chat-editor__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #494459; }
 .scan-chat-editor__tools { display: flex; gap: 2px; min-width: 0; flex-wrap: wrap; }

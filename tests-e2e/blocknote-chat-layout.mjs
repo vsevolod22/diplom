@@ -3,7 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { createServer as createNetServer } from 'node:net';
 import { createServer } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect as playwrightExpect } from '@playwright/test';
+
+const expect = playwrightExpect.configure({ timeout: 3000 });
 
 // Run with node tests-e2e/blocknote-chat-layout.mjs. Never attaches to a live app.
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -67,11 +69,18 @@ try {
         failures.push({
           width,
           name,
-          error: String(error.message).replace(/\u001b\[[0-9;]*m/g, ''),
-          editor: await page
-            .locator('[role="textbox"]')
-            .first()
-            .innerHTML()
+          error: String(error.message)
+            .replace(/\u001b\[[0-9;]*m/g, '')
+            .slice(0, 1400),
+          blocks: await textbox()
+            .locator('[data-content-type]')
+            .evaluateAll((elements) =>
+              elements.map((element) => ({
+                type: element.getAttribute('data-content-type'),
+                level: element.getAttribute('data-level'),
+                text: element.textContent,
+              })),
+            )
             .catch(() => null),
           active: await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 600)),
         });
@@ -158,6 +167,124 @@ try {
         assert.deepEqual(blocked, []);
       },
     );
+    // Every regression starts from a fresh controlled editor; a failure cannot contaminate the next.
+    async function seed(button, text) {
+      await page.goto(`${fixture}?composer`);
+      await page.getByRole('button', { name: button, exact: true }).click();
+      await expect(textbox()).toContainText(text);
+    }
+    async function selectText(startText, startOffset, endText = startText, endOffset = startText.length) {
+      await textbox().focus();
+      await textbox().evaluate(
+        (element, range) => {
+          const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+          const nodes = [];
+          while (walker.nextNode()) nodes.push(walker.currentNode);
+          const start = nodes.find((node) => node.textContent === range.startText);
+          const end = nodes.find((node) => node.textContent === range.endText);
+          if (!start || !end) throw new Error('Selection text nodes not found');
+          const selection = window.getSelection();
+          selection.setBaseAndExtent(start, range.startOffset, end, range.endOffset);
+          document.dispatchEvent(new Event('selectionchange'));
+        },
+        { startText, startOffset, endText, endOffset },
+      );
+      await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).not.toBe('');
+    }
+    const heading = () => page.getByRole('button', { name: 'Заголовок', exact: true });
+    const selectionText = () => page.evaluate(() => window.getSelection()?.toString());
+    await check('regression: H2 applies to every selected paragraph, not only cursor block', async () => {
+      await seed('Три абзаца', 'Gamma paragraph');
+      await selectText('Alpha paragraph', 0, 'Gamma paragraph', 15);
+      await heading().click();
+      await expect(textbox().locator('h2')).toHaveText([
+        'Alpha paragraph',
+        'Beta paragraph',
+        'Gamma paragraph',
+      ]);
+      await expect(draft()).toHaveText('## Alpha paragraph\n\n## Beta paragraph\n\n## Gamma paragraph');
+      await expect(page.getByTestId('submitted')).toHaveText('[]');
+    });
+    await check('regression: H1 selection becomes H2, never toggles to paragraph', async () => {
+      await seed('Исходный H1', 'Existing H1');
+      await selectText('Existing H1', 0);
+      await heading().click();
+      await expect(textbox().locator('h2')).toHaveText('Existing H1');
+      await expect(textbox().locator('h1')).toHaveCount(0);
+      await expect(draft()).toHaveText('## Existing H1');
+    });
+    await check('regression: selected actual H2 blocks toggle together to paragraphs', async () => {
+      await seed('Исходные H2', 'Second H2');
+      await selectText('Existing H2', 0, 'Second H2', 9);
+      await heading().click();
+      await expect(textbox().locator('h2')).toHaveCount(0);
+      await expect(
+        textbox()
+          .locator('[data-content-type="paragraph"]')
+          .filter({ hasText: /Existing H2|Second H2/ }),
+      ).toHaveText(['Existing H2', 'Second H2']);
+      await expect(draft()).toHaveText('Existing H2\n\nSecond H2');
+    });
+    await check(
+      'regression: substring text/selection survive H2 and typing replaces intended range',
+      async () => {
+        await seed('Подстрока', 'Before selected after');
+        await selectText('Before selected after', 7, 'Before selected after', 15);
+        assert.equal(await selectionText(), 'selected');
+        await heading().click();
+        await expect(textbox().locator('h2')).toHaveText('Before selected after');
+        assert.equal(await selectionText(), 'selected', 'toolbar must retain the exact substring selection');
+        await expect(textbox()).toBeFocused();
+        await page.keyboard.type('REPLACED');
+        await expect(textbox().locator('h2')).toHaveText('Before REPLACED after');
+        // Typing again must continue at the replacement caret, not jump to a block edge.
+        await page.keyboard.type('!');
+        await expect(draft()).toHaveText('## Before REPLACED! after');
+        assert.equal(await selectionText(), '');
+        await expect(page.getByTestId('submitted')).toHaveText('[]');
+      },
+    );
+    await check('regression: editor blank-area click focuses input and accepts typing', async () => {
+      await page.goto(`${fixture}?composer`);
+      const editor = page.locator('.scan-chat-editor');
+      const bounds = await editor.boundingBox();
+      assert(bounds);
+      // Bottom-right padding belongs to the editor surface, not its contenteditable child.
+      await page.mouse.click(bounds.x + bounds.width - 3, bounds.y + bounds.height - 3);
+      await expect(textbox()).toBeFocused();
+      await page.keyboard.type('Blank area question');
+      await expect(draft()).toHaveText('Blank area question');
+    });
+    await check(
+      'regression: external reset clears heading/selection; new typing is plain at fresh caret',
+      async () => {
+        await seed('Исходные H2', 'Second H2');
+        await selectText('Existing H2', 2, 'Existing H2', 8);
+        await page.getByRole('button', { name: 'Внешний сброс', exact: true }).click();
+        await expect(textbox()).toHaveText('');
+        await expect(draft()).toHaveText('');
+        await textbox().click();
+        await page.keyboard.type('Fresh question');
+        await expect(textbox().locator('h1, h2, h3, strong, em, code')).toHaveCount(0);
+        await expect(draft()).toHaveText('Fresh question');
+        assert.equal(await selectionText(), '');
+        await expect(heading()).toHaveAttribute('aria-pressed', 'false');
+      },
+    );
+    await check(
+      'regression: panel-style external retry ref focus places typing in replacement draft',
+      async () => {
+        await seed('Подстрока', 'Before selected after');
+        await selectText('Before selected after', 7, 'Before selected after', 15);
+        await page.getByRole('button', { name: 'Повтор с фокусом как в панели', exact: true }).click();
+        await expect(textbox()).toBeFocused();
+        await expect(textbox().locator('h2')).toHaveText('Retry heading');
+        await page.keyboard.type('!');
+        // The intended external-replacement caret is the end of the restored question.
+        await expect(draft()).toHaveText('## Retry heading\n\nRetry paragraph!');
+        await expect(page.getByTestId('submitted')).toHaveText('[]');
+      },
+    );
     await page.goto(fixture);
     await check('widget: lazy mount, minimize/reopen draft and focus retention, mobile bounds', async () => {
       const launcher = page.getByRole('button', { name: 'Открыть чат по отчёту' });
@@ -207,7 +334,12 @@ try {
   }
   console.log(
     JSON.stringify(
-      { mode: 'real Chromium / ephemeral loopback / synthetic fixture only', results, failures },
+      {
+        mode: 'real Chromium / ephemeral loopback / synthetic fixture only',
+        summary: { passed: results.length, failed: failures.length },
+        results,
+        failures,
+      },
       null,
       2,
     ),

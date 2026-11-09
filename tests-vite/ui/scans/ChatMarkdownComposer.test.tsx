@@ -6,14 +6,22 @@ import { ChatMarkdownComposer } from '@/features/scans/ChatMarkdownComposer';
 import { scanChatInputFeedback } from '@/features/scans/scanChatInputFeedback';
 import { validChatText } from '@/shared/api/scans/llmChatContract';
 
-// Lifecycle/controlled-value tests ONLY. The BlockNote surface below is an explicit
+// Lifecycle and command-routing tests ONLY. The BlockNote surface below is an explicit
 // test adapter, not WYSIWYG proof. Real input rules, DOM rendering, selection and
 // browser security are qualified by BlockNoteChatComposer.test.tsx / Chromium.
-type AdapterBlock = { type: string; text?: string };
+type AdapterBlock = { type: string; text?: string; props?: { level?: number } };
 type AdapterEditor = {
   document: AdapterBlock[];
   domElement?: HTMLTextAreaElement;
   isEditable: boolean;
+  selected?: AdapterBlock[];
+  getSelection: ReturnType<typeof vi.fn>;
+  focus: ReturnType<typeof vi.fn>;
+  setTextCursorPosition: ReturnType<typeof vi.fn>;
+  updateBlock: ReturnType<typeof vi.fn>;
+  toggleStyles: ReturnType<typeof vi.fn>;
+  transact: ReturnType<typeof vi.fn>;
+  prosemirrorState: { selection: { getBookmark: ReturnType<typeof vi.fn> } };
   notify?: () => void;
   replaceBlocks: ReturnType<typeof vi.fn>;
   tryParseMarkdownToBlocks: ReturnType<typeof vi.fn>;
@@ -29,9 +37,23 @@ vi.mock('@blocknote/react', async () => {
   return {
     useCreateBlockNote(options: Record<string, unknown>) {
       const [editor] = React.useState(() => {
+        const bookmark = { resolve: vi.fn(() => 'retained selection'), map: vi.fn() };
+        bookmark.map.mockReturnValue(bookmark);
+        const transaction = {
+          doc: {}, selection: { getBookmark: vi.fn(() => bookmark) },
+          mapping: { maps: [], slice: vi.fn(() => 'format mapping') },
+          setSelection: vi.fn(),
+        };
         const instance: AdapterEditor = {
           document: [{ type: 'paragraph' }],
           isEditable: true,
+          getSelection: vi.fn(() => instance.selected ? { blocks: instance.selected } : undefined),
+          focus: vi.fn(() => instance.domElement?.focus()),
+          setTextCursorPosition: vi.fn(),
+          updateBlock: vi.fn((block: AdapterBlock, update: Partial<AdapterBlock>) => Object.assign(block, update)),
+          toggleStyles: vi.fn(),
+          transact: vi.fn((callback: (tr: typeof transaction) => void) => callback(transaction)),
+          prosemirrorState: { selection: { getBookmark: vi.fn(() => bookmark) } },
           tryParseMarkdownToBlocks: vi.fn((text: string) => [{ type: 'paragraph', text }]),
           blocksToMarkdownLossy: vi.fn((blocks: AdapterBlock[]) => blocks.map(block => block.text ?? '').join('\n')),
           replaceBlocks: vi.fn((_old: AdapterBlock[], blocks: AdapterBlock[]) => {
@@ -42,7 +64,7 @@ vi.mock('@blocknote/react', async () => {
           }),
           ...{
             getActiveStyles: () => ({}),
-            getTextCursorPosition: () => ({ block: { type: 'paragraph' } }),
+            getTextCursorPosition: () => ({ block: instance.document[0] }),
           },
         };
         adapter.editors.push(instance);
@@ -188,4 +210,75 @@ it('routes only clipboard plain text to the adapter and ignores it when editing 
   target.isEditable = false;
   paste({ event, editor: target });
   expect(target.pasteText).toHaveBeenCalledTimes(1);
+});
+
+
+it('sets the external replacement caret at the end without stealing focus or publishing', () => {
+  const { rerender, props, onChange } = setup('original');
+  const editor = adapter.editors[0];
+  expect(editor.setTextCursorPosition).toHaveBeenLastCalledWith(editor.document.at(-1), 'end');
+  rerender(<ChatMarkdownComposer {...props} value="## Exact retained retry draft" />);
+  expect(editor.setTextCursorPosition).toHaveBeenLastCalledWith(editor.document.at(-1), 'end');
+  expect(editor.focus).not.toHaveBeenCalled();
+  expect(input()).not.toHaveFocus();
+  expect(onChange).not.toHaveBeenCalled();
+  rerender(<ChatMarkdownComposer {...props} value="" />);
+  expect(editor.document).toEqual([{ type: 'paragraph' }]);
+  expect(editor.setTextCursorPosition).toHaveBeenLastCalledWith(editor.document[0], 'end');
+});
+
+it('formats all selected blocks in one transaction before focusing, and toggles only actual H2', () => {
+  setup();
+  const editor = adapter.editors[0];
+  const blocks: AdapterBlock[] = [
+    { type: 'heading', props: { level: 1 }, text: 'H1' },
+    { type: 'paragraph', text: 'paragraph' },
+    { type: 'heading', props: { level: 2 }, text: 'H2' },
+  ];
+  editor.selected = blocks;
+  const heading = screen.getByRole('button', { name: 'Заголовок' });
+  editor.transact.mockClear();
+  fireEvent.click(heading);
+  expect(editor.transact).toHaveBeenCalledTimes(1);
+  expect(editor.updateBlock.mock.calls).toEqual(blocks.map(block => [block, { type: 'heading', props: { level: 2 } }]));
+  expect(blocks.map(block => block.text)).toEqual(['H1', 'paragraph', 'H2']);
+  expect(heading).toHaveAttribute('aria-pressed', 'true');
+  expect(editor.updateBlock.mock.invocationCallOrder.at(-1)).toBeLessThan(editor.focus.mock.invocationCallOrder[0]);
+  editor.updateBlock.mockClear();
+  fireEvent.click(heading);
+  expect(editor.updateBlock.mock.calls).toEqual(blocks.map(block => [block, { type: 'paragraph' }]));
+  expect(heading).toHaveAttribute('aria-pressed', 'false');
+});
+
+it('treats H1 at the caret as inactive H2 and converts it rather than clearing it', () => {
+  setup();
+  const editor = adapter.editors[0];
+  editor.document[0] = { type: 'heading', props: { level: 1 }, text: 'heading one' };
+  fireEvent.click(screen.getByRole('button', { name: 'Заголовок' }));
+  expect(editor.updateBlock).toHaveBeenCalledExactlyOnceWith(editor.document[0], { type: 'heading', props: { level: 2 } });
+});
+
+it('routes blank surface clicks to the final caret but leaves toolbar and text clicks alone', () => {
+  setup();
+  const editor = adapter.editors[0];
+  editor.setTextCursorPosition.mockClear();
+  fireEvent.mouseDown(input().closest('.scan-chat-editor')!);
+  expect(editor.setTextCursorPosition).toHaveBeenCalledExactlyOnceWith(editor.document.at(-1), 'end');
+  expect(editor.focus).toHaveBeenCalledTimes(1);
+  fireEvent.mouseDown(screen.getByRole('button', { name: 'Заголовок' }));
+  expect(editor.setTextCursorPosition).toHaveBeenCalledTimes(1);
+});
+
+
+it('retains a bookmark when keyboard focus leaves the editor for the toolbar', () => {
+  setup();
+  const editor = adapter.editors[0];
+  const heading = screen.getByRole('button', { name: 'Заголовок' });
+  fireEvent.blur(input(), { relatedTarget: heading });
+  expect(editor.prosemirrorState.selection.getBookmark).toHaveBeenCalledTimes(1);
+  const bookmark = editor.prosemirrorState.selection.getBookmark.mock.results[0].value;
+  fireEvent.click(heading);
+  expect(bookmark.resolve).toHaveBeenCalled();
+  expect(bookmark.map).toHaveBeenCalledWith('format mapping');
+  expect(editor.focus).toHaveBeenCalledTimes(1);
 });

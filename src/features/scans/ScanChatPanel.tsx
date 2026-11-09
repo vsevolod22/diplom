@@ -550,8 +550,19 @@ function ChatScope({
           const deliveryFailure = ['DELIVERY', 'TIMEOUT'].includes(error.code);
           const terminalFailure = ['LLM_UNAVAILABLE', 'LLM_PROVIDER_UNAVAILABLE', 'LLM_INVALID_RESPONSE',
             'LLM_PROVIDER_TIMEOUT', 'LLM_PROVIDER_RATE_LIMITED', 'LLM_PROVIDER_AUTH_FAILED'].includes(error.code);
-          if (!deliveryFailure && !terminalFailure) throw error;
+          const contextRejected = error.code === 'LLM_CONTEXT_LIMIT';
+          if (!deliveryFailure && !terminalFailure && !contextRejected) throw error;
           const recovered = await readSnapshot(signal).catch(() => { throw error; });
+          if (contextRejected) {
+            if (policyFence(recovered.context) !== policyFence(before) || recovered.context.epoch !== before.epoch ||
+              recovered.context.pending || recovered.history.revision !== before.revision) throw error;
+            publish(() => {
+              setSnapshot(recovered);
+              setSelectedIds(previous => retainedDecisionSources(accepted, recovered, previous));
+              setMessage(chatErrorMessage(error, kind));
+            });
+            return null;
+          }
           const saved = recovered.history.turns.find(turn => turn.mutationId === mutationId);
           if (policyFence(recovered.context) !== policyFence(before) ||
             recovered.context.epoch !== before.epoch || recovered.context.pending ||
