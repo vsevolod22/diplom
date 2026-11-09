@@ -34,11 +34,11 @@ function Controls({ label, limit, sort, sorts, disabled, onLimit, onSort, childr
     <summary>Фильтры и сортировка · {label}</summary>
     <fieldset className="scan-report-view-controls" disabled={disabled}>
     <legend>Весь отчёт {label} · фильтры и сортировка</legend>
-    <label>Строк на странице · {label}
+    {label === 'Уязвимости' ? <p>По 7 находок на странице</p> : <label>Строк на странице · {label}
       <select value={limit} onChange={event => onLimit(Number(event.target.value) as ReportLimit)}>
         {REPORT_LIMITS.map(size => <option key={size} value={size}>{size}</option>)}
       </select>
-    </label>
+    </label>}
     <label>Сортировка · {label}
       <select value={sort} onChange={event => onSort(event.target.value)}>
         {sorts.map(value => <option key={value} value={value}>{SORT_LABELS[value]}</option>)}

@@ -8,14 +8,14 @@ type Props = ComponentProps<typeof ScanChatPanel>;
 
 export function ScanChatWidget(props: Props) {
   const [open, setOpen] = useState(false);
-  const [visited, setVisited] = useState(false);
+
   const trigger = useRef<HTMLButtonElement>(null);
   const windowRef = useRef<HTMLDivElement>(null);
   const restoreFocus = useRef(false);
   const id = useId();
   const changeOpen = (next: boolean) => {
     restoreFocus.current = !next;
-    if (next) setVisited(true);
+
     setOpen(next);
   };
   useLayoutEffect(() => {
@@ -127,7 +127,7 @@ export function ScanChatWidget(props: Props) {
         aria-haspopup="dialog" aria-expanded={open} aria-controls={id} hidden={open} onClick={() => changeOpen(true)}>
         <MessageCircle size={23} aria-hidden="true" /><span>Спросить ИИ</span>
       </button>
-      {visited ? createPortal(
+      {createPortal(
         <div ref={windowRef} id={id} role="dialog" tabIndex={-1} aria-modal="false" aria-labelledby={`${id}-title`}
           aria-describedby={`${id}-description`} hidden={!open} className="scan-a1 scan-chat-widget">
           <header className="scan-chat-widget__header">
@@ -149,7 +149,7 @@ export function ScanChatWidget(props: Props) {
             } : undefined} />
           </div>
         </div>, document.body,
-      ) : null}
+      )}
     </>
   );
 }

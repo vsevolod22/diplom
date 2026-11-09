@@ -1,7 +1,7 @@
 export const REPORT_SEVERITIES = ['UNKNOWN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
 export type Severity = typeof REPORT_SEVERITIES[number];
 export type ReportKind = 'vuln' | 'sbom' | 'secret';
-export type ReportLimit = 5 | 10 | 25 | 50;
+export type ReportLimit = 5 | 7 | 10 | 25 | 50;
 export type VulnSort = 'severity:asc' | 'severity:desc';
 export type SbomSort = 'name:asc' | 'name:desc' | 'ecosystem:asc' | 'ecosystem:desc';
 export type SecretSort = 'ruleId:asc' | 'ruleId:desc' | 'line:asc' | 'line:desc';
@@ -59,7 +59,7 @@ export function parseReportQuery(kind: ReportKind, value: unknown): ReportQuery 
   const keys = ['view', 'limit', 'cursor', 'sort', ...(kind === 'vuln' ? ['severity'] :
     kind === 'sbom' ? ['ecosystem', 'name'] : ['ruleId', 'linePresence'])];
   if (Object.keys(query).some(key => !keys.includes(key)) || scalar(query, 'view') !== 'report-v1') return invalid();
-  const limit = choice(scalar(query, 'limit'), ['5', '10', '25', '50'] as const, '25');
+  const limit = choice(scalar(query, 'limit'), ['5', '7', '10', '25', '50'] as const, '25');
   const common = { limit: Number(limit) as ReportLimit, cursor: Object.hasOwn(query, 'cursor') ? query.cursor ?? null : undefined };
   if (kind === 'vuln') {
     const raw = scalar(query, 'severity');

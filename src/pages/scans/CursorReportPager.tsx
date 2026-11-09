@@ -6,6 +6,7 @@ import { ScanAccessError } from '@/shared/api/scans/httpScanTransport';
 import { ReportCursorResetError, ReportQueryError, ReportViewContractError } from '@/shared/api/scans/reportView';
 import { CveReportContractError } from '@/shared/api/scans/cveDbMetadata';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 export type PageDescription = {
   checked: boolean;
@@ -38,6 +39,7 @@ type Props<T> = {
   load: (cursor: string | undefined, signal: AbortSignal) => Promise<T>;
   describe: (data: T) => PageDescription;
   controls?: (pending: boolean) => ReactNode;
+  numberedPageSize?: number;
   children: (data: T) => ReactNode;
 };
 
@@ -46,7 +48,7 @@ export function CursorReportPager<T>(props: Props<T>) {
   return <PagerSession key={JSON.stringify([props.reportKey, hashKey(props.queryKey ?? [props.reportKey])])} {...props} />;
 }
 
-function PagerSession<T>({ reportKey, queryKey, label, enabled, waiting, load, describe, controls, children }: Props<T>) {
+function PagerSession<T>({ reportKey, queryKey, label, enabled, waiting, load, describe, controls, children, numberedPageSize }: Props<T>) {
   // Standalone renderers may omit the provider; application reports use its existing client.
   const queryClient = useContext(QueryClientContext);
   // The keyed session remounts whenever this query identity changes.
@@ -117,7 +119,8 @@ function PagerSession<T>({ reportKey, queryKey, label, enabled, waiting, load, d
         const entries = previous?.entries.slice() ?? [];
         const earlierEntries = entries.slice(0, target.index);
         const ids = new Set(description.rowIds);
-        const earlierIds = new Set(earlierEntries.flatMap((entry) => entry.rowIds));
+        const checkedEntries = numberedPageSize ? entries.filter((_, index) => index !== target.index) : earlierEntries;
+        const earlierIds = new Set(checkedEntries.flatMap((entry) => entry.rowIds));
         const end = target.start + description.rowIds.length;
         const inconsistentTotal =
           description.checked &&
@@ -198,7 +201,7 @@ function PagerSession<T>({ reportKey, queryKey, label, enabled, waiting, load, d
         }
       }
     },
-    [enabled, load, describe, label, queryClient, baseQueryKey],
+    [enabled, load, describe, label, queryClient, baseQueryKey, numberedPageSize],
   );
 
   useEffect(() => {
@@ -218,7 +221,40 @@ function PagerSession<T>({ reportKey, queryKey, label, enabled, waiting, load, d
   const previous = page && !historyInvalid && page.index > 0 ? page.entries[page.index - 1] : null;
   const nextCursor = page?.description.nextCursor ?? null;
   const navigable = !!page && page.description.rowIds.length > 0 && (page.index > 0 || nextCursor !== null);
-  const navigation = (position: 'top' | 'bottom') => navigable ? (
+  const pageCount = page && numberedPageSize && page.description.total !== null
+    ? Math.ceil(page.description.total / numberedPageSize) : 0;
+  function goToPage(index: number) {
+    if (!page || !numberedPageSize || pending || historyInvalid || denied || index < 0 || index >= pageCount || index === page.index) return;
+    const visited = page.entries[index];
+    if (visited) { void fetchPage({ ...visited, index }); return; }
+    if (index === 0) { void fetchPage({ cursor: undefined, index: 0, start: 0 }); return; }
+    // Cursor offsets are coordinates, never authority. Keep the server-issued
+    // query/snapshot hashes intact; the backend rechecks ownership and both hashes.
+    const basis = page.entries[page.index]?.cursor ?? page.description.nextCursor;
+    if (!basis || page.description.offset === undefined) return;
+    try {
+      const token = JSON.parse(atob(basis.replace(/-/g, '+').replace(/_/g, '/')));
+      if (token.v !== 1 || !/^[a-f0-9]{64}$/.test(token.q) || !/^[a-f0-9]{64}$/.test(token.r)) return;
+      const start = index * numberedPageSize;
+      const cursor = btoa(JSON.stringify({ v: 1, q: token.q, r: token.r, o: start })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      void fetchPage({ cursor, index, start });
+    } catch { /* A non-report-v1 cursor does not authorize arbitrary page jumps. */ }
+  }
+  const numberedNavigation = (position: 'top' | 'bottom') => {
+    if (!page || !numberedPageSize || pageCount < 2 || page.description.offset === undefined) return null;
+    const indexes = Array.from({ length: pageCount }, (_, index) => index)
+      .filter(index => index === 0 || index === pageCount - 1 || Math.abs(index - page.index) <= 1);
+    return <nav className="scan-report-numbered-pages" aria-label={`Пагинация ${label} · ${position === 'top' ? 'сверху' : 'снизу'}`}>
+      <button type="button" aria-label="Предыдущая страница" disabled={pending || historyInvalid || denied || page.index === 0} onClick={() => goToPage(page.index - 1)}><ChevronLeft size={18} aria-hidden="true" /></button>
+      {indexes.map((index, i) => <span key={index}>
+        {i > 0 && index > indexes[i - 1] + 1 ? <span className="scan-report-page-gap" aria-hidden="true">…</span> : null}
+        <button type="button" aria-label={`Страница ${index + 1}`} aria-current={index === page.index ? 'page' : undefined}
+          disabled={pending || historyInvalid || denied} onClick={() => goToPage(index)}>{index + 1}</button>
+      </span>)}
+      <button type="button" aria-label="Следующая страница" disabled={pending || historyInvalid || denied || page.index === pageCount - 1} onClick={() => goToPage(page.index + 1)}><ChevronRight size={18} aria-hidden="true" /></button>
+    </nav>;
+  };
+  const navigation = (position: 'top' | 'bottom') => numberedPageSize && page?.description.offset !== undefined ? numberedNavigation(position) : navigable ? (
     <nav className="scan-report-pages__controls" aria-label={`Пагинация ${label} · ${position === 'top' ? 'сверху' : 'снизу'}`}>
       <strong>Страницы {label}</strong>
       <Button type="button" variant="secondary" disabled={pending || historyInvalid || !previous || denied}

@@ -40,3 +40,23 @@
 .scan-chat-widget .scan-a1__compose small, .scan-chat-widget .scan-a1__compose p { font-size: 11px; line-height: 1.5; }
 @media (max-width: 600px) { .scan-chat-launcher { right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); min-height: 52px; } .scan-chat-widget { right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); width: calc(100vw - 16px); height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); border-radius: 16px; } .scan-chat-widget__header { padding: 12px; border-radius: 15px 15px 0 0; } .scan-chat-widget__body, .scan-chat-widget .scan-a1__compose { border-radius: 0 0 15px 15px; } }
 @media (prefers-reduced-motion: reduce) { .scan-chat-widget, .scan-chat-launcher { transition: none; animation: none; } }
+
+.scan-chat-compose-field { position: relative; min-width: 0; }
+.scan-chat-widget .scan-chat-compose-field .bn-editor { padding-right: 58px; padding-bottom: 44px; }
+.scan-chat-send { position: absolute; right: 10px; bottom: 10px; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: #d1ff5e; color: #171923; cursor: pointer; }
+.scan-chat-send:hover:not(:disabled) { background: #e0ff98; }
+.scan-chat-send:disabled { background: #373347; color: #a19aad; cursor: not-allowed; }
+.scan-chat-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.scan-chat-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 220px; padding: 24px; text-align: center; color: #bfb8d1; }
+.scan-chat-empty svg { color: #d1ff5e; }
+.scan-chat-empty h3 { margin: 0; font-size: 16px; color: #f5f3fc; }
+.scan-chat-empty p { margin: 0; max-width: 260px; font-size: 13px; line-height: 1.6; }
+.scan-chat-skeleton { display: flex; flex-direction: column; gap: 22px; padding-block: 12px; }
+.scan-chat-skeleton__bubble { display: grid; gap: 9px; padding: 16px; border: 1px solid #373347; border-radius: 14px; background: #211e31; width: 85%; }
+.scan-chat-skeleton__bubble--0 { align-self: flex-end; width: 58%; }
+.scan-chat-skeleton__bubble span { height: 10px; border-radius: 5px; background: linear-gradient(90deg,#373247 25%,#4a425e 50%,#373247 75%); background-size: 200% 100%; animation: chat-skeleton 1.6s ease-in-out infinite; }
+.scan-chat-skeleton__bubble span:last-child { width: 62%; }
+.scan-chat-skeleton__bubble--2 { width: 70%; }
+.scan-chat-editor-skeleton { height: 120px; border-radius: 10px; background: #292538; }
+@keyframes chat-skeleton { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .scan-chat-skeleton__bubble span { animation: none; } }

@@ -140,7 +140,7 @@ function viewRowFingerprint(rows: Parameters<typeof fingerprintReportRows>[0], r
 function VulnReport({ status, transport, reportKey, demo, scope }: SectionProps) {
 
   const label = 'Уязвимости';
-  const [query, setQuery, revision] = useReportSelection<VulnReportQuery>({ view: 'report-v1', limit: 25, sort: 'severity:desc', severity: null });
+  const [query, setQuery, revision] = useReportSelection<VulnReportQuery>({ view: 'report-v1', limit: 7, sort: 'severity:desc', severity: null });
   const supported = !demo && transport.kind === 'live';
   const load = useCallback(
     (cursor: string | undefined, signal: AbortSignal) => transport.vuln(status.scanId, cursor, signal, supported ? query : undefined),
@@ -201,6 +201,7 @@ function VulnReport({ status, transport, reportKey, demo, scope }: SectionProps)
         reportKey={`${reportKey}:${revision}:${JSON.stringify(query)}`}
         queryKey={[...scope, 'report-page', status.scanId, 'vuln', supported ? { view: query.view, ...normalizeReportQuery('vuln', query) } : null, reportKey]}
         label={label}
+        numberedPageSize={7}
         load={loadPage}
         describe={describe}
         enabled={terminal.includes(status.state) && !!status.perCheck?.vuln}

@@ -798,3 +798,10 @@
     scroll-behavior: auto !important;
   }
 }
+
+.scan-report-numbered-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px; margin: 18px 0; }
+.scan-report-numbered-pages > span { display: inline-flex; align-items: center; gap: 5px; }
+.scan-report-numbered-pages button { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; height: 36px; padding: 0 8px; border: 1px solid #514b66; border-radius: 8px; background: #211e31; color: #e6e1ef; cursor: pointer; font: inherit; }
+.scan-report-numbered-pages button[aria-current=page] { background: #d1ff5e; border-color: #d1ff5e; color: #171923; font-weight: 700; }
+.scan-report-numbered-pages button:disabled { opacity: .45; cursor: not-allowed; }
+.scan-report-page-gap { color: #bdb5ce; padding: 0 3px; }

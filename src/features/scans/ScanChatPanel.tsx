@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ArrowUp, MessageCircle } from 'lucide-react';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { subscribeReportPreferences, useReportPreferences } from '@/shared/api/preferences/reportPreferences';
 import { reportPreferencesCurrent } from '@/shared/api/scans/reportAutomation';
@@ -231,7 +232,7 @@ function ChatScope({
   const [question, setQuestion] = useState('');
   const [decision, setDecision] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [pending, setPending] = useState(false);
+  const [pending, setPending] = useState(true);
   const [message, setMessage] = useState('');
   const [receipt, setReceipt] = useState<Extract<ChatResult, { reply: unknown }>['usage'] | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -252,15 +253,7 @@ function ChatScope({
     request.current?.abort();
     request.current = null;
   }
-  function cancel() {
-    invalidate();
-    setPending(false);
-    setSnapshot(null);
-    setReceipt(null);
-    setSelectedIds([]);
-    setReadiness(null);
-    setMessage(chatErrorMessage(new ChatError('ABORTED'), operation));
-  }
+
   function checkStatus(context: ChatContext) {
     if (
       context.scanId !== status.scanId ||
@@ -669,8 +662,7 @@ function ChatScope({
         const element = event.currentTarget;
         followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 64;
       }}>
-      <h3>Задать вопрос по отчёту</h3>
-            <p>Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.</p>
+
       {['partial', 'failed', 'cancelled'].includes(status.state) ? (
         <p>
           Проверка {status.state === 'partial' ? 'завершилась частично' : status.state === 'failed' ? 'завершилась с ошибкой' : 'отменена'}.
@@ -678,24 +670,21 @@ function ChatScope({
           Чат, если разрешён сервером, использует сохранённые результаты; непроверенное не означает отсутствие проблем.
         </p>
       ) : null}
-      <p id="scan-chat-connection" role="status" aria-label="Состояние подключения чата" aria-live="polite">
+      <p id="scan-chat-connection" className={pending && operation === 'read' ? 'scan-chat-sr-only' : undefined} role="status" aria-label="Состояние подключения чата" aria-live="polite">
         {connection}
       </p>
 
-      <Button type="button" variant="secondary" disabled={pending || !current()} onClick={refresh}>
-        Обновить историю
-      </Button>
-      {pending ? (
-        <>
-          <p>
-            {operation === 'read'
-              ? 'Можно остановить чтение и обновить историю позже. Это не отменяет ранее отправленные запросы.'
-              : 'Отмена остановит ожидание, но запрос ещё может завершиться.'}
-          </p>
-          <Button type="button" variant="secondary" onClick={cancel}>
-            {operation === 'read' ? 'Отменить обновление истории' : 'Отменить ожидание чата'}
-          </Button>
-        </>
+      {!snapshot && !pending && message ? (
+        <Button type="button" variant="secondary" disabled={!current()} onClick={refresh}>
+          Повторить загрузку
+        </Button>
+      ) : null}
+      {pending && operation === 'read' && !snapshot ? (
+        <div className="scan-chat-skeleton" aria-hidden="true">
+          {[0, 1, 2].map(index => <div key={index} className={`scan-chat-skeleton__bubble scan-chat-skeleton__bubble--${index}`}>
+            <span /><span /><span />
+          </div>)}
+        </div>
       ) : null}
       {snapshot && pending && operation === 'read' ? (
         <Alert tone="warning">
@@ -711,7 +700,11 @@ function ChatScope({
       {snapshot && context ? (
         <>
           {!snapshot.history.turns.length && !snapshot.history.decisions.length ? (
-            <p>Например: «С каких находок начать?» Не добавляйте пароли, ключи или другие чувствительные данные.</p>
+            <div className="scan-chat-empty">
+              <MessageCircle size={28} aria-hidden="true" />
+              <h3>Напишите первое сообщение</h3>
+              <p>Помогу разобраться в находках и выбрать, что исправить сначала.</p>
+            </div>
           ) : null}
           <div className="scan-chat-conversation" aria-label="Сохранённая переписка">
           {snapshot.history.turns.map((turn) => (
@@ -791,11 +784,18 @@ function ChatScope({
           mutate('chat');
         }}
       >
-        <Suspense fallback={<p role="status">Загрузка редактора…</p>}>
+        <div className="scan-chat-compose-field">
+        <Suspense fallback={<div className="scan-chat-editor-skeleton" role="status" aria-label="Загрузка редактора" />}>
           <ChatMarkdownComposer textareaRef={questionInput} value={question} onChange={setQuestion}
             disabled={pending && operation !== 'read'} invalid={questionInvalid}
             describedBy={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`} />
         </Suspense>
+        <button className="scan-chat-send" type="submit" aria-label="Отправить вопрос" title="Отправить сообщение"
+          aria-describedby={`scan-chat-send-help scan-chat-input-help scan-chat-input-count scan-chat-connection${questionInvalid ? ' scan-chat-input-error' : ''}`}
+          disabled={!available || !generationAllowed || !validChatText(question)}>
+          <ArrowUp size={20} strokeWidth={2.5} aria-hidden="true" />
+        </button>
+        </div>
         <p id="scan-chat-input-count" hidden={utf8Bytes(question) < SCAN_CHAT_INPUT_BYTE_LIMIT * 0.9}>
           {utf8Bytes(question)} / {SCAN_CHAT_INPUT_BYTE_LIMIT} байт UTF-8
         </p>
@@ -831,13 +831,7 @@ function ChatScope({
             ? `Отправка — платный запрос ${context.disclosure.provider}. Вы передаёте вопрос и контекст отчёта.`
             : 'Отправляя вопрос, вы передаёте его и контекст отчёта внешнему ИИ.'}
         </p>
-        <Button
-          type="submit"
-          aria-describedby={`scan-chat-send-help scan-chat-input-help scan-chat-input-count scan-chat-connection${questionInvalid ? ' scan-chat-input-error' : ''}`}
-          disabled={!available || !generationAllowed || !validChatText(question)}
-        >
-          Отправить вопрос
-        </Button>
+
       </form>
       <details className="scan-chat-technical">
         <summary>Подробности · история решений, условия и использование</summary>
