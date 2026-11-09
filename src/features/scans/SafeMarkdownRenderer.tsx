@@ -33,8 +33,10 @@ const codeBlock: NonNullable<StreamdownProps['components']>['pre'] = ({ children
       .join('') ?? '';
   return (
     <div className="scan-markdown__code-block">
+      <div className="scan-markdown__code-actions">
+        <CopyText text={code} label="Скопировать код" />
+      </div>
       <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{children}</pre>
-      <CopyText text={code} label="Скопировать код" />
     </div>
   );
 };

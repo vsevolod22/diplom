@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { exact } from './response.js';
-import { openAiResponseFormat as moduleApiResponseFormat } from './openai-response-contract.js';
-export { OPENAI_PROMPTS as MODULEAPI_PROMPTS } from './openai-prompts.js';
+import { moduleApiResponseFormat } from './moduleapi-chat-format.js';
+export { MODULEAPI_PROMPTS } from './moduleapi-prompts.js';
 import { CHAT_SOURCE_BUDGET } from './chat-source-budget.js';
 
 // Explicit alias contract only: these returned identifiers do not prove model equivalence.

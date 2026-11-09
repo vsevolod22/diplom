@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { scanSession, subscribeScanSession } from '@/shared/api/auth/scanSession';
 import { subscribeReportPreferences, useReportPreferences } from '@/shared/api/preferences/reportPreferences';
 import { reportPreferencesCurrent } from '@/shared/api/scans/reportAutomation';
@@ -28,8 +28,9 @@ import { identifierLabel, identifierCountsTotal } from '@/shared/api/scans/publi
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
 import { ChatBubble, ChatThinking } from './ChatConversation';
-import { ChatMarkdownComposer } from './ChatMarkdownComposer';
 import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
+
+const ChatMarkdownComposer = lazy(() => import('./ChatMarkdownComposer').then(module => ({ default: module.ChatMarkdownComposer })));
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient; onNavigateSource?: ReportSourceNavigate };
 type Operation = 'read' | 'chat' | 'decision';
@@ -235,7 +236,7 @@ function ChatScope({
   const [receipt, setReceipt] = useState<Extract<ChatResult, { reply: unknown }>['usage'] | null>(null);
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
-  const questionInput = useRef<HTMLTextAreaElement | null>(null);
+  const questionInput = useRef<HTMLElement | null>(null);
   const chatContent = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
   const verifiedSources = useRef<{ fence: string; sources: SummarySource[] } | null>(null);
@@ -451,15 +452,12 @@ function ChatScope({
           discardPrevious();
       };
       // Keep setup diagnostics available even if the history-backed context cannot be read.
-      const [initialReadiness, next] = await Promise.all([
-        publicReport ? readReadiness(signal) : Promise.resolve(null),
-        readSnapshot(signal, observeContext),
-      ]);
-      let ready = initialReadiness;
+      let ready = publicReport ? await readReadiness(signal) : null;
       publish(() => setReadiness(ready));
       if (publicReport && !ready) publish(() => setSnapshot(null));
       else if (publicReport && ready && previous && !readinessMatchesContext(ready, previous.context))
         discardPrevious();
+      const next = await readSnapshot(signal, observeContext);
       if (!publicReport && isPaidDisclosure(next.context.disclosure)) {
         ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
@@ -782,9 +780,11 @@ function ChatScope({
           mutate('chat');
         }}
       >
-        <ChatMarkdownComposer textareaRef={questionInput} value={question} onChange={setQuestion}
-          disabled={pending && operation !== 'read'} invalid={questionInvalid}
-          describedBy={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`} />
+        <Suspense fallback={<p role="status">Загрузка редактора…</p>}>
+          <ChatMarkdownComposer textareaRef={questionInput} value={question} onChange={setQuestion}
+            disabled={pending && operation !== 'read'} invalid={questionInvalid}
+            describedBy={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`} />
+        </Suspense>
         <p id="scan-chat-input-count" hidden={utf8Bytes(question) < SCAN_CHAT_INPUT_BYTE_LIMIT * 0.9}>
           {utf8Bytes(question)} / {SCAN_CHAT_INPUT_BYTE_LIMIT} байт UTF-8
         </p>

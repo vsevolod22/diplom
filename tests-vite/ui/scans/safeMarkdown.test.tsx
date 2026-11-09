@@ -4,6 +4,22 @@ import { CopyText, SafeMarkdown } from '@/features/scans/safeMarkdown';
 import SafeMarkdownRenderer from '@/features/scans/SafeMarkdownRenderer';
 import { safeMarkdownUrl, unfinishedFence } from '@/features/scans/safeMarkdownPolicy';
 
+function expectOnlyCopyIcons(container: HTMLElement) {
+  const buttons = Array.from(container.querySelectorAll('button.scan-markdown__copy'));
+  const icons = buttons.map((button) => {
+    expect(['Скопировать текст', 'Скопировать код']).toContain(button.getAttribute('aria-label'));
+    const icon = button.querySelector(':scope > svg');
+    expect(icon?.matches('.lucide-copy, .lucide-check')).toBe(true);
+    expect(icon?.getAttribute('aria-hidden')).toBe('true');
+    return icon;
+  });
+  // Only direct UI icons are allowed; SVG anywhere in the rendered message still fails.
+  expect(Array.from(container.querySelectorAll('svg'))).toEqual(icons);
+  expect(
+    container.querySelector('[onload], [onclick], svg foreignObject, svg script, svg image, svg use'),
+  ).toBeNull();
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -14,18 +30,65 @@ it('R4 copy feedback is separated from the button label without changing copied 
     writeText = vi.fn(async () => {});
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
   const { container } = render(<CopyText text={text} />);
-  fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
+  const button = screen.getByRole('button', { name: 'Скопировать текст' });
+  expect(button.getAttribute('aria-label')).toBe('Скопировать текст');
+  expect(button.querySelector('.scan-markdown__sr-only')?.textContent).toBe('Скопировать текст');
+  expect(button.querySelector('svg.lucide-copy')).not.toBeNull();
+  fireEvent.click(button);
   await act(async () => {});
   expect(screen.getByRole('status').textContent).toBe('Скопировано');
-  expect(container.textContent).toBe('Скопировать текст Скопировано');
+  expect(button.getAttribute('aria-label')).toBe('Скопировать текст');
+  expect(button.querySelector('svg.lucide-check')).not.toBeNull();
+  expectOnlyCopyIcons(container);
   expect(writeText).toHaveBeenCalledWith(text);
   writeText.mockRejectedValueOnce(new Error('denied'));
   fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
   await act(async () => {});
-  expect(container.textContent).toBe('Скопировать текст Копирование недоступно; выделите текст вручную.');
+  expect(screen.getByRole('status').textContent).toBe('Копирование недоступно; выделите текст вручную.');
+  expect(screen.getByRole('status').className).toBe('scan-markdown__copy-status');
+  expect(button.getAttribute('aria-label')).toBe('Скопировать текст');
+  expect(button.querySelector('svg.lucide-copy')).not.toBeNull();
+  expectOnlyCopyIcons(container);
   expect(writeText).toHaveBeenNthCalledWith(2, text);
   expect(container.querySelector('script,a,img,pre,code')).toBeNull();
 });
+it('a delayed clipboard result cannot report success for changed text', async () => {
+  const oldText = '  Original\n```js\nunfinished';
+  const newText = '  Updated\n```js\nstill unfinished';
+  let finishCopy: (() => void) | undefined;
+  const writeText = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finishCopy = resolve;
+      }),
+  );
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  const { container, rerender } = render(<CopyText text={oldText} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
+  expect(writeText).toHaveBeenCalledWith(oldText);
+  expect(finishCopy).toBeTypeOf('function');
+
+  rerender(<CopyText text={newText} />);
+  expect(screen.getByRole('status').textContent).toBe('');
+  await act(async () => {
+    finishCopy?.();
+  });
+  expect(screen.getByRole('status').textContent).toBe('');
+  expect(container.querySelector('svg.lucide-check')).toBeNull();
+  expect(container.querySelector('svg.lucide-copy')).not.toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
+  expect(writeText).toHaveBeenNthCalledWith(2, newText);
+  await act(async () => {
+    finishCopy?.();
+  });
+  expect(screen.getByRole('status').textContent).toBe('Скопировано');
+  rerender(<CopyText text={oldText} />);
+  expect(screen.getByRole('status').textContent).toBe('');
+  expect(container.querySelector('svg.lucide-check')).toBeNull();
+  expectOnlyCopyIcons(container);
+});
+
 it('unfinished fences (length/type/nested markers) stay plain, exactly copyable and inert', async () => {
   const text = '```js\n<script>alert(1)</script>\n[jump](javascript:alert)';
   const writeText = vi.fn(async () => {});
@@ -72,7 +135,8 @@ it.each(nestedUnfinished)(
     const { container } = render(<SafeMarkdown text={text} />);
     await act(async () => {});
     expect(container.querySelector('pre')?.textContent).toBe(text);
-    expect(container.querySelector('script,img,svg,iframe,a,ul,ol,strong,[data-streamdown]')).toBeNull();
+    expect(container.querySelector('script,img,iframe,a,ul,ol,strong,[data-streamdown]')).toBeNull();
+    expectOnlyCopyIcons(container);
     fireEvent.click(screen.getByRole('button', { name: 'Скопировать текст' }));
     await act(async () => {});
     expect(writeText).toHaveBeenCalledWith(text);
@@ -97,7 +161,8 @@ it('raw HTML remains text and never yields scripts, event handlers, SVG, iframe 
   const text =
     '<script>alert(1)</script><svg onload="alert(2)"></svg><iframe src="https://example.com"></iframe><a href="javascript:alert">x</a>';
   const { container } = render(<SafeMarkdown text={text} />);
-  expect(container.querySelector('script,svg,iframe,a,img')).toBeNull();
+  expect(container.querySelector('script,iframe,a,img')).toBeNull();
+  expectOnlyCopyIcons(container);
   expect(container.querySelector('pre')?.textContent).toBe(text);
 });
 it('actual Streamdown wrapper has no rawHTML plugin, diagrams, image fetch or executable code path', async () => {
@@ -108,12 +173,13 @@ it('actual Streamdown wrapper has no rawHTML plugin, diagrams, image fetch or ex
   const { container } = render(
     <SafeMarkdownRenderer
       text={
-        '<script>alert(1)</script>\n\n![image](https://example.com/p.png)\n\n```mermaid\ngraph TD\nA-->B\n```\n\n```javascript\nalert(1)\n```'
+        '<script>alert(1)</script>\n\n<svg class="lucide-copy" onload="alert(2)"><foreignObject>unsafe</foreignObject></svg>\n\n![image](https://example.com/p.png)\n\n```mermaid\ngraph TD\nA-->B\n```\n\n```javascript\nalert(1)\n```'
       }
     />,
   );
   await act(async () => {});
-  expect(container.querySelector('script,img,svg,iframe')).toBeNull();
+  expect(container.querySelector('script,img,iframe')).toBeNull();
+  expectOnlyCopyIcons(container);
   expect(
     container.querySelector('[data-streamdown="mermaid-block"],[data-streamdown="code-block"]'),
   ).toBeNull();

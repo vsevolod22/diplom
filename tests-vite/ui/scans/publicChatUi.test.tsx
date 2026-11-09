@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom/vitest';
+import './mockChatEditor';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -69,7 +70,7 @@ it('announces automatic GET connection, request wait and continuation; submittin
   });
   mount(api, fetcher);
   expect(connection()).toHaveTextContent('Читаем сохранённую историю');
-  expect(screen.getByLabelText('Вопрос чату')).toBeVisible();
+  expect(await screen.findByLabelText('Вопрос чату')).toBeVisible();
   expect(api.requests.every((request) => request.init.method === 'GET')).toBe(true);
   await open();
   expect(connection()).toBeEmptyDOMElement();
@@ -504,6 +505,8 @@ it('local public readiness is explicitly unverified generation, not a provider s
   );
   await open();
   expect(screen.getByText(/dots-studio\/dots-3-note-preview:free/)).not.toBeVisible();
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).not.toBeVisible();
+  fireEvent.click(screen.getByText('Об использовании ИИ', { selector: 'summary' }));
   expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toBeVisible();
   expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toHaveTextContent(
     'Запрет обучения не гарантирует отсутствие хранения',

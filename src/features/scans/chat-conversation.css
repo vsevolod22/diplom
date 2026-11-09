@@ -56,7 +56,7 @@
   color: #e8edf5;
   min-width: 0;
 }
-.scan-chat-bubble.cs-message h5 {
+.scan-chat-bubble.cs-message .cs-message__custom-content > h5 {
   color: #bac9dd;
   margin: 0 0 10px;
   font-size: 12px;
@@ -98,8 +98,7 @@
   min-height: 96px;
   border-radius: 12px;
 }
-.scan-a1__chat button,
-.scan-markdown button.scan-markdown__copy {
+.scan-a1__chat button {
   color: #edf4ff;
   background: #243c59;
   border: 1px solid #657f9e;
@@ -110,8 +109,7 @@
   padding: 7px 11px;
   cursor: pointer;
 }
-.scan-a1__chat button:hover:not(:disabled),
-.scan-markdown button.scan-markdown__copy:hover:not(:disabled) {
+.scan-a1__chat button:hover:not(:disabled) {
   color: #ffffff;
   background: #304f73;
 }
@@ -160,7 +158,7 @@
   background: #192536;
   color-scheme: dark;
   font-size: 14px;
-  line-height: 1.75;
+  line-height: 1.7;
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -170,7 +168,11 @@
   background: transparent;
 }
 .scan-markdown :is(p, ul, ol, blockquote, pre, table) {
-  margin-block: 0 1em;
+  margin-block: 0 0.85em;
+}
+.scan-markdown > :last-child,
+.scan-markdown li > p:last-child {
+  margin-bottom: 0;
 }
 .scan-markdown :is(h1, h2, h3, h4, h5, h6) {
   color: #f5f7fc;
@@ -290,13 +292,85 @@
 .scan-markdown__code-block {
   min-width: 0;
   margin-block: 1em;
+  border: 1px solid #445268;
+  border-radius: 10px;
+  background: #0d1623;
+}
+.scan-markdown__code-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 6px;
+  border-bottom: 1px solid #344357;
 }
 .scan-markdown__code-block pre {
-  margin-bottom: 0.5em;
+  margin: 0;
+  border: 0;
+}
+.scan-markdown__copy-action {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.scan-markdown > .scan-markdown__copy-action {
+  display: flex;
+  width: fit-content;
+  margin-top: 8px;
+}
+/* Override chat-wide button styling without depending on a report-page ancestor. */
+.scan-markdown .scan-markdown__copy-action > button.scan-markdown__copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 1px solid #536780;
+  border-radius: 8px;
+  background: #1b2a3e;
+  color: #c4d5ec;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+.scan-markdown .scan-markdown__copy-action > button.scan-markdown__copy:hover {
+  background: #2b4464;
+  border-color: #9fcaff;
+  color: #ffffff;
+}
+.scan-markdown .scan-markdown__copy-action[data-copy-status='copied'] > button.scan-markdown__copy {
+  color: #a6ebc9;
+  border-color: #68b691;
+  background: #183b32;
+}
+.scan-markdown__copy svg {
+  display: block;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+.scan-markdown__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 .scan-markdown__copy-status {
-  color: #bac9dd;
+  color: #ffd2a3;
   font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .scan-markdown__table {
   max-width: 100%;
@@ -345,8 +419,18 @@
   .scan-markdown pre {
     padding: 10px;
   }
+  .scan-markdown .scan-markdown__copy-action > button.scan-markdown__copy {
+    width: 40px;
+    height: 40px;
+  }
+  .scan-markdown :is(th, td) {
+    padding: 0.55em 0.65em;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
+  .scan-markdown .scan-markdown__copy-action > button.scan-markdown__copy {
+    transition: none;
+  }
   .scan-chat-thinking .cs-typing-indicator__dot {
     animation: none !important;
   }

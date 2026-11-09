@@ -1,177 +1,191 @@
 import '@testing-library/jest-dom/vitest';
-import { useRef, useState } from 'react';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { createRef } from 'react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ChatMarkdownComposer } from '@/features/scans/ChatMarkdownComposer';
 import { scanChatInputFeedback } from '@/features/scans/scanChatInputFeedback';
 import { validChatText } from '@/shared/api/scans/llmChatContract';
 
-const submit = vi.fn();
+// Lifecycle/controlled-value tests ONLY. The BlockNote surface below is an explicit
+// test adapter, not WYSIWYG proof. Real input rules, DOM rendering, selection and
+// browser security are qualified by BlockNoteChatComposer.test.tsx / Chromium.
+type AdapterBlock = { type: string; text?: string };
+type AdapterEditor = {
+  document: AdapterBlock[];
+  domElement?: HTMLTextAreaElement;
+  isEditable: boolean;
+  notify?: () => void;
+  replaceBlocks: ReturnType<typeof vi.fn>;
+  tryParseMarkdownToBlocks: ReturnType<typeof vi.fn>;
+  blocksToMarkdownLossy: ReturnType<typeof vi.fn>;
+};
+const adapter = vi.hoisted(() => ({
+  editors: [] as AdapterEditor[],
+  options: [] as Record<string, unknown>[],
+  views: [] as Record<string, unknown>[],
+}));
+vi.mock('@blocknote/react', async () => {
+  const React = await import('react');
+  return {
+    useCreateBlockNote(options: Record<string, unknown>) {
+      const [editor] = React.useState(() => {
+        const instance: AdapterEditor = {
+          document: [{ type: 'paragraph' }],
+          isEditable: true,
+          tryParseMarkdownToBlocks: vi.fn((text: string) => [{ type: 'paragraph', text }]),
+          blocksToMarkdownLossy: vi.fn((blocks: AdapterBlock[]) => blocks.map(block => block.text ?? '').join('\n')),
+          replaceBlocks: vi.fn((_old: AdapterBlock[], blocks: AdapterBlock[]) => {
+            instance.document = blocks;
+            if (instance.domElement) instance.domElement.value = blocks.map(block => block.text ?? '').join('\n');
+            // Synchronous replacement notifications must not leak to onChange.
+            instance.notify?.();
+          }),
+          ...{
+            getActiveStyles: () => ({}),
+            getTextCursorPosition: () => ({ block: { type: 'paragraph' } }),
+          },
+        };
+        adapter.editors.push(instance);
+        adapter.options.push(options);
+        return instance;
+      });
+      return editor;
+    },
+    BlockNoteViewRaw(props: Record<string, unknown> & { editor: AdapterEditor; onChange(): void }) {
+      adapter.views.push(props);
+      React.useLayoutEffect(() => {
+        props.editor.notify = props.onChange;
+        return () => { props.editor.notify = undefined; };
+      }, [props.editor, props.onChange]);
+      return <textarea aria-label="Lifecycle editor adapter" ref={node => { props.editor.domElement = node ?? undefined; }}
+        disabled={props.editable === false}
+        onChange={event => {
+          props.editor.document = [{ type: 'paragraph', text: event.target.value }];
+          props.onChange();
+        }} />;
+    },
+  };
+});
 afterEach(() => {
   cleanup();
-  submit.mockClear();
+  adapter.editors.length = 0;
+  adapter.options.length = 0;
+  adapter.views.length = 0;
 });
-function Editor({
-  initial = '',
-  disabled = false,
-  invalid = false,
-}: {
-  initial?: string;
-  disabled?: boolean;
-  invalid?: boolean;
-}) {
-  const [value, setValue] = useState(initial);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        submit(value);
-      }}
-    >
-      <ChatMarkdownComposer
-        value={value}
-        onChange={setValue}
-        textareaRef={textareaRef}
-        disabled={disabled}
-        invalid={invalid}
-        describedBy="composer-help"
-      />
-      <p id="composer-help">2048 байт UTF-8</p>
-    </form>
-  );
+function setup(value = '') {
+  const onChange = vi.fn();
+  const textareaRef = createRef<HTMLElement>();
+  const props = { value, onChange, textareaRef };
+  return { ...render(<ChatMarkdownComposer {...props} />), props, onChange, textareaRef };
 }
-function input() {
-  return screen.getByLabelText('Вопрос чату') as HTMLTextAreaElement;
-}
+function input() { return screen.getByRole('textbox', { name: 'Lifecycle editor adapter' }); }
 
-it.each([
-  ['Жирный текст', '**находку**', 2, 9],
-  ['Курсив', '*находку*', 1, 8],
-  ['Код в строке', '`находку`', 1, 8],
-  ['Блок кода', '\n```\nнаходку\n```\n', 5, 12],
-] as const)(
-  'formats the selection with %s, restores selection/focus, and does not submit',
-  (label, replacement, start, end) => {
-    render(<Editor initial="До находку после" />);
-    input().focus();
-    input().setSelectionRange(3, 10);
-    fireEvent.click(screen.getByRole('button', { name: label }));
-    expect(input()).toHaveValue(`До ${replacement} после`);
-    expect(input()).toHaveFocus();
-    expect([input().selectionStart, input().selectionEnd]).toEqual([3 + start, 3 + end]);
-    expect(submit).not.toHaveBeenCalled();
-  },
-);
-
-it.each([
-  ['Список', '- первая\n- вторая'],
-  ['Заголовок', '## первая\n## вторая'],
-])('applies %s to selected whole lines without changing surrounding lines', (label, formatted) => {
-  render(<Editor initial={'до\nпервая\nвторая\nпосле'} />);
-  input().setSelectionRange(4, 15);
-  fireEvent.click(screen.getByRole('button', { name: label }));
-  expect(input()).toHaveValue(`до\n${formatted}\nпосле`);
-  expect(input()).toHaveFocus();
-  expect(submit).not.toHaveBeenCalled();
+it('imports an external draft exactly once without publishing parser normalization or replacement events', () => {
+  const original = '**Сохранённый** вопрос\n\n- пункт\n';
+  const { rerender, props, onChange } = setup(original);
+  const editor = adapter.editors[0];
+  expect(input()).toHaveValue(original);
+  expect(editor.tryParseMarkdownToBlocks).toHaveBeenCalledWith(original);
+  expect(onChange).not.toHaveBeenCalled();
+  rerender(<ChatMarkdownComposer {...props} />);
+  expect(editor.replaceBlocks).toHaveBeenCalledTimes(1);
+  rerender(<ChatMarkdownComposer {...props} value="## Повторная проверка" />);
+  expect(input()).toHaveValue('## Повторная проверка');
+  expect(onChange).not.toHaveBeenCalled();
+  rerender(<ChatMarkdownComposer {...props} value="" />);
+  expect(input()).toHaveValue('');
+  expect(editor.document).toEqual([{ type: 'paragraph' }]);
+  expect(onChange).not.toHaveBeenCalled();
 });
 
-it.each(['Список', 'Заголовок'])('does not format the unselected next line when %s selection ends after a newline', label => {
-  const draft = 'первая\nвторая';
-  render(<Editor initial={draft} />);
-  input().setSelectionRange(0, draft.indexOf('\n') + 1);
-  fireEvent.click(screen.getByRole('button', { name: label }));
-  expect(input()).toHaveValue(`${label === 'Список' ? '- ' : '## '}первая\nвторая`);
+it('publishes the synchronous document export, accepts its controlled echo and then honors a reset', () => {
+  const { rerender, props, onChange } = setup('старый');
+  const editor = adapter.editors[0];
+  editor.blocksToMarkdownLossy.mockReturnValueOnce('**Экспорт документа**\n');
+  fireEvent.change(input(), { target: { value: 'adapter document edit' } });
+  expect(editor.blocksToMarkdownLossy).toHaveBeenCalledWith(editor.document);
+  expect(onChange).toHaveBeenLastCalledWith('**Экспорт документа**\n');
+  const replacements = editor.replaceBlocks.mock.calls.length;
+  rerender(<ChatMarkdownComposer {...props} value={'**Экспорт документа**\n'} />);
+  expect(editor.replaceBlocks).toHaveBeenCalledTimes(replacements);
+  rerender(<ChatMarkdownComposer {...props} value="" />);
+  expect(input()).toHaveValue('');
+  expect(onChange).toHaveBeenCalledTimes(1);
 });
 
-it('reveals the editor and focuses a newly prepared external retry draft from preview', () => {
-  function RetryEditor() {
-    const [value, setValue] = useState('Старый вопрос');
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
-    return <form><ChatMarkdownComposer value={value} onChange={setValue} textareaRef={textareaRef} />
-      <button type="button" onClick={() => setValue('Повторить проверку')}>Подготовить повтор</button></form>;
-  }
-  render(<RetryEditor />);
-  fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр Markdown' }));
-  expect(input()).not.toBeVisible();
-  fireEvent.click(screen.getByRole('button', { name: 'Подготовить повтор' }));
-  expect(input()).toBeVisible(); expect(input()).toHaveFocus(); expect(input()).toHaveValue('Повторить проверку');
-});
-
-it('inserts a selected placeholder at the caret so typing replaces it, not surrounding text', () => {
-  render(<Editor initial="До после" />);
-  input().setSelectionRange(3, 3);
-  fireEvent.click(screen.getByRole('button', { name: 'Жирный текст' }));
-  expect(input()).toHaveValue('До **текст**после');
-  expect(input().value.slice(input().selectionStart, input().selectionEnd)).toBe('текст');
-});
-
-it('previews Markdown, GFM tables and fenced code without submitting, copying or losing the draft', async () => {
-  const draft =
-    '**важно** и *курсив*\n\n- пункт\n\n| Имя | Итог |\n| --- | --- |\n| образ | проверен |\n\n```text\nпример кода\n```';
-  render(<Editor initial={draft} />);
-  fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр Markdown' }));
-  const preview = screen.getByRole('region', { name: 'Предпросмотр Markdown' });
-  await waitFor(() => expect(preview.querySelector('[data-streamdown="strong"]')).toHaveTextContent('важно'));
-  expect(preview.querySelector('em')).toHaveTextContent('курсив');
-  expect(within(preview).getByRole('listitem')).toHaveTextContent('пункт');
-  expect(within(preview).getByRole('table')).toHaveTextContent('проверен');
-  expect(preview.querySelector('pre code')).toHaveTextContent('пример кода');
-  expect(within(preview).queryByRole('button', { name: /копир|copy/i })).not.toBeInTheDocument();
-  expect(input()).not.toBeVisible();
-  expect(screen.getByRole('button', { name: 'Жирный текст' })).toBeDisabled();
-  fireEvent.click(screen.getByRole('button', { name: 'Редактировать Markdown' }));
-  expect(input()).toBeVisible();
-  expect(input()).toHaveValue(draft);
-  expect(submit).not.toHaveBeenCalled();
-});
-
-it.each([
-  '<img src=x onerror=alert(1)>',
-  '[опасно](javascript:alert(1))\n\n![remote](https://example.test/pixel.png)',
-])('keeps unsafe content inert in preview without changing the draft: %s', async (draft) => {
-  const { container } = render(<Editor initial={draft} />);
-  fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр Markdown' }));
-  const preview = screen.getByRole('region', { name: 'Предпросмотр Markdown' });
-  if (!draft.includes('<')) await within(preview).findByText('опасно');
-  expect(preview.querySelector('img, script, iframe, a[href]')).toBeNull();
-  expect(container.querySelector('[onerror]')).toBeNull();
-  expect(input()).toHaveValue(draft);
-  expect(submit).not.toHaveBeenCalled();
-});
-
-it('passes disabled and validation accessibility through without enabling toolbar actions', () => {
-  render(<Editor initial="Вопрос" disabled invalid />);
-  expect(input()).toBeDisabled();
+it('assigns and clears the actual editor focus ref and updates disabled/validation attributes', () => {
+  const { rerender, props, textareaRef, onChange, unmount } = setup('вопрос');
+  expect(textareaRef.current).toBe(input());
+  rerender(<ChatMarkdownComposer {...props} disabled invalid describedBy="feedback" />);
+  expect(adapter.editors[0].isEditable).toBe(false);
+  expect(input()).toHaveAttribute('aria-disabled', 'true');
   expect(input()).toHaveAttribute('aria-invalid', 'true');
-  expect(input()).toHaveAccessibleDescription('2048 байт UTF-8');
+  expect(input()).toHaveAttribute('aria-describedby', 'feedback');
   for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled();
+  // Even an adapter notification while disabled must not publish a draft.
+  fireEvent.change(input(), { target: { value: 'ignored disabled notification' } });
+  expect(onChange).not.toHaveBeenCalled();
+  rerender(<ChatMarkdownComposer {...props} disabled={false} invalid={false} />);
+  expect(adapter.editors[0].isEditable).toBe(true);
+  expect(input()).toHaveAttribute('aria-invalid', 'false');
+  expect(input()).not.toHaveAttribute('aria-describedby');
+  unmount();
+  expect(textareaRef.current).toBeNull();
 });
 
-it('does not truncate UTF-8 drafts or bypass the existing 2048-byte validator with preview', () => {
+it('isolates owner remounts and detaches old adapter subscriptions', () => {
+  const { unmount, textareaRef } = setup('старый владелец');
+  const previous = adapter.editors[0];
+  unmount();
+  expect(previous.notify).toBeUndefined();
+  expect(textareaRef.current).toBeNull();
+  const next = setup('новый владелец');
+  expect(adapter.editors[1]).not.toBe(previous);
+  expect(input()).toHaveValue('новый владелец');
+  expect(next.onChange).not.toHaveBeenCalled();
+});
+
+it('retains over-limit external drafts and leaves UTF-8/forbidden-input enforcement to existing validators', () => {
   const draft = 'я '.repeat(683);
-  render(<Editor initial={draft} />);
+  setup(draft);
+  expect(input()).toHaveValue(draft);
   expect(new TextEncoder().encode(draft).length).toBe(2049);
   expect(validChatText(draft)).toBe(false);
-  fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр Markdown' }));
-  expect(screen.getByRole('region', { name: 'Предпросмотр Markdown' })).toHaveTextContent(
-    '2048 байт. Черновик сохранён',
-  );
-  expect(input()).toHaveValue(draft);
-  expect(submit).not.toHaveBeenCalled();
+  expect(scanChatInputFeedback(draft)).toBeTruthy();
   expect(validChatText('я '.repeat(682) + 'я')).toBe(true);
+  for (const forbidden of ['<script>пример</script>', 'https://example.test', 'token=synthetic']) {
+    expect(validChatText(`**${forbidden}**`)).toBe(false);
+    expect(scanChatInputFeedback(`**${forbidden}**`)).toBeTruthy();
+  }
 });
 
-it.each(['<script>пример</script>', 'https://example.test', 'token=synthetic'])(
-  'formatting/preview does not make forbidden input valid: %s',
-  (draft) => {
-    render(<Editor initial={draft} />);
-    input().setSelectionRange(0, draft.length);
-    fireEvent.click(screen.getByRole('button', { name: 'Жирный текст' }));
-    expect(validChatText(input().value)).toBe(false);
-    expect(scanChatInputFeedback(input().value)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр Markdown' }));
-    expect(input()).toHaveValue(`**${draft}**`);
-    expect(submit).not.toHaveBeenCalled();
-  },
-);
+it('configures a narrow schema, disables links/file drop and omits automatic rich-editor UI', () => {
+  setup();
+  const options = adapter.options[0];
+  const schema = options.schema as { blockSchema: object; styleSchema: object };
+  expect(Object.keys(schema.blockSchema).sort()).toEqual(['bulletListItem', 'codeBlock', 'heading', 'numberedListItem', 'paragraph']);
+  expect(Object.keys(schema.styleSchema).sort()).toEqual(['bold', 'code', 'italic']);
+  expect(options.disableExtensions).toEqual(expect.arrayContaining(['link', 'linkToolbar', 'dropFile']));
+  expect(options.domAttributes).toEqual({ editor: { role: 'textbox', 'aria-label': 'Вопрос чату', 'aria-multiline': 'true' } });
+  expect(adapter.views.at(-1)).toEqual(expect.objectContaining({
+    formattingToolbar: false, linkToolbar: false, slashMenu: false, sideMenu: false,
+    filePanel: false, tableHandles: false, emojiPicker: false, comments: false,
+  }));
+});
+
+it('routes only clipboard plain text to the adapter and ignores it when editing is disabled', () => {
+  setup();
+  const paste = adapter.options[0].pasteHandler as (context: {
+    event: { preventDefault(): void; clipboardData: { getData(type: string): string } };
+    editor: { isEditable: boolean; pasteText(text: string): void };
+  }) => boolean;
+  const event = { preventDefault: vi.fn(), clipboardData: { getData: vi.fn(() => 'literal text') } };
+  const target = { isEditable: true, pasteText: vi.fn() };
+  expect(paste({ event, editor: target })).toBe(true);
+  expect(event.preventDefault).toHaveBeenCalled();
+  expect(event.clipboardData.getData).toHaveBeenCalledExactlyOnceWith('text/plain');
+  expect(target.pasteText).toHaveBeenCalledExactlyOnceWith('literal text');
+  target.isEditable = false;
+  paste({ event, editor: target });
+  expect(target.pasteText).toHaveBeenCalledTimes(1);
+});

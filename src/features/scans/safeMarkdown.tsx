@@ -1,4 +1,5 @@
-import { Component, lazy, Suspense, useState, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Check, Copy } from 'lucide-react';
 import { unfinishedFence } from './safeMarkdownPolicy';
 import './chat-conversation.css';
 
@@ -6,29 +7,65 @@ const Markdown = lazy(() => import('./SafeMarkdownRenderer'));
 const plainStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' } as const;
 
 export function CopyText({ text, label = 'Скопировать текст' }: { text: string; label?: string }) {
-  const [message, setMessage] = useState('');
+  // A changed source must discard feedback and any still-pending clipboard result immediately.
+  return <CopyAction key={text} text={text} label={label} />;
+}
+
+function CopyAction({ text, label }: { text: string; label: string }) {
+  const [status, setStatus] = useState<'idle' | 'copied' | 'error'>('idle');
+  const request = useRef(0);
+  useEffect(
+    () => () => {
+      request.current += 1;
+    },
+    [],
+  );
+  useEffect(() => {
+    if (status !== 'copied') return;
+    const timer = window.setTimeout(() => setStatus('idle'), 2000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+
+  async function copy() {
+    const currentRequest = ++request.current;
+    setStatus('idle');
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(text);
+      if (currentRequest === request.current) setStatus('copied');
+    } catch {
+      if (currentRequest === request.current) setStatus('error');
+    }
+  }
+
+  const message =
+    status === 'copied'
+      ? 'Скопировано'
+      : status === 'error'
+        ? 'Копирование недоступно; выделите текст вручную.'
+        : '';
   return (
-    <>
+    <span className="scan-markdown__copy-action" data-copy-status={status}>
       <button
         type="button"
         className="scan-markdown__copy"
+        aria-label={label}
+        title={status === 'copied' ? 'Скопировано' : label}
         onClick={() => {
-          if (!navigator.clipboard?.writeText) {
-            setMessage('Копирование недоступно; выделите текст вручную.');
-            return;
-          }
-          void navigator.clipboard.writeText(text).then(
-            () => setMessage('Скопировано'),
-            () => setMessage('Копирование недоступно; выделите текст вручную.'),
-          );
+          void copy();
         }}
       >
-        {label}
+        {status === 'copied' ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}
+        <span className="scan-markdown__sr-only">{label}</span>
       </button>{' '}
-      <span className="scan-markdown__copy-status" role="status">
+      <span
+        className={status === 'error' ? 'scan-markdown__copy-status' : 'scan-markdown__sr-only'}
+        role="status"
+        aria-atomic="true"
+      >
         {message}
       </span>
-    </>
+    </span>
   );
 }
 function PlainMessage({ text }: { text: string }) {

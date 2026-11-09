@@ -9,6 +9,25 @@ import { createChatClient } from '@/shared/api/scans/llmChatClient';
 import type { ReportSourceNavigate } from '@/features/scans/reportSourceNavigation';
 import { chatApi, sourceTransport, status } from './llmChatFixtures';
 
+// These are widget/transport lifecycle tests, NOT BlockNote rendering tests.
+// The explicit lightweight textarea adapter supplies controlled Markdown and focus
+// only; real contenteditable behavior is covered by BlockNoteChatComposer.test.tsx.
+vi.mock('@/features/scans/ChatMarkdownComposer', () => ({
+  ChatMarkdownComposer: (props: {
+    value: string;
+    onChange(value: string): void;
+    textareaRef: import('react').RefObject<HTMLElement | null>;
+    disabled?: boolean;
+    invalid?: boolean;
+    describedBy?: string;
+  }) => <textarea aria-label="Вопрос чату" role="textbox" value={props.value}
+    ref={node => { props.textareaRef.current = node; }}
+    // Expose the widget's focus selector without pretending this is a rich editor.
+    contentEditable={!props.disabled} aria-disabled={!!props.disabled} disabled={props.disabled}
+    aria-invalid={props.invalid} aria-describedby={props.describedBy}
+    onChange={event => props.onChange(event.target.value)} />,
+}));
+
 beforeEach(() => transitionScanSession('widget-test', new QueryClient(), true));
 afterEach(() => {
   cleanup();
@@ -32,7 +51,7 @@ function mount(fetcher?: typeof fetch, onNavigateSource?: ReportSourceNavigate) 
 async function open() {
   fireEvent.click(screen.getByRole('button', { name: 'Открыть чат по отчёту' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Обновить историю' })).not.toBeDisabled());
-  return screen.getByRole('textbox', { name: 'Вопрос чату' });
+  return screen.findByRole('textbox', { name: 'Вопрос чату' });
 }
 
 it('does not mount the panel or read chat until first open; opening only reads', async () => {
@@ -149,24 +168,24 @@ it('keeps the window open when source navigation is refused', async () => {
   expect(screen.getByRole('dialog', { name: 'Ассистент отчёта' })).toBeVisible();
 });
 
-it('preserves the panel byte limit through formatting/preview and sends Markdown unchanged only on explicit submit', async () => {
+it('enforces the panel UTF-8 limit on controlled drafts and sends Markdown unchanged only on explicit submit', async () => {
   const { api } = mount();
   const input = (await open()) as HTMLTextAreaElement;
   const boundary = 'я '.repeat(682) + 'я';
   fireEvent.change(input, { target: { value: boundary } });
   expect(input).toHaveAttribute('aria-invalid', 'false');
   expect(document.getElementById('scan-chat-input-count')).toHaveTextContent('2048 / 2048');
-  input.setSelectionRange(0, boundary.length);
-  fireEvent.click(screen.getByRole('button', { name: 'Жирный текст' }));
-  expect(input).toHaveValue(`**${boundary}**`);
+  const overLimit = 'я '.repeat(683);
+  fireEvent.change(input, { target: { value: overLimit } });
+  expect(input).toHaveValue(overLimit);
+  expect(document.getElementById('scan-chat-input-count')).toHaveTextContent('2049 / 2048');
   expect(input).toHaveAttribute('aria-invalid', 'true');
   expect(screen.getByRole('button', { name: 'Отправить вопрос' })).toBeDisabled();
-  fireEvent.click(screen.getByRole('button', { name: 'Предпросмотр Markdown' }));
   expect(api.requests.filter((request) => request.init.method === 'POST')).toHaveLength(0);
-  fireEvent.click(screen.getByRole('button', { name: 'Редактировать Markdown' }));
   const markdown = '**Проверить** образ\n\n- Пересобрать\n\n```text\nпример\n```';
   fireEvent.change(input, { target: { value: markdown } });
   expect(input).toHaveAttribute('aria-invalid', 'false');
+  expect(api.requests.filter((request) => request.init.method === 'POST')).toHaveLength(0);
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByText(/исходную находку/);
   const posts = api.requests.filter((request) => request.init.method === 'POST');

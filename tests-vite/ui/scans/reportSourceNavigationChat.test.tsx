@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom/vitest';
+import './mockChatEditor';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';

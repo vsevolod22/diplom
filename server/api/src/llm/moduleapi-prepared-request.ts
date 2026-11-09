@@ -9,7 +9,8 @@ import { exact, invalidChatReply, invalidReply, object, validateReply } from './
 import { checkedModuleApiPolicy, moduleApiConfigurationError, type ModuleApiPolicy } from './moduleapi-policy.js';
 import { moduleApiReserve, type ModuleApiReserve } from './moduleapi-usage.js';
 // These are provider-neutral schema/alphabet validators; policy authority stays separate.
-import { openAiNarrative as moduleApiNarrative, openAiResponseFormat as moduleApiResponseFormat, type OpenAiOperation as ModuleApiOperation } from './openai-response-contract.js';
+import { openAiNarrative as moduleApiNarrative, type OpenAiOperation as ModuleApiOperation } from './openai-response-contract.js';
+import { moduleApiChatNarrative, moduleApiResponseFormat } from './moduleapi-chat-format.js';
 
 export type { OpenAiOperation as ModuleApiOperation } from './openai-response-contract.js';
 export type ModuleApiPrepared = Readonly<{
@@ -164,7 +165,7 @@ export function validateModuleApiPreparedReply(request: ModuleApiPrepared, polic
       return invalidChatReply('chat_citation_type');
     if (value.citations.length < 1 || value.citations.length > 3) return invalidChatReply('chat_citation_count');
     const reply = validateChatReply(value, report, true);
-    if (!moduleApiNarrative(reply.text)) return invalidChatReply('chat_narrative');
+    if (!moduleApiChatNarrative(reply.text)) return invalidChatReply('chat_narrative');
     return { operation: 'chat' as const, value: reply };
   }
   const paragraph = (item: unknown, maxText: number, maxCitations: number) => object(item) &&

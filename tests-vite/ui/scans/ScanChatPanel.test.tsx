@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom/vitest';
+import './mockChatEditor';
 import userEvent from '@testing-library/user-event';
 import { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -830,8 +831,11 @@ it('framed panel keeps partial nested fence inert/unpublished until done, EOF an
   await act(async () => writer.close());
   await screen.findByText(/Последний ответ: входных токенов 100/);
   expect(view.container.querySelector('pre')?.textContent).toBe(text);
-  for (const markdown of view.container.querySelectorAll('.scan-chat-conversation .scan-markdown'))
-      expect(markdown.querySelector('script,img,svg,iframe')).toBeNull();
+  for (const markdown of view.container.querySelectorAll('.scan-chat-conversation .scan-markdown')) {
+    expect(markdown.querySelector('script,img,iframe')).toBeNull();
+    for (const svg of markdown.querySelectorAll('svg'))
+      expect(svg.closest('button.scan-markdown__copy')).not.toBeNull();
+  }
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
   expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
 });

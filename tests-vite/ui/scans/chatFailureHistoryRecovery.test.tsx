@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom/vitest';
+import './mockChatEditor';
 import { webcrypto } from 'node:crypto';
 import { QueryClient } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
