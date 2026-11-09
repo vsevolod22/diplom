@@ -238,6 +238,7 @@ function ChatScope({
   const questionInput = useRef<HTMLTextAreaElement | null>(null);
   const chatContent = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
+  const verifiedSources = useRef<{ fence: string; sources: SummarySource[] } | null>(null);
   const [operation, setOperation] = useState<Operation>('read');
   useEffect(() => {
     const content = chatContent.current;
@@ -246,6 +247,7 @@ function ChatScope({
 
   function invalidate() {
     generation.current++;
+    verifiedSources.current = null;
     request.current?.abort();
     request.current = null;
   }
@@ -312,7 +314,9 @@ function ChatScope({
           throw error;
         return null;
       }),
-      collectSummarySources(transport, status, signal),
+      verifiedSources.current?.fence === policyFence(context)
+        ? Promise.resolve(verifiedSources.current.sources)
+        : collectSummarySources(transport, status, signal),
     ]);
     if (publicReport && sources.length !== context.findingCount) throw new ChatError('STALE');
     if (
@@ -344,6 +348,9 @@ function ChatScope({
     const after = await client.context(status.scanId, signal);
     observeContext?.(after);
     if (chatContextFence(after) !== chatContextFence(context)) throw new ChatError('STALE');
+    // The immutable report binding covers these fully verified scanner pages.
+    // Cache only inside this owner/session/preferences mount, after the final fence.
+    if (!signal.aborted && current()) verifiedSources.current = { fence: policyFence(context), sources };
     return { context, history, usage, sources };
   }
   async function operate(
@@ -422,6 +429,8 @@ function ChatScope({
 
   function refresh() {
     if (request.current || !current()) return;
+    // Explicit refresh rechecks scanner pages too, including same-ID content drift.
+    verifiedSources.current = null;
     setReadiness(null);
     setMessage('');
     // Keep only this mounted session/report's last confirmed view while reading.
@@ -442,12 +451,15 @@ function ChatScope({
           discardPrevious();
       };
       // Keep setup diagnostics available even if the history-backed context cannot be read.
-      let ready = publicReport ? await readReadiness(signal) : null;
+      const [initialReadiness, next] = await Promise.all([
+        publicReport ? readReadiness(signal) : Promise.resolve(null),
+        readSnapshot(signal, observeContext),
+      ]);
+      let ready = initialReadiness;
       publish(() => setReadiness(ready));
       if (publicReport && !ready) publish(() => setSnapshot(null));
       else if (publicReport && ready && previous && !readinessMatchesContext(ready, previous.context))
         discardPrevious();
-      const next = await readSnapshot(signal, observeContext);
       if (!publicReport && isPaidDisclosure(next.context.disclosure)) {
         ready = await readReadiness(signal);
         publish(() => setReadiness(ready));
@@ -534,17 +546,29 @@ function ChatScope({
             ? await client.chat(before, value, mutationId, signal)
             : await client.decision(before, value, ids, mutationId, signal);
         } catch (error) {
-          // A failed delivery is not a failed generation. Reconcile only this
-          // exact attempt through authorized reads; never repeat a paid POST.
-          if (kind !== 'chat' || signal.aborted || !current() || !(error instanceof ChatError) ||
-            !['DELIVERY', 'TIMEOUT'].includes(error.code)) throw error;
-          const recovered = await readSnapshot(signal);
+          // Recovery reads never repeat a paid POST or turn a typed provider
+          // failure into success. Only this exact completed/failed turn may appear.
+          if (kind !== 'chat' || signal.aborted || !current() || !(error instanceof ChatError)) throw error;
+          const deliveryFailure = ['DELIVERY', 'TIMEOUT'].includes(error.code);
+          const terminalFailure = ['LLM_UNAVAILABLE', 'LLM_PROVIDER_UNAVAILABLE', 'LLM_INVALID_RESPONSE',
+            'LLM_PROVIDER_TIMEOUT', 'LLM_PROVIDER_RATE_LIMITED', 'LLM_PROVIDER_AUTH_FAILED'].includes(error.code);
+          if (!deliveryFailure && !terminalFailure) throw error;
+          const recovered = await readSnapshot(signal).catch(() => { throw error; });
           const saved = recovered.history.turns.find(turn => turn.mutationId === mutationId);
           if (policyFence(recovered.context) !== policyFence(before) ||
             recovered.context.epoch !== before.epoch || recovered.context.pending ||
             recovered.history.epoch !== before.epoch || recovered.history.revision !== before.revision + 2 ||
-            !saved || saved.state !== 'completed' || saved.question !== value ||
-            !sameChatBinding(saved.report, before) || !verifiedChatSources(saved.reply, recovered.sources)) throw error;
+            !saved || saved.question !== value || !sameChatBinding(saved.report, before)) throw error;
+          if (terminalFailure) {
+            if (saved.state !== 'failed') throw error;
+            publish(() => {
+              setSnapshot(recovered);
+              setSelectedIds(previous => retainedDecisionSources(accepted, recovered, previous));
+              setMessage(chatErrorMessage(error, kind));
+            });
+            return null;
+          }
+          if (saved.state !== 'completed' || !verifiedChatSources(saved.reply, recovered.sources)) throw error;
           publish(() => {
             setSnapshot(recovered);
             setQuestion('');

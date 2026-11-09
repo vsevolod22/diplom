@@ -15,6 +15,18 @@ Frontend-only `node scripts/deploy.mjs web --apply` завершён `new-health
 
 Harness DIP-HRNS-6 v14 run `a167d483-8072-4415-8595-dcc734471e97`: четыре исходные роли завершены; final review дал результат, но шаг завершился timeout до work_complete. Это FAILED orchestration, не успешный harness run. DOC15 amendment остаётся отдельным незавершённым пунктом; native token streaming/model upgrade/full-site acceptance не заявляются.
 
+## Восстановление после ошибки и лишние чтения — выложено 2026-11-09
+
+Frontend-only rollout completedAt `2026-11-09T13:55:25.181Z`, new-healthy/lock released; postflight ready=true/locked=false. Пользователь сообщил об ошибке после «как дела» в scan968da32d. Operator read-only проверка только метаданных записи: четыре completed turn, один failed без reply, pending=false, revision10; текущий server validateHead PASS за2ms. Переписка не удалена. Точный provider failure первоначального запроса не восстановлен; нельзя объявлять отсутствие citations его доказанной причиной.
+
+Найден и исправлен конкретный UI-дефект: typed generation error очищал весь snapshot и не перечитывал failed turn. Теперь один GET-only snapshot восстанавливает предыдущую историю и именно failed turn при точных policy/report/epoch/revision+2/mutation/question и отсутствии pending. Исходная ошибка остаётся ошибкой; typed failure никогда не превращается в completed success, POST не повторяется. Contradictory recovery скрывается.
+
+Для уменьшения лишних чтений readiness и snapshot при открытии выполняются параллельно. Полностью проверенные source pages сохраняются только в текущем session/status/preferences mount после final context fence и используются при внутреннем post-mutation reread. Explicit refresh всегда заново читает sources, включая same-ID content drift; session/preferences/cancel инвалидируют cache. История/context остаются свежими, не кешируются.
+
+Проверки:7 focused files177/177PASS, productionbuildPASS; независимое read-only review текущей recovery/cache логики без blockers, новый13-test suitePASS. Дополнительная регрессия выявила несовместимость первоначального reuse с explicit same-ID-source refresh: исправлено обязательным сбросом перед ручным refresh, final suite прошёл. Постдеплойный authenticated GET-only Chromium375/1280 PASS/no errors/no overflow/no POST.
+
+Один новый явно разрешённый paid UI-вопрос «как дела» на собственном retained test scan305a55de: POST200/4NDJSONframes, usage/citation/delta/done, сохранённый ответ виден без reload, alert отсутствует, POST1/denied0. Private evidence `test-results/chat-widget-ux-20261109/smalltalk-result.json`; response headers18201ms — не чистая model latency. Первый runner остановился доPOST на слишком коротком5s expect; spent marker сохранён, второй с bounded60s ожиданием выполнил ровно один POST. Отдельные фактические GET до этой выкладки занимали примерно0.9–4s: backend повторно собирает полный report для guarded history/context/usage. Этот rollout убирает часть клиентской последовательности/скачиваний, но НЕ объявляет backend latency устранённой и не подменяет HTTP-проверку пользовательского аккаунта тестовым аккаунтом. Backend/DB/provider/model/accounting не менялись.
+
 ## Реальное воспроизведение
 Одна разрешённая платная попытка собственного retained тестового аккаунта на scan `305a55de-6d94-4af6-a653-2bd117e1ec85`: POST вернул HTTP502 `text/html` через 27727ms; последующий авторизованный GET истории нашёл именно отправленный mutation в состоянии completed с reply. Nginx зарегистрировал `upstream prematurely closed connection while reading response header from upstream`. Содержимое ответа, cookie и ключ не выводились. Это подтверждает ошибку доставки при успешном durable commit, но не доказывает единственную внутреннюю причину всех прежних 502.
 

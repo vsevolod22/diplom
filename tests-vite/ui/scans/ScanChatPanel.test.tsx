@@ -261,7 +261,7 @@ it('uses the current question without a consent checkbox, submits once, verifies
   expect(screen.getByText(/Источник текущего отчёта/)).toBeVisible();
   expect(screen.getByText(/Последний ответ: входных токенов 100/)).not.toBeVisible();
   expect(row).toHaveTextContent('Источник текущего отчёта');
-  expect(transport.results).toHaveBeenCalledTimes(4);
+  expect(transport.results).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
   expect(api.head.turns).toHaveLength(1);
   expect(api.head.revision).toBe(2);
@@ -435,7 +435,7 @@ for (const code of [
   });
 }
 it.each([429, 503, 401])(
-  'shows classified provider HTTP %s from backend frames and recovers failed history only manually',
+  'shows classified provider HTTP %s from backend frames and recovers failed history through GET without repeating the question',
   async (providerStatus) => {
     const api = chatApi();
     const auth = providerStatus === 401;
@@ -485,8 +485,9 @@ it.each([429, 503, 401])(
     expect(alert.textContent).toContain(auth ? 'Чат временно недоступен' : 'Сервис ответов занят');
     expect(alert.textContent).not.toMatch(/HTTP|LLM_|квот|receipt|0 с/);
     expect(screen.queryByText('Ответ · проверьте по источникам')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Вопрос · ошибка' })).toBeVisible();
     expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
-      true,
+      false,
     );
     vi.useFakeTimers();
     await act(async () => {
@@ -495,6 +496,7 @@ it.each([429, 503, 401])(
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
     vi.useRealTimers();
     fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
+    await open();
     await screen.findByText('Вопрос · ошибка');
     expect(screen.queryByRole('checkbox', { name: /Разрешаю один запрос/ })).toBeNull();
     expect((screen.getByRole('button', { name: 'Отправить вопрос' }) as HTMLButtonElement).disabled).toBe(
