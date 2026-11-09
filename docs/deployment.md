@@ -3,7 +3,15 @@
 Команды выполняются из корня `diplom` с установленными зависимостями.
 Это интерфейс нового `scripts/deploy.mjs`, не обёртка старого lifecycle launcher.
 
-## Текущая готовность — 08.11.2026
+## Текущая готовность — 09.11.2026
+
+- **ModuleAPI v7 активен**, модель `gpt-5.4-mini`, lifetime budget $5/account с сохранёнными UNKNOWN liabilities. Нижележащие записи08.11 «на стенде НЕ включён» — исторический snapshot, не текущее состояние. Secret установлен ранее API-only серверным способом, значение здесь не приводится. Native summary уже имел отдельную успешную приёмку; она не повторялась в этой выкладке.
+- Удаление старых image obligations выполнено по явному согласию владельца:96oldimages+121projectcache records, безforce/volumes/containers/8080; immutable historical receipts сохранены, exact waiver отдельно. Docker.raw31→28GiB. См. [cleanup evidence](docker-cleanup-20261109.md).
+- Исправлен host-remount blocker только для completed historical identities: текущая FS+inode/uid/mode/hash строгие, active locks/recovery остаются exact.20new/relatedtests+4scopedactivefenceregressionsPASS, четыре Sol review/test lanes иfinal review SOURCE GO в H6run `a7dd9b92-d253-4c78-bd1f-45728922416d`. Отдельный поздний broader deployment-tooling test command упёрся в120s timeout и НЕ считается PASS; не блокировал уже квалифицированный narrow release, причины unrelated test timeout не установлены.
+- **Выложен новый чат37b120f** normal `node scripts/deploy.mjs app --services web,api --apply`: nonce `dcaa44be097ac42e33e568a7e7c86c6c`, new-healthy/lockreleased, completedAt2026-11-09T11:15:03.773Z. Migrationfalse/historyMigrationnone/operationspublic-images-v2; gateways не выбраны для обновления, worker возобновлён механизмом. Штатные store-preservation guards пройдены; postflightready/unlocked/root200/anonymousauth401.
+- Реальный authenticated браузер своего retained тестового аккаунта, один явно разрешённый paid chat UI POST: **HTTP200 NDJSON**,6frames/3sources; анимация ожидания, ответ безreload, сохранностьпослеreload,375px nooverflow,0pageErrors,POST1/denied0. Private evidence `test-results/chat-ui-acceptance-20261109/result.json`; это не mock и не пользовательский аккаунт. Показатель51688ms включает сценарийreload и не объявляется latency модели. Native token stream и upgrade модели не реализованы. Details: [chat delivery](chat-delivery-20261109.md).
+
+## Историческая готовность — 08.11.2026
 
 ### ModuleAPI v7 — код и offline-переход готовы, на стенде НЕ включён
 

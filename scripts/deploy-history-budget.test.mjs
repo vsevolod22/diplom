@@ -129,7 +129,7 @@ test('history domains: 35 legacy + 13 complete adapter attempts admit without dr
 });
 
 test('history domains retain independent legacy and adapter limits', () => {
-  assert.deepEqual(DEPLOYMENT_CAPACITY_POLICY, { version: 2, active: 32, archived: 16, total: 48, archiveBatch: 8, retainedReferences: 128 });
+  assert.deepEqual(DEPLOYMENT_CAPACITY_POLICY, { version: 2, active: 32, archived: 16, total: 48, archiveBatch: 8, retainedReferences: 256 });
   assert.equal(custody.ADAPTER_HISTORY_LIMIT, 48);
   for (const count of [0, 13, 47, 48]) assert.doesNotThrow(() => custody.assertAdapterHistoryCapacity(count));
   for (const count of [0, 13, 47]) assert.doesNotThrow(() => custody.assertAdapterHistoryCapacity(count, { reserve: 1 }));

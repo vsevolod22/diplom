@@ -1,7 +1,9 @@
 # Чат: Chatscope и доставка сохранённого ответа
 
-## Статус
-Source increment, **не выложен и не принят на живом стенде**. Модель остаётся ModuleAPI `gpt-5.4-mini`; upgrade и реальный provider token streaming не реализованы.
+## Статус — обновлено после выкладки
+**Выложен и проверен реальным UI-вопросом на8081.** Deployment `dcaa44be097ac42e33e568a7e7c86c6c`, web+api, new-healthy/lockreleased, completedAt2026-11-09T11:15:03.773Z; migrationfalse/historyMigrationnone, штатные preservation checks пройдены. Один разрешённый платный POST через UI собственного retained тестового аккаунта: HTTP200 NDJSON,6frames/3sources, thinkingObserved=true, ответ безreload, reloadpersisted, POST1/denied0/pageErrors0/mobileOverflowfalse375px. Private evidence `test-results/chat-ui-acceptance-20261109/result.json`;latencyMs51688 измеряет весь сценарий до проверкиreload, НЕ чистую latency модели. Никакого второго POST приreload. Модель остаётся ModuleAPI `gpt-5.4-mini`; upgrade и provider token streaming не реализованы.
+
+Следующие разделы сохраняют первоначальное source/predeploy evidence; прежние слова «не выложен» и Docker unavailable — исторические, superseded этим статусом.
 
 ## Реальное воспроизведение
 Одна разрешённая платная попытка собственного retained тестового аккаунта на scan `305a55de-6d94-4af6-a653-2bd117e1ec85`: POST вернул HTTP502 `text/html` через 27727ms; последующий авторизованный GET истории нашёл именно отправленный mutation в состоянии completed с reply. Nginx зарегистрировал `upstream prematurely closed connection while reading response header from upstream`. Содержимое ответа, cookie и ключ не выводились. Это подтверждает ошибку доставки при успешном durable commit, но не доказывает единственную внутреннюю причину всех прежних 502.

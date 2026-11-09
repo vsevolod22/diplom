@@ -68,16 +68,23 @@ test('same tag consistent uses deduplicate, same image distinct tags do not',()=
   for(const bad of [{...r,image:image('different')},{...r,name:'worker'}])assert.throws(()=>referenceUnion([r,bad]),/REFERENCE_CONFLICT/);
   assert.throws(()=>retainedReferenceHistory({completions:[original,original]}),/OWNED_REFERENCE_DUPLICATE/);
 });
-for(const count of [124,125,126,127,128])test('concrete boundary '+count+' plus two candidate names at unchanged128',()=>{
+for(const count of [252,253,254,255,256])test('concrete boundary '+count+' plus two candidate names at bounded256',()=>{
   const observed=parseImageInventory(inventory(count)+'\n<none>:<none>\t'+image('dangling'));
   assert.equal(observed.concrete.size,count);assert.equal(observed.untagged.size,1);
   const action=()=>assertImageCapacity(observed,[],['dip-deploy-api:candidate-'+next,'dip-deploy-web:candidate-'+next]);
-  if(count<=126)assert.equal(action(),true);else assert.throws(action,/IMAGE_REFERENCE_CAPACITY/);
+  if(count<=254)assert.equal(action(),true);else assert.throws(action,/IMAGE_REFERENCE_CAPACITY/);
+});
+test('former128 boundary retains every reference with room for two candidate names',()=>{
+  const references=Array.from({length:128},(_,i)=>({name:'web',tag:`fixture/image:${i}`,image:image('inventory-'+i)}));
+  const before=structuredClone(references),observed=parseImageInventory(inventory(128));
+  assert.equal(referenceUnion(references).length,128);
+  assert.equal(assertImageCapacity(observed,references,['dip-deploy-api:candidate-'+next,'dip-deploy-web:candidate-'+next]),true);
+  assert.deepEqual(references,before);
 });
 test('untagged cap is independent, finite and enforced before deduplication hides rows',()=>{
-  assert.equal(IMAGE_REFERENCE_LIMIT,128);assert.equal(UNTAGGED_IMAGE_LIMIT,16);assert.equal(IMAGE_INVENTORY_ROW_LIMIT,144);
+  assert.equal(IMAGE_REFERENCE_LIMIT,256);assert.equal(UNTAGGED_IMAGE_LIMIT,16);assert.equal(IMAGE_INVENTORY_ROW_LIMIT,272);
   const rows=Array.from({length:UNTAGGED_IMAGE_LIMIT},(_,i)=>'<none>:<none>\t'+image('dangling-'+i));
-  assert.equal(parseImageInventory(inventory(128)+'\n'+rows.join('\n')).untagged.size,16);
+  assert.equal(parseImageInventory(inventory(256)+'\n'+rows.join('\n')).untagged.size,16);
   assert.throws(()=>parseImageInventory([...rows,'<none>:<none>\t'+image('extra')].join('\n')),/UNTAGGED_IMAGE_CAPACITY/);
   assert.throws(()=>parseImageInventory(Array(IMAGE_INVENTORY_ROW_LIMIT+1).fill(rows[0]).join('\n')),/IMAGE_INVENTORY_ROWS/);
   assert.equal(parseImageInventory(Array(IMAGE_INVENTORY_ROW_LIMIT).fill(rows[0]).join('\n')).untagged.size,1);

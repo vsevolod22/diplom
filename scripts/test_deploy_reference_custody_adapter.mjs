@@ -38,8 +38,8 @@ function attempts(f){return fs.readdirSync(join(f.stand,'deploy-adapter-v1')).ma
 function read(path){return JSON.parse(fs.readFileSync(path));}
 function completed(f){return attempts(f).map(dir=>({dir,...read(join(dir,'complete.json'))})).find(r=>r.version===3);}
 function engineInventory(f){return parseImageInventory([...f.images.values()].flatMap(i=>(i.RepoTags.length?i.RepoTags:['<none>:<none>']).map(tag=>tag+'\t'+i.Id)).join('\n'));}
-test('126 concrete +1 untagged /119 required: genuine adapter4→5 borrows2/builds2/completes3; all old receipts untouched',async t=>{
-  const f=await adapterFixture(t),originals=seedHistory(f);fillInventory(f,126);
+test('254 concrete +1 untagged /247 required: genuine adapter4→5 borrows2/builds2/completes3; all old receipts untouched',async t=>{
+  const f=await adapterFixture(t),originals=seedHistory(f,247);fillInventory(f,254);
   const plan=await f.rawAdapter.prepare({mode:'app',services:['web','api'],migrateHistoryV4ToV5:true});
   assert.equal(plan.newReferenceCount,2);assert.ok(plan.referenceCustody.old.every(r=>r.ownership==='borrowed'));
   assert.equal(f.locked(),false);assert.equal(f.calls.some(c=>['tag','build','create','up','stop'].includes(c[0])),false);
@@ -48,18 +48,24 @@ test('126 concrete +1 untagged /119 required: genuine adapter4→5 borrows2/buil
   const complete=completed(f);assert.ok(complete);assert.equal(complete.references.length,2);assert.equal(complete.borrowedReferences.length,2);
   assert.equal(f.calls.filter(c=>c[0]==='image'&&c[1]==='tag').length,0,'borrowed tags are NEVER retagged');
   assert.equal(f.calls.filter(c=>c[0]==='build').length,2);
-  const census=engineInventory(f);assert.equal(census.concrete.size,128);assert.equal(census.untagged.size,1);
+  const census=engineInventory(f);assert.equal(census.concrete.size,256);assert.equal(census.untagged.size,1);
   for(const name of ['intent.json','built.json','recovery.json','published.json','history-v5-prestart.json'])assert.deepEqual(read(join(complete.dir,name)).referenceCustody,complete.referenceCustody,name+' same custody');
   assert.deepEqual(read(join(complete.dir,'authority-v3.json')).files.referenceCustody,complete.referenceCustody);
-  const cp=read(join(complete.dir,'history-v5-prestart.json'));assert.equal(cp.files.references.length,119);assert.equal(cp.entrySources.length,7);
+  const cp=read(join(complete.dir,'history-v5-prestart.json'));assert.equal(cp.files.references.length,247);assert.equal(cp.entrySources.length,7);
+    const retained=originals.flatMap(({bytes})=>{
+        const record=JSON.parse(bytes);
+        return record.references.map(r=>({...r,origin:{kind:'adapter-completion',nonce:record.nonce,sha256:hash(bytes)}}));
+      });
+    assert.deepEqual(cp.files.references,retained.slice().sort((a,b)=>a.tag.localeCompare(b.tag)));
+    for(const r of retained)assert.equal(census.concrete.get(r.tag),r.image);
   assert.equal(f.events.indexOf('migration:committed')<f.events.indexOf('up:api'),true);
   for(const {path,bytes}of originals)assert.equal(fs.readFileSync(path,'utf8'),bytes);
   const statusPlan=await f.rawAdapter.prepare({mode:'app',services:['web','api']}).catch(e=>e);
   // History parsing accepts the NEW completion; a further two-tag build legitimately
-  // refuses at128, rather than losing the original obligations or reusing candidates.
+  // refuses at256, rather than losing the original obligations or reusing candidates.
   assert.equal(deployAdapterDiagnostic(statusPlan).code,'IMAGE_REFERENCE_CAPACITY');
 });
-for(const count of [127,128])test('actual read-only plan refuses '+count+' concrete before lock/fence/write',async t=>{
+for(const count of [255,256])test('actual read-only plan refuses '+count+' concrete before lock/fence/write',async t=>{
   const f=await adapterFixture(t);seedHistory(f,2);fillInventory(f,count);
   const before=attempts(f).flatMap(dir=>fs.readdirSync(dir).map(n=>dir+'/'+n));
   await assert.rejects(f.rawAdapter.prepare({mode:'app',services:['api','web'],migrateHistoryV4ToV5:true}),e=>deployAdapterDiagnostic(e).code==='IMAGE_REFERENCE_CAPACITY');
@@ -67,6 +73,15 @@ for(const count of [127,128])test('actual read-only plan refuses '+count+' concr
   const applied=await runDeployment(f.adapter,options);assert.equal(applied.ok,false);assert.equal(f.locked(),false);
   assert.deepEqual(attempts(f).flatMap(dir=>fs.readdirSync(dir).map(n=>dir+'/'+n)),before,'APPLY capacity refusal is also before shared lock/attempt writes');
   assert.ok(!f.calls.some(c=>c[0]==='build'||c[0]==='create'||c[0]==='image'&&c[1]==='tag'||c[0]==='container'&&['start','stop'].includes(c[1])));
+});
+test('former128 adapter boundary now admits a plan without losing retained references or writing a fence',async t=>{
+  const f=await adapterFixture(t),originals=seedHistory(f,119);fillInventory(f,128);
+  const before=attempts(f);
+  const plan=await f.rawAdapter.prepare({mode:'app',services:['api','web'],migrateHistoryV4ToV5:true});
+  assert.equal(plan.newReferenceCount,2);assert.ok(plan.referenceCustody.old.every(r=>r.ownership==='borrowed'));
+  assert.equal(engineInventory(f).concrete.size,128);assert.equal(f.locked(),false);assert.deepEqual(attempts(f),before);
+  for(const {path,bytes}of originals){assert.equal(fs.readFileSync(path,'utf8'),bytes);for(const r of JSON.parse(bytes).references)assert.equal(engineInventory(f).concrete.get(r.tag),r.image);}
+  assert.ok(!f.calls.some(c=>c[0]==='build'||c[0]==='create'||c[0]==='image'&&['tag','rm','prune'].includes(c[1])||c[0]==='container'&&['start','stop'].includes(c[1])));
 });
 test('no original old-image authority falls back to4 new owned tags and v3 completion',async t=>{
   const f=await adapterFixture(t,{historyVersion:5});const result=await runDeployment(f.adapter,{...options,migrateHistoryV4ToV5:false});
@@ -135,18 +150,28 @@ for(const fault of ['origin-receipt','helper-source','new-external-tag','same-id
     changed=true;
     if(fault==='origin-receipt')fs.appendFileSync(originals[0].path,' ');
     if(fault==='helper-source')fs.appendFileSync(join(f.root,'scripts/deploy-reference-custody.mjs'),'\n// synthetic source drift\n');
-    if(fault==='new-external-tag'){const i=images.get(f.pins().services.api.image);i.RepoTags.push('fixture-extra:unexpected-1','fixture-extra:unexpected-2');}
+    if(fault==='new-external-tag'){
+          assert.equal(engineInventory(f).concrete.size,255,'first build consumes one of two reserved names');
+          const i=images.get(f.pins().services.api.image);i.RepoTags.push('fixture-extra:unexpected-1','fixture-extra:unexpected-2');
+          assert.equal(new Set([...images.values()].flatMap(i=>i.RepoTags)).size,257,'external tags cross the concrete256 bound');
+        }
     if(fault==='same-id-restart')containers.find(c=>f.role(c)==='api').State.StartedAt='2026-11-04T12:00:00.000Z';
     if(fault==='retarget-borrowed'){
       const tag=`dip-deploy-web:old-${'1'.padStart(32,'0')}`;
       for(const i of images.values())i.RepoTags=i.RepoTags.filter(v=>v!==tag);
       images.get(f.pins().services.api.image).RepoTags.push(tag);
     }
-  }});originals=seedHistory(f);fillInventory(f,126);
+  }});originals=seedHistory(f);fillInventory(f,254);
   const result=await runDeployment(f.adapter,options);
   assert.equal(changed,true);assert.equal(result.ok,false);assert.equal(result.lock,'retained');assert.ok(f.locked());
   assert.equal(f.calls.filter(c=>c[0]==='image'&&c[1]==='tag').length,0);assert.ok(!f.events.includes('stop:web'));
   assert.ok(!f.calls.some(c=>c[0]==='image'&&['rm','prune'].includes(c[1])));
+  if(fault==='new-external-tag'){
+    assert.equal(f.calls.filter(c=>c[0]==='build').length,1);
+    assert.ok(!f.events.some(e=>e.startsWith('stop:')||e.startsWith('up:')),'overflow refuses before runtime fence/start');
+    for(const {path,bytes}of originals)assert.equal(fs.readFileSync(path,'utf8'),bytes);
+    for(const {bytes}of originals)for(const r of JSON.parse(bytes).references)assert.ok(f.images.get(r.image).RepoTags.includes(r.tag));
+  }
 });
 
 test('actual plan independently refuses17 untagged images even with concrete headroom',async t=>{

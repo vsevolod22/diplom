@@ -791,6 +791,8 @@ export function assertReconciliationHistory(root, pendingRedeploy = null) {
   redeployHistory(root, pendingRedeploy);
   const dir = join(root, STATE, HISTORY);
   if (!exists(dir)) return;
+  const historyDevice = privateDirectory(join(root,STATE)).dev;
+  const historicalMatch = (recorded,current) => historicalIdentityMatches(recorded,current,historyDevice);
   privateDirectory(dir);
   const names = fs.readdirSync(dir);
   safe(names.length <= 32, 'Isolated reconciliation history requires reviewed maintenance/HOLD.');
@@ -828,15 +830,15 @@ export function assertReconciliationHistory(root, pendingRedeploy = null) {
       typeof ack.endpoint === 'string' && /^unix:\/\/\/[^\s\0]+(?![\s\S])/.test(ack.endpoint) && typeof ack.at === 'string');
     publicImageCveConfig(root, ack.cve); // Schema only; never reopen historical private/public assets here.
     const m = (running ? runningBuildMarker : network ? networkStartMarker : buildMarker)(marker, ack.endpoint), archivedStamp = fileStamp(join(original, 'mutation.json'));
-    safe(equal(ack.originalLockIdentity, directoryIdentity(original)) &&
-      equal(ack.originalMarkerIdentity, { dev: archivedStamp.dev, ino: archivedStamp.ino }), 'Original reconciliation evidence identity changed/HOLD.');
+    safe(historicalMatch(ack.originalLockIdentity, directoryIdentity(original)) &&
+      historicalMatch(ack.originalMarkerIdentity, { dev: archivedStamp.dev, ino: archivedStamp.ino }), 'Original reconciliation evidence identity changed/HOLD.');
     safe(ack.originalMutationSha256 === sha(marker) && ack.endpointProvenance ===
       (Object.hasOwn(m, 'endpoint') ? 'recorded-match' : 'operator-acknowledged-legacy-marker'));
     if (network) {
           const start = privateRead(join(original, 'start-submission.json')), stamp = fileStamp(join(original, 'start-submission.json'));
           startSubmission(start, ack.endpoint);
           const identity = value => keys(value, ['dev', 'ino']) && Object.values(value).every(n => Number.isSafeInteger(n) && n >= 0);
-          safe(ack.originalStartSubmissionSha256 === sha(start) && equal(ack.originalStartSubmissionIdentity, { dev: stamp.dev, ino: stamp.ino }) &&
+          safe(ack.originalStartSubmissionSha256 === sha(start) && historicalMatch(ack.originalStartSubmissionIdentity, { dev: stamp.dev, ino: stamp.ino }) &&
             ack.transactionNonce === name.slice('network-only-'.length) && ack.operatorAttestation === 'LAUNCHER_RETURNED_AND_LONG_QUIESCENCE' &&
             identity(ack.imagePinsIdentity) && identity(ack.profileIdentity) && identity(ack.jwtIdentity) &&
             keys(ack.imagePins, SERVICES) && Object.values(ack.imagePins).every(id => IMAGE_ID.test(id)) &&
@@ -1360,6 +1362,8 @@ export function validateBackupHelper(c, name, image, purpose = 'backup', state =
 }
 function redeployHistory(root, pending = null) {
   const path = join(root, STATE, REDEPLOYS); if (!exists(path)) return;
+  const historyDevice = privateDirectory(join(root,STATE)).dev;
+  const historicalMatch = (recorded,current) => historicalIdentityMatches(recorded,current,historyDevice);
   privateDirectory(path); safe(fs.readdirSync(path).length <= 4, 'Recovery backup history limit/HOLD; no automatic pruning.');
   for (const name of fs.readdirSync(path)) {
     safe(/^redeploy-[a-f0-9]{32}$/.test(name)); const dir = join(path,name); privateDirectory(dir);
@@ -1376,14 +1380,14 @@ function redeployHistory(root, pending = null) {
     const required=['intent.json','baseline.json','prior-pins.json','candidate.images.json','helper-drain.json','helper-backup.json','backup-receipt.json','saved-main-pins.json','result.json'];
     safe(required.every(n=>Object.hasOwn(complete.files,n)) && Object.keys(complete.files).every(n=>required.includes(n)||/^phase-\d{3}\.json$/.test(n)||['failure.json','resume.json','resume-baseline.json','continue-drain.json','continue-drain-baseline.json','continue-failure.json','started-drain.json','started-drain-baseline.json','helper-drain-next.json','backup-export-manifest.json','backup-export-verified.json','backup-transfer.json','backup-transfer-baseline.json','started-failure.json','helper-backup-export.json','backup-generation.json','backup-original-manifest.json'].includes(n)));
     safe(equal(sorted(fs.readdirSync(dir)),sorted([...Object.keys(complete.files),'completion.json','backups','original-operation.lock','recovery-operation.lock'])));
-    for(const [n,f] of Object.entries(complete.files))safe(keys(f,['sha256','identity'])&&HEX_SHA.test(f.sha256)&&sha(privateRead(join(dir,n),131072))===f.sha256&&equal(fileIdentity(join(dir,n)),f.identity));
+    for(const [n,f] of Object.entries(complete.files))safe(keys(f,['sha256','identity'])&&HEX_SHA.test(f.sha256)&&sha(privateRead(join(dir,n),131072))===f.sha256&&historicalMatch(f.identity,fileIdentity(join(dir,n))));
     const intent=canonicalJson(join(dir,'intent.json')).value;
     safe(intent.operation==='recover-build-and-redeploy'&&intent.project===PROJECT&&intent.acknowledgement===REDEPLOY_ACK&&intent.helperPolicy==='CREATE_INSPECT_START_V2'&&intent.originalImageMetadataVerified===false&&
       intent.rollbackToPriorImages===false&&intent.originalMutationSha256===result.originalMutationSha256&&equal(intent.originalLockIdentity,result.originalLockIdentity)&&equal(intent.originalMarkerIdentity,result.originalMarkerIdentity));
     safe(equal(canonicalJson(join(dir,'candidate.images.json')).value.services,result.images)&&equal(canonicalJson(join(dir,'backup-receipt.json')).value,result.backups));
     safe(equal(canonicalJson(join(dir,'saved-main-pins.json')).value,canonicalJson(join(dir,'prior-pins.json')).value));
-    const original = join(dir,'original-operation.lock'); verifyDirectory(original,result.originalLockIdentity);
-    safe(sha(privateRead(join(original,'mutation.json'))) === result.originalMutationSha256 && equal(fileIdentity(join(original,'mutation.json')),result.originalMarkerIdentity));
+    const original = join(dir,'original-operation.lock'); safe(historicalMatch(result.originalLockIdentity,directoryIdentity(original)), 'Historical original directory identity changed/HOLD.');
+    safe(sha(privateRead(join(original,'mutation.json'))) === result.originalMutationSha256 && historicalMatch(result.originalMarkerIdentity,fileIdentity(join(original,'mutation.json'))));
     const originalNames=sorted(fs.readdirSync(original));safe(equal(originalNames,['mutation.json'])||equal(originalNames,['build-evidence.json','build-failure.json','mutation.json']));
     runningBuildMarker(privateRead(join(original,'mutation.json')),intent.endpoint);
     const recoveryLock=join(dir,'recovery-operation.lock');privateDirectory(recoveryLock);
@@ -1393,18 +1397,18 @@ function redeployHistory(root, pending = null) {
     safe(equal(sorted(fs.readdirSync(recoveryLock)),transferred?['backup-transfer.lock','continue-drain.lock','intent.json','resume.lock','started-drain.lock']:started?['continue-drain.lock','intent.json','resume.lock','started-drain.lock']:continued?['continue-drain.lock','intent.json','resume.lock']:resumed?['intent.json','resume.lock']:['intent.json'])&&equal(canonicalJson(join(recoveryLock,'intent.json')).value,intent));
     if(resumed){const receipt=canonicalJson(join(dir,'resume.json')).value;
       safe(Object.hasOwn(complete.files,'failure.json')&&Object.hasOwn(complete.files,'resume-baseline.json'));
-      validateResumeReceipt(receipt,dir,intent);privateDirectory(join(recoveryLock,'resume.lock'));
+      validateResumeReceipt(receipt,dir,intent,historicalMatch);privateDirectory(join(recoveryLock,'resume.lock'));
       safe(equal(fs.readdirSync(join(recoveryLock,'resume.lock')),['receipt.json'])&&equal(canonicalJson(join(recoveryLock,'resume.lock/receipt.json')).value,receipt));
     }else safe(!Object.hasOwn(complete.files,'failure.json')&&!Object.hasOwn(complete.files,'resume-baseline.json'));
     if(continued){recoverySafe(resumed&&Object.hasOwn(complete.files,'continue-drain-baseline.json'),'CONTINUE_HISTORY_BASELINE');const r=canonicalJson(join(dir,'continue-drain.json')).value;
-      validateCreatedDrainReceipt(r,dir);privateDirectory(join(recoveryLock,'continue-drain.lock'));recoverySafe(equal(fs.readdirSync(join(recoveryLock,'continue-drain.lock')),['receipt.json'])&&equal(canonicalJson(join(recoveryLock,'continue-drain.lock/receipt.json')).value,r),'CONTINUE_HISTORY_RECEIPT');
+      validateCreatedDrainReceipt(r,dir,historicalMatch);privateDirectory(join(recoveryLock,'continue-drain.lock'));recoverySafe(equal(fs.readdirSync(join(recoveryLock,'continue-drain.lock')),['receipt.json'])&&equal(canonicalJson(join(recoveryLock,'continue-drain.lock/receipt.json')).value,r),'CONTINUE_HISTORY_RECEIPT');
     }else safe(!Object.hasOwn(complete.files,'continue-drain-baseline.json'));
-    if(started){recoverySafe(continued&&Object.hasOwn(complete.files,'continue-failure.json')&&Object.hasOwn(complete.files,'started-drain-baseline.json'),'STARTED_HISTORY_EVIDENCE');const r=canonicalJson(join(dir,'started-drain.json')).value;validateStartedDrainReceipt(r,dir);
+    if(started){recoverySafe(continued&&Object.hasOwn(complete.files,'continue-failure.json')&&Object.hasOwn(complete.files,'started-drain-baseline.json'),'STARTED_HISTORY_EVIDENCE');const r=canonicalJson(join(dir,'started-drain.json')).value;validateStartedDrainReceipt(r,dir,historicalMatch);
       privateDirectory(join(recoveryLock,'started-drain.lock'));recoverySafe(equal(fs.readdirSync(join(recoveryLock,'started-drain.lock')),['receipt.json'])&&equal(canonicalJson(join(recoveryLock,'started-drain.lock/receipt.json')).value,r),'STARTED_HISTORY_RECEIPT');
       if(Object.hasOwn(complete.files,'helper-drain-next.json')){const next=canonicalJson(join(dir,'helper-drain-next.json')).value;recoverySafe(next.name===r.helper.name+'-next'&&next.id!==r.helper.id&&next.image===r.helper.image&&next.controlPolicy==='HELPER_AUTHORITY_V3','STARTED_HISTORY_REPLACEMENT_PROBE');}
     }else recoverySafe(!Object.hasOwn(complete.files,'continue-failure.json')&&!Object.hasOwn(complete.files,'started-drain-baseline.json')&&!Object.hasOwn(complete.files,'helper-drain-next.json'),'STARTED_HISTORY_NO_UNACKNOWLEDGED_EXTRAS');
     if(transferred){recoverySafe(started&&['started-failure.json','backup-transfer-baseline.json','helper-backup-export.json','backup-generation.json','backup-export-manifest.json','backup-export-verified.json'].every(n=>Object.hasOwn(complete.files,n)),'BACKUP_TRANSFER_HISTORY_FILES');
-      const r=canonicalJson(join(dir,'backup-transfer.json')).value;validateBackupTransferReceipt(r,dir);privateDirectory(join(recoveryLock,'backup-transfer.lock'));
+      const r=canonicalJson(join(dir,'backup-transfer.json')).value;validateBackupTransferReceipt(r,dir,historicalMatch);privateDirectory(join(recoveryLock,'backup-transfer.lock'));
       recoverySafe(equal(fs.readdirSync(join(recoveryLock,'backup-transfer.lock')),['receipt.json'])&&equal(canonicalJson(join(recoveryLock,'backup-transfer.lock/receipt.json')).value,r),'BACKUP_TRANSFER_HISTORY_RECEIPT');
       const h=canonicalJson(join(dir,'helper-backup-export.json')).value;recoverySafe(h.id!==r.helper.id&&h.name===r.helper.name+'-export'&&h.image===r.helper.image&&h.purpose==='backup'&&h.controlPolicy==='HELPER_AUTHORITY_V3','BACKUP_TRANSFER_HISTORY_HELPER');
       const generation=canonicalJson(join(dir,'backup-generation.json')).value;recoverySafe(keys(generation,['version','originalSnapshots','policy'])&&generation.version===1&&generation.policy==='REGENERATE_FROM_VERIFIED_QUIESCENT_SOURCES_NO_OLD_RESTART'&&['RECEIPT_AND_SOURCE_FENCES_CAPTURED','LEGACY_TMPFS_EXPIRED_NO_DURABLE_SNAPSHOT_RECEIPT'].includes(generation.originalSnapshots),'BACKUP_TRANSFER_GENERATION_RECORD');
@@ -1418,6 +1422,17 @@ function redeployHistory(root, pending = null) {
   }
 }
 function fileIdentity(path) { const s = fs.lstatSync(path); return {dev:s.dev,ino:s.ino}; }
+// Only completed, hash-validated historical receipts may cross a host remount.
+// Active operation/recovery fences still use exact dev equality. The current
+// object must stay on the current state filesystem; inode and every other
+// recorded identity field remain exact. No historical record is rewritten.
+export function historicalIdentityMatches(recorded,current,stateDevice) {
+  const shape = value => keys(value,['dev','ino']) || keys(value,['dev','ino','uid','mode']);
+  if (!shape(recorded) || !shape(current) || !Number.isSafeInteger(stateDevice) || stateDevice < 0 ||
+    !Object.values(recorded).every(value=>Number.isSafeInteger(value)&&value>=0) ||
+    !Object.values(current).every(value=>Number.isSafeInteger(value)&&value>=0) || current.dev!==stateDevice) return false;
+  return equal({...recorded,dev:current.dev},current);
+}
 const RESUME_PHASES=['build-submission','build-egress','build-worker','build-api','build-web','new-image-validation'];
 function preLifecycleResume(root,name) {
   safe(/^redeploy-[a-f0-9]{32}$/.test(name));const dir=join(root,STATE),audit=join(dir,REDEPLOYS,name),guard=join(dir,REDEPLOY_GUARD);
@@ -1436,13 +1451,13 @@ function preLifecycleResume(root,name) {
     safe(equal(sorted(fs.readdirSync(at)),exists(join(at,'resume.lock'))?['intent.json','resume.lock']:['intent.json']));
   }};
 }
-function validateResumeReceipt(receipt,dir,intent) {
+function validateResumeReceipt(receipt,dir,intent,identityMatches = equal) {
   safe(keys(receipt,['version','project','operation','acknowledgement','audit','endpoint','originalFailureSha256','originalFiles','canonicalMountPolicy','stateIdentity','stateFiles','dataPolicy','at'])&&
     receipt.version===1&&receipt.project===PROJECT&&receipt.operation==='RESUME_PRE_LIFECYCLE_ONLY'&&receipt.acknowledgement==='--ack-pre-lifecycle-only'&&
     receipt.audit===dir.slice(dir.lastIndexOf('/')+1)&&receipt.endpoint===intent.endpoint&&receipt.canonicalMountPolicy==='RUNTIME_MOUNTS_BY_DESTINATION_V1'&&
     receipt.dataPolicy==='SAME_LIVE_VOLUMES_NO_LAUNCHER_DB_ACCESS_BEFORE_QUIESCENCE'&&timestamp(receipt.at)&&keys(receipt.stateFiles,['profile','jwt','pins']));
   const names=['intent.json','baseline.json','prior-pins.json','candidate.images.json','failure.json',...RESUME_PHASES.map((_,i)=>`phase-${String(i+1).padStart(3,'0')}.json`)];
-  safe(keys(receipt.originalFiles,names));for(const n of names){const f=receipt.originalFiles[n];safe(keys(f,['sha256','identity'])&&HEX_SHA.test(f.sha256)&&f.sha256===sha(privateRead(join(dir,n),131072))&&equal(f.identity,fileIdentity(join(dir,n))));}
+  safe(keys(receipt.originalFiles,names));for(const n of names){const f=receipt.originalFiles[n];safe(keys(f,['sha256','identity'])&&HEX_SHA.test(f.sha256)&&f.sha256===sha(privateRead(join(dir,n),131072))&&identityMatches(f.identity,fileIdentity(join(dir,n))));}
   safe(receipt.originalFailureSha256===receipt.originalFiles['failure.json'].sha256&&keys(receipt.stateIdentity,['dev','ino','uid','mode'])&&
     Object.values(receipt.stateIdentity).every(Number.isSafeInteger)&&receipt.stateIdentity.uid===process.getuid()&&(receipt.stateIdentity.mode&0o7777)===0o700);
   for(const f of Object.values(receipt.stateFiles))safe(keys(f,['dev','ino'])&&Number.isSafeInteger(f.dev)&&Number.isSafeInteger(f.ino));
@@ -1530,10 +1545,10 @@ function neverStartedDrain(c){
   recoverySafe(c.RestartCount===0&&c.State.Status==='created'&&c.State.Running===false&&c.State.Pid===0&&c.State.ExitCode===0&&c.State.StartedAt==='0001-01-01T00:00:00Z'&&c.State.FinishedAt==='0001-01-01T00:00:00Z'&&neutral(c.State.Error)&&timestamp(c.Created),'CONTINUE_HELPER_NEVER_STARTED');
   recoverySafe(c.Path==='node'&&equal(c.Args,c.Config.Cmd),'CONTINUE_HELPER_EXECUTABLE');
 }
-function validateBackupTransferReceipt(r,dir){
+function validateBackupTransferReceipt(r,dir,identityMatches = equal){
   recoverySafe(keys(r,['version','project','operation','acknowledgement','audit','endpoint','helper','originalFiles','stateIdentity','stateFiles','at'])&&r.version===1&&r.project===PROJECT&&r.operation==='CONTINUE_QUIESCENT_BACKUP_TRANSFER'&&r.acknowledgement==='--ack-quiescent-backup-transfer'&&r.audit===dir.slice(dir.lastIndexOf('/')+1)&&timestamp(r.at),'BACKUP_TRANSFER_RECEIPT_SCHEMA');
   const expected=['intent.json','baseline.json','prior-pins.json','candidate.images.json','failure.json','resume.json','resume-baseline.json','continue-drain.json','continue-drain-baseline.json','continue-failure.json','helper-drain.json','started-drain.json','started-drain-baseline.json','started-failure.json','helper-drain-next.json','helper-backup.json',...BACKUP_COPY_PHASES.map((_,i)=>`phase-${String(i+1).padStart(3,'0')}.json`)];
-  recoverySafe(keys(r.originalFiles,expected),'BACKUP_TRANSFER_RECEIPT_FILES');for(const[n,f]of Object.entries(r.originalFiles))recoverySafe(keys(f,['sha256','identity'])&&f.sha256===sha(privateRead(join(dir,n),131072))&&equal(f.identity,fileIdentity(join(dir,n))),'BACKUP_TRANSFER_RECEIPT_ORIGINAL_IDENTITY');
+  recoverySafe(keys(r.originalFiles,expected),'BACKUP_TRANSFER_RECEIPT_FILES');for(const[n,f]of Object.entries(r.originalFiles))recoverySafe(keys(f,['sha256','identity'])&&f.sha256===sha(privateRead(join(dir,n),131072))&&identityMatches(f.identity,fileIdentity(join(dir,n))),'BACKUP_TRANSFER_RECEIPT_ORIGINAL_IDENTITY');
   const h=r.helper,previous=canonicalJson(join(dir,'started-drain.json')).value,record=canonicalJson(join(dir,'helper-backup.json')).value;
   recoverySafe(keys(h,['id','name','image','created','authoritySha256','epoch','state'])&&h.id===record.id&&h.name===record.name&&h.name===`${PROJECT}-recovery-${r.audit.slice(9)}-backup`&&h.image===record.image&&HEX_SHA.test(h.authoritySha256)&&timestamp(h.created)&&keys(h.epoch,['startedAt','pid','restartCount'])&&timestamp(h.epoch.startedAt)&&h.epoch.restartCount===0&&Number.isSafeInteger(h.epoch.pid)&&['running','exited'].includes(h.state)&&r.endpoint===previous.endpoint&&equal(r.stateIdentity,previous.stateIdentity)&&equal(r.stateFiles,previous.stateFiles),'BACKUP_TRANSFER_RECEIPT_BINDING');
 }
@@ -1577,19 +1592,19 @@ export function validateRemainingEngineShapes(helper,images,inventory,config,opt
   }
   return {candidateApplications:'validated-models',backupHelper:'validated-model',nativeExecution:'not-executed'};
 }
-function validateStartedDrainReceipt(r,dir){
+function validateStartedDrainReceipt(r,dir,identityMatches = equal){
   recoverySafe(keys(r,['version','project','operation','acknowledgement','audit','endpoint','helper','originalFiles','stateIdentity','stateFiles','at'])&&r.version===1&&r.project===PROJECT&&r.operation==='CONTINUE_STARTED_DRAIN_ONLY'&&r.acknowledgement==='--ack-started-drain-only'&&r.audit===dir.slice(dir.lastIndexOf('/')+1)&&timestamp(r.at),'STARTED_RECEIPT_SCHEMA');
   const h=r.helper;recoverySafe(keys(h,['id','name','image','created','authoritySha256','epoch','state'])&&HEX_SHA.test(h.id)&&h.name===`${PROJECT}-recovery-${r.audit.slice(9)}-drain`&&IMAGE_ID.test(h.image)&&HEX_SHA.test(h.authoritySha256)&&timestamp(h.created)&&['running','exited'].includes(h.state)&&keys(h.epoch,['startedAt','pid','restartCount'])&&timestamp(h.epoch.startedAt)&&h.epoch.restartCount===0&&Number.isSafeInteger(h.epoch.pid),'STARTED_RECEIPT_HELPER');
   const expected=['intent.json','baseline.json','prior-pins.json','candidate.images.json','failure.json','resume.json','resume-baseline.json','continue-drain.json','continue-drain-baseline.json','continue-failure.json','helper-drain.json',...STARTED_DRAIN_PHASES.map((_,i)=>`phase-${String(i+1).padStart(3,'0')}.json`)];
-  recoverySafe(keys(r.originalFiles,expected),'STARTED_RECEIPT_FILES');for(const[n,f]of Object.entries(r.originalFiles))recoverySafe(keys(f,['sha256','identity'])&&f.sha256===sha(privateRead(join(dir,n),131072))&&equal(f.identity,fileIdentity(join(dir,n))),'STARTED_RECEIPT_ORIGINAL_IDENTITY');
+  recoverySafe(keys(r.originalFiles,expected),'STARTED_RECEIPT_FILES');for(const[n,f]of Object.entries(r.originalFiles))recoverySafe(keys(f,['sha256','identity'])&&f.sha256===sha(privateRead(join(dir,n),131072))&&identityMatches(f.identity,fileIdentity(join(dir,n))),'STARTED_RECEIPT_ORIGINAL_IDENTITY');
   const previous=canonicalJson(join(dir,'continue-drain.json')).value;
   recoverySafe(equal(r.stateIdentity,previous.stateIdentity)&&equal(r.stateFiles,previous.stateFiles)&&r.endpoint===previous.endpoint&&h.id===previous.helper.id&&h.image===previous.helper.image&&h.created===previous.helper.created,'STARTED_RECEIPT_PRIOR_BINDING');
 }
-function validateCreatedDrainReceipt(r,dir){
+function validateCreatedDrainReceipt(r,dir,identityMatches = equal){
   recoverySafe(keys(r,['version','project','operation','acknowledgement','audit','endpoint','helper','originalFiles','stateIdentity','stateFiles','at'])&&r.version===1&&r.project===PROJECT&&r.operation==='CONTINUE_CREATED_DRAIN_ONLY'&&r.acknowledgement==='--ack-created-drain-only'&&r.audit===dir.slice(dir.lastIndexOf('/')+1)&&timestamp(r.at),'CONTINUE_RECEIPT_SCHEMA');
   const h=r.helper;recoverySafe(keys(h,['id','name','image','created','controlSha256'])&&HEX_SHA.test(h.id)&&h.name===`${PROJECT}-recovery-${r.audit.slice(9)}-drain`&&IMAGE_ID.test(h.image)&&timestamp(h.created)&&HEX_SHA.test(h.controlSha256),'CONTINUE_RECEIPT_HELPER');
   const expected=['intent.json','baseline.json','prior-pins.json','candidate.images.json','failure.json','resume.json','resume-baseline.json',...CREATED_DRAIN_PHASES.map((_,i)=>`phase-${String(i+1).padStart(3,'0')}.json`)];
-  recoverySafe(keys(r.originalFiles,expected),'CONTINUE_RECEIPT_FILES');for(const[n,f]of Object.entries(r.originalFiles))recoverySafe(keys(f,['sha256','identity'])&&f.sha256===sha(privateRead(join(dir,n),131072))&&equal(f.identity,fileIdentity(join(dir,n))),'CONTINUE_RECEIPT_ORIGINAL_IDENTITY');
+  recoverySafe(keys(r.originalFiles,expected),'CONTINUE_RECEIPT_FILES');for(const[n,f]of Object.entries(r.originalFiles))recoverySafe(keys(f,['sha256','identity'])&&f.sha256===sha(privateRead(join(dir,n),131072))&&identityMatches(f.identity,fileIdentity(join(dir,n))),'CONTINUE_RECEIPT_ORIGINAL_IDENTITY');
   const intent=canonicalJson(join(dir,'intent.json')).value,resume=canonicalJson(join(dir,'resume.json')).value;
   recoverySafe(r.endpoint===intent.endpoint&&equal(r.stateIdentity,resume.stateIdentity)&&equal(r.stateFiles,resume.stateFiles),'CONTINUE_RECEIPT_STATE_ENDPOINT');
   const helper=canonicalJson(join(dir,'helper-drain.json')).value;recoverySafe(helper.id===h.id&&helper.name===h.name&&helper.image===h.image&&helper.createdControlSha256===h.controlSha256,'CONTINUE_RECEIPT_ADOPTED_HELPER');

@@ -24,7 +24,7 @@ export function precheckRecoveryRecordCapacity(authority,checkpoint) {
   need(c+RECOVERY_FUTURE_RECORD_RESERVE<=RECOVERY_AUTHORITY_RECORD_LIMIT,'RECOVERY_RECORD_CAPACITY');
   return {version:1,authorityBytes:a,checkpointBytes:c,futureBytes:RECOVERY_FUTURE_RECORD_RESERVE,limit:RECOVERY_AUTHORITY_RECORD_LIMIT};
 }
-export const IMAGE_REFERENCE_LIMIT = 128;
+export const IMAGE_REFERENCE_LIMIT = 256;
 export const UNTAGGED_IMAGE_LIMIT = 16;
 export const IMAGE_INVENTORY_ROW_LIMIT = IMAGE_REFERENCE_LIMIT + UNTAGGED_IMAGE_LIMIT;
 export const ADAPTER_HISTORY_LIMIT = 48;

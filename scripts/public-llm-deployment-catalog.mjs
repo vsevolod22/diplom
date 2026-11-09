@@ -13,7 +13,7 @@ export const DEPLOYMENT_ARCHIVE_OPERATIONS = 'llm-deployment-archive-operations'
 // capacities. This does not change receipt formats or recovery authority;
 // the policy bytes are bound by the existing execution source closure.
 export const DEPLOYMENT_CAPACITY_POLICY = Object.freeze({
-  version: 2, active: 32, archived: 16, total: 48, archiveBatch: 8, retainedReferences: 128,
+  version: 2, active: 32, archived: 16, total: 48, archiveBatch: 8, retainedReferences: 256,
 });
 export const DEPLOYMENT_ACTIVE_LIMIT = DEPLOYMENT_CAPACITY_POLICY.active;
 export const DEPLOYMENT_ARCHIVE_BATCH = DEPLOYMENT_CAPACITY_POLICY.archiveBatch;
@@ -173,6 +173,13 @@ export function ordinaryDeployment(path, name) {
 // Catalog membership is a durable receipt, not a generic alternate-path lookup.
 // An incomplete move has no completed operation and is rejected even if its
 // .operation.lock was removed externally. No archived audit can be active too.
+// st_dev is a mount identifier, not persistent APFS volume identity: it can
+// change across host boots. Fence the CURRENT state/archive filesystem instead;
+// retain the recorded inode, membership and cryptographic receipt checks.
+export function archiveRootMatches(recorded, current, stateDevice) {
+  return !!recorded && Number.isSafeInteger(recorded.dev) && recorded.dev >= 0 &&
+    current.dev === stateDevice && recorded.ino === current.ino && equal(recorded.names,current.names);
+}
 export function captureDeploymentCatalog(root) {
   safe(resolve(root) === root && fs.realpathSync(root) === root);
   const state = join(root, STATE); directory(state, 0o700);
@@ -205,7 +212,7 @@ export function captureDeploymentCatalog(root) {
       safe(tree && Array.isArray(tree.files) && Array.isArray(tree.directories));
       const rootTree = tree.directories.find(d => d.path === '');
       const rootDir = archiveDirectory(join(archivePath, name)); guards.push(rootDir);
-      safe(rootTree && rootTree.dev === rootDir.dev && rootTree.ino === rootDir.ino && equal(rootTree.names, rootDir.names));
+      safe(archiveRootMatches(rootTree,rootDir,stateId.dev));
       for (const file of rootDir.names.filter(n => n.endsWith('.json'))) {
         const proof = archiveFile(join(rootDir.path, file));
         safe(tree.files.filter(f => f.path === file && f.digest === proof.digest).length === 1); guards.push(proof);

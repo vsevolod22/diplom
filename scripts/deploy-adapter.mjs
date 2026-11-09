@@ -20,6 +20,8 @@ import { captureDeploymentCatalog, DEPLOYMENT_RETAINED_REFERENCE_LIMIT } from '.
 import { assertNoOpenAiDockerSecret, checkPublicLlmSourceBuild, validateOpenAiVolume, selectOpenAiOperations,
   assertNoModuleApiDockerSecret, validateModuleApiVolume, selectModuleApiOperations } from './public-llm-source-build.mjs';
 import { writeExclusive, syncDirectory } from './setup-local-cve.mjs';
+import { runExactForward432 } from './deploy-forward-432.mjs';
+import { captureImageRetirements } from './deploy-image-retirements.mjs';
 import { PUBLIC_DRAIN_PROBE, PUBLIC_READY_PROBE } from './refresh-public-cve.mjs';
 import { createAdapterSnapshots, qualifyAdapterStoreCopies } from './deploy-adapter-stores.mjs';
 import { requireDeploySupervisor, inspectDeploySupervisor } from './deploy-supervisor.mjs';
@@ -145,13 +147,16 @@ export function captureBuildHistory(root, own = null, legacy = [], checkDeadline
         const stamps=r.evidence.map(e=>{checkDeadline();const path=join(dir,e.path),s=fs.lstatSync(path);return {path,stamp:[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]};});
     guards.push(()=>{for(const {path,stamp} of stamps){checkDeadline();const s=fs.lstatSync(path);need(equal(stamp,[s.dev,s.ino,s.mode,s.nlink,s.size,s.mtimeMs,s.ctimeMs]),'ADAPTER_HISTORY_CHANGED');}});
   }
-  const references=retainedReferenceHistory({legacy,completions});
+  const allReferences=retainedReferenceHistory({legacy,completions});
+  const retirements=captureImageRetirements(root,allReferences);
+  guards.push(retirements.verify);
+  const references=retirements.references;
     need(references.length<=DEPLOYMENT_RETAINED_REFERENCE_LIMIT,'IMAGE_REFERENCE_CAPACITY');
   const verify=()=>{checkDeadline();guards.forEach(g=>{checkDeadline();g();checkDeadline();});
       const currentNames=exists(parent)?fs.readdirSync(parent).sort():[];
       checkDeadline();assertAdapterHistoryCapacity(currentNames.length);
       need(equal(currentNames,allNames),'ADAPTER_HISTORY_CHANGED');};
-  verify();return {references,verify,completions,count:names.length};
+  verify();return {references,allReferences,retiredTags:retirements.retiredTags,verify,completions,count:names.length};
 }
 export function legacyReferenceOrigins(catalog,retentions) {
   return retentions.receipts.flatMap(receipt=>{
@@ -426,7 +431,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       if(moduleApiChange)need(mode==='app'&&['api','web','openai-egress'].every(n=>targets.includes(n))&&!upgradeOperations&&!migrateHistoryV4ToV5&&!migrate,'MODULEAPI_TRANSITION_SCOPE');
       else if(!equal(config.selection,config.next))need(ROLES.every(n=>targets.includes(n)),'CONFIG_CHANGE_REQUIRES_ALL_APP_TARGETS');
       const source=capturePublicLlmSource(root,config.next.version===7?{moduleapi:true}:{openai:true}),self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
-      const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs'].map(name=>captureFile(join(root,'scripts',name),{privateMode:false,limit:1024**2}));
+      const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs','deploy-image-retirements.mjs'].map(name=>captureFile(join(root,'scripts',name),{privateMode:false,limit:1024**2}));
       const contract=sourceContract(root),catalog=captureDeploymentCatalog(root),retentions=capturePublicLlmRetentions(root),
               history=captureBuildHistory(root,owned?.nonce,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline);
       source.verify();
@@ -436,6 +441,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
             const requiredMemory=Object.values(next.services).filter(s=>s.restart!=='no').reduce((sum,s)=>sum+Number(s.mem_limit),0);
             need(Number.isSafeInteger(requiredMemory)&&requiredMemory<=connection.initial.memory,'DAEMON_MEMORY_BUDGET');
       for(const receipt of retentions.receipts) for(const [name,row] of Object.entries(receipt.images)) {
+        if(history.retiredTags.has(row.tag))continue;
         retentions.verify();
         const values=JSON.parse(await request(['image','inspect',row.tag],connection.options,'RETAINED_IMAGE_VERIFY_FAILED'));
         need(values.length===1&&values[0].Id===row.image.Id&&equal(values[0].Config,row.image.Config)&&values[0].RepoTags?.includes(row.tag),'RETAINED_IMAGE_CHANGED');
@@ -918,7 +924,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
         const gateway=name==='api'?adapterGatewayProbe(p.authorities.get(name).selection):'';
         const worker=name==='worker'&&p.authorities.get(name).selection.operations?`import * as z from 'node:zlib';import {PUBLIC_IMAGE_RESOURCE_POLICY as policy,PUBLIC_IMAGE_CHECKS_VERSION as checks,PUBLIC_IMAGE_LIMITS as limits} from './src/oci/public-image-policy.ts';import {publicResourceEnvelope} from './src/worker/worker-runtime.ts';if(typeof z.createZstdDecompress!=='function'||policy!=='public-hub-resources-v2'||checks!=='trivy-0.69.3-public-archive-v2'||limits.compressedLayer!==256*1024**2||limits.compressedTotal!==768*1024**2||limits.wireBytes!==800*1024**2||limits.expandedLayer!==512*1024**2||limits.expandedTotal!==1024**3||limits.scratchBytes!==2*1024**3||limits.deadlineMs!==180000||!publicResourceEnvelope())throw Error('RESOURCE_CONTRACT');`:'';
                 const program=worker+gateway+(p.config.profile.cve?cveReadyProbe():ADAPTER_READY_PROBE);
-        const r=JSON.parse(await request(['container','exec',current.Id,'node','--import','tsx','--input-type=module','-e',program],p.connection.options,'READINESS_EXEC_FAILED',15000));
+        const r=JSON.parse(await request(['container','exec',current.Id,'node','--import','tsx','--input-type=module','-e',program],p.connection.options,'READINESS_EXEC_FAILED',60000));
         if(r.ready===true){if(p.config.profile.cve)need(r.manifest===p.config.profile.cve.manifestDigest&&r.bundle===p.config.profile.cve.artifactSha256,'READINESS_CVE_BINDING');return;}
         need(equal(r,{ready:false,reason:'CHAIN_NOT_READY'}),'READINESS_FATAL');
       }
@@ -1117,7 +1123,7 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
     const config=loadConfiguration(root,home,false);
     const next=expectedPublicLlmConfig(root,config.profile.cve,config.selection),source=capturePublicLlmSource(root,{openai:true});
     const self=captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2});
-    const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs'].map(n=>captureFile(join(root,'scripts',n),{privateMode:false,limit:1024**2}));
+    const entryProofs=['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs','deploy-image-retirements.mjs'].map(n=>captureFile(join(root,'scripts',n),{privateMode:false,limit:1024**2}));
     const sourceDigest=digest(JSON.stringify(source.manifest.files.map(f=>({path:f.path,digest:f.digest}))));
     need(sourceDigest===cp.source&&sourceDigest===intent.source&&sourceDigest===migration.source&&digest(self.bytes)===cp.adapter&&cp.adapter===intent.adapter&&
       equal(entryProofs.map(f=>digest(f.bytes)),cp.entrySources)&&equal(cp.entrySources,intent.entrySources),'RECOVERY_SOURCE_DRIFT');
@@ -1218,12 +1224,39 @@ export function createDeployAdapter({ root = ROOT, home = homedir(), run = runIs
       throw error;
     }
   }
+  // Exact incident authority lives separately; normal/frozen recovery stays unchanged.
+  const exactForward432=options=>runExactForward432({
+    root,home,STATE,PROJECT,now,rootCheck,captureFile,protectedDirectory,evidenceIndex,assertFourStoreTransition,
+    requireSupervisor:()=>requireDeploySupervisor(root),inspectSupervisor:()=>inspectDeploySupervisor(root),
+    loadConfiguration:desired=>loadConfiguration(root,home,desired),expectedConfig:(cve,s)=>expectedPublicLlmConfig(root,cve,s),
+    captureSource:()=>capturePublicLlmSource(root,{moduleapi:true}),captureSelf:()=>captureFile(fileURLToPath(import.meta.url),{privateMode:false,limit:1024**2}),
+    captureEntries:()=>['deploy.mjs','deploy-core.mjs','deploy-adapter-stores.mjs','public-llm-stand.mjs','deploy-supervisor.mjs','deploy-authority.mjs','deploy-reference-custody.mjs'].map(n=>captureFile(join(root,'scripts',n),{privateMode:false,limit:1024**2})),
+    sourceContract:()=>sourceContract(root),catalog:()=>captureDeploymentCatalog(root),retentions:()=>capturePublicLlmRetentions(root),
+    history:(nonce,catalog,retentions)=>captureBuildHistory(root,nonce,legacyReferenceOrigins(catalog,retentions),checkHistoryDeadline),
+    validateCustody:validateReferenceCustody,custodyCompletion:custodyCompletionReferences,connect,request,namespace,retained,
+    validateImage:validatePublicLlmImage,recipe,cleanStopped,healthy,operationIdentity,authority:deploymentAuthority,
+    qualifyAuth:options=>qualifyAdapterAuthCopy(root,{DB:database(),...options}),qualifyStores:options=>qualifyAdapterStoreCopies({root,DB:database(),...options}),
+    writeExclusive,syncDirectory,boundedRecord:boundedDeploymentRecord,recordLimit:deploymentRecordLimit,diagnostic:deployAdapterDiagnostic,
+    boundary,ready,startService,health,publish:publishReceipt,release,
+    snapshots:(p,directory,record)=>createAdapterSnapshots({DB:database(),directory,helper:(phase,work)=>backupHelper(p,phase,work),guard:()=>guard(p),record,historyVersion:5,migrateHistory:false}),
+    installForward(p,{original,child,owner,lockGuard,supervisor,record,verifyOriginal,writeCompletion}){
+      need(engineJournal===null,'FORWARD_FRESH_EXECUTOR');
+      const lock={path:join(root,STATE,'.operation.lock'),verify:lockGuard};
+      engineJournal=createEngineJournal(join(child,'engine.jsonl'),()=>{supervisor.verify();lock.verify();owner.verify();verifyOriginal();});
+      const lease=Object.freeze({version:3,nonce:p.nonce,exactForward432:true});leaseDeadline=now()+3600000;
+      leases.set(lease,{lock,nonce:p.nonce,audit:original,owner,proofs:p.proofs,supervisor,engineJournal,released:false,plan:p,record:writeCompletion});
+      Object.assign(p,{lease,lock,owner,record,audit:child,phase:'qualified'});
+      const token=Object.freeze({version:3,mode:'app',services:p.targets,interruptedServices:['api','openai-egress','web','worker']});p.token=token;plans.set(token,p);
+      return {options:{},mode:'app',services:p.targets,interruptedServices:token.interruptedServices,lease,plan:token,fenceAttempted:true,switchAttempted:true,migrationAttempted:false,historyMigrationAttempted:false,publishAttempted:false};
+    },
+  },options);
   const methods={acquireLock:acquire,releaseLock:release,
     preflight:ctx=>prepare({mode:ctx.mode,services:ctx.services,lease:ctx.lease,upgradeOperations:ctx.options?.upgradeOperations,migrateHistoryV4ToV5:ctx.options?.migrateHistoryV4ToV5,migrate:ctx.options?.migrate}),
     build:ctx=>{contextPlan(ctx);return buildCandidate(ctx.plan);},validateCandidate:validate,
     verify:async ctx=>{const p=contextPlan(ctx);need(p.phase==='validated','VERIFY_STAGE');await stable(p);return {valid:true};},
     waitForIdle,prepareRecovery,fenceAdmissions,snapshot,qualifyState,switchServices,health,publishReceipt,restoreOld};
   return Object.freeze({capabilities:()=>DEPLOY_ADAPTER_CAPABILITIES,status:bounded(status,120000),prepare:bounded(prepare,300000),
+      exactForward432:bounded(exactForward432,1800000),
     planRecovery:bounded(planRecovery,300000),applyRecovery:bounded(applyRecovery,1800000),
     ...Object.fromEntries(Object.entries(methods).map(([name,fn])=>[name,bounded(async ctx=>{
       try{return await fn(ctx);}catch(error){const failure=safeError('ADAPTER_'+name.toUpperCase()+'_FAILED',error);
