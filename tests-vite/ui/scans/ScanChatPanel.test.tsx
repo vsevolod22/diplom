@@ -191,6 +191,10 @@ it('opens history and composer automatically, exposes disclosure and never dispa
   expect(screen.getByLabelText('Текст решения')).not.toBeVisible();
   for (const usage of screen.getAllByText(/остаток входных токенов 9850/)) expect(usage).not.toBeVisible();
   expect(screen.getByText(new RegExp(binding.scanId))).not.toBeVisible();
+  expect(screen.getByText(/Нажимая «Отправить вопрос»/)).not.toBeVisible();
+  expect(document.getElementById('scan-chat-input-count')).not.toBeVisible();
+  expect(document.getElementById('scan-chat-send-help')).toBeVisible();
+  fireEvent.click(screen.getByText('Об использовании ИИ', { selector: 'summary' }));
   expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toBeVisible();
   expect(screen.getByText(/Нажимая «Отправить вопрос»/)).toHaveTextContent(
     'внешнему ИИ вопрос и контекст отчёта',

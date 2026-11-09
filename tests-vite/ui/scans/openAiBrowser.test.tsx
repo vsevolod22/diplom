@@ -538,7 +538,10 @@ it.each(['ndjson', 'json', 'timeout'] as const)(
     await waitFor(() => expect(screen.getByRole('button', { name: 'Обновить историю' })).toBeEnabled());
     const notice = document.querySelector('.scan-chat-paid-notice');
     expect(notice).toBeVisible();
-    expect(notice).toHaveTextContent('без локального денежного лимита — это не бесплатный режим');
+    expect(notice).toHaveTextContent('платный запрос OpenAI');
+    expect(screen.getByText(/Это отдельное согласие, не прежний бесплатный opt-in/)).not.toBeVisible();
+    fireEvent.click(screen.getByText('Об использовании ИИ', { selector: 'summary' }));
+    expect(screen.getAllByText(/без локального денежного лимита — это не бесплатный режим/)[0]).toBeVisible();
     expect(screen.getByText(/Это отдельное согласие, не прежний бесплатный opt-in/)).toBeVisible();
     expect(calls.filter((m) => m === 'POST')).toHaveLength(0);
     fireEvent.change(screen.getByLabelText('Вопрос чату'), { target: { value: 'Что проверить?' } });

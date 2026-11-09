@@ -761,34 +761,40 @@ function ChatScope({
         <ChatMarkdownComposer textareaRef={questionInput} value={question} onChange={setQuestion}
           disabled={pending && operation !== 'read'} invalid={questionInvalid}
           describedBy={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`} />
-        <small id="scan-chat-input-help">
-          Markdown: заголовки, списки, выделение и код. Без ссылок, HTML и секретов. До 2048 байт UTF-8.
-        </small>
-        <p id="scan-chat-input-count">
+        <p id="scan-chat-input-count" hidden={utf8Bytes(question) < SCAN_CHAT_INPUT_BYTE_LIMIT * 0.9}>
           {utf8Bytes(question)} / {SCAN_CHAT_INPUT_BYTE_LIMIT} байт UTF-8
         </p>
         <p id="scan-chat-input-error" role="status" aria-live="polite" aria-atomic="true">
           {questionInvalid ? questionFeedback : null}
         </p>
-        {isPaidDisclosure(context?.disclosure) ? (
+        <details className="scan-chat-conditions">
+          <summary>Об использовании ИИ</summary>
+          <small id="scan-chat-input-help">
+            Markdown: заголовки, списки, выделение и код. Без ссылок, HTML и секретов. До 2048 байт UTF-8.
+          </small>
+          {isPaidDisclosure(context?.disclosure) ? (
           <>
-            <p className="scan-chat-paid-notice">{context.disclosure.provider} · {context.disclosure.model}. Платный запрос:{' '}
+            <p>{context.disclosure.provider} · {context.disclosure.model}. Платный запрос:{' '}
               {'lifetimeUserCostMicros' in context.disclosure && typeof context.disclosure.lifetimeUserCostMicros === 'number' && context.disclosure.lifetimeUserCostMicros > 0
                 ? `бюджет аккаунта $${context.disclosure.lifetimeUserCostMicros / 1_000_000} за всё время. `
                 : context.disclosure.monetaryLimit === 'uncapped'
                   ? 'без локального денежного лимита — это не бесплатный режим. '
                   : 'с серверными денежными лимитами. '}
               {context.disclosure.provider === 'ModuleAPI' ? 'Хранение и обучение у провайдера не подтверждены.' : 'ZDR не подтверждён.'}</p>
-            <details className="scan-chat-conditions"><summary>Условия передачи данных и стоимость</summary>
-              <OpenAiDisclosure disclosure={context.disclosure} chat />
-            </details>
+            <OpenAiDisclosure disclosure={context.disclosure} chat />
           </>
         ) : null}
-        <p id="scan-chat-send-help">
+        <p>
           Нажимая «Отправить вопрос», вы разрешаете{' '}
           {isPaidDisclosure(context?.disclosure)
             ? `платный запрос ${context.disclosure.provider} и передачу вопроса, находок и истории на условиях выше. Это отдельное согласие, не прежний бесплатный opt-in.`
             : 'передать внешнему ИИ вопрос и контекст отчёта, включая историю чата. Запрет обучения не гарантирует отсутствие хранения.'}
+        </p>
+        </details>
+        <p id="scan-chat-send-help" className="scan-chat-paid-notice">
+          {isPaidDisclosure(context?.disclosure)
+            ? `Отправка — платный запрос ${context.disclosure.provider}. Вы передаёте вопрос и контекст отчёта.`
+            : 'Отправляя вопрос, вы передаёте его и контекст отчёта внешнему ИИ.'}
         </p>
         <Button
           type="submit"

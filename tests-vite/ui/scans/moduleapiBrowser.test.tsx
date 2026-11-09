@@ -392,11 +392,13 @@ it('usage GET has provider-neutral paid wording and all-time held liabilities, w
 it('chat typing/GET never sends; explicit Send uses ModuleAPI receipt then durable history reload without another POST', async () => {
   const api = chatApi();
   await openChat(api);
+  expect(screen.getByLabelText('Условия ModuleAPI')).not.toBeVisible();
+  fireEvent.click(screen.getByText('Об использовании ИИ', { selector: 'summary' }));
   expect(screen.getByLabelText('Условия ModuleAPI')).toBeVisible();
   expect(screen.queryByLabelText('Условия OpenAI')).toBeNull();
   enterQuestion();
   expect(api.posts()).toHaveLength(0);
-  expect(screen.getByText(/платный запрос ModuleAPI/)).toBeVisible();
+  expect(document.getElementById('scan-chat-send-help')).toHaveTextContent('платный запрос ModuleAPI');
   fireEvent.click(screen.getByRole('button', { name: 'Отправить вопрос' }));
   await screen.findByRole('heading', { name: 'Ответ · проверьте по источникам' });
   expect(api.posts()).toHaveLength(1);
@@ -467,5 +469,6 @@ it('failed explicit ModuleAPI chat does not retry on reload/focus/history GET', 
   fireEvent.click(screen.getByRole('button', { name: 'Обновить историю' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Обновить историю' })).toBeEnabled());
   expect(api.posts()).toHaveLength(1);
+  fireEvent.click(screen.getByText('Об использовании ИИ', { selector: 'summary' }));
   expect(within(screen.getByLabelText('Условия ModuleAPI')).getByText(/Условия хранения/)).toBeVisible();
 });

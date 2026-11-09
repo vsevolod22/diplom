@@ -391,7 +391,7 @@ it('paid disclosure stays honest and failed retry preparation remains zero paid 
   await ready();
   expect(document.querySelector('.scan-chat-paid-notice')).toBeVisible();
   expect(screen.getByLabelText('Условия OpenAI')).not.toBeVisible();
-  fireEvent.click(screen.getByText('Условия передачи данных и стоимость', { selector: 'summary' }));
+  fireEvent.click(screen.getByText('Об использовании ИИ', { selector: 'summary' }));
   expect(screen.getByLabelText('Условия OpenAI')).toBeVisible();
   expect(region()).toHaveTextContent(/платн/);
   expect(region()).toHaveTextContent(/без.*лимит|не огранич|не установлен/i);
