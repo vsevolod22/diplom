@@ -6,7 +6,7 @@ import { ArrowLeft, CheckCircle2, CircleDashed, CircleOff, LockKeyhole, XCircle 
 import { Link, useParams } from 'react-router-dom';
 
 
-import { ScanChatPanel } from '@/features/scans/ScanChatPanel';
+import { ScanChatWidget } from '@/features/scans/ScanChatWidget';
 import { ScanSummaryPanel } from '@/features/scans/ScanSummaryPanel';
 import { isReportSourceCategory, reportSourceTargets, type ReportSourceCategory } from '@/features/scans/reportSourceNavigation';
 import { scanSession } from '@/shared/api/auth/scanSession';
@@ -575,7 +575,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
               transport={transport}
               onNavigateSource={navigateSource}
             /> : null}
-            {!demo && live && !staleSnapshot && !active ? <ScanChatPanel
+            {!demo && live && !staleSnapshot && !active ? <ScanChatWidget
               key={JSON.stringify(['chat', scope, scan.data])}
               status={scan.data}
               transport={transport}

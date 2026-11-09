@@ -1,5 +1,6 @@
 import { Component, lazy, Suspense, useState, type ReactNode } from 'react';
 import { unfinishedFence } from './safeMarkdownPolicy';
+import './chat-conversation.css';
 
 const Markdown = lazy(() => import('./SafeMarkdownRenderer'));
 const plainStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' } as const;
@@ -10,6 +11,7 @@ export function CopyText({ text, label = 'Скопировать текст' }: 
     <>
       <button
         type="button"
+        className="scan-markdown__copy"
         onClick={() => {
           if (!navigator.clipboard?.writeText) {
             setMessage('Копирование недоступно; выделите текст вручную.');
@@ -23,7 +25,9 @@ export function CopyText({ text, label = 'Скопировать текст' }: 
       >
         {label}
       </button>{' '}
-      <span role="status">{message}</span>
+      <span className="scan-markdown__copy-status" role="status">
+        {message}
+      </span>
     </>
   );
 }
@@ -39,21 +43,21 @@ class MarkdownBoundary extends Component<{ children: ReactNode; text: string }, 
     return this.state.failed ? <PlainMessage text={this.props.text} /> : this.props.children;
   }
 }
-export function SafeMarkdown({ text }: { text: string }) {
+export function SafeMarkdown({ text, showCopy = true }: { text: string; showCopy?: boolean }) {
   // Unclosed fences and HTML-like input stay inert and exactly copyable, even during future delivery chunks.
   const plain = unfinishedFence(text) || /[<>]/.test(text);
   return (
-    <div style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}>
+    <div className="scan-markdown" style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}>
       {plain ? (
         <PlainMessage text={text} />
       ) : (
         <MarkdownBoundary key={text} text={text}>
           <Suspense fallback={<PlainMessage text={text} />}>
-            <Markdown text={text} />
+            <Markdown text={text} showCopy={showCopy} />
           </Suspense>
         </MarkdownBoundary>
       )}
-      <CopyText key={`copy:${text}`} text={text} />
+      {showCopy ? <CopyText key={`copy:${text}`} text={text} /> : null}
     </div>
   );
 }

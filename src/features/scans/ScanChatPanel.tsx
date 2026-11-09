@@ -28,6 +28,7 @@ import { identifierLabel, identifierCountsTotal } from '@/shared/api/scans/publi
 import { Alert, Button } from '@/shared/ui/scan-primitives';
 import { SafeMarkdown } from './safeMarkdown';
 import { ChatBubble, ChatThinking } from './ChatConversation';
+import { ChatMarkdownComposer } from './ChatMarkdownComposer';
 import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
 
 type Props = { status: ScanStatus; transport: ScanTransport; client?: ChatClient; onNavigateSource?: ReportSourceNavigate };
@@ -235,7 +236,13 @@ function ChatScope({
   const request = useRef<AbortController | null>(null);
   const generation = useRef(0);
   const questionInput = useRef<HTMLTextAreaElement | null>(null);
+  const chatContent = useRef<HTMLDivElement | null>(null);
+  const followLatest = useRef(true);
   const [operation, setOperation] = useState<Operation>('read');
+  useEffect(() => {
+    const content = chatContent.current;
+    if (content && followLatest.current) content.scrollTop = content.scrollHeight;
+  }, [snapshot?.history.revision, pending]);
 
   function invalidate() {
     generation.current++;
@@ -507,6 +514,7 @@ function ChatScope({
     }
     if (request.current) return;
     setMessage('');
+    followLatest.current = true;
     const mutationId = crypto.randomUUID();
     const ids = [...selectedIds];
     void operate(kind, kind === 'chat' ? 120_000 : 45_000, async (signal, publish) => {
@@ -624,6 +632,10 @@ function ChatScope({
       aria-busy={pending}
       style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}
     >
+      <div className="scan-chat-content" ref={chatContent} onScroll={event => {
+        const element = event.currentTarget;
+        followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 64;
+      }}>
       <h3>Задать вопрос по отчёту</h3>
             <p>Уточните непонятную находку или порядок исправлений. Ответ ИИ — подсказка, не замена проверки источников.</p>
       {['partial', 'failed', 'cancelled'].includes(status.state) ? (
@@ -684,7 +696,7 @@ function ChatScope({
                   }[turn.state]
                 }
               </h5>
-              <p style={{ whiteSpace: 'pre-wrap' }}>{turn.question}</p>
+              <SafeMarkdown text={turn.question} />
               </ChatBubble>
               {turn.state === 'completed' ? (
                 <ChatBubble direction="incoming">
@@ -737,6 +749,7 @@ function ChatScope({
         </>
       ) : null}
       {pending && operation === 'chat' ? <ChatThinking /> : null}
+      </div>
       <form
         className="scan-a1__compose"
         aria-label="Отправка вопроса по отчёту"
@@ -745,22 +758,11 @@ function ChatScope({
           mutate('chat');
         }}
       >
-        <label>
-          Вопрос чату
-          <textarea
-            ref={questionInput}
-            aria-describedby={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`}
-            aria-invalid={questionInvalid}
-            value={question}
-            disabled={pending && operation !== 'read'}
-            rows={3}
-            onChange={(event) => setQuestion(event.target.value)}
-            style={{ width: '100%' }}
-          />
-        </label>
+        <ChatMarkdownComposer textareaRef={questionInput} value={question} onChange={setQuestion}
+          disabled={pending && operation !== 'read'} invalid={questionInvalid}
+          describedBy={`scan-chat-input-help scan-chat-input-count${questionInvalid ? ' scan-chat-input-error' : ''}`} />
         <small id="scan-chat-input-help">
-          Короткий вопрос без ссылок, разметки, секретов и служебных символов. Лимит — 2048 байт UTF-8, не символов:
-          русская буква обычно занимает 2 байта. Например: «С каких находок начать?»
+          Markdown: заголовки, списки, выделение и код. Без ссылок, HTML и секретов. До 2048 байт UTF-8.
         </small>
         <p id="scan-chat-input-count">
           {utf8Bytes(question)} / {SCAN_CHAT_INPUT_BYTE_LIMIT} байт UTF-8
@@ -769,12 +771,23 @@ function ChatScope({
           {questionInvalid ? questionFeedback : null}
         </p>
         {isPaidDisclosure(context?.disclosure) ? (
-          <OpenAiDisclosure disclosure={context.disclosure} chat />
+          <>
+            <p className="scan-chat-paid-notice">{context.disclosure.provider} · {context.disclosure.model}. Платный запрос:{' '}
+              {'lifetimeUserCostMicros' in context.disclosure && typeof context.disclosure.lifetimeUserCostMicros === 'number' && context.disclosure.lifetimeUserCostMicros > 0
+                ? `бюджет аккаунта $${context.disclosure.lifetimeUserCostMicros / 1_000_000} за всё время. `
+                : context.disclosure.monetaryLimit === 'uncapped'
+                  ? 'без локального денежного лимита — это не бесплатный режим. '
+                  : 'с серверными денежными лимитами. '}
+              {context.disclosure.provider === 'ModuleAPI' ? 'Хранение и обучение у провайдера не подтверждены.' : 'ZDR не подтверждён.'}</p>
+            <details className="scan-chat-conditions"><summary>Условия передачи данных и стоимость</summary>
+              <OpenAiDisclosure disclosure={context.disclosure} chat />
+            </details>
+          </>
         ) : null}
         <p id="scan-chat-send-help">
           Нажимая «Отправить вопрос», вы разрешаете{' '}
           {isPaidDisclosure(context?.disclosure)
-            ? `платный запрос ${context.disclosure.provider} на показанных условиях текущей политики и передачу вопроса, находок и истории. Это отдельное согласие, не прежний бесплатный opt-in и не разрешение другого провайдера.`
+            ? `платный запрос ${context.disclosure.provider} и передачу вопроса, находок и истории на условиях выше. Это отдельное согласие, не прежний бесплатный opt-in.`
             : 'передать внешнему ИИ вопрос и контекст отчёта, включая историю чата. Запрет обучения не гарантирует отсутствие хранения.'}
         </p>
         <Button
@@ -785,7 +798,7 @@ function ChatScope({
           Отправить вопрос
         </Button>
       </form>
-      <details>
+      <details className="scan-chat-technical">
         <summary>Подробности · история решений, условия и использование</summary>
         {needsReadiness ? (
           <section aria-label="Готовность генерации">

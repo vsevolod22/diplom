@@ -5,6 +5,16 @@
 
 Следующие разделы сохраняют первоначальное source/predeploy evidence; прежние слова «не выложен» и Docker unavailable — исторические, superseded этим статусом.
 
+## Плавающее окно и Markdown — выложено 2026-11-09
+
+Frontend-only `node scripts/deploy.mjs web --apply` завершён `new-healthy`, lock released, completedAt `2026-11-09T12:37:29.749Z`. Backend/worker/БД не пересоздавались. Postflight: ready=true, locked=false, root200, anonymous auth401.
+
+Чат перенесён в отдельное modeless окно через React portal, с launcher, сворачиванием, Escape и восстановлением фокуса после render. Первое открытие монтирует панель; сворачивание сохраняет draft/history/inflight. Устранены чёрные цвета Chatscope на content-wrapper. Вопросы/ответы и preview используют безопасный Markdown с GFM; toolbar поддерживает выделение, списки и code. HTML/URLs/secrets, исходные byte-limit/auth/consent/transport guards не ослаблены. Краткое платное предупреждение видно постоянно; полные условия раскрываются отдельно.
+
+Проверки: независимый source review без конкретных blockers и 233/233 scoped tests PASS; дополнительные chatBatch26/chatRecoveryDrafts 39/39 PASS. Production build PASS. Synthetic Chromium375/1280: min sampled contrast9.72:1, overflow0, draft/preview/focus PASS. Новая фактическая authenticated GET-only проверка опубликованного8081 на375/1280: сохранённые ответы видны, preview таблиц работает, draft сохраняется после minimize/reopen, Escape возвращает focus, overflow0, текст/editor rgb(232,237,245), pageErrors0, deniedRequests0. Private evidence `test-results/chat-widget-ux-20261109/live-result.json`, `live-375.png`, `live-1280.png`. Новых paid/model requests не было; отправка проверена предыдущей реальной приёмкой выше, не повторялась ради CSS.
+
+Harness DIP-HRNS-6 v14 run `a167d483-8072-4415-8595-dcc734471e97`: четыре исходные роли завершены; final review дал результат, но шаг завершился timeout до work_complete. Это FAILED orchestration, не успешный harness run. DOC15 amendment остаётся отдельным незавершённым пунктом; native token streaming/model upgrade/full-site acceptance не заявляются.
+
 ## Реальное воспроизведение
 Одна разрешённая платная попытка собственного retained тестового аккаунта на scan `305a55de-6d94-4af6-a653-2bd117e1ec85`: POST вернул HTTP502 `text/html` через 27727ms; последующий авторизованный GET истории нашёл именно отправленный mutation в состоянии completed с reply. Nginx зарегистрировал `upstream prematurely closed connection while reading response header from upstream`. Содержимое ответа, cookie и ключ не выводились. Это подтверждает ошибку доставки при успешном durable commit, но не доказывает единственную внутреннюю причину всех прежних 502.
 

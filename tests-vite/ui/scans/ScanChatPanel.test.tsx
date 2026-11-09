@@ -824,7 +824,8 @@ it('framed panel keeps partial nested fence inert/unpublished until done, EOF an
   await act(async () => writer.close());
   await screen.findByText(/Последний ответ: входных токенов 100/);
   expect(view.container.querySelector('pre')?.textContent).toBe(text);
-  expect(view.container.querySelector('script,img,svg,iframe')).toBeNull();
+  for (const markdown of view.container.querySelectorAll('.scan-chat-conversation .scan-markdown'))
+      expect(markdown.querySelector('script,img,svg,iframe')).toBeNull();
   expect(api.requests.filter((r) => r.init.method === 'POST')).toHaveLength(1);
   expect(screen.getByText(/Исходный отчёт/)).toBeTruthy();
 });

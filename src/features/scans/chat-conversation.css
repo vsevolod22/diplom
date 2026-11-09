@@ -1,17 +1,353 @@
-.scan-a1__chat { border: 1px solid var(--border, #343842); border-radius: 18px; padding: clamp(16px, 3vw, 28px); }
-.scan-a1__chat .scan-chat-conversation { display: grid; gap: 24px; margin-block: 24px; }
-.scan-chat-conversation article { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.scan-a1__chat .cs-message { max-width: 94%; min-width: 0; font: inherit; }
-.scan-a1__chat .cs-message--outgoing { align-self: flex-end; }
-.scan-a1__chat .cs-message--incoming { align-self: flex-start; width: 100%; }
-.scan-a1__chat .cs-message__content { color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 12%, transparent); border-radius: 14px; padding: 14px 18px; overflow-wrap: anywhere; }
-.scan-a1__chat .cs-message--outgoing .cs-message__content { background: color-mix(in srgb, #568aff 14%, transparent); }
-.scan-a1__chat .cs-message__custom-content { min-width: 0; }
-.scan-a1__chat .cs-message h5 { margin: 0 0 10px; font-size: 12px; letter-spacing: .04em; opacity: .75; }
-.scan-a1__chat .cs-message p { margin-block: 8px; }
-.scan-chat-thinking { display: flex; align-items: center; gap: 14px; padding: 18px; margin-block: 18px; border-radius: 14px; background: color-mix(in srgb, #568aff 8%, transparent); }
-.scan-chat-thinking .cs-typing-indicator { position: static; background: transparent; padding: 0; }
-.scan-chat-thinking__hint { display: block; margin-top: 5px; font-size: 12px; opacity: .65; }
-.scan-a1__chat .scan-a1__compose textarea { box-sizing: border-box; resize: vertical; min-height: 96px; border-radius: 12px; }
-@media (max-width: 480px) { .scan-a1__chat .cs-message { max-width: 100%; } .scan-a1__chat .cs-message__content { padding: 12px; } }
-@media (prefers-reduced-motion: reduce) { .scan-a1__chat .cs-typing-indicator__dot { animation: none !important; } }
+.scan-a1__chat {
+  color: #e8edf5;
+  color-scheme: dark;
+  background: #111925;
+  border: 1px solid #445268;
+  border-radius: 18px;
+  padding: clamp(16px, 3vw, 28px);
+}
+
+.scan-a1__chat .scan-chat-conversation {
+  display: grid;
+  gap: 24px;
+  margin-block: 24px;
+}
+.scan-chat-conversation article {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Chatscope assigns black at BOTH roots; content inheritance alone cannot fix it. */
+.scan-chat-bubble.cs-message,
+.scan-chat-bubble.cs-message .cs-message__content-wrapper {
+  color: #e8edf5;
+  font: inherit;
+  min-width: 0;
+  max-width: 100%;
+}
+.scan-chat-bubble.cs-message {
+  max-width: 94%;
+}
+.scan-chat-bubble.cs-message--outgoing {
+  align-self: flex-end;
+}
+.scan-chat-bubble.cs-message--incoming {
+  align-self: flex-start;
+  width: 100%;
+}
+.scan-chat-bubble.cs-message .cs-message__content {
+  color: #e8edf5;
+  background: #192536;
+  border: 1px solid #445268;
+  border-radius: 14px;
+  padding: 14px 18px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+}
+.scan-chat-bubble.cs-message--outgoing .cs-message__content {
+  color: #e8edf5;
+  background: #203550;
+  border-color: #536d8d;
+}
+.scan-chat-bubble .cs-message__custom-content {
+  color: #e8edf5;
+  min-width: 0;
+}
+.scan-chat-bubble.cs-message h5 {
+  color: #bac9dd;
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.scan-a1__chat :is(label, legend, p, li) {
+  color: #e8edf5;
+}
+.scan-a1__chat :is(h2, h3, h4, strong) {
+  color: #f5f7fc;
+}
+.scan-a1__chat :is(small, time) {
+  color: #bac9dd;
+}
+.scan-a1__chat a {
+  color: #9fcaff;
+  text-underline-offset: 3px;
+}
+
+.scan-a1__chat :is(textarea, select, input:not([type='checkbox']):not([type='radio'])) {
+  color: #e8edf5;
+  background: #0e1724;
+  border: 1px solid #657894;
+  color-scheme: dark;
+  caret-color: #b5d7ff;
+}
+.scan-a1__chat :is(textarea, input)::placeholder {
+  color: #aabbd0;
+  opacity: 1;
+}
+.scan-a1__chat select option {
+  color: #e8edf5;
+  background: #0e1724;
+}
+.scan-a1__chat .scan-a1__compose textarea {
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 96px;
+  border-radius: 12px;
+}
+.scan-a1__chat button,
+.scan-markdown button.scan-markdown__copy {
+  color: #edf4ff;
+  background: #243c59;
+  border: 1px solid #657f9e;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+.scan-a1__chat button:hover:not(:disabled),
+.scan-markdown button.scan-markdown__copy:hover:not(:disabled) {
+  color: #ffffff;
+  background: #304f73;
+}
+.scan-a1__chat button:disabled {
+  color: #bac9dd;
+  background: #253142;
+  border-color: #526177;
+  opacity: 1;
+  cursor: not-allowed;
+}
+.scan-a1__chat :is(button, textarea, select, input, a):focus-visible,
+.scan-markdown :is(button, a, [tabindex]):focus-visible {
+  outline: 2px solid #a9d1ff;
+  outline-offset: 3px;
+}
+
+.scan-chat-thinking {
+  color: #e8edf5;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  margin-block: 18px;
+  border: 1px solid #445268;
+  border-radius: 14px;
+  background: #192536;
+}
+.scan-chat-thinking .cs-typing-indicator {
+  position: static;
+  background: transparent;
+  padding: 0;
+}
+.scan-chat-thinking .cs-typing-indicator__dot {
+  background: #9fcaff;
+}
+.scan-chat-thinking__hint {
+  color: #bac9dd;
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+}
+
+/* Self-contained: previews and portal content need no report-page ancestor. */
+.scan-markdown {
+  color: #e8edf5;
+  background: #192536;
+  color-scheme: dark;
+  font-size: 14px;
+  line-height: 1.75;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.scan-markdown .scan-markdown,
+.scan-chat-bubble .scan-markdown {
+  background: transparent;
+}
+.scan-markdown :is(p, ul, ol, blockquote, pre, table) {
+  margin-block: 0 1em;
+}
+.scan-markdown :is(h1, h2, h3, h4, h5, h6) {
+  color: #f5f7fc;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+  margin-block: 1.4em 0.65em;
+  text-wrap: pretty;
+}
+.scan-markdown h1 {
+  font-size: 1.65em;
+}
+.scan-markdown h2 {
+  font-size: 1.4em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid #536780;
+}
+.scan-markdown h3 {
+  font-size: 1.2em;
+}
+.scan-markdown :is(h4, h5, h6) {
+  font-size: 1em;
+}
+.scan-markdown > :first-child {
+  margin-top: 0;
+}
+.scan-markdown :is(p, li, td) {
+  color: #e8edf5;
+}
+.scan-markdown :is(strong, [data-streamdown='strong']) {
+  color: #ffffff;
+  font-weight: 700;
+}
+.scan-markdown em {
+  color: #d5e2f5;
+}
+.scan-markdown del {
+  color: #bac9dd;
+}
+.scan-markdown :is(ul, ol) {
+  padding-inline-start: 1.65em;
+}
+.scan-markdown ul {
+  list-style: disc;
+}
+.scan-markdown ol {
+  list-style: decimal;
+}
+.scan-markdown li {
+  padding-inline-start: 0.2em;
+  margin-block: 0.3em;
+}
+.scan-markdown li::marker {
+  color: #a9c9f3;
+}
+.scan-markdown li > :is(ul, ol) {
+  margin-block: 0.35em;
+}
+.scan-markdown input[type='checkbox'] {
+  accent-color: #9fcaff;
+  opacity: 1;
+  margin-inline-end: 0.5em;
+}
+.scan-markdown .contains-task-list {
+  list-style: none;
+  padding-inline-start: 0.25em;
+}
+.scan-markdown blockquote {
+  color: #d5e2f5;
+  background: #203047;
+  border-inline-start: 3px solid #9fcaff;
+  padding: 0.75em 1em;
+  border-radius: 0 8px 8px 0;
+}
+.scan-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+.scan-markdown a {
+  color: #9fcaff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.scan-markdown a:hover {
+  color: #d0e5ff;
+}
+.scan-markdown code {
+  color: #c5e2ff;
+  background: #0d1623;
+  border: 1px solid #445268;
+  border-radius: 5px;
+  padding: 0.12em 0.35em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  white-space: break-spaces;
+}
+.scan-markdown pre {
+  color: #e8edf5;
+  background: #0d1623;
+  border: 1px solid #445268;
+  border-radius: 10px;
+  padding: 14px;
+  max-width: 100%;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  tab-size: 2;
+}
+.scan-markdown pre code {
+  color: #e8edf5;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  font-size: inherit;
+}
+.scan-markdown__code-block {
+  min-width: 0;
+  margin-block: 1em;
+}
+.scan-markdown__code-block pre {
+  margin-bottom: 0.5em;
+}
+.scan-markdown__copy-status {
+  color: #bac9dd;
+  font-size: 12px;
+}
+.scan-markdown__table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin-block: 1em;
+  border: 1px solid #536780;
+  border-radius: 10px;
+}
+.scan-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+  font-size: 13px;
+}
+.scan-markdown :is(th, td) {
+  border: 1px solid #536780;
+  padding: 0.65em 0.9em;
+  text-align: start;
+  vertical-align: top;
+  min-width: 7em;
+}
+.scan-markdown th {
+  color: #f5f7fc;
+  background: #263b55;
+  font-weight: 700;
+}
+.scan-markdown td {
+  background: #192536;
+}
+.scan-markdown tr:nth-child(even) td {
+  background: #203047;
+}
+.scan-markdown hr {
+  border: 0;
+  border-top: 1px solid #536780;
+  margin-block: 1.5em;
+}
+
+@media (max-width: 480px) {
+  .scan-chat-bubble.cs-message {
+    max-width: 100%;
+  }
+  .scan-chat-bubble.cs-message .cs-message__content {
+    padding: 12px;
+  }
+  .scan-markdown pre {
+    padding: 10px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scan-chat-thinking .cs-typing-indicator__dot {
+    animation: none !important;
+  }
+}

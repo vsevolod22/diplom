@@ -389,6 +389,9 @@ it('paid disclosure stays honest and failed retry preparation remains zero paid 
   });
   render(<ScanChatPanel status={status} transport={sourceTransport()} client={client} />);
   await ready();
+  expect(document.querySelector('.scan-chat-paid-notice')).toBeVisible();
+  expect(screen.getByLabelText('Условия OpenAI')).not.toBeVisible();
+  fireEvent.click(screen.getByText('Условия передачи данных и стоимость', { selector: 'summary' }));
   expect(screen.getByLabelText('Условия OpenAI')).toBeVisible();
   expect(region()).toHaveTextContent(/платн/);
   expect(region()).toHaveTextContent(/без.*лимит|не огранич|не установлен/i);
