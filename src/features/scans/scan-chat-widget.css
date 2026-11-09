@@ -1,7 +1,9 @@
 .scan-chat-launcher { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 60; display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 56px; padding: 14px 20px; border: 1px solid #e3ffab; border-radius: 999px; background: #d1ff5e; color: #171923; font-family: Inter, sans-serif; font-size: 14px; font-weight: 700; line-height: 1.3; box-shadow: 0 8px 32px #0006; cursor: pointer; }
 .scan-chat-launcher[hidden], .scan-chat-widget[hidden] { display: none !important; }
 .scan-chat-launcher:hover { background: #e0ff98; }
-.scan-chat-launcher:focus-visible, .scan-chat-widget button:focus-visible, .scan-chat-widget textarea:focus-visible, .scan-chat-widget [role="textbox"][contenteditable="true"]:focus-visible, .scan-chat-widget:focus-visible { outline: 2px solid #d1ff5e; outline-offset: 4px; }
+.scan-chat-launcher:focus-visible, .scan-chat-widget button:focus-visible, .scan-chat-widget textarea:focus-visible, .scan-chat-widget:focus-visible { outline: 2px solid #d1ff5e; outline-offset: 4px; }
+/* The editor wrapper owns the focus ring; a second inner outline overlaps its toolbar. */
+.scan-chat-widget .scan-chat-editor [role="textbox"][contenteditable]:focus-visible { outline: none; outline-offset: 0; }
 .scan-chat-widget { position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 60; display: flex; flex-direction: column; width: min(460px, calc(100vw - 32px)); height: min(740px, calc(100dvh - 48px)); min-height: 0; overflow: visible; border: 1px solid #514f68; border-radius: 20px; background: #171625; color: #f5f3fc; box-shadow: 0 24px 96px #0009; font-family: Inter, sans-serif; }
 .scan-chat-widget__header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 12px; padding: 16px 18px; border-bottom: 1px solid #414054; background: #211f33; border-radius: 19px 19px 0 0; }
 .scan-chat-widget__identity { display: flex; align-items: center; gap: 11px; min-width: 0; }
