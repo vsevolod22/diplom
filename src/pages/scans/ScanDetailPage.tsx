@@ -22,6 +22,7 @@ import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/sca
 import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import type { ScanCoverage, ScanStatus } from '@/shared/api/scans/scanTransport';
 import { Alert, Badge, Button } from '@/shared/ui/scan-primitives';
+import { ScanInfoDialog } from '@/shared/ui/ScanInfoDialog';
 import { ScanReportSections } from './ScanReportSections';
 import { ScanReportOverview } from './ScanReportOverview';
 import './scan-detail-a1.css';
@@ -291,12 +292,11 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                   <summary>Подробности · ход завершённой проверки</summary>
                   <ScanProgressPanel scan={scan.data} />
                 </details> : null}
-                <details className="scan-a1__technical">
-                  <summary>Подробности · точный образ и данные сканирования</summary>
+                <ScanInfoDialog title="Данные проверки" description="Адрес образа, подтверждённая сборка и идентификатор этого отчёта.">
                   <dl className="scan-a1__facts">
                   <div>
                     <dt>Указанная цель</dt>
-                    <dd>Указанная цель: {scan.data.imageReference || 'не предоставлена сервером'}</dd>
+                    <dd>{scan.data.imageReference || 'Ещё не подтверждено'}</dd>
                   </div>
                   <div>
                     <dt>Подтверждение цели</dt>
@@ -304,7 +304,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                       Закреплённая цель:{' '}
                       {scan.data.digest && scan.data.platform
                         ? `${scan.data.digest} · ${scan.data.platform}`
-                        : 'ожидаем подтверждения digest/platform от авторизованного GET status'}
+                        : 'Ещё не подтверждено' }
                     </dd>
                   </div>
                   <div>
@@ -317,7 +317,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                   </div>
                   <div><dt>ID сканирования</dt><dd>ID / {scanId}</dd></div>
                   </dl>
-                </details>
+                </ScanInfoDialog>
 
                 {!demo && scan.data.state === 'cancelled' ? (
                   <Alert tone="neutral">
@@ -338,10 +338,10 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                       </Button>
                     </AlertDialog.Trigger>
                     <AlertDialog.Portal>
-                      <AlertDialog.Overlay className="fixed inset-0 z-40 bg-slate-950/65" />
-                      <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(calc(100vw-2rem),28rem)] -translate-x-1/2 -translate-y-1/2 space-y-5 rounded-lg border border-slate-300 bg-white p-6 text-slate-900 shadow-2xl">
+                      <AlertDialog.Overlay className="scan-info-overlay" />
+                      <AlertDialog.Content className="scan-info-dialog scan-cancel-dialog">
                         <AlertDialog.Title className="text-xl font-semibold">Отменить скан?</AlertDialog.Title>
-                        <AlertDialog.Description className="text-sm leading-relaxed text-slate-600">
+                        <AlertDialog.Description className="text-sm leading-relaxed">
                           Сохранённые результаты завершённых проверок останутся доступны. Остальные проверки не будут завершены. Статус подтвердит сервер.
                         </AlertDialog.Description>
                         <div className="flex flex-wrap justify-end gap-3">
@@ -427,10 +427,10 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
         ) : null}
         {!enabled ? (
           <Alert tone="neutral">
-            Деталь недоступна без защищённой авторизованной сессии; scanId в адресе не подтверждает доступ.
+            <Link to="/login" className="font-bold underline">Войдите, чтобы открыть доступный вам отчёт</Link>. Адрес отчёта сам по себе не подтверждает доступ.
           </Alert>
         ) : null}
-        {scan.isPending && enabled ? <p role="status">Загружаем снимок…</p> : null}
+        {scan.isPending && enabled ? <p role="status">Загружаем отчёт…</p> : null}
         {scan.isError ? (
           <Alert role="alert" tone="danger">
             <p>{staleSnapshot && showSnapshot
@@ -439,7 +439,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
             {enabled && !(scan.error instanceof ScanAccessError) ? (
               <Button type="button" variant="secondary" disabled={scan.isFetching}
                 onClick={() => void scan.refetch({ cancelRefetch: false })}>
-                {scan.isFetching ? 'Получаем статус…' : 'Повторить получение статуса'}
+                {scan.isFetching ? 'Получаем статус…' : 'Обновить статус'}
               </Button>
             ) : null}
           </Alert>
@@ -495,7 +495,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                       return (
                         <li key={item.check} data-outcome={item.status}>
                           <div className="scan-a1__coverage-heading">
-                            <strong>{item.check}</strong>
+                            <strong>{Object.hasOwn(scanCheckLabels, item.check) ? scanCheckLabels[item.check as keyof typeof scanCheckLabels] : item.check}</strong>
                             <span className="scan-a1__coverage-status">
                               <StatusIcon size={16} aria-hidden="true" />
                               {coverageLabels[item.status]}
@@ -505,7 +505,7 @@ function ScanDetailContent({ demo }: { demo: boolean }) {
                           {item.reason ? <p className="scan-a1__coverage-reason">{scanReasonLabel(item.reason) === item.reason ? 'Причина не описана сервером; код доступен в подробностях.' : scanReasonLabel(item.reason)}</p> : null}
                           {item.reason || item.checksVersion || item.resourcePolicyVersion || item.scannerVersion || item.dbVersion ? (
                             <details className="scan-a1__coverage-technical">
-                              <summary>Технические данные · {item.check}</summary>
+                              <summary>Технические данные · {Object.hasOwn(scanCheckLabels, item.check) ? scanCheckLabels[item.check as keyof typeof scanCheckLabels] : item.check}</summary>
                               {item.reason ? <p>Причина: {item.reason}</p> : null}
                               {item.checksVersion || item.resourcePolicyVersion ? (
                                 <p>checks {item.checksVersion ?? 'не предоставлена'} · policy {item.resourcePolicyVersion ?? 'не предоставлена'}</p>

@@ -20,6 +20,7 @@ import { collectSummarySources, type SummarySource } from '@/shared/api/scans/ll
 import type { ScanStatus, ScanTransport } from '@/shared/api/scans/scanTransport';
 import { usageMatchesDisclosure, type LlmUsage } from '@/shared/api/scans/llmUsageClient';
 import { OpenAiDisclosure } from './OpenAiDisclosure';
+import { LifetimeBudgetDetails } from './LlmUsagePanel';
 import { isPaidDisclosure } from '@/shared/api/scans/llmPublicContract';
 import { ReportRemediation } from './ReportRemediation';
 import type { ReportSourceNavigate } from './reportSourceNavigation';
@@ -27,6 +28,7 @@ import { utf8Bytes } from '@/shared/api/scans/vulnAdvisory';
 import { PUBLIC_IMAGE_PROFILE } from '@/shared/api/scans/publicImageProfile';
 import { identifierLabel, identifierCountsTotal } from '@/shared/api/scans/publicVulnerabilityIdentifiers';
 import { Alert, Button } from '@/shared/ui/scan-primitives';
+import { ScanInfoDialog } from '@/shared/ui/ScanInfoDialog';
 import { SafeMarkdown } from './safeMarkdown';
 import { ChatBubble, ChatThinking } from './ChatConversation';
 import { SCAN_CHAT_INPUT_BYTE_LIMIT, scanChatInputFeedback } from './scanChatInputFeedback';
@@ -670,9 +672,7 @@ function ChatScope({
           Чат, если разрешён сервером, использует сохранённые результаты; непроверенное не означает отсутствие проблем.
         </p>
       ) : null}
-      <p id="scan-chat-connection" className={pending && operation === 'read' ? 'scan-chat-sr-only' : undefined} role="status" aria-label="Состояние подключения чата" aria-live="polite">
-        {connection}
-      </p>
+
 
       {!snapshot && !pending && message ? (
         <Button type="button" variant="secondary" disabled={!current()} onClick={refresh}>
@@ -739,19 +739,15 @@ function ChatScope({
                       {
                         pending:
                           'По сохранённому статусу запрос ожидает ответа. Обновите историю позже; повторно он не отправляется.',
-                        failed:
-                          'Попытка завершилась с ошибкой. Подтверждённого ответа нет; причина в сохранённой истории не указана.',
-                        cancelled: 'Попытка отменена. Подтверждённого ответа в истории нет.',
-                        interrupted:
-                          'Попытка прервана. Подтверждённого ответа нет; причина прерывания в сохранённой истории не указана.',
+                        failed: 'Ошибка. Подтверждённого ответа нет. Автоповтора нет; расход мог быть учтён.',
+                        cancelled: 'Попытка отменена. Подтверждённого ответа нет. Автоповтора нет; расход мог быть учтён.',
+                        interrupted: 'Ответ прерван. Подтверждённого ответа нет. Автоповтора нет; расход мог быть учтён.',
                       }[turn.state]
                     }
                   </p>
                   {turn.state !== 'pending' ? (
                     <p>
-                      Автоматического повтора нет. Подготовка повтора только скопирует вопрос в черновик;
-                      новая отправка требует отдельного нажатия и может быть платной. Статус не определяет
-                      фактическую стоимость попытки.
+                      Повтор только подготовит черновик. Новая отправка требует отдельного нажатия и может быть платной.
                     </p>
                   ) : null}
                   {turn.state !== 'pending' ? (
@@ -802,39 +798,38 @@ function ChatScope({
         <p id="scan-chat-input-error" role="status" aria-live="polite" aria-atomic="true">
           {questionInvalid ? questionFeedback : null}
         </p>
-        <details className="scan-chat-conditions">
-          <summary>Об использовании ИИ</summary>
-          <small id="scan-chat-input-help">
-            Markdown: заголовки, списки, выделение и код. Без ссылок, HTML и секретов. До 2048 байт UTF-8.
-          </small>
-          {isPaidDisclosure(context?.disclosure) ? (
-          <>
-            <p>{context.disclosure.provider} · {context.disclosure.model}. Платный запрос:{' '}
-              {'lifetimeUserCostMicros' in context.disclosure && typeof context.disclosure.lifetimeUserCostMicros === 'number' && context.disclosure.lifetimeUserCostMicros > 0
-                ? `бюджет аккаунта $${context.disclosure.lifetimeUserCostMicros / 1_000_000} за всё время. `
-                : context.disclosure.monetaryLimit === 'uncapped'
-                  ? 'без локального денежного лимита — это не бесплатный режим. '
-                  : 'с серверными денежными лимитами. '}
-              {context.disclosure.provider === 'ModuleAPI' ? 'Хранение и обучение у провайдера не подтверждены.' : 'ZDR не подтверждён.'}</p>
-            <OpenAiDisclosure disclosure={context.disclosure} chat />
-          </>
-        ) : null}
-        <p>
-          Нажимая «Отправить вопрос», вы разрешаете{' '}
-          {isPaidDisclosure(context?.disclosure)
-            ? `платный запрос ${context.disclosure.provider} и передачу вопроса, находок и истории на условиях выше. Это отдельное согласие, не прежний бесплатный opt-in.`
-            : 'передать внешнему ИИ вопрос и контекст отчёта, включая историю чата. Запрет обучения не гарантирует отсутствие хранения.'}
-        </p>
-        </details>
+        <small id="scan-chat-input-help">Markdown · без ссылок, HTML и секретов · до 2048 байт UTF-8.</small>
+        <p id="scan-chat-connection" role="status" aria-label="Состояние подключения чата" aria-live="polite">{connection}</p>
         <p id="scan-chat-send-help" className="scan-chat-paid-notice">
-          {isPaidDisclosure(context?.disclosure)
-            ? `Отправка — платный запрос ${context.disclosure.provider}. Вы передаёте вопрос и контекст отчёта.`
-            : 'Отправляя вопрос, вы передаёте его и контекст отчёта внешнему ИИ.'}
+          {isPaidDisclosure(context?.disclosure) ? <>
+            Отправка — платный запрос через {context.disclosure.provider}.{' '}
+            {'lifetimeUserCostMicros' in context.disclosure && typeof context.disclosure.lifetimeUserCostMicros === 'number' && context.disclosure.lifetimeUserCostMicros > 0
+              ? `Бюджет аккаунта $${context.disclosure.lifetimeUserCostMicros / 1_000_000} за всё время. `
+              : context.disclosure.monetaryLimit === 'uncapped' ? 'Без локального денежного лимита. ' : 'С серверными денежными лимитами. '}
+            Оценка — не счёт. Нажатие — отдельное согласие.
+          </> : context?.disclosure?.provider === 'OpenRouter'
+            ? 'Бесплатный профиль OpenRouter, без платной замены. Отправляя вопрос, вы разрешаете передачу данных.'
+            : 'Профиль генерации не подтверждён. Не отправляйте секреты.'}
+          {' '}Передадим вопрос, историю и контекст отчёта.
+          {context?.disclosure ? context.disclosure.retention === 'unknown'
+            ? ' Хранение и обучение у провайдера не подтверждены.'
+            : context.disclosure.retention === 'no-storage'
+              ? ' Провайдер декларирует отсутствие хранения и обучения; соблюдение не подтверждено.'
+              : ' Провайдер декларирует запрет обучения; запросы могут храниться, ZDR не подтверждён.' : ''}
         </p>
+        {snapshot && context ? <p className="scan-chat-quota-notice" role="status" aria-label="Состояние квот чата">
+          {snapshot.usage?.available && usageMatchesDisclosure(snapshot.usage, context.disclosure)
+            ? snapshot.usage.reason === 'exhausted' ? 'Квота исчерпана. Допуск нового запроса проверяет сервер.'
+              : snapshot.usage.reason === 'warning' ? 'Приближается лимит чата. Точные остатки — в данных использования.'
+                : snapshot.usage.reason === 'policy_fault' ? 'Учёт заблокирован из-за расхождения с политикой.'
+                  : ''
+            : 'Учёт недоступен — это не ноль и не разрешение на генерацию. Квоты проверит сервер.'}
+        </p> : null}
 
       </form>
-      <details className="scan-chat-technical">
-        <summary>Подробности · история решений, условия и использование</summary>
+      <div className="scan-chat-info-action">
+      <ScanInfoDialog title="Данные и использование" description="Условия передачи данных, привязка к отчёту и учёт запросов. Открытие окна ничего не отправляет.">
+        {isPaidDisclosure(context?.disclosure) ? <OpenAiDisclosure disclosure={context.disclosure} chat /> : null}
         {needsReadiness ? (
           <section aria-label="Готовность генерации">
             <h4>Готовность генерации</h4>
@@ -941,6 +936,10 @@ function ChatScope({
               <h4>Использование</h4>
               {snapshot.usage?.available && usageMatchesDisclosure(snapshot.usage, context.disclosure) ? (
                 <>
+                  {snapshot.usage.lifetimeBudget ? <>
+                    <LifetimeBudgetDetails budget={snapshot.usage.lifetimeBudget} />
+                    <p>Оконные счётчики — статистика, не бюджет допуска. Допуск определяется отдельным бюджетом аккаунта за всё время.</p>
+                  </> : null}
                   <p>
                     Окно {new Date(snapshot.usage.window.start).toISOString()} —{' '}
                     {new Date(snapshot.usage.window.end).toISOString()}
@@ -961,11 +960,11 @@ function ChatScope({
                           : `${snapshot.usage[scope].remaining.costMicros} микро-USD`}
                         . Резерв стоимости: {snapshot.usage[scope].held.costMicros}; перенос:{' '}
                         {snapshot.usage[scope].carried.costMicros}.
-                        {snapshot.usage[scope].exhausted
+                        {!snapshot.usage.lifetimeBudget && (snapshot.usage[scope].exhausted
                           ? ' Квота исчерпана.'
                           : snapshot.usage[scope].warning
                             ? ' Приближается лимит.'
-                            : ''}
+                            : '')}
                       </p>
                     ) : null,
                   )}
@@ -991,6 +990,13 @@ function ChatScope({
               ) : null}
             </section>
 
+          </>
+        ) : null}
+      </ScanInfoDialog>
+      </div>
+      <details className="scan-chat-technical scan-chat-decisions">
+        <summary>Решения{snapshot ? ` · ${snapshot.history.decisions.length}` : ''}</summary>
+        {snapshot && context ? (<>
             {snapshot.history.decisions.map((entry) => (
               <article key={entry.id}>
                 <h5>Решение пользователя · не вывод сканера</h5>

@@ -95,11 +95,7 @@ export function HomePage() {
               <span className="home__eyebrow-icon" aria-hidden="true">
                 <Sparkles size={15} />
               </span>
-              ДИПЛОМНЫЙ ПРОЕКТ{' '}
-              <span className="home__eyebrow-divider" aria-hidden="true">
-                /
-              </span>{' '}
-              OCI IMAGE SECURITY
+              Проверка контейнерных образов
             </motion.div>
 
             <motion.h1
@@ -136,9 +132,7 @@ export function HomePage() {
                 </Link>
               </div>
               <p className="home__hero-disclaimer">
-                <span aria-hidden="true">✳</span> Для реальной проверки нужны <Link to="/login">вход</Link> и
-                разрешение сервера. <Link to="/register">Создать аккаунт</Link>. Демо доступно без входа и
-                содержит вымышленные данные.
+                Для запуска нужны <Link to="/login">вход</Link> и разрешение на проверку. Пример отчёта — вымышленные данные, без входа. <Link to="/register">Создать аккаунт</Link>.
               </p>
             </motion.div>
           </div>
@@ -152,10 +146,7 @@ export function HomePage() {
             <div className="home__visual-halo" aria-hidden="true" />
             <div className="home__orbit home__orbit--outer" aria-hidden="true" />
             <div className="home__orbit home__orbit--inner" aria-hidden="true" />
-            <div className="home__float-tag home__float-tag--top" aria-hidden="true">
-              <span>01 / INSPECT</span>
-              <ArrowDownRight size={17} />
-            </div>
+
             <div className="home__preview">
               <div className="home__preview-top">
                 <div className="home__preview-dots" aria-hidden="true">
@@ -180,7 +171,7 @@ export function HomePage() {
                   <br />
                   <em>образа?</em>
                 </div>
-                <p className="home__preview-note">Иллюстрация интерфейса · не результат сканирования</p>
+                <p className="home__preview-note">Иллюстрация, не результат проверки</p>
                 <ol
                   className="home__preview-stack"
                   aria-label="Этапы исследования: образ, слои, пакеты, находки"
@@ -221,12 +212,10 @@ export function HomePage() {
               </div>
               <div className="home__preview-footer">
                 <span>OCI / VISION</span>
-                <span>КОНЦЕПТ · НЕ LIVE-ДАННЫЕ</span>
+
               </div>
             </div>
-            <div className="home__float-tag home__float-tag--bottom" aria-hidden="true">
-              <span className="home__float-pulse" /> LOOK CLOSER / 001
-            </div>
+
           </motion.div>
           <a className="home__scroll" href="#approach">
             Листай ниже <ArrowDownRight size={17} aria-hidden="true" />

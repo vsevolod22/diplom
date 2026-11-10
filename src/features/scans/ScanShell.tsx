@@ -75,7 +75,7 @@ export function ScanShell({ demo, children, compact = false }: { demo: boolean; 
             </div>
           </header>
           <div className={compact ? 'sr-only' : 'scan-shell__body'}>
-            <p className="scan-shell__eyebrow">IMAGE / EXPLORER</p>
+            <p className="scan-shell__eyebrow">Проверка образов</p>
             <h1 className="sr-only">{screenTitle}</h1>
             <Badge tone={demo ? 'warning' : 'neutral'}>
               {demo ? 'Демонстрация' : 'Личный кабинет'}
@@ -115,7 +115,7 @@ export function ScanShell({ demo, children, compact = false }: { demo: boolean; 
         <div className="scan-shell__content">
           {demo ? (
             <Alert role="note" className="border-amber-300">
-              <strong className="block">ДЕМО · вымышленные данные</strong>
+              <strong className="block">Демо · вымышленные данные</strong>
               <span className="mt-1 block text-sm leading-relaxed">
                 Не результат реального сканирования и не подтверждение безопасности образа.
               </span>

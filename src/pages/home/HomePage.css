@@ -157,6 +157,7 @@
   font-weight: 650;
 }
 .home__nav a {
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -190,6 +191,8 @@
   align-items: center;
   gap: 10px;
   color: var(--home-acid);
+  letter-spacing: 0.04em;
+  font-size: 13px;
 }
 .home__eyebrow-icon {
   display: inline-grid;
@@ -278,14 +281,12 @@
 }
 .home__hero-disclaimer {
   max-width: 470px;
-  margin: 25px 0 0;
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  color: #aaaab7;
-  font-size: 12px;
-  line-height: 1.55;
+  margin: 20px 0 0;
+  color: #c7c6d0;
+  font-size: 13px;
+  line-height: 1.65;
 }
+.home .home__hero-disclaimer a { text-decoration: underline; text-underline-offset: 3px; }
 .home__hero-disclaimer span {
   color: var(--home-violet);
   font-size: 17px;
@@ -1089,9 +1090,9 @@
     padding: 65px 0 90px;
   }
   .home__eyebrow {
-    font-size: 9px;
-    gap: 6px;
-    letter-spacing: 0.1em;
+    font-size: 12px;
+    gap: 8px;
+    letter-spacing: 0.02em;
   }
   .home__title {
     margin: 26px 0 28px;

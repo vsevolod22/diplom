@@ -6,6 +6,7 @@ import { useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ScanShell } from '@/features/scans/ScanShell';
+import { ScanInfoDialog } from '@/shared/ui/ScanInfoDialog';
 import { scanCheckLabels } from '@/features/scans/scanProgressPresentation';
 import { ScanAccessError, ScanHttpError } from '@/shared/api/scans/httpScanTransport';
 import { scanChecks } from '@/shared/api/scans/scanTransport';
@@ -515,7 +516,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
   }
   return (
     <ScanShell demo={demo} compact>
-      <section className="scan-create-page min-w-0 space-y-8 pb-8" aria-labelledby="new-scan">
+      <section className="scan-create-page grid min-w-0 gap-4 pb-8" aria-labelledby="new-scan">
         <div className="scan-a1__chapter">
           <span>НОВАЯ ПРОВЕРКА</span>
           <Link className="scan-a1__link" to={demo ? '/demo/scans' : '/scans'}>
@@ -524,23 +525,22 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
         </div>
         <div className="scan-a1__create-hero">
           <div className="min-w-0">
-            <span className="scan-a1__folio">ВЫБЕРИТЕ ОБРАЗ И ПРОВЕРКИ</span>
+
             <h2 id="new-scan" className="scan-a1__heading">
-              Проверьте <em>свой образ.</em>
+              Новая проверка
             </h2>
-            <p className="scan-a1__muted mt-6 max-w-xl text-lg">
-              Выберите публичный образ Docker Hub и его версию, затем нужные проверки.
-                            Поддерживается Linux (amd64). Приватные образы и другие реестры не принимаются.
-            </p>
+            <p className="scan-a1__muted mt-3 max-w-xl">Выберите публичный образ Docker Hub и нужные проверки.</p>
+            <p className="scan-a1__muted mt-2 text-sm">Linux amd64 · только публичные образы</p>
           </div>
 
         </div>
 
         <div className="scan-a1__form-grid scan-a1__form-grid--story">
           <form className="scan-a1__form" aria-label="Параметры скана" aria-busy={busy} onSubmit={handleSubmit(create)}>
-            {restoredAttempt ? <p role="status">Предыдущий запуск не подтверждён. Сначала <Link to="/scans">проверьте список</Link>. Если нужен повтор, нажмите «Проверить допуск снова» и заново подтвердите цель. Повтор использует прежний запрос; автоматического запуска нет.</p> : null}
+            {restoredAttempt ? <p role="status">Предыдущий запуск не подтверждён. Сначала <Link to="/scans">проверьте список</Link>. Если нужен повтор, нажмите «Проверить доступность снова» и заново подтвердите цель. Повтор использует прежний запрос; автоматического запуска нет.</p> : null}
             <div className="scan-image-selection">
-              <h3>{repository ? '2. Выберите версию' : '1. Найдите репозиторий'}</h3>
+              <h3>1. Образ</h3>
+              <p className="scan-image-selection__subtitle">{repository ? 'Выберите версию' : 'Найдите репозиторий'}</p>
               {repository ? <div className="scan-image-selection__step">
                 <button type="button" disabled={busy} onClick={() => changeDiscovery(null, search, true)}>Назад к репозиториям</button>
                 <strong>{repository}</strong>
@@ -593,8 +593,10 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 }}>Показать ещё</button> : null}
                 {searchState === 'error' || searchState === 'expired' ? <button ref={restartButton} type="button" disabled={busy} onClick={event => restartSearch(event.currentTarget)}>Начать новый поиск</button> : null}
               </div>
+              <details className="scan-image-selection__examples">
+                <summary>Тестовые образы</summary>
               <fieldset className="scan-image-selection__presets" disabled={busy}>
-                <legend>Быстрый выбор · старые версии</legend>
+                <legend>Устаревшие версии — только для тестирования, не для рабочих приложений</legend>
                 <p>Первый пример — устаревшая сборка Node.js сентября 2023 года для изучения уязвимостей. Используйте её только для тестирования, не для рабочих приложений. Число находок определяется проверкой; остальные примеры тоже не являются рекомендацией для работы.</p>
                 <div className="scan-a1__targets">
                   {OLDER_IMAGE_PRESETS.map(target => <button key={target.reference} type="button" className="scan-a1__target"
@@ -603,6 +605,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                   </button>)}
                 </div>
               </fieldset>
+              </details>
               <details className="scan-image-selection__manual">
                 <summary>Указать адрес вручную</summary>
                 <label htmlFor="image-reference">Адрес образа в Docker Hub</label>
@@ -624,7 +627,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               {imageReference ? <div className="scan-image-selection__chosen" role="status">
                 <strong>Выбранный адрес</strong><p>{imageReference}</p>
                 <p>{localEligibility?.imageReference === imageReference && localEligibility.eligible && !eligibilityBusy
-                  ? 'Сервер разрешает выбранные проверки. Перед запуском проверим доступность ещё раз.'
+                  ? 'Выбранные проверки доступны. Перед запуском проверим ещё раз.'
                   : localEligibility?.imageReference === imageReference && !eligibilityBusy
                     ? localEligibility.failureDetail ? failureDetailMessage(localEligibility.failureDetail)
                       : `Запуск недоступен: ${{ READY: 'проверяем доступность', UNSUPPORTED_SCAN: 'образ или набор проверок не поддерживается', SCANNER_UNAVAILABLE: 'сканер недоступен', DB_UNAVAILABLE: 'база уязвимостей недоступна' }[localEligibility.reason]}.`
@@ -636,7 +639,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
             <fieldset id="scan-checks" disabled={busy} aria-invalid={!!errors.checks}
               aria-describedby={errors.checks ? 'scan-checks-error' : undefined}
               aria-errormessage={errors.checks ? 'scan-checks-error' : undefined}>
-              <legend>3. Что проверить в образе</legend>
+              <legend>2. Что проверить</legend>
               {localSelected ? <div role="group" aria-label="Доказанные наборы локального профиля">
                 {localCheckSets.map(set => <label key={set.join(',')}><input type="radio" name="local-check-set"
                   checked={JSON.stringify(canonicalSelected) === JSON.stringify(set)} onChange={() => { ++submissionVersion.current; setValue('checks', [...set]); setConfirmed(false); attempt.current = null; setError(''); }} />
@@ -663,6 +666,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
               <p>Проверяем сам образ, не работающий контейнер и не сервер. Список пакетов не заменяет проверку уязвимостей.</p>
               {errors.checks ? <p id="scan-checks-error" role="alert">{errors.checks.message}</p> : null}
             </fieldset>
+            <h3>3. Подтверждение</h3>
             <label>
               <input
                 type="checkbox"
@@ -688,17 +692,30 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
                 setConfirmed(false);
                 setError('');
                 setEligibilityWait(null); setAdmissionWait(null); setEligibilityRefresh(value => value + 1);
-              }}>Проверить допуск снова</button> : null}
+              }}>Проверить доступность снова</button> : null}
             <button
               className="scan-a1__disabled"
               type="submit"
               disabled={demo || !live || !confirmed || !checks.length || busy || eligibilityAccessError !== null || !recoveryEligible || admissionWaiting ||
                 (eligibilityWaiting && !samePendingAttempt) || (!samePendingAttempt && !selectionEligible)}
               title={demo ? 'Демо не запускает реальные сканы' : undefined}
+              aria-describedby="scan-launch-help"
             >
               <LockKeyhole size={17} className="mr-2 inline" aria-hidden="true" />
               {demo || !live ? 'Запуск недоступен' : busy ? 'Запускаем…' : 'Запустить проверку'}
             </button>
+            <p id="scan-launch-help" role="status">
+              {demo ? 'Демо: запуск реальной проверки отключён.' : !live ? 'Для запуска войдите в аккаунт.'
+                : busy ? 'Запускаем проверку, дождитесь подтверждения.'
+                : !imageReference ? 'Сначала выберите образ.'
+                : eligibilityAccessError !== null ? 'Доступ к запуску не подтверждён. Проверьте сообщение выше.'
+                : eligibilityBusy ? 'Проверяем доступность выбранного образа.'
+                : admissionWaiting || eligibilityWaiting ? 'Сервер просит подождать. Время повтора указано выше.'
+                : !checks.length ? 'Выберите хотя бы одну проверку.'
+                : !recoveryEligible ? 'Исход предыдущего запуска не подтверждён. Проверьте список и доступность перед повтором.'
+                : !samePendingAttempt && !selectionEligible ? 'Доступность выбранных проверок пока не подтверждена.'
+                : !confirmed ? 'Подтвердите выбранный образ и проверки.' : 'Можно запускать. Доступ повторно проверит сервер.'}
+            </p>
             {error ? <div className="scan-create-page__error" role="alert"><p>{error}</p><Link to={demo ? '/demo/scans' : '/scans'}>Проверить список перед повтором</Link></div> : null}
             <p className="text-sm">
               {confirmed
@@ -713,17 +730,18 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
             ) : null}
           </form>
           <aside className="scan-a1__trust-note">
-            <span className="scan-a1__folio">ПЕРЕД ЗАПУСКОМ</span>
+
             <strong>Что вы получите</strong>
             <p>
-              Отчёт по выбранным проверкам: находки, версии пакетов и следующие шаги. Проверяем публичные образы Docker Hub для Linux (amd64); большие или неподдерживаемые образы могут быть отклонены.
+              Находки, состав образа и следующие шаги по выбранным проверкам.
             </p>
-            <p>Отсутствие находок не гарантирует безопасность. В отчёте будет видно, какие проверки завершены и где остались пробелы.</p>
-            <details><summary>Подробности · ограничения проверки</summary>
+            <p>Пустой результат не гарантирует безопасность. В отчёте будут видны непроверенные области.</p>
+            <ScanInfoDialog title="Ограничения проверки" description="Что проверяем и почему некоторые образы могут быть недоступны.">
             <p>Ограничены размер образа и отдельных файлов, число слоёв, время обработки и временное место на диске. Найденная в каталоге версия может не пройти эти ограничения; выберите меньшую сборку, если сервер сообщает о превышении.</p>
             <p>Проверка уязвимостей зависит от доступной базы и поддерживаемых пакетов. Проверка настроек читает пользователя запуска из образа, но не исследует Dockerfile, права работающего контейнера или сервер.</p>
             <p>ИИ-объяснение необязательно и включается отдельно в отчёте. Данные передаются внешнему провайдеру, запрос может быть платным. Условия и согласие показываются перед отправкой.</p>
-            </details>
+            <p>Проверка работающего контейнера — отдельный сценарий со своими разрешениями; она не входит в проверку образа.</p>
+            </ScanInfoDialog>
             <Link className="scan-a1__link" to="/demo/scans/partial-demo">Посмотреть пример отчёта без запуска</Link>
           </aside>
           {!demo && subject ? (
@@ -733,20 +751,7 @@ export function ScanCreatePage({ demo = false }: { demo?: boolean }) {
             </details>
           ) : null}
         </div>
-        <div className="scan-a1__trust-path" aria-label="Этапы настройки">
-          <div>
-            <span>01 / ЦЕЛЬ</span>
-            <p>Выберите образ из каталога.</p>
-          </div>
-          <div>
-            <span>02 / ОБЛАСТЬ</span>
-            <p>Проверьте доступные категории.</p>
-          </div>
-          <div>
-            <span>03 / РАЗРЕШЕНИЕ</span>
-            <p>Подтвердите цель. Доступ проверяет сервер.</p>
-          </div>
-        </div>
+
       </section>
     </ScanShell>
   );

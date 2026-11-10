@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { MagicCard } from '@/features/scans/MagicCard';
 import { ScanShell } from '@/features/scans/ScanShell';
 import { useLiveScanSession } from '@/features/scans/liveScanContext';
-import { ScanScene } from '@/features/scans/ScanScene';
+
 import { ScanProgressPanel } from '@/features/scans/ScanProgressPanel';
 import { stateLabels } from '@/features/scans/scanStateLabels';
 import { fixtureScanTransport, unavailableScanTransport } from '@/shared/api/scans/fixtureScanTransport';
@@ -35,37 +35,23 @@ function ScanListSession({ transport, scope, demo }: { transport: ScanTransport;
   const denied = list.error instanceof ScanAccessError;
   const snapshot = denied || !transport.capabilities.list ? null : list.snapshot;
   return (
-    <ScanShell demo={demo}>
+    <ScanShell demo={demo} compact>
       <section aria-labelledby="scan-list" className="scan-a1-list min-w-0 space-y-8 pb-8">
-        <div className="scan-a1__chapter">
-          <span>МОИ ПРОВЕРКИ</span>
-          <span>{demo ? 'ВЫМЫШЛЕННЫЕ ПРИМЕРЫ' : 'ИСТОРИЯ'}</span>
-        </div>
-        <div className="scan-a1__intro scan-a1__intro--editorial">
+        <div className="scan-a1__list-heading">
           <div className="scan-a1__intro-copy min-w-0">
-            <span className="scan-a1__folio">ОБРАЗЫ И РЕЗУЛЬТАТЫ</span>
+
             <h2 id="scan-list" className="scan-a1__heading">
-              Ваши <em>проверки.</em>
+              Мои проверки
             </h2>
-            <p className="mt-5 max-w-2xl">
-              Откройте отчёт, чтобы разобраться с находками и исправлениями. После обновления образа запустите новую проверку.
-            </p>
+            <p className="mt-3 max-w-2xl">Откройте отчёт или проверьте новую версию образа.</p>
           </div>
-          <div className="scan-a1__intro-art">
-            <ScanScene variant="list" />
-            <div className="scan-a1__intro-cta">
-              <span>{demo ? 'ПРИМЕРЫ, НЕ РЕАЛЬНЫЕ РЕЗУЛЬТАТЫ' : 'ПРОВЕРИТЬ ДРУГОЙ ОБРАЗ'}</span>
+          <div>
               {transport.capabilities.create || demo ? (
                 <Link className="scan-a1__action" to={demo ? '/demo/scans/new' : '/scans/new'}>
-                  + Новая проверка <ArrowRight size={20} aria-hidden="true" />
+                  Новая проверка <ArrowRight size={20} aria-hidden="true" />
                 </Link>
               ) : null}
-            </div>
           </div>
-        </div>
-        <div className="scan-a1__section-title">
-          <span>{demo ? 'ПРИМЕРЫ ОТЧЁТОВ' : 'ИСТОРИЯ ПРОВЕРОК'}</span>
-          <span>ОБРАЗ → РЕЗУЛЬТАТ</span>
         </div>
         {!transport.capabilities.list ? (
           <Alert role="status" tone="neutral">
@@ -86,25 +72,29 @@ function ScanListSession({ transport, scope, demo }: { transport: ScanTransport;
         {list.error ? (
           <Alert role="alert" tone="danger">
             {list.error instanceof ScanAccessError && list.error.status === 403 ? (
-              <>Аккаунту не выдано разрешение на реальные сканы. Вход работает, но список и запуск закрыты. Узнайте ID на <Link to="/account" className="font-bold underline">странице аккаунта</Link>, чтобы разрешить этот аккаунт на стенде.</>
+              <>Проверки пока недоступны этому аккаунту. Вход выполнен, но запуск и история закрыты. <Link to="/account" className="font-bold underline">Открыть аккаунт</Link>.</>
             ) : list.error instanceof ScanAccessError && list.error.status === 401 ? (
               <>Сессия больше не действует. <Link to="/login" state={{ returnTo: '/scans' }} className="font-bold underline">Войдите заново</Link>.</>
             ) : list.error instanceof ScanListIdentityError ? list.error.message
-              : snapshot ? 'Не удалось загрузить страницу. Ранее загруженные проверки сохранены.'
-                : 'Не удалось загрузить список. Неизвестно, есть ли сканы.'}
+              : snapshot ? 'Новые данные не загружены. Показаны последние полученные проверки.'
+                : 'Не удалось загрузить проверки. Список пока неизвестен.'}
             {transport.capabilities.list && !denied && !snapshot ? (
               <Button type="button" variant="secondary" disabled={list.pending} onClick={list.reload}>
-                {list.pending ? 'Загружаем список…' : 'Повторить загрузку списка'}
+                {list.pending ? 'Загружаем список…' : 'Повторить загрузку'}
               </Button>
             ) : null}
           </Alert>
         ) : null}
         {snapshot && !snapshot.scans.length ? (
-          <p className="scan-a1__muted">Проверок пока нет. Нажмите «Новая проверка», выберите образ и получите первый отчёт.</p>
+          <div className="scan-a1__empty">
+            <h3>Проверок пока нет</h3>
+            <p>Выберите образ, чтобы получить первый отчёт.</p>
+            {transport.capabilities.create || demo ? <Link className="scan-a1__action" to={demo ? '/demo/scans/new' : '/scans/new'}>Проверить первый образ <ArrowRight size={18} aria-hidden="true" /></Link> : null}
+          </div>
         ) : null}
         {snapshot ? (
           <ol className="scan-a1__records min-w-0 list-none p-0">
-            {snapshot.scans.map((scan, index) => (
+            {snapshot.scans.map((scan) => (
               <li
                 key={scan.scanId}
                 className={`scan-a1__record min-w-0 ${scan.state === 'partial' ? 'scan-a1__record--featured' : ''}`}
@@ -115,16 +105,20 @@ function ScanListSession({ transport, scope, demo }: { transport: ScanTransport;
                     to={`${demo ? '/demo' : ''}/scans/${encodeURIComponent(scan.scanId)}`}
                     aria-label={`Открыть отчёт: ${scan.targetLabel}, ID ${scan.scanId}`}
                   >
-                    <span className="scan-a1__index">
-                      {String(index + 1).padStart(2, '0')} / {stateLabels[scan.state]}
-                    </span>
+
                     <div className="scan-a1__record-facts min-w-0">
                       <h3>{scan.targetLabel.replace(/@sha256:[a-f0-9]{64}/g, ' · точная сборка')}</h3>
                       <p className="mt-2 break-all text-xs">
                         <span title={scan.scanId}>ID {scan.scanId.length > 16 ? `${scan.scanId.slice(0, 8)}…${scan.scanId.slice(-4)}` : scan.scanId}</span>
                         {scan.digest ? <span title={scan.digest}> · {scan.digest.slice(0, 19)}…</span> : null}
                       </p>
-                      <ScanProgressPanel scan={scan} compact list />
+                      {['queued', 'running', 'cancelling'].includes(scan.state) ? (
+                        <ScanProgressPanel scan={scan} compact list />
+                      ) : (
+                        <p className="mt-2 text-sm">
+                          Подробности в отчёте.{scan.state !== 'completed' ? ' Непроверенное — не ноль находок.' : ''}
+                        </p>
+                      )}
                       {demo ? (
                         <p className="mt-1 text-xs">Вымышленные данные · не результат реальной проверки</p>
                       ) : null}
@@ -158,7 +152,7 @@ function ScanListSession({ transport, scope, demo }: { transport: ScanTransport;
                 </Button>
               ) : null}
               <Button type="button" variant="secondary" disabled={list.pending} onClick={list.reload}>
-                Обновить список сначала
+                Обновить список
               </Button>
               <span className="scan-a1__muted text-sm" role="status">
                 Загружено проверок: {snapshot.scans.length}.

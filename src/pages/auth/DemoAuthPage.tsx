@@ -376,9 +376,9 @@ function AuthPageScope({ mode }: { mode: Mode }) {
         {mode === 'account' ? (
           <div className="demo-auth__account">
             <header className="demo-auth__account-heading">
-              <span className="demo-auth__eyebrow">ЛИЧНЫЙ КАБИНЕТ</span>
+
               <h1 id="auth-title">
-                Ваш аккаунт<span>.</span>
+                Аккаунт
               </h1>
               <p>Ваши проверки и управление доступом — в одном месте.</p>
             </header>
@@ -552,24 +552,20 @@ function AuthPageScope({ mode }: { mode: Mode }) {
               className={mode === 'login' ? 'demo-auth__intro demo-auth__intro--login' : 'demo-auth__intro'}
               aria-labelledby="auth-title"
             >
-              <span className="demo-auth__eyebrow">ДОСТУП / СТЕНДОВЫЙ РЕЖИМ</span>
+
               <h1 id="auth-title">
-                {mode === 'register' ? 'Создайте аккаунт.' : 'Рады вас видеть.'}
-                <span> Демо открыто каждому.</span>
+                {mode === 'register' ? 'Создать аккаунт' : 'Вход'}
               </h1>
               <p>
-                Знакомство с интерфейсом не требует регистрации. Вымышленные записи доступны всем; вход сам по
-                себе не даёт права на реальное сканирование.
+                Войдите, чтобы открыть свои проверки. Для запуска требуется отдельное разрешение.
               </p>
               <Link className="demo-auth__demo-link" to="/demo/scans">
-                Смотреть демо без регистрации <ArrowRight size={18} aria-hidden="true" />
+                Посмотреть пример без входа <ArrowRight size={18} aria-hidden="true" />
               </Link>
             </section>
             <section className="demo-auth__panel" aria-label="Учётная запись">
-              <span className="demo-auth__eyebrow">
-                {mode === 'register' ? '01 / РЕГИСТРАЦИЯ' : '02 / ВХОД'}
-              </span>
-              <h2>{mode === 'register' ? 'Регистрация' : 'Вход'}</h2>
+
+              <h2>{mode === 'register' ? 'Регистрация' : 'Войти в аккаунт'}</h2>
               {mode === 'login' && typeof location.state?.sessionNotice === 'string' ? (
                 <p role="status" className="demo-auth__success">
                   <Check size={18} aria-hidden="true" /> {location.state.sessionNotice}
